@@ -246,6 +246,8 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
     <button class="tool-chip act" id="tc-arrow" onclick="setTool('arrow')" title="Valg/Flytt (V)">↖ Pil</button>
     <button class="tool-chip" id="tc-hand" onclick="setTool('hand')" title="Hånd/Pan (H)">✋ Hånd</button>
     <span class="tc-sep"></span>
+    <button class="tool-chip" id="chip-undo" onclick="undo()" title="Angre (Ctrl+Z)" disabled style="opacity:0.4">↩ Angre</button>
+    <span class="tc-sep"></span>
     <button class="snap-chip on" id="chip-grid" onclick="toggleSnap('grid')" title="Rutenettsnap 50cm">
       <span class="snap-dot"></span>Snap Grid
     </button>
@@ -864,15 +866,10 @@ function drawRooms() {
 
 // ─── DRAW HINDRINGS ──────────────────────────────────────────
 function drawHindrings() {
+  if (!S.ui.selectedRoomId || S.ui.drawMode) return; // only show when a room is selected and not in draw mode
   for (const h of S.hindrings) {
     if (!h.points || h.points.length < 3) continue;
-    // Edit 9: during drawing, filter by pending floor to avoid cross-floor leakage
-    if (S.ui.drawMode && S.ui.pendingFloorId !== null) {
-      const ownerRoom=S.rooms.find(r=>r.id===h.roomId);
-      if (ownerRoom && ownerRoom.floorId !== S.ui.pendingFloorId) continue;
-    } else {
-      if (S.ui.selectedRoomId && h.roomId !== S.ui.selectedRoomId) continue;
-    }
+    if (h.roomId !== S.ui.selectedRoomId) continue; // strict: only hindring of selected room
     const isSel = h.id === S.ui.selectedHindringId;
     const spts=h.points.map(p=>w2s(p.x,p.y));
     ctx.save();
@@ -1156,6 +1153,7 @@ function compWalls(pts) {
 
 function createRoom(pts, shape, name, floorId) {
   if (!pts || pts.length < 3) return null;
+  pushUndo();
   // Auto-assign to first floor if none specified
   if (floorId === null && S.floors.length > 0) floorId = S.floors[0].id;
 
@@ -1199,6 +1197,7 @@ function exitDrawing() {
 
 function deleteRoom(id) {
   if (!confirm('Slett dette rommet?')) return;
+  pushUndo();
   S.rooms = S.rooms.filter(r=>r.id!==id);
   if (S.ui.selectedRoomId===id) { S.ui.selectedRoomId=null; S.ui.selectedWallId=null; }
   renderSidebar(); updateWip();
@@ -1628,6 +1627,7 @@ function selHindring(type) {
   });
 }
 function confirmHindring() {
+  pushUndo();
   const customName=document.getElementById('hindring-name-inp').value.trim();
   const hw=parseFloat(document.getElementById('hindring-w-inp').value);
   const hh=parseFloat(document.getElementById('hindring-h-inp').value);
@@ -1956,6 +1956,14 @@ function getAnchorWorld(roomId) {
   const xs=rm.points.map(p=>p.x), ys=rm.points.map(p=>p.y);
   return {x:Math.min(...xs), y:Math.max(...ys)};
 }
+function getRoomGizmoPos(room) {
+  // Place gizmo outside the room bounding box, to the right at mid-height (screen coords)
+  const spts=room.points.map(p=>w2s(p.x,p.y));
+  const maxSx=Math.max(...spts.map(p=>p.x));
+  const minSy=Math.min(...spts.map(p=>p.y));
+  const maxSy=Math.max(...spts.map(p=>p.y));
+  return {x:maxSx+72, y:(minSy+maxSy)/2};
+}
 function getRotCircleRadius() {
   return 50 * BASE_SCALE * S.view.zoom; // fixed 100cm diameter
 }
@@ -1965,10 +1973,7 @@ function getRotIconPos(roomId) {
   return {x: a.x+r*Math.cos(-Math.PI/4), y: a.y+r*Math.sin(-Math.PI/4)};
 }
 function hitTransformHandle(sx, sy) {
-  if (!S.ui.selectedRoomId) return false;
-  const hpos=getTransformHandlePos(S.ui.selectedRoomId);
-  if (!hpos) return false;
-  return Math.hypot(sx-hpos.x, sy-hpos.y) < 16;
+  return hitRoomGizmoCenter(sx, sy);
 }
 function getVertexGizmoAnchor() {
   // Returns screen pos of selected vertex, or null if none selected
@@ -2006,8 +2011,34 @@ function hitVertexFreeDrag(sx, sy) {
 }
 function hitRotCircle(sx, sy) {
   if (!S.ui.selectedRoomId || (S.ui.transformMode||'move')!=='rotate') return false;
-  const ip=getRotIconPos(S.ui.selectedRoomId); if(!ip) return false;
-  return Math.hypot(sx-ip.x, sy-ip.y) < 14;
+  const rm=S.rooms.find(r=>r.id===S.ui.selectedRoomId); if(!rm) return false;
+  const gp=getRoomGizmoPos(rm);
+  return Math.hypot(sx-gp.x, sy-gp.y)<14;
+}
+function hitRoomGizmoCenter(sx, sy) {
+  if (!S.ui.selectedRoomId) return false;
+  const rm=S.rooms.find(r=>r.id===S.ui.selectedRoomId); if(!rm) return false;
+  const gp=getRoomGizmoPos(rm);
+  return Math.hypot(sx-gp.x, sy-gp.y)<16;
+}
+function hitRoomGizmoX(sx, sy) {
+  if (!S.ui.selectedRoomId||(S.ui.transformMode||'move')!=='move') return false;
+  const rm=S.rooms.find(r=>r.id===S.ui.selectedRoomId); if(!rm) return false;
+  const gp=getRoomGizmoPos(rm);
+  return distSegPx(sx,sy, gp.x+18,gp.y, gp.x+72,gp.y)<13;
+}
+function hitRoomGizmoY(sx, sy) {
+  if (!S.ui.selectedRoomId||(S.ui.transformMode||'move')!=='move') return false;
+  const rm=S.rooms.find(r=>r.id===S.ui.selectedRoomId); if(!rm) return false;
+  const gp=getRoomGizmoPos(rm);
+  return distSegPx(sx,sy, gp.x,gp.y-18, gp.x,gp.y-72)<13;
+}
+function hitHindringGizmo(sx, sy) {
+  if (!S.ui.selectedHindringId) return false;
+  const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId); if(!h||!h.points||h.points.length<3) return false;
+  const xs=h.points.map(p=>p.x), ys=h.points.map(p=>p.y);
+  const bl=w2s(Math.min(...xs), Math.max(...ys));
+  return Math.hypot(sx-bl.x, sy-bl.y)<16;
 }
 function drawGizmoArrow(x1,y1,x2,y2,col) {
   const ang=Math.atan2(y2-y1,x2-x1), hL=13;
@@ -2020,18 +2051,17 @@ function drawGizmoArrow(x1,y1,x2,y2,col) {
   ctx.closePath(); ctx.fillStyle=col; ctx.fill();
 }
 function drawTransformGizmo(room) {
-  const hpos=getTransformHandlePos(room.id); if(!hpos) return;
+  const gp=getRoomGizmoPos(room);           // gizmo anchor — outside the room
+  const blpos=getTransformHandlePos(room.id); // BL corner — rotation pivot indicator
   const mode=S.ui.transformMode||'move';
   ctx.save();
   if (mode==='move') {
+    // ── Vertex gizmo (shown only when a vertex is selected) ──
     const va=getVertexGizmoAnchor();
     const d=getVertexArrowDirs();
     if (va && d) {
-      // Red arrow — horizontal, pointing away from room (left or right)
       drawGizmoArrow(va.x+d.xDir*18,va.y, va.x+d.xDir*84,va.y, 'rgba(255,75,75,0.9)');
-      // Green arrow — vertical, pointing away from room (up or down)
       drawGizmoArrow(va.x,va.y+d.yDir*18, va.x,va.y+d.yDir*84, 'rgba(75,210,100,0.9)');
-      // Center cross — free move
       ctx.beginPath(); ctx.arc(va.x,va.y,13,0,Math.PI*2);
       ctx.fillStyle='rgba(232,255,71,0.07)'; ctx.strokeStyle='rgba(232,255,71,0.5)';
       ctx.lineWidth=1; ctx.fill(); ctx.stroke();
@@ -2040,37 +2070,50 @@ function drawTransformGizmo(room) {
       ctx.moveTo(va.x,va.y-9); ctx.lineTo(va.x,va.y+9);
       ctx.strokeStyle='rgba(232,255,71,0.95)'; ctx.lineWidth=2; ctx.stroke();
     }
-    // ⊕ at BL anchor — always visible, for room drag / mode switch
-    ctx.beginPath(); ctx.arc(hpos.x,hpos.y,11,0,Math.PI*2);
+    // ── Room move gizmo — placed outside the room ──
+    // Dashed connector from nearest wall to gizmo
+    const spts=room.points.map(p=>w2s(p.x,p.y));
+    const rightmost=spts.reduce((a,b)=>b.x>a.x?b:a);
+    ctx.beginPath(); ctx.moveTo(rightmost.x,rightmost.y); ctx.lineTo(gp.x,gp.y);
+    ctx.strokeStyle='rgba(232,255,71,0.18)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.stroke(); ctx.setLineDash([]);
+    // Red arrow → (X, rightward)
+    drawGizmoArrow(gp.x+18,gp.y, gp.x+72,gp.y, 'rgba(255,75,75,0.9)');
+    // Green arrow ↑ (Y, upward on screen)
+    drawGizmoArrow(gp.x,gp.y-18, gp.x,gp.y-72, 'rgba(75,210,100,0.9)');
+    // Center ⊕
+    ctx.beginPath(); ctx.arc(gp.x,gp.y,13,0,Math.PI*2);
     ctx.fillStyle='rgba(232,255,71,0.1)'; ctx.strokeStyle='rgba(232,255,71,0.85)';
     ctx.lineWidth=1.5; ctx.fill(); ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(hpos.x-8,hpos.y); ctx.lineTo(hpos.x+8,hpos.y);
-    ctx.moveTo(hpos.x,hpos.y-8); ctx.lineTo(hpos.x,hpos.y+8);
-    ctx.strokeStyle='rgba(232,255,71,0.85)'; ctx.lineWidth=1.2; ctx.stroke();
+    ctx.moveTo(gp.x-9,gp.y); ctx.lineTo(gp.x+9,gp.y);
+    ctx.moveTo(gp.x,gp.y-9); ctx.lineTo(gp.x,gp.y+9);
+    ctx.strokeStyle='rgba(232,255,71,0.85)'; ctx.lineWidth=2; ctx.stroke();
   } else {
-    // Rotation circle — large dashed, centered at anchor (BL corner = rotation pivot)
+    // ── Rotation mode ──
     const r=getRotCircleRadius();
-    ctx.beginPath(); ctx.arc(hpos.x,hpos.y,r,0,Math.PI*2);
+    // Large dashed circle around BL pivot
+    ctx.beginPath(); ctx.arc(blpos.x,blpos.y,r,0,Math.PI*2);
     ctx.setLineDash([8,5]); ctx.strokeStyle='rgba(255,140,71,0.45)';
     ctx.lineWidth=1.5; ctx.stroke(); ctx.setLineDash([]);
-    // Rotation icon on circle rim (upper-right at 315°)
-    const ip=getRotIconPos(room.id);
-    const hx=ip.x, hy=ip.y;
-    ctx.beginPath(); ctx.arc(hx,hy,9,0,Math.PI*2);
+    // Dashed connector from BL pivot to gizmo drag handle
+    ctx.beginPath(); ctx.moveTo(blpos.x,blpos.y); ctx.lineTo(gp.x,gp.y);
+    ctx.strokeStyle='rgba(255,140,71,0.3)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.stroke(); ctx.setLineDash([]);
+    // Rotation drag handle at gizmo position
+    ctx.beginPath(); ctx.arc(gp.x,gp.y,11,0,Math.PI*2);
     ctx.fillStyle='rgba(255,140,71,0.25)'; ctx.strokeStyle='rgba(255,140,71,0.9)';
     ctx.lineWidth=1.5; ctx.fill(); ctx.stroke();
-    // Arc indicator inside drag handle
-    ctx.beginPath(); ctx.arc(hx,hy,5,0,Math.PI*1.4);
-    ctx.strokeStyle='rgba(255,140,71,0.9)'; ctx.lineWidth=1.2; ctx.stroke();
-    // Anchor ⊕ at BL corner
-    ctx.beginPath(); ctx.arc(hpos.x,hpos.y,10,0,Math.PI*2);
-    ctx.fillStyle='rgba(255,140,71,0.1)'; ctx.strokeStyle='rgba(255,140,71,0.8)';
-    ctx.lineWidth=1.5; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(gp.x,gp.y,6,0,Math.PI*1.4);
+    ctx.strokeStyle='rgba(255,140,71,0.9)'; ctx.lineWidth=1.5; ctx.stroke();
+    // Small ⊕ pivot indicator at BL corner
+    ctx.beginPath(); ctx.arc(blpos.x,blpos.y,7,0,Math.PI*2);
+    ctx.fillStyle='rgba(255,140,71,0.15)'; ctx.strokeStyle='rgba(255,140,71,0.6)';
+    ctx.lineWidth=1; ctx.fill(); ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(hpos.x-7,hpos.y); ctx.lineTo(hpos.x+7,hpos.y);
-    ctx.moveTo(hpos.x,hpos.y-7); ctx.lineTo(hpos.x,hpos.y+7);
-    ctx.strokeStyle='rgba(255,140,71,0.8)'; ctx.lineWidth=1; ctx.stroke();
+    ctx.moveTo(blpos.x-5,blpos.y); ctx.lineTo(blpos.x+5,blpos.y);
+    ctx.moveTo(blpos.x,blpos.y-5); ctx.lineTo(blpos.x,blpos.y+5);
+    ctx.strokeStyle='rgba(255,140,71,0.6)'; ctx.lineWidth=1; ctx.stroke();
   }
   ctx.restore();
 }
@@ -2124,6 +2167,38 @@ let _thRotCenter={x:0,y:0}, _thRotStartAngle=0;
 let _spacePrevTool='arrow';
 // L-shape variant (Edit 5)
 let _lshapeVariant=3;
+
+// ─── UNDO SYSTEM ──────────────────────────────────────────────
+const _undoStack=[];
+const UNDO_MAX=50;
+function pushUndo() {
+  _undoStack.push({
+    rooms:     S.rooms.map(r=>({...r, points:r.points.map(p=>({x:p.x,y:p.y})), walls:r.walls.map(w=>({...w}))})),
+    hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({x:p.x,y:p.y}))}))
+  });
+  if (_undoStack.length>UNDO_MAX) _undoStack.shift();
+  _updUndoBtn();
+}
+function undo() {
+  if (_undoStack.length===0) return;
+  const prev=_undoStack.pop();
+  S.rooms=prev.rooms; S.hindrings=prev.hindrings;
+  if (S.ui.selectedRoomId && !S.rooms.find(r=>r.id===S.ui.selectedRoomId)) {
+    S.ui.selectedRoomId=null; S.ui.selectedWallId=null; S.ui.selectedVertexIdx=null;
+  }
+  if (S.ui.selectedHindringId && !S.hindrings.find(h=>h.id===S.ui.selectedHindringId)) {
+    S.ui.selectedHindringId=null;
+  }
+  _updUndoBtn(); renderSidebar(); updateWip();
+}
+function _updUndoBtn() {
+  const btn=document.getElementById('chip-undo'); if(!btn) return;
+  const has=_undoStack.length>0;
+  btn.disabled=!has; btn.style.opacity=has?'1':'0.4';
+}
+function _angreItem() { // prepend Angre to any context menu
+  return _undoStack.length>0?`<div class="ctx-item" onclick="undo();hideCtx()">↩ Angre</div><div class="ctx-sep"></div>`:'';
+}
 
 function drawRoomDragOverlay() {
   const room=S.rooms.find(r=>r.id===_rdRoomId); if(!room) return;
@@ -2204,8 +2279,9 @@ canvas.addEventListener('mousedown', e=>{
       updWbw();
     }
   } else {
-    // Shift anywhere (no draw mode) = pan view
+    // Arrow tool — no draw mode
     if (e.shiftKey) {
+      // Shift+click anywhere = pan view
       S.ui.selectedVertexIdx=null;
       _roomDragging=true;
       _rdStart={x:e.clientX,y:e.clientY}; _rdMoved=false;
@@ -2215,45 +2291,50 @@ canvas.addEventListener('mousedown', e=>{
     const cRect=canvas.getBoundingClientRect();
     const sx0=e.clientX-cRect.left, sy0=e.clientY-cRect.top;
     hideTransformChips();
-
-    // Gizmo axis arrows (move mode only)
     const rmGizmo=S.ui.selectedRoomId ? S.rooms.find(r=>r.id===S.ui.selectedRoomId) : null;
-    if (rmGizmo && hitXArrow(sx0,sy0)) {
+
+    // ── Room gizmo X arrow (move room along X) ──
+    if (rmGizmo && hitRoomGizmoX(sx0,sy0)) {
+      pushUndo();
       _thDragging=true; _thDragMoved=false; _thMode='move'; _thConstraint='x';
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
       canvas.style.cursor='ew-resize'; return;
     }
-    if (rmGizmo && hitYArrow(sx0,sy0)) {
+    // ── Room gizmo Y arrow (move room along Y) ──
+    if (rmGizmo && hitRoomGizmoY(sx0,sy0)) {
+      pushUndo();
       _thDragging=true; _thDragMoved=false; _thMode='move'; _thConstraint='y';
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
       canvas.style.cursor='ns-resize'; return;
     }
-    // Rotation circle drag
+    // ── Rotation drag (rotate mode) ──
     if (rmGizmo && hitRotCircle(sx0,sy0)) {
+      pushUndo();
       const aw=getAnchorWorld(rmGizmo.id);
       _thDragging=true; _thDragMoved=false; _thMode='rotate'; _thConstraint='free';
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
-      _thRotCenter={x:aw.x,y:aw.y}; // BL corner = rotation pivot
+      _thRotCenter={x:aw.x,y:aw.y};
       const sAnchor=w2s(aw.x,aw.y);
       _thRotStartAngle=Math.atan2(sy0-sAnchor.y, sx0-sAnchor.x);
       canvas.style.cursor='crosshair'; return;
     }
-    // Transform handle ⊕ — free move drag or click→chips
-    if (hitTransformHandle(sx0, sy0)) {
+    // ── Room gizmo center ⊕ — free move drag or click→chips ──
+    if (hitRoomGizmoCenter(sx0, sy0)) {
       if (rmGizmo) {
+        pushUndo();
         _thDragging=true; _thDragMoved=false;
         _thMode=S.ui.transformMode||'move'; _thConstraint='free';
         _thOrigStart={x:e.clientX,y:e.clientY};
         _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
         _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
         const aw=getAnchorWorld(rmGizmo.id);
-        _thRotCenter={x:aw.x,y:aw.y}; // BL corner as rotation pivot
+        _thRotCenter={x:aw.x,y:aw.y};
         const sAnchor=w2s(aw.x,aw.y);
         _thRotStartAngle=Math.atan2(sy0-sAnchor.y, sx0-sAnchor.x);
         canvas.style.cursor='crosshair';
@@ -2261,9 +2342,10 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
-    // Vertex gizmo — arrow/cross drag (only when a vertex is already selected)
+    // ── Vertex gizmo arrows/cross (only when a vertex is selected) ──
     if (S.ui.selectedVertexIdx!==null && rmGizmo) {
       if (hitXArrow(sx0,sy0)) {
+        pushUndo();
         const pt=rmGizmo.points[S.ui.selectedVertexIdx];
         _vdDragging=true; _vdPending=false; _vdConstraint='x';
         _vdRoomId=rmGizmo.id; _vdIdx=S.ui.selectedVertexIdx;
@@ -2271,6 +2353,7 @@ canvas.addEventListener('mousedown', e=>{
         canvas.style.cursor='ew-resize'; return;
       }
       if (hitYArrow(sx0,sy0)) {
+        pushUndo();
         const pt=rmGizmo.points[S.ui.selectedVertexIdx];
         _vdDragging=true; _vdPending=false; _vdConstraint='y';
         _vdRoomId=rmGizmo.id; _vdIdx=S.ui.selectedVertexIdx;
@@ -2278,7 +2361,7 @@ canvas.addEventListener('mousedown', e=>{
         canvas.style.cursor='ns-resize'; return;
       }
       if (hitVertexFreeDrag(sx0,sy0)) {
-        // Center cross — free drag of selected vertex
+        pushUndo();
         const pt=rmGizmo.points[S.ui.selectedVertexIdx];
         _vdDragging=true; _vdPending=false; _vdConstraint='free';
         _vdRoomId=rmGizmo.id; _vdIdx=S.ui.selectedVertexIdx;
@@ -2287,21 +2370,33 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
 
-    // Edit 3+4: Vertex click — set pending (becomes drag or selection on mouseup)
+    // ── Hindring gizmo drag (only from the ⊕ at BL corner) ──
+    if (hitHindringGizmo(sx0, sy0)) {
+      const hh=S.hindrings.find(h=>h.id===S.ui.selectedHindringId);
+      if (hh) {
+        pushUndo();
+        _dhDragging=true; _dhId=hh.id;
+        _dhOrigStart={x:e.clientX,y:e.clientY};
+        _dhOrigPts=hh.points.map(p=>({x:p.x,y:p.y}));
+        canvas.style.cursor='crosshair';
+        return;
+      }
+    }
+
+    // ── Vertex click — select only, show gizmo arrows ──
     const vh=hitVertex(sx0, sy0);
     if (vh) {
-      _vdPending=true; _vdDragging=false; _vdConstraint='free';
-      _vdRoomId=vh.roomId; _vdIdx=vh.vertexIdx;
-      const rm=S.rooms.find(r=>r.id===vh.roomId);
-      _vdOrigPt={x:rm.points[vh.vertexIdx].x, y:rm.points[vh.vertexIdx].y};
-      _vdOrigStart={x:e.clientX, y:e.clientY};
-      canvas.style.cursor='move';
+      S.ui.selectedVertexIdx=vh.vertexIdx;
+      S.ui.selectedRoomId=vh.roomId;
+      S.ui.selectedWallId=null;
+      renderSidebar();
       return;
     }
 
-    // Wall move arrow
+    // ── Wall move arrow (only when wall is selected) ──
     const arrowRoom=nearMoveArrow(sx0, sy0);
     if (arrowRoom) {
+      pushUndo();
       _movingWall=true;
       _mwStart={x:e.clientX,y:e.clientY};
       _mwOrigStart={x:e.clientX,y:e.clientY};
@@ -2311,47 +2406,40 @@ canvas.addEventListener('mousedown', e=>{
       canvas.style.cursor='crosshair';
       return;
     }
-    // Hindring drag
+
+    // ── Hindring body click — select only (drag via gizmo) ──
     const hhid=hitHindring(wp.x, wp.y);
     if (hhid !== null) {
       const hh=S.hindrings.find(h=>h.id===hhid);
-      _dhDragging=true; _dhId=hhid;
-      _dhOrigStart={x:e.clientX,y:e.clientY};
-      _dhOrigPts=hh.points.map(p=>({x:p.x,y:p.y}));
       S.ui.selectedHindringId=hhid;
       S.ui.selectedWallId=null;
-      canvas.style.cursor='crosshair';
+      S.ui.selectedVertexIdx=null;
+      if (hh) S.ui.selectedRoomId=hh.roomId;
       renderSidebar(); updateObjInfo();
       return;
     }
-    // Edit 8: Canvas hit-tests only work for the currently selected room
+
+    // ── Wall / room body click — select wall or pan room view ──
     const hit=hitTest(wp.x,wp.y);
     if (hit?.wallId && hit.roomId===S.ui.selectedRoomId) {
-      // Wall click (currently selected room only)
+      // Wall click — select, show move arrows; movement only through arrows
       S.ui.selectedWallId=hit.wallId;
       S.ui.selectedHindringId=null;
-      S.ui.movingWall=true;
-      _movingWall=true;
-      _mwStart={x:e.clientX,y:e.clientY};
-      _mwOrigStart={x:e.clientX,y:e.clientY};
-      _mwRoomId=-1; _mwWallIdx=-1;
-      for (const r of S.rooms) {
-        const wi=r.walls.findIndex(w=>w.id===hit.wallId);
-        if (wi>=0) { _mwRoomId=r.id; _mwWallIdx=wi; _mwOrigPts=r.points.map(p=>({x:p.x,y:p.y})); break; }
-      }
-      canvas.style.cursor='crosshair';
+      S.ui.selectedVertexIdx=null;
+      S.ui.movingWall=false;
       renderSidebar(); updateWip();
     } else if (hit?.roomId && hit.roomId===S.ui.selectedRoomId) {
-      // Room body click (currently selected room only) → pan view
+      // Room body click — clear sub-selection, pan view
       S.ui.selectedWallId=null;
       S.ui.selectedHindringId=null;
+      S.ui.selectedVertexIdx=null;
       S.ui.movingWall=false;
       renderSidebar(); updateWip();
       _roomDragging=true;
       _rdStart={x:e.clientX,y:e.clientY}; _rdMoved=false;
       canvas.style.cursor='grabbing';
     } else {
-      // clicking empty space or another room — clear wall/hindring/vertex, keep room selected
+      // Empty space — clear all sub-selections, keep room selected
       S.ui.selectedWallId=null;
       S.ui.selectedHindringId=null;
       S.ui.selectedVertexIdx=null;
@@ -2429,12 +2517,8 @@ canvas.addEventListener('mousemove', e=>{
     }
     return;
   }
-  // Edit 3+4: Vertex pending → drag transition
-  if (_vdPending) {
-    const moved=Math.hypot(e.clientX-_vdOrigStart.x, e.clientY-_vdOrigStart.y);
-    if (moved>4) { _vdPending=false; _vdDragging=true; S.ui.selectedVertexIdx=null; }
-    else return;
-  }
+  // Vertex pending — safety cancel (no longer used for drag, vertex click now only selects)
+  if (_vdPending) { _vdPending=false; return; }
   // Edit 3+4: Vertex drag (free or constrained)
   if (_vdDragging) {
     const rm=S.rooms.find(r=>r.id===_vdRoomId);
@@ -2521,25 +2605,31 @@ canvas.addEventListener('mousemove', e=>{
       const cRect2=canvas.getBoundingClientRect();
       const sx2=e.clientX-cRect2.left, sy2=e.clientY-cRect2.top;
       if (hitRotCircle(sx2, sy2)) {
-        canvas.style.cursor='crosshair';
+        canvas.style.cursor='crosshair';        // rotate drag handle
+      } else if (hitRoomGizmoX(sx2, sy2)) {
+        canvas.style.cursor='ew-resize';        // room X arrow
+      } else if (hitRoomGizmoY(sx2, sy2)) {
+        canvas.style.cursor='ns-resize';        // room Y arrow
+      } else if (hitRoomGizmoCenter(sx2, sy2)) {
+        canvas.style.cursor=(S.ui.transformMode==='rotate')?'crosshair':'move'; // room gizmo ⊕
       } else if (hitXArrow(sx2, sy2)) {
-        canvas.style.cursor='ew-resize';
+        canvas.style.cursor='ew-resize';        // vertex X arrow
       } else if (hitYArrow(sx2, sy2)) {
-        canvas.style.cursor='ns-resize';
+        canvas.style.cursor='ns-resize';        // vertex Y arrow
       } else if (hitVertexFreeDrag(sx2, sy2)) {
-        canvas.style.cursor='move';
-      } else if (hitTransformHandle(sx2, sy2)) {
-        canvas.style.cursor=(S.ui.transformMode==='rotate')?'crosshair':'move';
+        canvas.style.cursor='move';             // vertex center cross
+      } else if (hitHindringGizmo(sx2, sy2)) {
+        canvas.style.cursor='move';             // hindring gizmo ⊕
       } else if (hitVertex(sx2, sy2)) {
-        canvas.style.cursor='move';  // Edit 2: same move symbol on all vertices
+        canvas.style.cursor='pointer';          // clickable corner point
       } else if (nearMoveArrow(sx2, sy2)) {
-        canvas.style.cursor='move';  // Edit 3: crosshair-arrows when over wall move arrows
+        canvas.style.cursor='move';             // wall move arrow
       } else if (hitHindring(wp.x, wp.y) !== null) {
-        canvas.style.cursor='move';
+        canvas.style.cursor='pointer';          // selectable hindring body
       } else {
         const hit=hitTest(wp.x,wp.y);
-        if (hit?.wallId && hit.roomId===S.ui.selectedRoomId) canvas.style.cursor='move';
-        else if (hit?.roomId && hit.roomId===S.ui.selectedRoomId) canvas.style.cursor='move';
+        if (hit?.wallId && hit.roomId===S.ui.selectedRoomId) canvas.style.cursor='pointer';
+        else if (hit?.roomId && hit.roomId===S.ui.selectedRoomId) canvas.style.cursor='grab';
         else canvas.style.cursor='default';
       }
     }
@@ -2558,14 +2648,7 @@ canvas.addEventListener('mouseup', e=>{
     return;
   }
   if (_dhDragging) { _dhDragging=false; _dhId=-1; canvas.style.cursor='default'; return; }
-  // Edit 3+4: vertex pending → select vertex (show gizmo arrows)
-  if (_vdPending) {
-    _vdPending=false;
-    S.ui.selectedVertexIdx=_vdIdx;
-    _vdIdx=-1; _vdRoomId=-1; _vdConstraint='free';
-    canvas.style.cursor='default';
-    return;
-  }
+  if (_vdPending) { _vdPending=false; canvas.style.cursor='default'; return; }
   if (_vdDragging) {
     _vdDragging=false; _vdRoomId=-1; _vdIdx=-1; _vdConstraint='free';
     canvas.style.cursor='default'; return;
@@ -2591,6 +2674,7 @@ canvas.addEventListener('mouseup', e=>{
         {x:Math.min(rs.x,wp.x),y:Math.max(rs.y,wp.y)}
       ];
       if (S.ui.drawMode==='hindring') {
+        pushUndo();
         const hType=HINDRING_TYPES.find(t=>t.id===S.ui.hindringType)||HINDRING_TYPES[4];
         const customName=S.ui.hindringCustomName||'';
         S.hindrings.push({id:S.counters.nextHindringId++,type:S.ui.hindringType,
@@ -2633,6 +2717,7 @@ canvas.addEventListener('contextmenu', e=>{
   // Edit 6: Transform handle right-click
   if (hitTransformHandle(sx, sy)) {
     document.getElementById('ctx-menu').innerHTML=`
+      ${_angreItem()}
       <div class="ctx-item${(S.ui.transformMode||'move')==='move'?' sel':''}" onclick="setTransformMode('move');hideCtx()">↔ Flytt-modus</div>
       <div class="ctx-item${(S.ui.transformMode||'move')==='rotate'?' sel':''}" onclick="setTransformMode('rotate');hideCtx()">↻ Roter-modus</div>`;
     showCtxAt(e.clientX, e.clientY); return;
@@ -2646,12 +2731,17 @@ canvas.addEventListener('contextmenu', e=>{
   const hit=hitTest(wp.x,wp.y);
   if (hit?.wallId) showWallCtxMenu(e, hit.roomId, hit.wallId, wp);
   else if (hit?.roomId) roomCtxMenu(e,hit.roomId);
+  else if (_undoStack.length>0) {
+    // Empty canvas right-click: show Angre if available
+    document.getElementById('ctx-menu').innerHTML=`<div class="ctx-item" onclick="undo();hideCtx()">↩ Angre</div>`;
+    showCtxAt(e.clientX, e.clientY);
+  }
 });
 
 // ─── WALL CONTEXT MENU + CORNER INSERTION ────────────────────
 function showWallCtxMenu(e, roomId, wallId, wp) {
   selWall(roomId, wallId);
-  document.getElementById('ctx-menu').innerHTML=`
+  document.getElementById('ctx-menu').innerHTML=`${_angreItem()}
     <div class="ctx-item" onclick="insertCornerPoint(${roomId},${wallId},${wp.x},${wp.y});hideCtx()">⊕ Legg til hjørnepunkt</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" onclick="showHindringModal(${roomId});hideCtx()">⬛ Lag hindring</div>`;
@@ -2660,7 +2750,7 @@ function showWallCtxMenu(e, roomId, wallId, wp) {
 
 function showVertexCtxMenu(e, roomId, vertexIdx) {
   selRoom(roomId);
-  document.getElementById('ctx-menu').innerHTML=`
+  document.getElementById('ctx-menu').innerHTML=`${_angreItem()}
     <div class="ctx-item danger" onclick="deleteCornerPoint(${roomId},${vertexIdx});hideCtx()">✕ Slett hjørnepunkt</div>`;
   showCtxAt(e.clientX, e.clientY);
 }
@@ -2668,6 +2758,7 @@ function showVertexCtxMenu(e, roomId, vertexIdx) {
 function deleteCornerPoint(roomId, vertexIdx) {
   const rm=S.rooms.find(r=>r.id===roomId); if(!rm) return;
   if (rm.points.length <= 3) return;
+  pushUndo();
   rm.points.splice(vertexIdx, 1);
   rm.walls=compWalls(rm.points);
   rm.area=compArea(rm.points);
@@ -2677,6 +2768,7 @@ function deleteCornerPoint(roomId, vertexIdx) {
 
 function insertCornerPoint(roomId, wallId, wx, wy) {
   const rm=S.rooms.find(r=>r.id===roomId); if(!rm) return;
+  pushUndo();
   const wi=rm.walls.findIndex(w=>w.id===wallId); if(wi<0) return;
   const wl=rm.walls[wi];
   const dx=wl.x2-wl.x1, dy=wl.y2-wl.y1, l2=dx*dx+dy*dy;
@@ -2718,6 +2810,7 @@ document.addEventListener('keydown', e=>{
     e.preventDefault();
     if (S.ui.drawMode==='polygon'||S.ui.drawMode==='lshape') S.drawing.points.pop();
     else if (S.ui.drawMode==='wbw') undoWbwWall();
+    else undo();
     return;
   }
   if (!e.ctrlKey&&!e.altKey&&!e.metaKey) {
