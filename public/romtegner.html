@@ -1204,26 +1204,34 @@ function _stripRoomBounds(strip) {
 function _clampStripToRoom(strip) {
   const b = _stripRoomBounds(strip); if (!b) return;
   const nc = _stripNettoCm(strip);
+  const GAP_CM = 1.0; // 10mm minimum gap between strips
   const MIN_LEN = 5; // cm
+  let posMin, posMax;
   if (strip.direction === 'v') {
-    strip.pos_cm   = Math.max(b.minX, Math.min(b.maxX - nc,   strip.pos_cm));
+    posMin = b.minX; posMax = b.maxX - nc;
     strip.start_cm = Math.max(b.minY, strip.start_cm);
     if (strip.start_cm + strip.length_cm > b.maxY) strip.length_cm = b.maxY - strip.start_cm;
   } else {
-    strip.pos_cm   = Math.max(b.minY, Math.min(b.maxY - nc,   strip.pos_cm));
+    posMin = b.minY; posMax = b.maxY - nc;
     strip.start_cm = Math.max(b.minX, strip.start_cm);
     if (strip.start_cm + strip.length_cm > b.maxX) strip.length_cm = b.maxX - strip.start_cm;
   }
+  // Collision avoidance: enforce 10mm gap from all other strips in same room+direction
+  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  let lo = posMin, hi = posMax;
+  for (const o of others) {
+    const onc = _stripNettoCm(o);
+    if (strip.pos_cm + nc/2 <= o.pos_cm + onc/2) {
+      hi = Math.min(hi, o.pos_cm - nc - GAP_CM);   // we're left of other → stay left
+    } else {
+      lo = Math.max(lo, o.pos_cm + onc + GAP_CM);  // we're right of other → stay right
+    }
+  }
+  if (lo <= hi) strip.pos_cm = Math.max(lo, Math.min(hi, strip.pos_cm));
   if (strip.length_cm < MIN_LEN) strip.length_cm = MIN_LEN;
 }
 
 // ── Strip gizmo screen positions ──
-function _stripGizmoCenter(strip) {
-  const nc = _stripNettoCm(strip);
-  return strip.direction === 'v'
-    ? w2s(strip.pos_cm + nc/2, strip.start_cm + strip.length_cm/2)
-    : w2s(strip.start_cm + strip.length_cm/2, strip.pos_cm + nc/2);
-}
 function _stripEndHandlePos(strip) {
   const nc = _stripNettoCm(strip);
   if (strip.direction === 'v') {
@@ -1238,15 +1246,15 @@ function _stripEndHandlePos(strip) {
 // ── Strip gizmo hit tests ──
 function hitStripGizmo(sx, sy) {
   const strip = S.strips.find(s => s.id === S.ui.selectedStripId); if (!strip) return null;
-  const gp = _stripGizmoCenter(strip);
-  if (Math.hypot(sx-gp.x, sy-gp.y) < 15) return 'free';
-  const A = 18, B = 72;
+  const ends = _stripEndHandlePos(strip);
+  const ap = ends.start; // arrows anchored at start end
+  const ARR = 42;
   if (strip.direction === 'v') {
-    if (distSegPx(sx,sy,gp.x+A,gp.y,gp.x+B,gp.y)<12 || distSegPx(sx,sy,gp.x-B,gp.y,gp.x-A,gp.y)<12) return 'across';
-    if (distSegPx(sx,sy,gp.x,gp.y-B,gp.x,gp.y-A)<12 || distSegPx(sx,sy,gp.x,gp.y+A,gp.x,gp.y+B)<12) return 'along';
+    if (distSegPx(sx,sy, ap.x, ap.y, ap.x+ARR, ap.y) < 12) return 'across';
+    if (distSegPx(sx,sy, ap.x, ap.y, ap.x-ARR, ap.y) < 12) return 'across';
   } else {
-    if (distSegPx(sx,sy,gp.x,gp.y+A,gp.x,gp.y+B)<12 || distSegPx(sx,sy,gp.x,gp.y-B,gp.x,gp.y-A)<12) return 'across';
-    if (distSegPx(sx,sy,gp.x+A,gp.y,gp.x+B,gp.y)<12 || distSegPx(sx,sy,gp.x-B,gp.y,gp.x-A,gp.y)<12) return 'along';
+    if (distSegPx(sx,sy, ap.x, ap.y, ap.x, ap.y+ARR) < 12) return 'across';
+    if (distSegPx(sx,sy, ap.x, ap.y, ap.x, ap.y-ARR) < 12) return 'across';
   }
   return null;
 }
@@ -1261,33 +1269,44 @@ function hitStripEndHandle(sx, sy) {
 // ── Draw strip gizmo ──
 function drawStripGizmo() {
   const strip = S.strips.find(s => s.id === S.ui.selectedStripId); if (!strip) return;
-  const gp = _stripGizmoCenter(strip);
   const ends = _stripEndHandlePos(strip);
-  const A = 18, B = 72;
+  const ap = ends.start; // move arrows anchored at start end
+  const ARR = 42;
 
   ctx.save();
-  // Move arrows
+  ctx.lineWidth = 2;
+  // Wall-style perpendicular move arrows at strip start end
   if (strip.direction === 'v') {
-    drawGizmoArrow(gp.x+A, gp.y, gp.x+B, gp.y, 'rgba(255,75,75,0.9)');   // → across
-    drawGizmoArrow(gp.x-A, gp.y, gp.x-B, gp.y, 'rgba(255,75,75,0.9)');   // ← across
-    drawGizmoArrow(gp.x, gp.y-A, gp.x, gp.y-B, 'rgba(75,210,100,0.9)');  // ↑ along
-    drawGizmoArrow(gp.x, gp.y+A, gp.x, gp.y+B, 'rgba(75,210,100,0.9)');  // ↓ along
+    // across = horizontal (left/right)
+    const pa = 0; // angle = 0 (horizontal)
+    for (const dir of [1, -1]) {
+      const tx = ap.x + Math.cos(pa) * ARR * dir, ty = ap.y;
+      ctx.strokeStyle = '#ff5555';
+      ctx.beginPath(); ctx.moveTo(ap.x, ap.y); ctx.lineTo(tx, ty); ctx.stroke();
+      const h1 = pa + (dir > 0 ? Math.PI - 0.38 : 0.38);
+      const h2 = pa + (dir > 0 ? Math.PI + 0.38 : -0.38);
+      ctx.beginPath();
+      ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.cos(h1)*11, ty + Math.sin(h1)*11);
+      ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.cos(h2)*11, ty + Math.sin(h2)*11);
+      ctx.stroke();
+    }
   } else {
-    drawGizmoArrow(gp.x, gp.y+A, gp.x, gp.y+B, 'rgba(255,75,75,0.9)');   // ↓ across
-    drawGizmoArrow(gp.x, gp.y-A, gp.x, gp.y-B, 'rgba(255,75,75,0.9)');   // ↑ across
-    drawGizmoArrow(gp.x+A, gp.y, gp.x+B, gp.y, 'rgba(75,210,100,0.9)');  // → along
-    drawGizmoArrow(gp.x-A, gp.y, gp.x-B, gp.y, 'rgba(75,210,100,0.9)');  // ← along
+    // across = vertical (up/down)
+    const pa = Math.PI / 2; // angle = 90° (vertical)
+    for (const dir of [1, -1]) {
+      const tx = ap.x, ty = ap.y + Math.sin(pa) * ARR * dir;
+      ctx.strokeStyle = '#ff5555';
+      ctx.beginPath(); ctx.moveTo(ap.x, ap.y); ctx.lineTo(tx, ty); ctx.stroke();
+      const h1 = pa + (dir > 0 ? Math.PI - 0.38 : 0.38);
+      const h2 = pa + (dir > 0 ? Math.PI + 0.38 : -0.38);
+      ctx.beginPath();
+      ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.cos(h1)*11, ty + Math.sin(h1)*11);
+      ctx.moveTo(tx, ty); ctx.lineTo(tx + Math.cos(h2)*11, ty + Math.sin(h2)*11);
+      ctx.stroke();
+    }
   }
-  // Center ⊕
-  ctx.beginPath(); ctx.arc(gp.x, gp.y, 13, 0, Math.PI*2);
-  ctx.fillStyle='rgba(232,255,71,0.1)'; ctx.strokeStyle='rgba(232,255,71,0.85)';
-  ctx.lineWidth=1.5; ctx.fill(); ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(gp.x-9,gp.y); ctx.lineTo(gp.x+9,gp.y);
-  ctx.moveTo(gp.x,gp.y-9); ctx.lineTo(gp.x,gp.y+9);
-  ctx.strokeStyle='rgba(232,255,71,0.85)'; ctx.lineWidth=2; ctx.stroke();
   // End resize handles (diamond shape)
-  for (const [ep, isEnd] of [[ends.start,false],[ends.end,true]]) {
+  for (const ep of [ends.start, ends.end]) {
     const R = 9;
     ctx.beginPath();
     ctx.moveTo(ep.x, ep.y-R); ctx.lineTo(ep.x+R, ep.y);
