@@ -228,6 +228,18 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .soi-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
 .soi-k{font-size:12px;color:var(--dim)}
 .soi-v{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted)}
+
+/* ── VARMEFOLIE PANEL ── */
+.vf-panel{margin-top:10px;padding:10px;background:rgba(255,140,50,0.07);border:1px solid rgba(255,140,50,0.22);border-radius:8px}
+.vf-title{font-size:10px;font-weight:600;color:rgba(255,200,100,0.85);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+.vf-select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:11px;color:var(--text);outline:none;cursor:pointer;margin-bottom:7px}
+.vf-dir-row{display:flex;gap:4px;margin-bottom:8px}
+.vf-dir-btn{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:5px;font-size:11px;color:var(--muted);cursor:pointer;transition:all .12s;text-align:center}
+.vf-dir-btn.act{border-color:rgba(255,180,60,0.8);color:rgba(255,200,100,0.9);background:rgba(255,140,50,0.15)}
+.vf-stat{display:flex;justify-content:space-between;padding:2px 0;font-size:11px}
+.vf-stat-l{color:var(--muted)}.vf-stat-v{color:rgba(255,200,100,0.9);font-family:'DM Mono',monospace}
+.vf-toggle{width:100%;margin-top:8px;padding:7px;border-radius:6px;font-size:11px;font-weight:500;cursor:pointer;transition:all .12s;border:1px solid var(--border);background:var(--surface2);color:var(--muted)}
+.vf-toggle.on{background:rgba(255,140,50,0.15);border-color:rgba(255,180,60,0.6);color:rgba(255,200,100,0.9)}
 </style>
 </head>
 <body>
@@ -688,7 +700,8 @@ const S = {
   },
   snap     : { grid:true, a90:true, a45:false },
   counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1 },
-  shiftHeld: false
+  shiftHeld: false,
+  varmefolie: { productId: null, direction: 'v', visible: false }
 };
 
 // ─── CANVAS ──────────────────────────────────────────────────
@@ -816,6 +829,7 @@ function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawGrid();
   drawRooms();
+  if (S.varmefolie.visible) drawVarmefolie();
   if (currentRoom()?.dimSnap) drawDimAnnotations();
   drawHindrings();
   if (S.ui.drawMode === 'import') drawImportOverlay();
@@ -1050,6 +1064,184 @@ function drawHindrings() {
     }
     ctx.restore();
   }
+}
+
+// ─── VARMEFOLIE ──────────────────────────────────────────────
+function vfCalc(room) {
+  const p = HEATING_PRODUCTS.find(p => p.id === S.varmefolie.productId);
+  if (!p || !room || !room.points || room.points.length < 3) return null;
+
+  const nettoCm  = (p.netto_width_mm  || p.width_mm) / 10;
+  const bruttoCm = (p.brutto_width_mm || p.width_mm) / 10;
+
+  const xs = room.points.map(pt => pt.x);
+  const ys = room.points.map(pt => pt.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const roomW = maxX - minX;  // cm
+  const roomH = maxY - minY;  // cm
+
+  const dir    = S.varmefolie.direction;
+  const across = dir === 'v' ? roomW : roomH;  // cm perpendicular to strips
+  const along  = dir === 'v' ? roomH : roomW;  // cm along strips
+
+  const n = Math.floor(across / nettoCm);
+  if (n <= 0) return null;
+
+  const margin        = (across - n * nettoCm) / 2;
+  const marginMm      = Math.round(margin * 10);
+  const border        = Math.max(0, (bruttoCm - nettoCm) / 2);
+  const stripLength_m = along / 100;
+  const totalLength_m = n * stripLength_m;
+
+  const netFloorArea = roomAreas(room).net;
+  const nettoArea    = n * nettoCm * along;  // cm²
+  const coveragePct  = netFloorArea > 0 ? Math.min(100, nettoArea / netFloorArea * 100) : 0;
+  const totalWatt    = p.watt_per_lm ? Math.round(p.watt_per_lm * totalLength_m) : null;
+  const maxLenWarn   = p.max_length_m && stripLength_m > p.max_length_m;
+
+  const strips = [];
+  for (let i = 0; i < n; i++) {
+    strips.push((dir === 'v' ? minX : minY) + margin + i * nettoCm);
+  }
+
+  return { product:p, n, nettoCm, bruttoCm, border, margin, marginMm,
+           stripLength_m, totalLength_m, nettoArea, coveragePct, totalWatt, maxLenWarn,
+           strips, minX, minY, maxX, maxY, dir, along };
+}
+
+function drawVarmefolie() {
+  const room = currentRoom();
+  if (!room || !S.varmefolie.visible || !S.varmefolie.productId) return;
+  const calc = vfCalc(room);
+  if (!calc) return;
+
+  const { strips, nettoCm, border, minX, minY, maxX, maxY, dir } = calc;
+
+  ctx.save();
+  // Clip to room polygon so strips don't overflow
+  const spts = room.points.map(p => w2s(p.x, p.y));
+  ctx.beginPath();
+  ctx.moveTo(spts[0].x, spts[0].y);
+  for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
+  ctx.closePath();
+  ctx.clip();
+
+  for (const pos of strips) {
+    let bx, by, bw, bh, nx, ny, nw, nh;
+    if (dir === 'v') {
+      const b1 = w2s(pos - border, minY), b2 = w2s(pos + nettoCm + border, maxY);
+      const n1 = w2s(pos, minY),          n2 = w2s(pos + nettoCm, maxY);
+      bx=b1.x; by=b1.y; bw=b2.x-b1.x; bh=b2.y-b1.y;
+      nx=n1.x; ny=n1.y; nw=n2.x-n1.x; nh=n2.y-n1.y;
+    } else {
+      const b1 = w2s(minX, pos - border), b2 = w2s(maxX, pos + nettoCm + border);
+      const n1 = w2s(minX, pos),          n2 = w2s(maxX, pos + nettoCm);
+      bx=b1.x; by=b1.y; bw=b2.x-b1.x; bh=b2.y-b1.y;
+      nx=n1.x; ny=n1.y; nw=n2.x-n1.x; nh=n2.y-n1.y;
+    }
+    // Brutto background (physical foil)
+    ctx.fillStyle = 'rgba(255,150,50,0.10)';
+    ctx.fillRect(bx, by, bw, bh);
+    // Netto active heating area
+    ctx.fillStyle = 'rgba(255,200,80,0.26)';
+    ctx.fillRect(nx, ny, nw, nh);
+    // Netto outline
+    ctx.strokeStyle = 'rgba(255,210,80,0.6)';
+    ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.strokeRect(nx, ny, nw, nh);
+  }
+
+  // Margin boundary lines
+  if (calc.margin > 0.2) {
+    ctx.strokeStyle = 'rgba(255,120,60,0.5)';
+    ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    if (dir === 'v') {
+      const mL1=w2s(minX+calc.margin,minY), mL2=w2s(minX+calc.margin,maxY);
+      ctx.beginPath(); ctx.moveTo(mL1.x,mL1.y); ctx.lineTo(mL2.x,mL2.y); ctx.stroke();
+      const mR1=w2s(maxX-calc.margin,minY), mR2=w2s(maxX-calc.margin,maxY);
+      ctx.beginPath(); ctx.moveTo(mR1.x,mR1.y); ctx.lineTo(mR2.x,mR2.y); ctx.stroke();
+    } else {
+      const mT1=w2s(minX,minY+calc.margin), mT2=w2s(maxX,minY+calc.margin);
+      ctx.beginPath(); ctx.moveTo(mT1.x,mT1.y); ctx.lineTo(mT2.x,mT2.y); ctx.stroke();
+      const mB1=w2s(minX,maxY-calc.margin), mB2=w2s(maxX,maxY-calc.margin);
+      ctx.beginPath(); ctx.moveTo(mB1.x,mB1.y); ctx.lineTo(mB2.x,mB2.y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+
+  // Margin labels (drawn outside clip)
+  if (calc.margin > 1 && S.view.zoom > 0.4) {
+    ctx.fillStyle = 'rgba(255,190,80,0.85)';
+    ctx.font = `10px 'DM Mono',monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const txt = `${calc.marginMm}mm`;
+    if (dir === 'v') {
+      const sy  = w2s(0, (minY+maxY)/2).y;
+      ctx.fillText(txt, w2s(minX + calc.margin/2, 0).x, sy);
+      ctx.fillText(txt, w2s(maxX - calc.margin/2, 0).x, sy);
+    } else {
+      const sx  = w2s((minX+maxX)/2, 0).x;
+      ctx.fillText(txt, sx, w2s(0, minY + calc.margin/2).y);
+      ctx.fillText(txt, sx, w2s(0, maxY - calc.margin/2).y);
+    }
+  }
+}
+
+function vfPanelHtml(room) {
+  const vf    = S.varmefolie;
+  const prods = HEATING_PRODUCTS.filter(p => p.active !== false && (p.netto_width_mm || p.width_mm));
+  if (!prods.length) return '<div style="font-size:11px;color:var(--dim);margin-top:8px">🔥 Laster produkter…</div>';
+
+  const opts = prods.map(p =>
+    `<option value="${p.id}" ${p.id===vf.productId?'selected':''}>${esc(p.name)} — ${(p.netto_width_mm||p.width_mm)/10}cm netto</option>`
+  ).join('');
+
+  let statsHtml = '';
+  if (vf.productId) {
+    const c = vfCalc(room);
+    if (c) {
+      statsHtml = `
+      <div class="vf-stat"><span class="vf-stat-l">Antall striper</span><span class="vf-stat-v">${c.n} stk</span></div>
+      <div class="vf-stat"><span class="vf-stat-l">Margin per side</span><span class="vf-stat-v">${c.marginMm} mm</span></div>
+      <div class="vf-stat"><span class="vf-stat-l">Dekning</span><span class="vf-stat-v">${c.coveragePct.toFixed(0)}%</span></div>
+      ${c.totalLength_m ? `<div class="vf-stat"><span class="vf-stat-l">Lengde totalt</span><span class="vf-stat-v">${c.totalLength_m.toFixed(1)} m</span></div>` : ''}
+      ${c.totalWatt ? `<div class="vf-stat"><span class="vf-stat-l">Totaleffekt</span><span class="vf-stat-v">${c.totalWatt} W</span></div>` : ''}
+      ${c.maxLenWarn ? `<div class="vf-stat" style="color:var(--warn)">⚠ Stipe > maks ${c.product.max_length_m}m — del stipe</div>` : ''}`;
+    } else {
+      statsHtml = `<div class="vf-stat" style="color:var(--warn)">Produktet passer ikke i dette rommet</div>`;
+    }
+  }
+
+  const isOn = vf.visible && vf.productId;
+  return `<div class="vf-panel">
+    <div class="vf-title">🔥 Varmefolie</div>
+    <select class="vf-select" onchange="setVfProduct(this.value)" onclick="event.stopPropagation()">
+      <option value="">— Velg produkt —</option>${opts}
+    </select>
+    <div class="vf-dir-row">
+      <button class="vf-dir-btn${vf.direction==='v'?' act':''}" onclick="setVfDirection('v');event.stopPropagation()">↕ Vertikale striper</button>
+      <button class="vf-dir-btn${vf.direction==='h'?' act':''}" onclick="setVfDirection('h');event.stopPropagation()">↔ Horisontale striper</button>
+    </div>
+    ${statsHtml}
+    <button class="vf-toggle${isOn?' on':''}" onclick="toggleVarmefolie();event.stopPropagation()">
+      ${isOn ? '🔥 Skjul varmefolie' : '🔥 Vis på canvas'}
+    </button>
+  </div>`;
+}
+
+function setVfProduct(id) {
+  S.varmefolie.productId = id ? parseInt(id) : null;
+  updateObjInfo();
+}
+function setVfDirection(dir) {
+  S.varmefolie.direction = dir;
+  updateObjInfo();
+}
+function toggleVarmefolie() {
+  S.varmefolie.visible = !S.varmefolie.visible;
+  updateObjInfo();
 }
 
 // ─── DRAW PREVIEW ────────────────────────────────────────────
@@ -2558,7 +2750,8 @@ function updateObjInfo() {
         <div class="area-panel">
           <div class="ar"><span class="ar-label">Bruttoareal</span><span class="ar-val">${(areas.gross/10000).toFixed(2)} m²</span></div>
           ${hasHind?`<div class="ar"><span class="ar-label">Hindringer</span><span class="ar-val">−${(areas.hindArea/10000).toFixed(2)} m²</span></div><div class="ar ar-net"><span class="ar-label">Nettoareal</span><span class="ar-val">${(areas.net/10000).toFixed(2)} m²</span></div>`:''}
-        </div>`;
+        </div>
+        ${vfPanelHtml(r)}`;
       panel.style.display='block'; return;
     }
   }
@@ -3980,9 +4173,10 @@ function _buildSaveData() {
       dims   : (r.dims||[]).map(d=>({...d})),
     })),
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({...p}))})),
-    counters : {...S.counters},
-    snap     : {...S.snap},
-    view     : {...S.view},
+    counters   : {...S.counters},
+    snap       : {...S.snap},
+    view       : {...S.view},
+    varmefolie : {...S.varmefolie},
   };
 }
 
@@ -4054,6 +4248,7 @@ function _restoreProject(data) {
   S.counters  = data.counters  || S.counters;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
+  if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; });
   S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
   S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;

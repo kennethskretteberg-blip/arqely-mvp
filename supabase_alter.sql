@@ -41,16 +41,19 @@ UPDATE heating_products SET
   watt_per_lm     = 120
 WHERE id = 4;  -- Varmefolie 100 cm 120W
 
--- Legg til RLS-policy for INSERT (kreves for Excel-import fra appen)
+-- Legg til RLS-policy for INSERT/UPDATE/DELETE (kreves for Excel-import fra appen)
 -- OBS: Dette tillater alle å skrive — bytt til auth.uid() når du legger til login
-CREATE POLICY IF NOT EXISTS "Service insert products"
+DROP POLICY IF EXISTS "Service insert products" ON heating_products;
+CREATE POLICY "Service insert products"
   ON heating_products FOR INSERT
   WITH CHECK (TRUE);
 
-CREATE POLICY IF NOT EXISTS "Service update products"
+DROP POLICY IF EXISTS "Service update products" ON heating_products;
+CREATE POLICY "Service update products"
   ON heating_products FOR UPDATE
   USING (TRUE);
 
-CREATE POLICY IF NOT EXISTS "Service delete products"
+DROP POLICY IF EXISTS "Service delete products" ON heating_products;
+CREATE POLICY "Service delete products"
   ON heating_products FOR DELETE
   USING (TRUE);
