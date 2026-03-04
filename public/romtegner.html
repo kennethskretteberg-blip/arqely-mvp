@@ -30,6 +30,8 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .np-field textarea{resize:vertical;min-height:72px}
 .btn-acc{background:var(--accent);color:#0d0e10;border:none;border-radius:8px;padding:12px 28px;font-size:15px;font-weight:600;transition:opacity .15s}
 .btn-acc:hover{opacity:.86}
+.btn-open-proj{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 28px;font-size:15px;font-weight:500;color:var(--muted);cursor:pointer;transition:all .15s}
+.btn-open-proj:hover{border-color:var(--accent);color:var(--accent)}
 .btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:9px 18px;font-size:13px;transition:all .15s}
 .btn-ghost:hover{color:var(--text);border-color:var(--dim)}
 
@@ -244,6 +246,12 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
       <textarea id="np-desc" placeholder="Kort beskrivelse..."></textarea>
     </div>
     <button class="btn-acc" onclick="startProject()" style="width:100%">Opprett prosjekt →</button>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+      <span style="font-size:12px;color:var(--dim)">eller</span>
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+    </div>
+    <button class="btn-open-proj" onclick="openProject()">📂 Åpne prosjekt</button>
   </div>
 </div>
 
@@ -287,9 +295,8 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
       <span class="snap-dot"></span>Målsett Hindring
     </button>
     <span class="tc-sep"></span>
-    <button class="file-btn" onclick="saveProject()" title="Lagre prosjekt som .json-fil">💾 Lagre</button>
-    <button class="file-btn" onclick="document.getElementById('open-file-input').click()" title="Åpne tidligere lagret prosjekt">📂 Åpne</button>
-    <input type="file" id="open-file-input" accept=".json" style="display:none" onchange="openProject(event)">
+    <button class="file-btn" id="btn-save" onclick="saveProject()" title="Lagre prosjekt (overskriv)">💾 Lagre</button>
+    <button class="file-btn" onclick="openProject()" title="Åpne tidligere lagret prosjekt">📂 Åpne</button>
     <span class="tc-sep"></span>
     <button class="zoom-btn" onclick="zoomOut()" title="Zoom ut [−]">−</button>
     <button class="zoom-fit" onclick="fitAll()" title="Tilpass til skjerm">Tilpass</button>
@@ -3898,9 +3905,11 @@ function editProjName() {
   }
 }
 
-// ─── LAGRE / ÅPNE PROSJEKT ────────────────────────────────────
-function saveProject() {
-  const data = {
+// ─── LAGRE / ÅPNE PROSJEKT (File System Access API) ──────────
+let _projectFileHandle = null; // FileSystemFileHandle — reused for overwrite
+
+function _buildSaveData() {
+  return {
     _version : 1,
     project  : {...S.project, savedAt: Date.now()},
     floors   : S.floors.map(f=>({...f})),
@@ -3915,52 +3924,87 @@ function saveProject() {
     snap     : {...S.snap},
     view     : {...S.view},
   };
-  const json = JSON.stringify(data, null, 2);
-  const blob = new Blob([json], {type:'application/json'});
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  const safeName = (S.project.name||'prosjekt').replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g,'_');
-  a.href = url; a.download = safeName + '.json';
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-function openProject(e) {
-  const file = e.target.files[0]; if(!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    try {
-      const data = JSON.parse(ev.target.result);
-      if (!data._version||!data.project||!data.rooms) {
-        alert('Ugyldig prosjektfil.'); return;
-      }
-      // Restore state
-      S.project   = data.project;
-      S.floors    = data.floors   || [];
-      S.rooms     = data.rooms    || [];
-      S.hindrings = data.hindrings|| [];
-      S.counters  = data.counters || S.counters;
-      S.snap      = data.snap     || S.snap;
-      S.view      = data.view     || S.view;
-      // Ensure dims array exists on each room
-      S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; });
-      // Reset transient UI state
-      S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
-      S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
-      S.ui.selectedDimId=null; S.ui.selectedAnnot=null;
-      S.ui.drawMode=null; S.drawing.active=false; S.drawing.points=[];
-      S.drawing.rectStart=null; S.drawing.dimPending=null;
-      // Show app screen
-      document.getElementById('np-screen').style.display='none';
-      document.getElementById('app').style.display='flex';
-      document.getElementById('proj-name-disp').textContent=S.project.name;
-      document.getElementById('sb-proj-lbl').textContent=S.project.name;
-      resizeCanvas(); renderSidebar(); updMode(); updateWip(); fitAll();
-    } catch(err) { alert('Kunne ikke lese filen: ' + err.message); }
-  };
-  reader.readAsText(file);
-  // Reset input so the same file can be re-opened
-  e.target.value='';
+async function saveProject() {
+  const json = JSON.stringify(_buildSaveData(), null, 2);
+  const safeName = (S.project.name||'prosjekt').replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g,'_');
+
+  if (!('showSaveFilePicker' in window)) {
+    // Fallback: browser download
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(new Blob([json],{type:'application/json'})),
+      download: safeName+'.json'
+    });
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    return;
+  }
+
+  try {
+    // First save → let user pick folder + filename; after that reuse handle
+    if (!_projectFileHandle) {
+      _projectFileHandle = await window.showSaveFilePicker({
+        suggestedName: safeName + '.json',
+        types: [{ description: 'Romtegner-prosjekt', accept: {'application/json':['.json']} }],
+      });
+    }
+    const writable = await _projectFileHandle.createWritable();
+    await writable.write(json);
+    await writable.close();
+    // Brief confirmation flash on button
+    const btn = document.getElementById('btn-save');
+    if (btn) { const t=btn.textContent; btn.textContent='✓ Lagret'; setTimeout(()=>btn.textContent=t, 1500); }
+  } catch(err) {
+    if (err.name==='AbortError') return; // user cancelled picker
+    // Handle lost permission (e.g. file moved) — ask to pick new location
+    if (err.name==='NotAllowedError'||err.name==='SecurityError') { _projectFileHandle=null; saveProject(); return; }
+    alert('Kunne ikke lagre: ' + err.message);
+  }
+}
+
+async function openProject() {
+  if (!('showOpenFilePicker' in window)) {
+    // Fallback: hidden file input
+    const inp = Object.assign(document.createElement('input'), {type:'file', accept:'.json'});
+    inp.onchange = async e => {
+      const file = e.target.files[0]; if(!file) return;
+      try { _restoreProject(JSON.parse(await file.text())); } catch(err) { alert('Ugyldig fil: '+err.message); }
+    };
+    inp.click(); return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'Romtegner-prosjekt', accept: {'application/json':['.json']} }],
+      multiple: false,
+    });
+    const data = JSON.parse(await (await handle.getFile()).text());
+    _projectFileHandle = handle; // reuse handle for subsequent saves
+    _restoreProject(data);
+  } catch(err) {
+    if (err.name!=='AbortError') alert('Kunne ikke åpne: ' + err.message);
+  }
+}
+
+function _restoreProject(data) {
+  if (!data._version||!data.project||!data.rooms) { alert('Ugyldig prosjektfil.'); return; }
+  S.project   = data.project;
+  S.floors    = data.floors    || [];
+  S.rooms     = data.rooms     || [];
+  S.hindrings = data.hindrings || [];
+  S.counters  = data.counters  || S.counters;
+  S.snap      = data.snap      || S.snap;
+  S.view      = data.view      || S.view;
+  S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; });
+  S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
+  S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
+  S.ui.selectedDimId=null; S.ui.selectedAnnot=null;
+  S.ui.drawMode=null; S.drawing.active=false; S.drawing.points=[];
+  S.drawing.rectStart=null; S.drawing.dimPending=null;
+  document.getElementById('np-screen').style.display='none';
+  document.getElementById('app').style.display='flex';
+  document.getElementById('proj-name-disp').textContent=S.project.name;
+  document.getElementById('sb-proj-lbl').textContent=S.project.name;
+  resizeCanvas(); renderSidebar(); updMode(); updateWip(); fitAll();
 }
 
 // ─── MODAL KEYBOARD SHORTCUTS ─────────────────────────────────
