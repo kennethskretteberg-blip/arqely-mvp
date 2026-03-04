@@ -186,6 +186,9 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .mp-item:hover{background:var(--surface2)}
 .mp-item:active{cursor:grabbing}
 .mp-item-info{font-size:10px;color:var(--dim)}
+.mp-semi-rem{padding:6px 14px 7px;font-size:11px;font-weight:700;color:#64dcff;background:rgba(100,220,255,0.07);border-bottom:1px solid var(--border)}
+.mp-semi-rem.done{color:#55cc55;background:rgba(85,204,85,0.07)}
+.mp-item-dim{opacity:.32;cursor:not-allowed!important}
 .mp-close{margin:8px 14px 4px;padding:5px 10px;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--dim);cursor:pointer;font-size:12px;width:calc(100% - 28px)}
 .mp-close:hover{background:var(--surface2);color:var(--text)}
 .ctx-item{padding:8px 12px;border-radius:5px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;transition:background .1s}
@@ -727,7 +730,10 @@ const S = {
     dropPreviewStrip: null,      // ghost strip during drag
     palettePosX: null,           // manual palette position (null = docked to sidebar)
     palettePosY: null,
-    showStripLabels: false       // show product name inside each strip
+    showStripLabels: false,      // show product name inside each strip
+    semiAutoMode: false,         // halvautomatisk placement active
+    semiAutoRoomId: null,
+    semiAutoCursor: 0            // world pos filled up to
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -870,7 +876,8 @@ function render() {
   drawGrid();
   drawRooms();
   drawStrips();
-  if (S.ui.dropPreviewStrip) drawDropPreview();
+  if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
+  else if (_stripDragging || _sgDragging) drawStripGapLine();
   if (currentRoom()?.dimSnap) drawDimAnnotations();
   drawHindrings();
   if (S.ui.drawMode === 'import') drawImportOverlay();
@@ -1224,6 +1231,7 @@ function openPlacementMenu(e, familyName, categoryId) {
     <div style="padding:6px 12px 2px;font-size:11px;color:var(--dim)">${esc(familyName)}</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId});hideProduktMenu()">⚡ Tegn ut automatisk</div>
+    <div class="ctx-item" onclick="startSemiAutoFill(${sq(familyName)},${categoryId});hideProduktMenu()">⚡½ Halvautomatisk</div>
     <div class="ctx-item" onclick="startManualPlace(${sq(familyName)},${categoryId});hideProduktMenu()">✋ Tegn inn manuelt</div>`;
   showProduktDropdown(html, e.clientX, e.clientY);
 }
@@ -1367,6 +1375,105 @@ function cancelManualPlace() {
   document.getElementById('manual-palette').style.display = 'none';
 }
 
+// ─── HALVAUTOMATISK PLASSERING ────────────────────────────────
+function startSemiAutoFill(familyName, categoryId) {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) { alert('Velg et rom først'); return; }
+  const dir = S.varmefolie.direction;
+  const coords = dir === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
+  const MARGIN = 2.5;
+  pushUndo();
+  // Clear existing strips for this room/category
+  S.strips = S.strips.filter(s => {
+    const sp = _stripProduct(s);
+    return !(s.roomId === room.id && sp && sp.category_id === categoryId);
+  });
+  S.ui.semiAutoMode = true;
+  S.ui.manualFamilyName = familyName;
+  S.ui.manualCategoryId = categoryId;
+  S.ui.semiAutoRoomId = room.id;
+  S.ui.semiAutoCursor = Math.min(...coords) + MARGIN;
+  renderSemiAutoPalette();
+}
+
+function _semiAutoRemaining() {
+  const room = S.rooms.find(r => r.id === S.ui.semiAutoRoomId); if (!room) return 0;
+  const dir = S.varmefolie.direction;
+  const coords = dir === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
+  return Math.max(...coords) - 2.5 - S.ui.semiAutoCursor;
+}
+
+function renderSemiAutoPalette() {
+  const remaining = _semiAutoRemaining();
+  const done = remaining < 2;
+  const { manualFamilyName, manualCategoryId } = S.ui;
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === manualCategoryId && p.active !== false && p.name.startsWith(manualFamilyName))
+    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+
+  const remTxt = done
+    ? `<div class="mp-semi-rem done">✓ Rom fylt</div>`
+    : `<div class="mp-semi-rem">🔲 ${Math.round(remaining)} cm gjenstår — velg bredde:</div>`;
+
+  const items = done ? '' : prods.map(p => {
+    const nc = Math.round((p.netto_width_mm || p.width_mm) / 10);
+    const fits = nc <= remaining + 0.01;
+    return `<div class="mp-item${fits ? '' : ' mp-item-dim'}" ${fits ? `onclick="doSemiAutoStep(${p.id})"` : ''}>
+      <span>${esc(p.name)}</span>
+      <span class="mp-item-info">${nc} cm</span>
+    </div>`;
+  }).join('');
+
+  const pal = document.getElementById('manual-palette');
+  pal.innerHTML = `
+    <div class="mp-drag-handle" id="mp-handle">
+      <span>⚡½ Halvautomatisk</span>
+      <button style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:14px;line-height:1;padding:0 0 0 8px" onclick="cancelSemiAutoFill()">✕</button>
+    </div>
+    ${remTxt}
+    <div class="mp-items-wrap">${items}</div>
+    ${done ? `<div style="padding:6px 12px 10px"><button class="snap-chip on" onclick="cancelSemiAutoFill()" style="width:100%;justify-content:center">✓ Ferdig</button></div>` : ''}`;
+
+  const sbRect = document.getElementById('sidebar').getBoundingClientRect();
+  pal.style.left = (S.ui.palettePosX !== null ? S.ui.palettePosX : sbRect.right + 4) + 'px';
+  pal.style.top  = (S.ui.palettePosY !== null ? S.ui.palettePosY : 44) + 'px';
+  pal.style.display = 'block';
+  _initPaletteDrag(pal);
+}
+
+function doSemiAutoStep(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId); if (!prod) return;
+  const room = S.rooms.find(r => r.id === S.ui.semiAutoRoomId); if (!room) return;
+  const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+  const dir = S.varmefolie.direction;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const MARGIN = 2.5, GAP = 1.0;
+  const roomFar = (dir === 'v' ? Math.max(...xs) : Math.max(...ys)) - MARGIN;
+  const along = dir === 'v' ? Math.max(...ys) - Math.min(...ys) : Math.max(...xs) - Math.min(...xs);
+  const baseAlong = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
+  let cursor = S.ui.semiAutoCursor;
+  while (cursor + nc <= roomFar + 0.01) {
+    S.strips.push({
+      id: S.counters.nextStripId++,
+      roomId: room.id, productId: prod.id, direction: dir,
+      pos_cm: cursor,
+      start_cm: baseAlong + MARGIN,
+      length_cm: along - 2 * MARGIN
+    });
+    cursor += nc + GAP;
+  }
+  S.ui.semiAutoCursor = cursor;
+  renderSemiAutoPalette();
+  renderSidebar(); updateObjInfo();
+}
+
+function cancelSemiAutoFill() {
+  S.ui.semiAutoMode = false;
+  S.ui.semiAutoRoomId = null;
+  S.ui.semiAutoCursor = 0;
+  document.getElementById('manual-palette').style.display = 'none';
+}
+
 function manualDragStart(e, productId) {
   S.ui.dragWidth = { productId };
   e.dataTransfer.effectAllowed = 'copy';
@@ -1401,6 +1508,69 @@ function drawDropPreview() {
   ctx.restore();
 }
 
+function drawStripGapLine() {
+  // Resolve which strip to use
+  let pos_cm, nc, dir, roomId;
+  const ps = S.ui.dropPreviewStrip;
+  if (ps) {
+    pos_cm = ps.pos_cm; nc = ps.nc; dir = ps.direction; roomId = ps.roomId;
+  } else if (_stripDragging || _sgDragging) {
+    const s = S.strips.find(s => s.id === _stripId); if (!s) return;
+    nc = _stripNettoCm(s); pos_cm = s.pos_cm; dir = s.direction; roomId = s.roomId;
+  } else return;
+
+  const room = S.rooms.find(r => r.id === roomId); if (!room) return;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const MARGIN = 2.5;
+
+  if (dir === 'v') {
+    const farEdge = pos_cm + nc;
+    const roomFar = Math.max(...xs) - MARGIN;
+    const gap = roomFar - farEdge;
+    if (gap < 0.5) return;
+    const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const p1 = w2s(farEdge, midY), p2 = w2s(roomFar, midY);
+    drawGapDimLine(p1.x, p1.y, p2.x, p2.y, gap);
+  } else {
+    const farEdge = pos_cm + nc;
+    const roomFar = Math.max(...ys) - MARGIN;
+    const gap = roomFar - farEdge;
+    if (gap < 0.5) return;
+    const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const p1 = w2s(midX, farEdge), p2 = w2s(midX, roomFar);
+    drawGapDimLine(p1.x, p1.y, p2.x, p2.y, gap);
+  }
+}
+
+function drawGapDimLine(x1, y1, x2, y2, gapCm) {
+  const ang = Math.atan2(y2 - y1, x2 - x1);
+  const perp = ang + Math.PI / 2;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(100,220,255,0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.setLineDash([]);
+  // End ticks
+  for (const [px, py] of [[x1, y1], [x2, y2]]) {
+    ctx.beginPath();
+    ctx.moveTo(px + Math.cos(perp) * 7, py + Math.sin(perp) * 7);
+    ctx.lineTo(px - Math.cos(perp) * 7, py - Math.sin(perp) * 7);
+    ctx.stroke();
+  }
+  // Label box
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  const txt = gapCm >= 100 ? `${(gapCm / 100).toFixed(2)} m` : `${Math.round(gapCm)} cm`;
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(txt).width + 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(mx - tw / 2, my - 10, tw, 20);
+  ctx.fillStyle = 'rgba(100,220,255,1)';
+  ctx.fillText(txt, mx, my);
+  ctx.restore();
+}
+
 function _getDropPosition(e) {
   // Convert dragover event to world coords
   const rect = canvas.getBoundingClientRect();
@@ -1431,7 +1601,7 @@ canvas.addEventListener('dragover', e => {
     startCm = Math.min(...xs) + MARGIN;
     lengthCm = Math.max(...xs) - Math.min(...xs) - 2 * MARGIN;
   }
-  S.ui.dropPreviewStrip = { pos_cm: pos, start_cm: startCm, length_cm: Math.max(5, lengthCm), direction: dir, nc };
+  S.ui.dropPreviewStrip = { pos_cm: pos, start_cm: startCm, length_cm: Math.max(5, lengthCm), direction: dir, nc, roomId: room.id };
 });
 
 canvas.addEventListener('dragleave', () => {
