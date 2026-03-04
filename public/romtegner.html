@@ -701,6 +701,15 @@ function getWorldPos(e) {
     }
   }
 
+  // dim: shift = free length only, angle always snaps per chips
+  if (S.ui.drawMode === 'dim') {
+    let p = s2w(sx, sy);
+    if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
+    const ref = S.drawing.rectStart;
+    if (ref) p = angleSnapAlways(p.x, p.y, ref);
+    return p;
+  }
+
   // hindring-polygon: shift = free length only, angle always snaps per chips
   if (S.ui.drawMode === 'hindring-polygon') {
     let p = s2w(sx, sy);
@@ -729,6 +738,7 @@ function render() {
   if (S.ui.drawMode === 'wbw') drawWbwLines();
   if (S.ui.selectedWallId) drawMoveArrows();
   drawUserDimLines();
+  if (S.ui.selectedDimId!==null) drawDimMoveGizmo();
   drawScaleBar();
 }
 
@@ -1226,12 +1236,6 @@ function drawUserDimLines() {
     ctx.fillStyle=col; ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(len+' cm',0,-2);
     ctx.restore();
-    // Drag handle dot at midpoint (when selected)
-    if (isSel) {
-      ctx.beginPath(); ctx.arc(mx,my,5,0,Math.PI*2);
-      ctx.fillStyle='rgba(232,255,71,0.9)'; ctx.fill();
-      ctx.strokeStyle='rgba(13,14,16,0.5)'; ctx.lineWidth=1; ctx.stroke();
-    }
   }
   ctx.restore();
 }
@@ -1419,6 +1423,47 @@ function drawMoveArrows() {
     ctx.lineTo(tx+Math.cos(h2)*11, ty+Math.sin(h2)*11);
     ctx.stroke();
   }
+}
+
+// ─── DIM LINE MOVE GIZMO ──────────────────────────────────────
+function _dimGizmoCenter() {
+  if (S.ui.selectedDimId===null) return null;
+  const dim=S.dims.find(d=>d.id===S.ui.selectedDimId); if(!dim) return null;
+  const off=dim.offset||0;
+  const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
+  const wLen=Math.hypot(wdx,wdy); if(wLen<1) return null;
+  const wnx=-wdy/wLen, wny=wdx/wLen;
+  const sd1=w2s(dim.p1.x+wnx*off,dim.p1.y+wny*off);
+  const sd2=w2s(dim.p2.x+wnx*off,dim.p2.y+wny*off);
+  const mx=(sd1.x+sd2.x)/2, my=(sd1.y+sd2.y)/2;
+  const ang=Math.atan2(sd2.y-sd1.y,sd2.x-sd1.x);
+  return {mx,my,pa:ang+Math.PI/2,wnx,wny,off,dim};
+}
+function drawDimMoveGizmo() {
+  const g=_dimGizmoCenter(); if(!g) return;
+  const {mx,my,pa}=g;
+  const arr=38;
+  ctx.save(); ctx.lineWidth=2;
+  for (const dir of [1,-1]) {
+    ctx.strokeStyle='rgba(232,255,71,0.9)';
+    const tx=mx+Math.cos(pa)*arr*dir, ty=my+Math.sin(pa)*arr*dir;
+    ctx.beginPath(); ctx.moveTo(mx,my); ctx.lineTo(tx,ty); ctx.stroke();
+    const h1=pa+(dir>0?Math.PI-0.38:0.38), h2=pa+(dir>0?Math.PI+0.38:-0.38);
+    ctx.beginPath();
+    ctx.moveTo(tx,ty); ctx.lineTo(tx+Math.cos(h1)*11,ty+Math.sin(h1)*11);
+    ctx.moveTo(tx,ty); ctx.lineTo(tx+Math.cos(h2)*11,ty+Math.sin(h2)*11);
+    ctx.stroke();
+  }
+  ctx.beginPath(); ctx.arc(mx,my,4,0,Math.PI*2);
+  ctx.fillStyle='rgba(232,255,71,0.8)'; ctx.fill();
+  ctx.restore();
+}
+function hitDimGizmo(sx,sy) {
+  const g=_dimGizmoCenter(); if(!g) return false;
+  const {mx,my,pa}=g; const arr=38;
+  const tx1=mx+Math.cos(pa)*arr, ty1=my+Math.sin(pa)*arr;
+  const tx2=mx-Math.cos(pa)*arr, ty2=my-Math.sin(pa)*arr;
+  return distSegPx(sx,sy,mx,my,tx1,ty1)<14 || distSegPx(sx,sy,mx,my,tx2,ty2)<14;
 }
 
 // ─── ROOM MANAGEMENT ─────────────────────────────────────────
@@ -2818,28 +2863,19 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
-    // ── Dim line: drag selected, or click to select ──
-    if (S.ui.selectedDimId!==null) {
-      const selDim=S.dims.find(d=>d.id===S.ui.selectedDimId);
-      if (selDim) {
-        const off=selDim.offset||0;
-        const wdx=selDim.p2.x-selDim.p1.x, wdy=selDim.p2.y-selDim.p1.y;
-        const wLen=Math.hypot(wdx,wdy);
-        if (wLen>1) {
-          const wnx=-wdy/wLen, wny=wdx/wLen;
-          const sd1=w2s(selDim.p1.x+wnx*off,selDim.p1.y+wny*off);
-          const sd2=w2s(selDim.p2.x+wnx*off,selDim.p2.y+wny*off);
-          if (distSegPx(sx0,sy0,sd1.x,sd1.y,sd2.x,sd2.y)<10) {
-            pushUndo();
-            _dimOffDragging=true; _dimOffId=selDim.id;
-            _dimOffOrigOffset=off;
-            _dimOffOrigStart={x:e.clientX,y:e.clientY};
-            _dimOffPerpX=wnx; _dimOffPerpY=wny;
-            canvas.style.cursor='grabbing'; return;
-          }
-        }
+    // ── Dim move gizmo (selected dim only) ──
+    if (hitDimGizmo(sx0,sy0)) {
+      const g=_dimGizmoCenter();
+      if (g) {
+        pushUndo();
+        _dimOffDragging=true; _dimOffId=g.dim.id;
+        _dimOffOrigOffset=g.off;
+        _dimOffOrigStart={x:e.clientX,y:e.clientY};
+        _dimOffPerpX=g.wnx; _dimOffPerpY=g.wny;
+        canvas.style.cursor='grabbing'; return;
       }
     }
+    // ── Dim line click — select (keep selectedRoomId so room stays visible) ──
     for (const dim of S.dims) {
       const off=dim.offset||0;
       const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
@@ -2852,7 +2888,8 @@ canvas.addEventListener('mousedown', e=>{
           distSegPx(sx0,sy0,sp1.x,sp1.y,sd1.x,sd1.y)<6 ||
           distSegPx(sx0,sy0,sp2.x,sp2.y,sd2.x,sd2.y)<6) {
         S.ui.selectedDimId=dim.id;
-        S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
+        // Do NOT clear selectedRoomId — room drawing must stay visible
+        S.ui.selectedWallId=null;
         S.ui.selectedHindringId=null; S.ui.selectedVertexIdx=null;
         updateWip(); return;
       }
