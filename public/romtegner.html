@@ -229,6 +229,15 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .soi-k{font-size:12px;color:var(--dim)}
 .soi-v{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted)}
 
+/* ── STRIP ITEMS (varmefolie) ── */
+.strip-item{display:flex;align-items:center;gap:8px;padding:5px 16px 5px 40px;cursor:pointer;border-left:2px solid transparent;transition:all .12s;font-size:12px}
+.strip-item:hover{background:var(--surface2)}.strip-item.sel{border-left-color:rgba(255,210,80,0.9);background:rgba(255,180,50,0.07)}
+.strip-item.indented{padding-left:56px}
+.strip-ico{color:rgba(255,200,80,0.65);font-size:10px;flex-shrink:0}
+.strip-nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+.strip-len{font-family:'DM Mono',monospace;font-size:10px;color:var(--dim);flex-shrink:0;cursor:pointer;padding:2px 4px;border-radius:3px}
+.strip-len:hover{color:var(--muted);background:var(--surface2)}
+
 /* ── VARMEFOLIE PANEL ── */
 .vf-panel{margin-top:10px;padding:10px;background:rgba(255,140,50,0.07);border:1px solid rgba(255,140,50,0.22);border-radius:8px}
 .vf-title{font-size:10px;font-weight:600;color:rgba(255,200,100,0.85);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
@@ -671,6 +680,7 @@ const S = {
   floors   : [],
   rooms    : [],
   hindrings: [],
+  strips   : [],   // [{id,roomId,productId,direction,pos_cm,start_cm,length_cm}]
   ui : {
     selectedRoomId  : null,
     selectedWallId  : null,
@@ -687,7 +697,8 @@ const S = {
     selectedVertexIdx: null,     // index into selected room's points array
     selectedHindringWallIdx: null, // index into selected hindring's wall list
     selectedDimId: null,         // selected user dimension line id
-    selectedAnnot: null          // selected wall annotation {roomId, wallId}
+    selectedAnnot: null,         // selected wall annotation {roomId, wallId}
+    selectedStripId: null        // selected strip id
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -699,9 +710,9 @@ const S = {
     wbw      : { started:false, startPoint:null, walls:[], direction:'right' }
   },
   snap     : { grid:true, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1 },
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1 },
   shiftHeld: false,
-  varmefolie: { productId: null, direction: 'v', visible: false }
+  varmefolie: { direction: 'v', pendingProductId: null }
 };
 
 // ─── CANVAS ──────────────────────────────────────────────────
@@ -829,7 +840,7 @@ function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawGrid();
   drawRooms();
-  if (S.varmefolie.visible) drawVarmefolie();
+  drawStrips();
   if (currentRoom()?.dimSnap) drawDimAnnotations();
   drawHindrings();
   if (S.ui.drawMode === 'import') drawImportOverlay();
@@ -1066,128 +1077,160 @@ function drawHindrings() {
   }
 }
 
-// ─── VARMEFOLIE ──────────────────────────────────────────────
-function vfCalc(room) {
-  const p = HEATING_PRODUCTS.find(p => p.id === S.varmefolie.productId);
-  if (!p || !room || !room.points || room.points.length < 3) return null;
+// ─── VARMEFOLIE / STRIPS ──────────────────────────────────────
+function autoAddStrips(roomId, productId, direction) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const p = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !p) return;
 
-  const nettoCm  = (p.netto_width_mm  || p.width_mm) / 10;
-  const bruttoCm = (p.brutto_width_mm || p.width_mm) / 10;
-
-  const xs = room.points.map(pt => pt.x);
-  const ys = room.points.map(pt => pt.y);
+  const nettoCm = (p.netto_width_mm || p.width_mm) / 10;
+  const xs = room.points.map(pt => pt.x), ys = room.points.map(pt => pt.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const roomW = maxX - minX;  // cm
-  const roomH = maxY - minY;  // cm
 
-  const dir    = S.varmefolie.direction;
-  const across = dir === 'v' ? roomW : roomH;  // cm perpendicular to strips
-  const along  = dir === 'v' ? roomH : roomW;  // cm along strips
+  const across = direction === 'v' ? (maxX - minX) : (maxY - minY);
+  const along  = direction === 'v' ? (maxY - minY) : (maxX - minX);
 
-  const MIN_MARGIN_CM = 2.5; // 25 mm minimum randsone mot vegger
-  const n = Math.floor((across - 2 * MIN_MARGIN_CM) / nettoCm);
-  if (n <= 0) return null;
+  const MIN_MARGIN_CM = 2.5;  // 25mm randsone
+  const GAP_CM = 1.0;         // 10mm gap between strips
+  // n = floor((across - 2*margin + gap) / (netto + gap))
+  // which means: n*(netto+gap) - gap + 2*margin = across → margin = (across - n*(netto+gap) + gap) / 2
+  const n = Math.floor((across - 2 * MIN_MARGIN_CM + GAP_CM) / (nettoCm + GAP_CM));
+  if (n <= 0) { alert('Produktet passer ikke i dette rommet (for smalt).'); return; }
 
-  const margin        = (across - n * nettoCm) / 2;  // alltid ≥ 25 mm
-  const marginMm      = Math.round(margin * 10);
-  const border        = Math.max(0, (bruttoCm - nettoCm) / 2);
-  const stripLength_m = along / 100;
-  const totalLength_m = n * stripLength_m;
+  const usedWidth = n * nettoCm + (n - 1) * GAP_CM;
+  const margin = (across - usedWidth) / 2;  // >= MIN_MARGIN_CM
 
-  const netFloorArea = roomAreas(room).net;
-  const nettoArea    = n * nettoCm * along;  // cm²
-  const coveragePct  = netFloorArea > 0 ? Math.min(100, nettoArea / netFloorArea * 100) : 0;
-  const totalWatt    = p.watt_per_lm ? Math.round(p.watt_per_lm * totalLength_m) : null;
-  const maxLenWarn   = p.max_length_m && stripLength_m > p.max_length_m;
+  // Remove existing strips for this room + product + direction
+  S.strips = S.strips.filter(s => !(s.roomId === roomId && s.productId === productId && s.direction === direction));
 
-  const strips = [];
+  const basePos   = direction === 'v' ? minX : minY;
+  const baseAlong = direction === 'v' ? minY : minX;
+
   for (let i = 0; i < n; i++) {
-    strips.push((dir === 'v' ? minX : minY) + margin + i * nettoCm);
+    S.strips.push({
+      id: S.counters.nextStripId++,
+      roomId, productId, direction,
+      pos_cm   : basePos + margin + i * (nettoCm + GAP_CM),
+      start_cm : baseAlong,
+      length_cm: along
+    });
   }
-
-  return { product:p, n, nettoCm, bruttoCm, border, margin, marginMm,
-           stripLength_m, totalLength_m, nettoArea, coveragePct, totalWatt, maxLenWarn,
-           strips, minX, minY, maxX, maxY, dir, along };
+  renderSidebar(); updateObjInfo();
 }
 
-function drawVarmefolie() {
-  const room = currentRoom();
-  if (!room || !S.varmefolie.visible || !S.varmefolie.productId) return;
-  const calc = vfCalc(room);
-  if (!calc) return;
+function _stripProduct(strip) {
+  return HEATING_PRODUCTS.find(p => p.id === strip.productId);
+}
+function _stripNettoCm(strip) {
+  const p = _stripProduct(strip); if (!p) return 0;
+  return (p.netto_width_mm || p.width_mm) / 10;
+}
+function _stripBorderCm(strip) {
+  const p = _stripProduct(strip); if (!p) return 0;
+  const netto  = (p.netto_width_mm  || p.width_mm) / 10;
+  const brutto = (p.brutto_width_mm || p.width_mm) / 10;
+  return Math.max(0, (brutto - netto) / 2);
+}
 
-  const { strips, nettoCm, border, minX, minY, maxX, maxY, dir } = calc;
+function drawStrips() {
+  for (const strip of S.strips) {
+    const room = S.rooms.find(r => r.id === strip.roomId);
+    const nettoCm = _stripNettoCm(strip);
+    if (!room || nettoCm <= 0) continue;
 
-  ctx.save();
-  // Clip to room polygon so strips don't overflow
-  const spts = room.points.map(p => w2s(p.x, p.y));
-  ctx.beginPath();
-  ctx.moveTo(spts[0].x, spts[0].y);
-  for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
-  ctx.closePath();
-  ctx.clip();
+    const isSel = strip.id === S.ui.selectedStripId;
+    const border = _stripBorderCm(strip);
 
-  for (const pos of strips) {
+    ctx.save();
+    // Clip to room polygon
+    const spts = room.points.map(p => w2s(p.x, p.y));
+    ctx.beginPath(); ctx.moveTo(spts[0].x, spts[0].y);
+    for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
+    ctx.closePath(); ctx.clip();
+
     let bx, by, bw, bh, nx, ny, nw, nh;
-    if (dir === 'v') {
-      const b1 = w2s(pos - border, minY), b2 = w2s(pos + nettoCm + border, maxY);
-      const n1 = w2s(pos, minY),          n2 = w2s(pos + nettoCm, maxY);
+    if (strip.direction === 'v') {
+      const b1 = w2s(strip.pos_cm - border, strip.start_cm);
+      const b2 = w2s(strip.pos_cm + nettoCm + border, strip.start_cm + strip.length_cm);
+      const n1 = w2s(strip.pos_cm, strip.start_cm);
+      const n2 = w2s(strip.pos_cm + nettoCm, strip.start_cm + strip.length_cm);
       bx=b1.x; by=b1.y; bw=b2.x-b1.x; bh=b2.y-b1.y;
       nx=n1.x; ny=n1.y; nw=n2.x-n1.x; nh=n2.y-n1.y;
     } else {
-      const b1 = w2s(minX, pos - border), b2 = w2s(maxX, pos + nettoCm + border);
-      const n1 = w2s(minX, pos),          n2 = w2s(maxX, pos + nettoCm);
+      const b1 = w2s(strip.start_cm, strip.pos_cm - border);
+      const b2 = w2s(strip.start_cm + strip.length_cm, strip.pos_cm + nettoCm + border);
+      const n1 = w2s(strip.start_cm, strip.pos_cm);
+      const n2 = w2s(strip.start_cm + strip.length_cm, strip.pos_cm + nettoCm);
       bx=b1.x; by=b1.y; bw=b2.x-b1.x; bh=b2.y-b1.y;
       nx=n1.x; ny=n1.y; nw=n2.x-n1.x; nh=n2.y-n1.y;
     }
-    // Brutto background (physical foil)
-    ctx.fillStyle = 'rgba(255,150,50,0.10)';
-    ctx.fillRect(bx, by, bw, bh);
-    // Netto active heating area
-    ctx.fillStyle = 'rgba(255,200,80,0.26)';
+    // Brutto background
+    ctx.fillStyle = 'rgba(255,150,50,0.10)'; ctx.fillRect(bx, by, bw, bh);
+    // Netto active area
+    ctx.fillStyle = isSel ? 'rgba(255,200,80,0.38)' : 'rgba(255,200,80,0.22)';
     ctx.fillRect(nx, ny, nw, nh);
     // Netto outline
-    ctx.strokeStyle = 'rgba(255,210,80,0.6)';
-    ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.strokeStyle = isSel ? 'rgba(255,220,80,1.0)' : 'rgba(255,210,80,0.55)';
+    ctx.lineWidth = isSel ? 2 : 1; ctx.setLineDash([]);
     ctx.strokeRect(nx, ny, nw, nh);
+    ctx.restore();
   }
+}
 
-  // Margin boundary lines
-  if (calc.margin > 0.2) {
-    ctx.strokeStyle = 'rgba(255,120,60,0.5)';
-    ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-    if (dir === 'v') {
-      const mL1=w2s(minX+calc.margin,minY), mL2=w2s(minX+calc.margin,maxY);
-      ctx.beginPath(); ctx.moveTo(mL1.x,mL1.y); ctx.lineTo(mL2.x,mL2.y); ctx.stroke();
-      const mR1=w2s(maxX-calc.margin,minY), mR2=w2s(maxX-calc.margin,maxY);
-      ctx.beginPath(); ctx.moveTo(mR1.x,mR1.y); ctx.lineTo(mR2.x,mR2.y); ctx.stroke();
+function hitStrip(wx, wy) {
+  for (let i = S.strips.length - 1; i >= 0; i--) {
+    const s = S.strips[i];
+    const nc = _stripNettoCm(s); if (nc <= 0) continue;
+    if (s.direction === 'v') {
+      if (wx >= s.pos_cm && wx <= s.pos_cm + nc &&
+          wy >= s.start_cm && wy <= s.start_cm + s.length_cm) return s;
     } else {
-      const mT1=w2s(minX,minY+calc.margin), mT2=w2s(maxX,minY+calc.margin);
-      ctx.beginPath(); ctx.moveTo(mT1.x,mT1.y); ctx.lineTo(mT2.x,mT2.y); ctx.stroke();
-      const mB1=w2s(minX,maxY-calc.margin), mB2=w2s(maxX,maxY-calc.margin);
-      ctx.beginPath(); ctx.moveTo(mB1.x,mB1.y); ctx.lineTo(mB2.x,mB2.y); ctx.stroke();
-    }
-    ctx.setLineDash([]);
-  }
-  ctx.restore();
-
-  // Margin labels (drawn outside clip)
-  if (calc.margin > 1 && S.view.zoom > 0.4) {
-    ctx.fillStyle = 'rgba(255,190,80,0.85)';
-    ctx.font = `10px 'DM Mono',monospace`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const txt = `${calc.marginMm}mm`;
-    if (dir === 'v') {
-      const sy  = w2s(0, (minY+maxY)/2).y;
-      ctx.fillText(txt, w2s(minX + calc.margin/2, 0).x, sy);
-      ctx.fillText(txt, w2s(maxX - calc.margin/2, 0).x, sy);
-    } else {
-      const sx  = w2s((minX+maxX)/2, 0).x;
-      ctx.fillText(txt, sx, w2s(0, minY + calc.margin/2).y);
-      ctx.fillText(txt, sx, w2s(0, maxY - calc.margin/2).y);
+      if (wx >= s.start_cm && wx <= s.start_cm + s.length_cm &&
+          wy >= s.pos_cm && wy <= s.pos_cm + nc) return s;
     }
   }
+  return null;
+}
+
+function selStrip(id) {
+  S.ui.selectedStripId = id;
+  if (id !== null) {
+    const strip = S.strips.find(s => s.id === id);
+    if (strip) {
+      S.ui.selectedRoomId = strip.roomId;
+      S.ui.selectedWallId = null;
+      S.ui.selectedHindringId = null;
+      S.ui.selectedHindringWallIdx = null;
+    }
+  }
+  renderSidebar(); updateObjInfo();
+}
+
+function deleteStrip(id) {
+  S.strips = S.strips.filter(s => s.id !== id);
+  if (S.ui.selectedStripId === id) S.ui.selectedStripId = null;
+  renderSidebar(); updateObjInfo();
+}
+
+function editStripLen(id, span) {
+  const strip = S.strips.find(s => s.id === id); if (!strip) return;
+  const inp = document.createElement('input');
+  inp.type = 'number'; inp.min = '1'; inp.step = '1'; inp.value = Math.round(strip.length_cm);
+  inp.style.cssText = 'width:60px;background:var(--surface2);border:1px solid var(--accent);border-radius:4px;padding:1px 5px;font-family:"DM Mono",monospace;font-size:11px;color:var(--text);outline:none';
+  span.replaceWith(inp); inp.focus(); inp.select();
+  const apply = () => { const v = parseFloat(inp.value); if (v > 0) strip.length_cm = v; renderSidebar(); updateObjInfo(); };
+  inp.addEventListener('blur', apply);
+  inp.addEventListener('keydown', e => { if (e.key==='Enter') inp.blur(); if (e.key==='Escape') renderSidebar(); e.stopPropagation(); });
+}
+
+function stripCtxMenu(e, id) {
+  e.preventDefault();
+  selStrip(id);
+  document.getElementById('ctx-menu').innerHTML = `
+    ${_angreItem()}
+    <div class="ctx-item danger" onclick="deleteStrip(${id});hideCtx()">✕ Slett stripe</div>`;
+  showCtxAt(e.clientX, e.clientY);
 }
 
 function vfPanelHtml(room) {
@@ -1196,53 +1239,26 @@ function vfPanelHtml(room) {
   if (!prods.length) return '<div style="font-size:11px;color:var(--dim);margin-top:8px">🔥 Laster produkter…</div>';
 
   const opts = prods.map(p =>
-    `<option value="${p.id}" ${p.id===vf.productId?'selected':''}>${esc(p.name)} — ${(p.netto_width_mm||p.width_mm)/10}cm netto</option>`
+    `<option value="${p.id}" ${p.id===vf.pendingProductId?'selected':''}>${esc(p.name)} — ${(p.netto_width_mm||p.width_mm)/10}cm netto</option>`
   ).join('');
 
-  let statsHtml = '';
-  if (vf.productId) {
-    const c = vfCalc(room);
-    if (c) {
-      statsHtml = `
-      <div class="vf-stat"><span class="vf-stat-l">Antall striper</span><span class="vf-stat-v">${c.n} stk</span></div>
-      <div class="vf-stat"><span class="vf-stat-l">Margin per side</span><span class="vf-stat-v">${c.marginMm} mm</span></div>
-      <div class="vf-stat"><span class="vf-stat-l">Dekning</span><span class="vf-stat-v">${c.coveragePct.toFixed(0)}%</span></div>
-      ${c.totalLength_m ? `<div class="vf-stat"><span class="vf-stat-l">Lengde totalt</span><span class="vf-stat-v">${c.totalLength_m.toFixed(1)} m</span></div>` : ''}
-      ${c.totalWatt ? `<div class="vf-stat"><span class="vf-stat-l">Totaleffekt</span><span class="vf-stat-v">${c.totalWatt} W</span></div>` : ''}
-      ${c.maxLenWarn ? `<div class="vf-stat" style="color:var(--warn)">⚠ Stipe > maks ${c.product.max_length_m}m — del stipe</div>` : ''}`;
-    } else {
-      statsHtml = `<div class="vf-stat" style="color:var(--warn)">Produktet passer ikke i dette rommet</div>`;
-    }
-  }
+  const roomStrips = S.strips.filter(s => s.roomId === room.id);
+  const canAdd = !!vf.pendingProductId;
 
-  const isOn = vf.visible && vf.productId;
   return `<div class="vf-panel">
     <div class="vf-title">🔥 Varmefolie</div>
-    <select class="vf-select" onchange="setVfProduct(this.value)" onclick="event.stopPropagation()">
+    <select class="vf-select" onchange="S.varmefolie.pendingProductId=this.value?parseInt(this.value):null;updateObjInfo()" onclick="event.stopPropagation()">
       <option value="">— Velg produkt —</option>${opts}
     </select>
     <div class="vf-dir-row">
-      <button class="vf-dir-btn${vf.direction==='v'?' act':''}" onclick="setVfDirection('v');event.stopPropagation()">↕ Vertikale striper</button>
-      <button class="vf-dir-btn${vf.direction==='h'?' act':''}" onclick="setVfDirection('h');event.stopPropagation()">↔ Horisontale striper</button>
+      <button class="vf-dir-btn${vf.direction==='v'?' act':''}" onclick="S.varmefolie.direction='v';updateObjInfo();event.stopPropagation()">↕ Vertikalt</button>
+      <button class="vf-dir-btn${vf.direction==='h'?' act':''}" onclick="S.varmefolie.direction='h';updateObjInfo();event.stopPropagation()">↔ Horisontalt</button>
     </div>
-    ${statsHtml}
-    <button class="vf-toggle${isOn?' on':''}" onclick="toggleVarmefolie();event.stopPropagation()">
-      ${isOn ? '🔥 Skjul varmefolie' : '🔥 Vis på canvas'}
+    <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId,S.varmefolie.direction)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
+      ＋ Legg til striper
     </button>
+    ${roomStrips.length ? `<div class="vf-stat" style="margin-top:6px"><span class="vf-stat-l">Striper i rom</span><span class="vf-stat-v">${roomStrips.length} stk</span></div>` : ''}
   </div>`;
-}
-
-function setVfProduct(id) {
-  S.varmefolie.productId = id ? parseInt(id) : null;
-  updateObjInfo();
-}
-function setVfDirection(dir) {
-  S.varmefolie.direction = dir;
-  updateObjInfo();
-}
-function toggleVarmefolie() {
-  S.varmefolie.visible = !S.varmefolie.visible;
-  updateObjInfo();
 }
 
 // ─── DRAW PREVIEW ────────────────────────────────────────────
@@ -2033,6 +2049,23 @@ function roomItemHtml(room, indented) {
     `</div>`;
   }
 
+  // Strip items for this room
+  const roomStripsItem = S.strips.filter(s => s.roomId === room.id);
+  const stripsHtml = roomStripsItem.map(s => {
+    const ssel = s.id === S.ui.selectedStripId ? ' sel' : '';
+    const sind = indented ? ' indented' : '';
+    const sp = _stripProduct(s);
+    const nc = _stripNettoCm(s);
+    const nm = sp ? esc(sp.name) : 'Stripe';
+    return `<div class="strip-item${ssel}${sind}"
+      onclick="selStrip(${s.id});event.stopPropagation()"
+      oncontextmenu="stripCtxMenu(event,${s.id});event.stopPropagation()">
+      <span class="strip-ico">═</span>
+      <span class="strip-nm">${nm}${nc?' '+Math.round(nc*10)+'mm':''}</span>
+      <span class="strip-len" title="Klikk for å endre lengde" onclick="editStripLen(${s.id},this);event.stopPropagation()">${Math.round(s.length_cm)} cm</span>
+    </div>`;
+  }).join('');
+
   // Hindring items for this room
   const roomHindrings=S.hindrings.filter(h=>h.roomId===room.id);
   const hindringsHtml = roomHindrings.map(h=>{
@@ -2081,7 +2114,7 @@ function roomItemHtml(room, indented) {
       </div>
     </div>
     ${hasWalls ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} vegger">${exp?'▾':'▸'}</button>` : ''}
-  </div>${wallsHtml}${hindringsHtml}`;
+  </div>${wallsHtml}${stripsHtml}${hindringsHtml}`;
 }
 
 function esc(s) {
@@ -2715,6 +2748,21 @@ function deleteHindring(id) {
 // ─── OBJECT INFO PANEL ───────────────────────────────────────
 function updateObjInfo() {
   const panel=document.getElementById('sb-obj-info');
+  if(S.ui.selectedStripId!==null) {
+    const strip=S.strips.find(s=>s.id===S.ui.selectedStripId);
+    if(strip) {
+      const p=_stripProduct(strip);
+      const nc=_stripNettoCm(strip);
+      const bc=_stripBorderCm(strip);
+      const watt=p?.watt_per_lm ? Math.round(p.watt_per_lm*strip.length_cm/100) : null;
+      panel.innerHTML=`<div class="soi-title">🔥 ${esc(p?.name||'Varmefolie')}</div>
+        <div class="soi-row"><span class="soi-k">Netto bredde</span><span class="soi-v">${Math.round(nc*10)} mm</span></div>
+        <div class="soi-row"><span class="soi-k">Lengde</span><span class="soi-v">${Math.round(strip.length_cm)} cm</span></div>
+        ${watt?`<div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${watt} W</span></div>`:''}
+        <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteStrip(${strip.id})">✕ Slett stripe</button></div>`;
+      panel.style.display='block'; return;
+    }
+  }
   if(S.ui.selectedHindringId) {
     const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId);
     if(h&&h.points) {
@@ -3145,6 +3193,9 @@ document.addEventListener('mousedown', e=>{
 }, true);
 
 // ─── CANVAS EVENT HANDLING ───────────────────────────────────
+// Strip drag
+let _stripDragging=false, _stripId=-1;
+let _stripOrigPos=0, _stripOrigStart=0, _stripOrigMouse={x:0,y:0};
 let _dragging=false, _panning=false;
 let _panStart={x:0,y:0}, _panSV={x:0,y:0};
 let _movingWall=false, _mwStart={x:0,y:0}, _mwOrigStart={x:0,y:0}, _mwOrigPts=null;
@@ -3470,6 +3521,18 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Strip body click — select + start drag ──
+    const hs=hitStrip(wp.x, wp.y);
+    if (hs) {
+      selStrip(hs.id);
+      pushUndo();
+      _stripDragging=true; _stripId=hs.id;
+      _stripOrigPos=hs.pos_cm; _stripOrigStart=hs.start_cm;
+      _stripOrigMouse={x:e.clientX,y:e.clientY};
+      canvas.style.cursor='crosshair';
+      return;
+    }
+
     // ── Hindring body click — select + start drag immediately ──
     const hhid=hitHindring(wp.x, wp.y);
     if (hhid !== null) {
@@ -3711,6 +3774,22 @@ canvas.addEventListener('mousemove', e=>{
     }
     return;
   }
+  if (_stripDragging) {
+    const strip = S.strips.find(s => s.id === _stripId);
+    if (strip) {
+      const sc = S.view.zoom * BASE_SCALE;
+      const ddx = (e.clientX - _stripOrigMouse.x) / sc;
+      const ddy = (e.clientY - _stripOrigMouse.y) / sc;
+      if (strip.direction === 'v') {
+        strip.pos_cm   = _stripOrigPos   + (S.snap.grid && !S.shiftHeld ? Math.round(ddx/GRID)*GRID : ddx);
+        strip.start_cm = _stripOrigStart + (S.snap.grid && !S.shiftHeld ? Math.round(ddy/GRID)*GRID : ddy);
+      } else {
+        strip.start_cm = _stripOrigStart + (S.snap.grid && !S.shiftHeld ? Math.round(ddx/GRID)*GRID : ddx);
+        strip.pos_cm   = _stripOrigPos   + (S.snap.grid && !S.shiftHeld ? Math.round(ddy/GRID)*GRID : ddy);
+      }
+    }
+    return;
+  }
   // Vertex pending — safety cancel (no longer used for drag, vertex click now only selects)
   if (_vdPending) { _vdPending=false; return; }
   // Edit 3+4: Vertex drag (free or constrained)
@@ -3858,6 +3937,7 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_dimOffDragging) { _dimOffDragging=false; _dimOffId=-1; canvas.style.cursor='default'; return; }
   if (_annotDragging){_annotDragging=false;_annotWallId=null;canvas.style.cursor='default';return;}
+  if (_stripDragging) { _stripDragging=false; _stripId=-1; canvas.style.cursor='default'; return; }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
   if (_dhDragging) { _dhDragging=false; _dhId=-1; _dhDragAxis='free'; canvas.style.cursor='default'; return; }
   if(_hwMoving){_hwMoving=false;_hwHindId=-1;_hwWallIdx=-1;canvas.style.cursor='default';return;}
@@ -3940,7 +4020,10 @@ canvas.addEventListener('contextmenu', e=>{
   const vh=hitVertex(sx, sy);
   if (vh) { showVertexCtxMenu(e, vh.roomId, vh.vertexIdx); return; }
   const wp=getWorldPos(e);
-  // Check hindring first (they sit on top of rooms)
+  // Check strips first, then hindrings (both sit on top of rooms)
+  const hs2=hitStrip(wp.x, wp.y);
+  if (hs2) { stripCtxMenu(e, hs2.id); return; }
+  // Check hindring
   const hh=hitHindring(wp.x, wp.y);
   if (hh!==null) { hindringCtxMenu(e, hh); return; }
   const hit=hitTest(wp.x,wp.y);
@@ -4019,6 +4102,7 @@ document.addEventListener('keydown', e=>{
   // Edit 6: Ctrl+R = rotate mode, Ctrl+F = move mode
   if ((e.ctrlKey||e.metaKey)&&e.key==='r') { e.preventDefault(); setTransformMode('rotate'); return; }
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
+  if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
   if (e.key==='Delete'&&S.ui.selectedDimId) {
     const _crDel=currentRoom();
     if(_crDel) { pushUndo(); _crDel.dims=_crDel.dims.filter(d=>d.id!==S.ui.selectedDimId); }
@@ -4174,6 +4258,7 @@ function _buildSaveData() {
       dims   : (r.dims||[]).map(d=>({...d})),
     })),
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({...p}))})),
+    strips   : S.strips.map(s=>({...s})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -4246,10 +4331,13 @@ function _restoreProject(data) {
   S.floors    = data.floors    || [];
   S.rooms     = data.rooms     || [];
   S.hindrings = data.hindrings || [];
+  S.strips    = data.strips    || [];
   S.counters  = data.counters  || S.counters;
+  if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
+  S.ui.selectedStripId = null;
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; });
   S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
   S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
