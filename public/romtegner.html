@@ -267,6 +267,13 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
     <button class="snap-chip" id="chip-hindring" onclick="startHindringMode()" title="Tegn hindring i valgt rom">
       <span class="snap-dot"></span>Hindring
     </button>
+    <span class="tc-sep"></span>
+    <button class="snap-chip" id="chip-dims" onclick="toggleSnap('dims')" title="Vis målsetting utenfor rom">
+      <span class="snap-dot"></span>Målsetting
+    </button>
+    <button class="snap-chip" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje mellom to punkter">
+      <span class="snap-dot"></span>Mållinje
+    </button>
     <button class="zoom-btn" onclick="zoomOut()" title="Zoom ut [−]">−</button>
     <button class="zoom-fit" onclick="fitAll()" title="Tilpass til skjerm">Tilpass</button>
     <button class="zoom-btn" onclick="zoomIn()" title="Zoom inn [+]">+</button>
@@ -582,7 +589,8 @@ const S = {
     transformMode   : 'move',
     toolMode        : 'arrow',   // 'arrow' | 'hand'
     selectedVertexIdx: null,     // index into selected room's points array
-    selectedHindringWallIdx: null // index into selected hindring's wall list
+    selectedHindringWallIdx: null, // index into selected hindring's wall list
+    selectedDimId: null          // selected user dimension line id
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -592,8 +600,9 @@ const S = {
     rectStart: null,
     wbw      : { started:false, startPoint:null, walls:[], direction:'right' }
   },
-  snap     : { grid:true, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1 },
+  snap     : { grid:true, a90:true, a45:false, dims:false },
+  dims     : [],   // user-drawn dimension lines [{id,p1,p2}]
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1 },
   shiftHeld: false
 };
 
@@ -651,6 +660,28 @@ function angleSnap(wx, wy, from) {
   return { x:wx, y:wy };
 }
 
+// Like angleSnap but ignores S.shiftHeld — used for hindring-polygon
+function angleSnapAlways(wx, wy, from) {
+  if (!S.snap.a90 && !S.snap.a45) return { x:wx, y:wy };
+  const dx = wx - from.x, dy = wy - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return { x:wx, y:wy };
+  const ang = Math.atan2(dy, dx) * 180 / Math.PI;
+  const cands = [];
+  if (S.snap.a90) cands.push(0, 90, 180, -90, -180, 270, -270);
+  if (S.snap.a45) cands.push(45, 135, -45, -135, 225, -225);
+  let best = ang, bestD = 11;
+  for (const c of cands) {
+    const d = Math.abs(((ang - c) + 540) % 360 - 180);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  if (bestD < 11) {
+    const r = best * Math.PI / 180;
+    return { x: from.x + Math.cos(r)*len, y: from.y + Math.sin(r)*len };
+  }
+  return { x:wx, y:wy };
+}
+
 function getSnapRef() {
   const m = S.ui.drawMode, pts = S.drawing.points;
   if ((m==='polygon'||m==='lshape'||m==='hindring-polygon') && pts.length>0) return pts[pts.length-1];
@@ -670,6 +701,15 @@ function getWorldPos(e) {
     }
   }
 
+  // hindring-polygon: shift = free length only, angle always snaps per chips
+  if (S.ui.drawMode === 'hindring-polygon') {
+    let p = s2w(sx, sy);
+    if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
+    const ref = getSnapRef();
+    if (ref) p = angleSnapAlways(p.x, p.y, ref);
+    return p;
+  }
+
   let p = s2w(sx, sy);
   p = gridSnap(p.x, p.y);
   const ref = getSnapRef();
@@ -682,11 +722,13 @@ function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawGrid();
   drawRooms();
+  if (S.snap.dims) drawDimAnnotations();
   drawHindrings();
   if (S.ui.drawMode === 'import') drawImportOverlay();
   else drawPreview();
   if (S.ui.drawMode === 'wbw') drawWbwLines();
   if (S.ui.selectedWallId) drawMoveArrows();
+  drawUserDimLines();
   drawScaleBar();
 }
 
@@ -904,6 +946,11 @@ function drawHindrings() {
       ctx.strokeStyle='rgba(255,220,80,1)'; ctx.lineWidth=3; ctx.setLineDash([]); ctx.stroke();
       ctx.setLineDash([5,3]);
     }
+    // Distance lines to room walls (selected or dragging)
+    if (isSel) {
+      const rm=S.rooms.find(r=>r.id===h.roomId);
+      if (rm) drawHindringDistances(h, rm);
+    }
     // ⊕ gizmo at BL corner of selected hindring
     if (isSel) {
       const xs=h.points.map(p=>p.x), ys=h.points.map(p=>p.y);
@@ -925,6 +972,9 @@ function drawPreview() {
   const mode = S.ui.drawMode;
   const pts  = S.drawing.points;
   const mp   = S.drawing.mousePos;
+
+  // Dim line preview
+  if (mode==='dim') { drawDimPreview(mp); return; }
 
   // Rectangle drag preview (also for hindring free-draw)
   if ((mode==='rect'||mode==='hindring') && S.drawing.rectStart && S.drawing.active) {
@@ -1021,6 +1071,201 @@ function drawPreview() {
       }
     }
   }
+}
+
+// ─── DIM TOOL PREVIEW ─────────────────────────────────────────
+function drawDimPreview(mp) {
+  if (!S.drawing.rectStart) return;
+  const p1=S.drawing.rectStart, p2=mp;
+  const s1=w2s(p1.x,p1.y), s2=w2s(p2.x,p2.y);
+  ctx.save();
+  ctx.setLineDash([6,4]); ctx.strokeStyle='rgba(71,180,255,0.9)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(s1.x,s1.y); ctx.lineTo(s2.x,s2.y); ctx.stroke();
+  ctx.setLineDash([]);
+  // Ticks
+  const ang=Math.atan2(s2.y-s1.y,s2.x-s1.x)+Math.PI/2;
+  for (const sp of [s1,s2]) {
+    ctx.beginPath();
+    ctx.moveTo(sp.x+Math.cos(ang)*6,sp.y+Math.sin(ang)*6);
+    ctx.lineTo(sp.x-Math.cos(ang)*6,sp.y-Math.sin(ang)*6);
+    ctx.stroke();
+  }
+  // Label
+  const len=Math.round(Math.hypot(p2.x-p1.x,p2.y-p1.y));
+  const mx=(s1.x+s2.x)/2, my=(s1.y+s2.y)/2;
+  const drawAng=Math.atan2(s2.y-s1.y,s2.x-s1.x);
+  ctx.save();
+  ctx.translate(mx,my); ctx.rotate(drawAng);
+  ctx.fillStyle='rgba(71,180,255,0.9)';
+  ctx.font="11px 'DM Mono',monospace"; ctx.textAlign='center'; ctx.textBaseline='bottom';
+  ctx.fillText(len+' cm',0,-6);
+  ctx.restore();
+  ctx.restore();
+}
+
+// ─── DIMENSION ANNOTATIONS (Målsetting chip) ──────────────────
+function drawDimAnnotations() {
+  const OFFSET=38; // screen px outside wall
+  const TICK=8;    // tick length
+  ctx.save();
+  ctx.strokeStyle='rgba(71,180,255,0.55)'; ctx.lineWidth=1;
+  ctx.fillStyle='rgba(71,180,255,0.75)';
+  ctx.font="10px 'DM Mono',monospace";
+  for (const room of S.rooms) {
+    if (!room.walls || !room.points) continue;
+    const cxW=room.points.reduce((a,p)=>a+p.x,0)/room.points.length;
+    const cyW=room.points.reduce((a,p)=>a+p.y,0)/room.points.length;
+    for (const wl of room.walls) {
+      const s1=w2s(wl.x1,wl.y1), s2=w2s(wl.x2,wl.y2);
+      const mx=(s1.x+s2.x)/2, my=(s1.y+s2.y)/2;
+      const wallAng=Math.atan2(s2.y-s1.y,s2.x-s1.x);
+      const perpAng=wallAng+Math.PI/2;
+      // Determine outward direction
+      const wmx=(wl.x1+wl.x2)/2, wmy=(wl.y1+wl.y2)/2;
+      const outDot=(wmx-cxW)*Math.cos(perpAng)+(wmy-cyW)*Math.sin(perpAng);
+      // outward screen normal (perpendicular pointing away from room center)
+      const sc=S.view.zoom*BASE_SCALE;
+      const outDotScreen=(s1.x+s2.x)/2-w2s(cxW,cyW).x;
+      const outDotScreenY=(s1.y+s2.y)/2-w2s(cxW,cyW).y;
+      const dotTest=outDotScreen*Math.cos(perpAng)+outDotScreenY*Math.sin(perpAng);
+      const outDir=dotTest>=0?1:-1;
+      const nx=Math.cos(perpAng)*outDir, ny=Math.sin(perpAng)*outDir;
+      // Offset line endpoints
+      const ox1=s1.x+nx*OFFSET, oy1=s1.y+ny*OFFSET;
+      const ox2=s2.x+nx*OFFSET, oy2=s2.y+ny*OFFSET;
+      // Extension lines (from wall endpoints to offset)
+      ctx.setLineDash([2,3]);
+      ctx.beginPath();
+      ctx.moveTo(s1.x+nx*6,s1.y+ny*6); ctx.lineTo(ox1,oy1);
+      ctx.moveTo(s2.x+nx*6,s2.y+ny*6); ctx.lineTo(ox2,oy2);
+      ctx.stroke();
+      // Offset line
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(ox1,oy1); ctx.lineTo(ox2,oy2); ctx.stroke();
+      // Ticks at ends
+      const tx=Math.cos(wallAng)*TICK, ty=Math.sin(wallAng)*TICK;
+      ctx.beginPath();
+      ctx.moveTo(ox1-tx,oy1-ty); ctx.lineTo(ox1+tx,oy1+ty);
+      ctx.moveTo(ox2-tx,oy2-ty); ctx.lineTo(ox2+tx,oy2+ty);
+      ctx.stroke();
+      // Length label
+      const len=Math.round(wl.length);
+      const drawAng=(wallAng>Math.PI/2||wallAng<-Math.PI/2)?wallAng+Math.PI:wallAng;
+      ctx.save();
+      ctx.translate((ox1+ox2)/2,(oy1+oy2)/2); ctx.rotate(drawAng);
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      // Background pill
+      ctx.fillStyle='rgba(13,14,16,0.7)';
+      const tw=ctx.measureText(len+' cm').width;
+      ctx.fillRect(-tw/2-3,-7,tw+6,14);
+      ctx.fillStyle='rgba(71,180,255,0.9)';
+      ctx.fillText(len+' cm',0,0);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
+// ─── USER DIM LINES ───────────────────────────────────────────
+function drawUserDimLines() {
+  if (!S.dims.length) return;
+  const TICK=7;
+  ctx.save();
+  for (const dim of S.dims) {
+    const isSel=dim.id===S.ui.selectedDimId;
+    const s1=w2s(dim.p1.x,dim.p1.y), s2=w2s(dim.p2.x,dim.p2.y);
+    const ang=Math.atan2(s2.y-s1.y,s2.x-s1.x);
+    const perp=ang+Math.PI/2;
+    const col=isSel?'rgba(232,255,71,0.95)':'rgba(71,180,255,0.8)';
+    ctx.strokeStyle=col; ctx.lineWidth=isSel?1.8:1.2; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(s1.x,s1.y); ctx.lineTo(s2.x,s2.y); ctx.stroke();
+    // Ticks at each end
+    const tx=Math.cos(perp)*TICK, ty=Math.sin(perp)*TICK;
+    ctx.beginPath();
+    ctx.moveTo(s1.x-tx,s1.y-ty); ctx.lineTo(s1.x+tx,s1.y+ty);
+    ctx.moveTo(s2.x-tx,s2.y-ty); ctx.lineTo(s2.x+tx,s2.y+ty);
+    ctx.stroke();
+    // Length label
+    const len=Math.round(Math.hypot(dim.p2.x-dim.p1.x,dim.p2.y-dim.p1.y));
+    const mx=(s1.x+s2.x)/2, my=(s1.y+s2.y)/2;
+    const drawAng=(ang>Math.PI/2||ang<-Math.PI/2)?ang+Math.PI:ang;
+    ctx.save();
+    ctx.translate(mx,my); ctx.rotate(drawAng);
+    ctx.fillStyle='rgba(13,14,16,0.75)';
+    ctx.font="11px 'DM Mono',monospace";
+    const tw=ctx.measureText(len+' cm').width;
+    ctx.fillRect(-tw/2-3,-9,tw+6,13);
+    ctx.fillStyle=col; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(len+' cm',0,-2);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// ─── HINDRING DISTANCE LINES ──────────────────────────────────
+function drawHindringDistances(h, room) {
+  if (!h.points||h.points.length<3||!room.walls||!room.walls.length) return;
+  const OFFSET=28; // px outside room wall for label
+  const SNAP_THR=10; // cm — don't show line if touching (snap threshold)
+  // Compute hindring bounding box in world
+  const hxs=h.points.map(p=>p.x), hys=h.points.map(p=>p.y);
+  const hMinX=Math.min(...hxs), hMaxX=Math.max(...hxs);
+  const hMinY=Math.min(...hys), hMaxY=Math.max(...hys);
+  const hCx=(hMinX+hMaxX)/2, hCy=(hMinY+hMaxY)/2;
+  const cxW=room.points.reduce((a,p)=>a+p.x,0)/room.points.length;
+  const cyW=room.points.reduce((a,p)=>a+p.y,0)/room.points.length;
+  ctx.save();
+  ctx.font="10px 'DM Mono',monospace";
+  for (const wl of room.walls) {
+    const wdx=wl.x2-wl.x1, wdy=wl.y2-wl.y1, wLen=Math.hypot(wdx,wdy);
+    if (wLen<1) continue;
+    const wux=wdx/wLen, wuy=wdy/wLen;
+    const wnx=-wuy, wny=wux; // inward normal (CCW convention)
+    // Signed distance from wall to room centroid (should be positive for inward)
+    const centSignedDist=(cxW-wl.x1)*wnx+(cyW-wl.y1)*wny;
+    // Outward normal = direction away from room
+    const outNx=centSignedDist>0?-wnx:wnx, outNy=centSignedDist>0?-wny:wny;
+    const inNx=-outNx, inNy=-outNy;
+    // Distance from hindring centroid to wall line (signed, positive = hindring inside room relative to this wall)
+    const wallDist=(hCx-wl.x1)*inNx+(hCy-wl.y1)*inNy;
+    if (wallDist<=0) continue; // hindring outside this wall — skip
+    // Find hindring edge closest to this wall (min perpendicular distance)
+    let minEdgeDist=wallDist;
+    for (const hp of h.points) {
+      const d=(hp.x-wl.x1)*inNx+(hp.y-wl.y1)*inNy;
+      if (d<minEdgeDist) minEdgeDist=d;
+    }
+    if (minEdgeDist<SNAP_THR) continue; // touching wall — skip
+    // Find t param of hindring centroid projected onto wall
+    const t=Math.max(0,Math.min(1,((hCx-wl.x1)*wux+(hCy-wl.y1)*wuy)/wLen));
+    const wallPt={x:wl.x1+t*wdx,y:wl.y1+t*wdy};
+    const hindPt={x:wallPt.x+inNx*minEdgeDist,y:wallPt.y+inNy*minEdgeDist};
+    const sWall=w2s(wallPt.x,wallPt.y), sHind=w2s(hindPt.x,hindPt.y);
+    const sWallOut=w2s(wallPt.x+outNx*(minEdgeDist*0.0+1),wallPt.y+outNy*(minEdgeDist*0.0+1));
+    // Draw dashed line inside room from hindring edge to wall
+    ctx.strokeStyle='rgba(255,200,80,0.6)'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(sHind.x,sHind.y); ctx.lineTo(sWall.x,sWall.y); ctx.stroke();
+    ctx.setLineDash([]);
+    // Tick at wall
+    const wallAngS=Math.atan2(w2s(wl.x2,wl.y2).y-w2s(wl.x1,wl.y1).y,w2s(wl.x2,wl.y2).x-w2s(wl.x1,wl.y1).x);
+    const tx=Math.cos(wallAngS)*5, ty=Math.sin(wallAngS)*5;
+    ctx.strokeStyle='rgba(255,200,80,0.8)'; ctx.lineWidth=1.2;
+    ctx.beginPath();
+    ctx.moveTo(sWall.x-tx,sWall.y-ty); ctx.lineTo(sWall.x+tx,sWall.y+ty);
+    ctx.moveTo(sHind.x-tx,sHind.y-ty); ctx.lineTo(sHind.x+tx,sHind.y+ty);
+    ctx.stroke();
+    // Label outside room
+    const outDx=Math.cos(Math.atan2(sWall.y-sHind.y,sWall.x-sHind.x));
+    const outDy=Math.sin(Math.atan2(sWall.y-sHind.y,sWall.x-sHind.x));
+    const labelX=sWall.x+outDx*OFFSET, labelY=sWall.y+outDy*OFFSET;
+    const dist=Math.round(minEdgeDist);
+    ctx.fillStyle='rgba(13,14,16,0.75)';
+    const tw=ctx.measureText(dist+' cm').width;
+    ctx.fillRect(labelX-tw/2-3,labelY-8,tw+6,14);
+    ctx.fillStyle='rgba(255,210,80,0.95)'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(dist+' cm',labelX,labelY);
+  }
+  ctx.restore();
 }
 
 // Compute 6-point L-shape from 3 anchor clicks
@@ -1209,6 +1454,7 @@ function exitDrawing() {
   S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null;
   S.drawing.wbw={ started:false, startPoint:null, walls:[], direction:'right' };
   document.getElementById('wbw-panel').style.display='none';
+  document.getElementById('chip-dim-tool')?.classList.remove('on');
   canvas.style.cursor='default';
   updMode();
 }
@@ -1696,6 +1942,12 @@ function confirmHindringPolygon() {
   S.drawing.active=true; S.drawing.points=[]; S.drawing.rectStart=null;
   canvas.style.cursor='crosshair'; updMode();
 }
+function startDimMode() {
+  S.ui.drawMode='dim'; S.ui.selectedDimId=null;
+  S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null;
+  canvas.style.cursor='crosshair'; updMode();
+  document.getElementById('chip-dim-tool').classList.add('on');
+}
 function createHindringFromPolygon(pts) {
   const hType=HINDRING_TYPES.find(t=>t.id===S.ui.hindringType)||HINDRING_TYPES[4];
   const customName=S.ui.hindringCustomName||'';
@@ -1728,7 +1980,8 @@ function cancelDrawing() { exitDrawing(); renderSidebar(); }
 function updMode() {
   const names={ rect:'Tegn rektangel', lshape:'Tegn L-form',
                 polygon:'Tegn polygon', wbw:'Vegg-for-vegg',
-                hindring:'Tegn hindring', 'hindring-polygon':'Tegn hindring polygon', import:'Import plantegning' };
+                hindring:'Tegn hindring', 'hindring-polygon':'Tegn hindring polygon',
+                dim:'Mållinje — klikk 2 punkter', import:'Import plantegning' };
   document.getElementById('sb-mode').textContent=
     S.ui.drawMode ? (names[S.ui.drawMode]||S.ui.drawMode) : 'Velg';
 }
@@ -2007,7 +2260,7 @@ function nearMoveArrow(sx, sy) {
   const arr=42;
   for (const dir of [1,-1]) {
     const tx=mx+Math.cos(pa)*arr*dir, ty=my+Math.sin(pa)*arr*dir;
-    if (distSegPx(sx,sy,mx,my,tx,ty) < 20) return parentRoom;
+    if (distSegPx(sx,sy,mx,my,tx,ty) < 28) return parentRoom;
   }
   return null;
 }
@@ -2046,12 +2299,9 @@ function getAnchorWorld(roomId) {
   return {x:Math.min(...xs), y:Math.max(...ys)};
 }
 function getRoomGizmoPos(room) {
-  // Place gizmo outside the room bounding box, to the right at mid-height (screen coords)
-  const spts=room.points.map(p=>w2s(p.x,p.y));
-  const maxSx=Math.max(...spts.map(p=>p.x));
-  const minSy=Math.min(...spts.map(p=>p.y));
-  const maxSy=Math.max(...spts.map(p=>p.y));
-  return {x:maxSx+72, y:(minSy+maxSy)/2};
+  // Place gizmo 1 grid to the LEFT of the room's BL corner (world-space offset → screen)
+  const xs=room.points.map(p=>p.x), ys=room.points.map(p=>p.y);
+  return w2s(Math.min(...xs) - GRID, Math.max(...ys));
 }
 function getRotCircleRadius() {
   return 50 * BASE_SCALE * S.view.zoom; // fixed 100cm diameter
@@ -2362,11 +2612,7 @@ canvas.addEventListener('mousedown', e=>{
     }
     S.drawing.points.push({x:wp.x,y:wp.y});
   } else if (mode==='hindring-polygon') {
-    if (e.shiftKey) {
-      _panning=true; _panStart={x:e.clientX,y:e.clientY};
-      _panSV={x:S.view.panX,y:S.view.panY}; canvas.style.cursor='grabbing';
-      e.preventDefault(); return;
-    }
+    // Shift frees length-snap but keeps angle-snap (handled in getWorldPos)
     if (S.drawing.points.length >= 3) {
       const p0=S.drawing.points[0];
       if (Math.hypot(wp.x-p0.x, wp.y-p0.y) < 1) {
@@ -2378,6 +2624,14 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
     S.drawing.points.push({x:wp.x,y:wp.y});
+  } else if (mode==='dim') {
+    if (!S.drawing.rectStart) {
+      S.drawing.rectStart={x:wp.x,y:wp.y};
+    } else {
+      S.dims.push({id:S.counters.nextDimId++, p1:{...S.drawing.rectStart}, p2:{x:wp.x,y:wp.y}});
+      S.drawing.rectStart=null;
+      // Stay in dim mode for additional lines
+    }
   } else if (mode==='wbw') {
     if (!S.drawing.wbw.started) {
       S.drawing.wbw.started=true;
@@ -2526,10 +2780,36 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
-    // ── Wall / room body click — select wall or pan room view ──
+    // ── Dim line click — select user dim line ──
+    for (const dim of S.dims) {
+      const s1=w2s(dim.p1.x,dim.p1.y), s2=w2s(dim.p2.x,dim.p2.y);
+      if (distSegPx(sx0,sy0,s1.x,s1.y,s2.x,s2.y) < 8) {
+        S.ui.selectedDimId=dim.id;
+        S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
+        S.ui.selectedHindringId=null; S.ui.selectedVertexIdx=null;
+        updateWip(); return;
+      }
+    }
+
+    // ── Wall / room body click — select wall or drag selected wall ──
     const hit=hitTest(wp.x,wp.y);
     if (hit?.wallId && hit.roomId===S.ui.selectedRoomId) {
-      // Wall click — select, show move arrows; movement only through arrows
+      if (hit.wallId === S.ui.selectedWallId) {
+        // Click on already-selected wall → start move drag directly
+        const rmW=S.rooms.find(r=>r.id===S.ui.selectedRoomId);
+        if (rmW) {
+          pushUndo();
+          _movingWall=true;
+          _mwStart={x:e.clientX,y:e.clientY};
+          _mwOrigStart={x:e.clientX,y:e.clientY};
+          _mwRoomId=S.ui.selectedRoomId;
+          _mwWallIdx=rmW.walls.findIndex(w=>w.id===S.ui.selectedWallId);
+          _mwOrigPts=rmW.points.map(p=>({x:p.x,y:p.y}));
+          canvas.style.cursor='crosshair';
+        }
+        return;
+      }
+      // Different wall — select it
       S.ui.selectedWallId=hit.wallId;
       S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
       S.ui.selectedVertexIdx=null;
@@ -2550,6 +2830,7 @@ canvas.addEventListener('mousedown', e=>{
       S.ui.selectedWallId=null;
       S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
       S.ui.selectedVertexIdx=null;
+      S.ui.selectedDimId=null;
       S.ui.movingWall=false;
       renderSidebar(); updateWip();
     }
@@ -2619,6 +2900,27 @@ canvas.addEventListener('mousemove', e=>{
         const nx=Math.round((_dhOrigPts[0].x+totalDx)/GRID)*GRID;
         const ny=Math.round((_dhOrigPts[0].y+totalDy)/GRID)*GRID;
         snapDx=nx-_dhOrigPts[0].x; snapDy=ny-_dhOrigPts[0].y;
+      }
+      // Edit 7: wall snap — snap hindring edge to room wall if within 10cm
+      const rmSnap=S.rooms.find(r=>r.id===h.roomId);
+      if (rmSnap && rmSnap.walls) {
+        const SNAP_THR=10;
+        const cxW=rmSnap.points.reduce((a,p)=>a+p.x,0)/rmSnap.points.length;
+        const cyW=rmSnap.points.reduce((a,p)=>a+p.y,0)/rmSnap.points.length;
+        const hPts=_dhOrigPts.map(p=>({x:p.x+snapDx,y:p.y+snapDy}));
+        let bestD=SNAP_THR, bestInNx=0, bestInNy=0, snapped=false;
+        for (const wl of rmSnap.walls) {
+          const wdx=wl.x2-wl.x1, wdy=wl.y2-wl.y1, wLen=Math.hypot(wdx,wdy);
+          if (wLen<1) continue;
+          const wnx=-wdy/wLen, wny=wdx/wLen;
+          const centSD=(cxW-wl.x1)*wnx+(cyW-wl.y1)*wny;
+          const inNx=centSD>0?wnx:-wnx, inNy=centSD>0?wny:-wny;
+          for (const hp of hPts) {
+            const d=(hp.x-wl.x1)*inNx+(hp.y-wl.y1)*inNy;
+            if (d>0 && d<bestD) { bestD=d; bestInNx=inNx; bestInNy=inNy; snapped=true; }
+          }
+        }
+        if (snapped) { snapDx-=bestD*bestInNx; snapDy-=bestD*bestInNy; }
       }
       h.points=_dhOrigPts.map(p=>({x:p.x+snapDx,y:p.y+snapDy}));
     }
@@ -2913,6 +3215,10 @@ document.addEventListener('keydown', e=>{
   // Edit 6: Ctrl+R = rotate mode, Ctrl+F = move mode
   if ((e.ctrlKey||e.metaKey)&&e.key==='r') { e.preventDefault(); setTransformMode('rotate'); return; }
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
+  if (e.key==='Delete'&&S.ui.selectedDimId) {
+    pushUndo(); S.dims=S.dims.filter(d=>d.id!==S.ui.selectedDimId);
+    S.ui.selectedDimId=null; updateWip(); return;
+  }
   if (e.key==='Delete'&&S.ui.selectedRoomId) { deleteRoom(S.ui.selectedRoomId); return; }
   if (e.key==='Enter'&&S.ui.drawMode==='wbw') { addWbwWall(); return; }
   if ((e.ctrlKey||e.metaKey)&&(e.key==='z'||e.key==='Z')) {
@@ -2996,11 +3302,18 @@ function highlightLShapeDim(which) {
 // ─── SNAP CHIPS ───────────────────────────────────────────────
 function toggleSnap(type) {
   S.snap[type]=!S.snap[type];
-  const ids={grid:'chip-grid',a90:'chip-90',a45:'chip-45'};
-  document.getElementById(ids[type]).classList.toggle('on',S.snap[type]);
+  const ids={grid:'chip-grid',a90:'chip-90',a45:'chip-45',dims:'chip-dims'};
+  const el=document.getElementById(ids[type]); if(el) el.classList.toggle('on',S.snap[type]);
 }
 
 // ─── PROJECT ──────────────────────────────────────────────────
+function setInitialView() {
+  // Place grid origin (0,0) near bottom-right of viewport
+  S.view.zoom = 1;
+  S.view.panX = (80 - canvas.width/2) / BASE_SCALE;
+  S.view.panY = (80 - canvas.height/2) / BASE_SCALE;
+  updZoomBadge();
+}
 function startProject() {
   const name=document.getElementById('np-name').value.trim();
   if (!name) {
@@ -3016,6 +3329,7 @@ function startProject() {
   document.getElementById('proj-name-disp').textContent=name;
   document.getElementById('sb-proj-lbl').textContent=name;
   resizeCanvas();
+  setInitialView();
   renderSidebar();
   updMode();
 }
