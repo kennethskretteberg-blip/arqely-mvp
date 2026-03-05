@@ -820,7 +820,7 @@ const S = {
   snap     : { grid:true, a90:true, a45:false },
   counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1 },
   shiftHeld: false,
-  varmefolie: { direction: 'v', corner: 'bl', pendingProductId: null, gapCm: 1.0 }
+  varmefolie: { direction: 'v', startWall: 'left', pendingProductId: null, gapCm: 1.0 }
 };
 
 // ─── CANVAS ──────────────────────────────────────────────────
@@ -1243,11 +1243,17 @@ function drawHindrings() {
 }
 
 // ─── VARMEFOLIE / STRIPS ──────────────────────────────────────
-function autoAddStrips(roomId, productId, direction) {
+function autoAddStrips(roomId, productId) {
   const room = S.rooms.find(r => r.id === roomId);
   const p = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!room || !p) return;
   pushUndo();
+
+  // Derive direction and fill start from startWall
+  const startWall = S.varmefolie.startWall || 'left';
+  const direction = (startWall === 'left' || startWall === 'right') ? 'v' : 'h';
+  const fromHigh  = (startWall === 'right' || startWall === 'bottom');
+  S.varmefolie.direction = direction;
 
   const nettoCm = (p.netto_width_mm || p.width_mm) / 10;
   const xs = room.points.map(pt => pt.x), ys = room.points.map(pt => pt.y);
@@ -1257,26 +1263,19 @@ function autoAddStrips(roomId, productId, direction) {
   const across = direction === 'v' ? (maxX - minX) : (maxY - minY);
   const along  = direction === 'v' ? (maxY - minY) : (maxX - minX);
 
-  const MIN_MARGIN_CM = 2.5;  // 25mm randsone
+  const MIN_MARGIN_CM = 2.5;
   const GAP_CM = S.varmefolie.gapCm;
   const n = Math.floor((across - 2 * MIN_MARGIN_CM + GAP_CM) / (nettoCm + GAP_CM));
   if (n <= 0) { alert('Produktet passer ikke i dette rommet (for smalt).'); return; }
 
-  // Remove existing strips for this room + product + direction
   S.strips = S.strips.filter(s => !(s.roomId === roomId && s.productId === productId && s.direction === direction));
-
-  // Corner determines which side is the START edge (closest to first strip)
-  const corner = S.varmefolie.corner || 'bl';
-  const reverseAcross = (direction === 'v')
-    ? (corner === 'tr' || corner === 'br')   // right corners → fill right-to-left
-    : (corner === 'bl' || corner === 'br');  // bottom corners → fill bottom-to-top
 
   const basePos   = direction === 'v' ? minX : minY;
   const baseMax   = direction === 'v' ? maxX : maxY;
   const baseAlong = direction === 'v' ? minY : minX;
 
   for (let i = 0; i < n; i++) {
-    const pos = reverseAcross
+    const pos = fromHigh
       ? baseMax - MIN_MARGIN_CM - i * (nettoCm + GAP_CM) - nettoCm
       : basePos + MIN_MARGIN_CM + i * (nettoCm + GAP_CM);
     S.strips.push({
@@ -1420,6 +1419,7 @@ function confirmAutoFill(direction, fromHigh) {
   if (!room) { cancelAutoFill(); return; }
 
   S.varmefolie.direction = direction;
+  S.varmefolie.startWall = direction === 'v' ? (fromHigh ? 'right' : 'left') : (fromHigh ? 'bottom' : 'top');
   S.ui.autoFillPending = null;
 
   // Collect all strips to add (without modifying S.strips yet)
@@ -2472,72 +2472,81 @@ function stripCtxMenu(e, id) {
   showCtxAt(e.clientX, e.clientY);
 }
 
-function setVfCornerDir(corner, dir) {
-  S.varmefolie.corner = corner;
-  S.varmefolie.direction = dir;
+function setVfStartWall(wall) {
+  S.varmefolie.startWall = wall;
+  S.varmefolie.direction = (wall === 'left' || wall === 'right') ? 'v' : 'h';
   updateObjInfo();
 }
 
-function _vfCornerPickerSvg() {
-  const c = S.varmefolie.corner || 'bl';
-  const d = S.varmefolie.direction || 'v';
-  const ACT = '1', DIM = '0.28';
-  const RED = '#ff4b4b', GRN = '#4bd272';
+function _vfWallPickerSvg() {
+  const w = S.varmefolie.startWall || 'left';
+  const isLight = S.ui.theme === 'light';
+  const ACT = isLight ? '#0055cc' : '#e8ff47';
+  const DIM = isLight ? 'rgba(80,110,180,0.35)' : 'rgba(200,210,240,0.22)';
+  const PREV = isLight ? 'rgba(40,80,180,0.16)' : 'rgba(200,210,240,0.16)';
 
-  function mkArrow(x1, y1, x2, y2, col, op, corner, dir) {
+  // Room rect
+  const rx1=22, ry1=17, rx2=108, ry2=73;
+  const rmx=(rx1+rx2)/2, rmy=(ry1+ry2)/2;
+
+  // Inward arrow from active wall midpoint
+  function inwardArrow(wall) {
+    const offs = 20, s = 5;
+    let x1,y1,x2,y2;
+    if (wall==='left')   { x1=rx1; y1=rmy; x2=rx1+offs; y2=rmy; }
+    else if (wall==='right')  { x1=rx2; y1=rmy; x2=rx2-offs; y2=rmy; }
+    else if (wall==='top')    { x1=rmx; y1=ry1; x2=rmx; y2=ry1+offs; }
+    else                      { x1=rmx; y1=ry2; x2=rmx; y2=ry2-offs; }
     const dx=x2-x1, dy=y2-y1, len=Math.sqrt(dx*dx+dy*dy);
     const ux=dx/len, uy=dy/len;
-    const lx2=x2-ux*7, ly2=y2-uy*7;
-    const p1=`${x2},${y2}`;
-    const p2=`${(x2-ux*8-uy*4).toFixed(1)},${(y2-uy*8+ux*4).toFixed(1)}`;
-    const p3=`${(x2-ux*8+uy*4).toFixed(1)},${(y2-uy*8-ux*4).toFixed(1)}`;
-    const hx=Math.min(x1,x2)-8, hy=Math.min(y1,y2)-8;
-    const hw=Math.abs(x2-x1)+16, hh=Math.abs(y2-y1)+16;
-    return `<g onclick="setVfCornerDir('${corner}','${dir}');event.stopPropagation()" style="cursor:pointer;opacity:${op};transition:opacity .12s">` +
-      `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="transparent"/>` +
-      `<line x1="${x1}" y1="${y1}" x2="${lx2.toFixed(1)}" y2="${ly2.toFixed(1)}" stroke="${col}" stroke-width="2.5" stroke-linecap="round"/>` +
-      `<polygon points="${p1} ${p2} ${p3}" fill="${col}"/>` +
-      `</g>`;
+    const lx2=x2-ux*8, ly2=y2-uy*8;
+    const p1=`${x2.toFixed(1)},${y2.toFixed(1)}`;
+    const p2=`${(x2-ux*10-uy*s).toFixed(1)},${(y2-uy*10+ux*s).toFixed(1)}`;
+    const p3=`${(x2-ux*10+uy*s).toFixed(1)},${(y2-uy*10-ux*s).toFixed(1)}`;
+    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${lx2.toFixed(1)}" y2="${ly2.toFixed(1)}" stroke="${ACT}" stroke-width="2.5" stroke-linecap="round"/>` +
+           `<polygon points="${p1} ${p2} ${p3}" fill="${ACT}"/>`;
   }
 
-  const corners = [
-    { id:'tl', cx:22,  cy:17, left:true,  top:true  },
-    { id:'tr', cx:108, cy:17, left:false, top:true  },
-    { id:'bl', cx:22,  cy:73, left:true,  top:false },
-    { id:'br', cx:108, cy:73, left:false, top:false }
-  ];
-
-  let arrows = '';
-  for (const {id, cx, cy, left, top} of corners) {
-    const vx2 = left ? cx+20 : cx-20;
-    const vOp = (c===id && d==='v') ? ACT : DIM;
-    arrows += mkArrow(cx, cy, vx2, cy, RED, vOp, id, 'v');
-    const hy2 = top ? cy+20 : cy-20;
-    const hOp = (c===id && d==='h') ? ACT : DIM;
-    arrows += mkArrow(cx, cy, cx, hy2, GRN, hOp, id, 'h');
-  }
-
+  // Strip layout preview
+  const dir = (w==='left'||w==='right') ? 'v' : 'h';
   let preview = '';
-  if (d === 'v') {
+  if (dir === 'v') {
     for (let i=1; i<=4; i++) {
-      const px = (22 + i*(86/5)).toFixed(0);
-      preview += `<line x1="${px}" y1="22" x2="${px}" y2="68" stroke="rgba(200,200,220,0.2)" stroke-width="1.5" stroke-dasharray="2,3"/>`;
+      const px = (rx1 + i*(rx2-rx1)/5).toFixed(1);
+      preview += `<line x1="${px}" y1="${ry1+3}" x2="${px}" y2="${ry2-3}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
     }
   } else {
-    for (let i=1; i<=4; i++) {
-      const py = (17 + i*(56/5)).toFixed(0);
-      preview += `<line x1="27" y1="${py}" x2="103" y2="${py}" stroke="rgba(200,200,220,0.2)" stroke-width="1.5" stroke-dasharray="2,3"/>`;
+    for (let i=1; i<=3; i++) {
+      const py = (ry1 + i*(ry2-ry1)/4).toFixed(1);
+      preview += `<line x1="${rx1+3}" y1="${py}" x2="${rx2-3}" y2="${py}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
     }
   }
 
-  const cornerLabel = {tl:'Øverst venstre',tr:'Øverst høyre',bl:'Nederst venstre',br:'Nederst høyre'}[c]||'';
-  const dirLabel = d==='v' ? 'vertikale striper' : 'horisontale striper';
+  // Clickable walls
+  const WT = 7; // half hit-thickness
+  function mkWall(id, lx1, ly1, lx2, ly2, hx, hy, hw, hh) {
+    const isAct = w === id;
+    const col = isAct ? ACT : DIM;
+    const lw  = isAct ? 4.5 : 2;
+    return `<g onclick="setVfStartWall('${id}');event.stopPropagation()" style="cursor:pointer">` +
+      `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="transparent"/>` +
+      `<line x1="${lx1}" y1="${ly1}" x2="${lx2}" y2="${ly2}" stroke="${col}" stroke-width="${lw}" stroke-linecap="round"/>` +
+      `</g>`;
+  }
+  const walls =
+    mkWall('top',    rx1,ry1, rx2,ry1,   rx1,ry1-WT,    rx2-rx1,WT*2) +
+    mkWall('bottom', rx1,ry2, rx2,ry2,   rx1,ry2-WT,    rx2-rx1,WT*2) +
+    mkWall('left',   rx1,ry1, rx1,ry2,   rx1-WT,ry1,    WT*2,ry2-ry1) +
+    mkWall('right',  rx2,ry1, rx2,ry2,   rx2-WT,ry1,    WT*2,ry2-ry1);
+
+  const lbl = {left:'Fra venstre vegg →',right:'Fra høyre vegg ←',top:'Fra topp-vegg ↓',bottom:'Fra bunn-vegg ↑'}[w]||'';
+  const dirLbl = dir==='v' ? 'vertikale striper' : 'horisontale striper';
 
   return `<svg class="vf-corner-picker" width="130" height="90" viewBox="0 0 130 90">` +
-    `<rect x="22" y="17" width="86" height="56" fill="none" stroke="var(--border)" stroke-width="1.5"/>` +
-    preview + arrows +
+    `<rect x="${rx1}" y="${ry1}" width="${rx2-rx1}" height="${ry2-ry1}" fill="none"/>` +
+    preview + walls + inwardArrow(w) +
     `</svg>` +
-    `<div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px">${cornerLabel} · ${dirLabel}</div>`;
+    `<div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px">${lbl} · ${dirLbl}</div>`;
 }
 
 function vfPanelHtml(room) {
@@ -2557,8 +2566,8 @@ function vfPanelHtml(room) {
     <select class="vf-select" onchange="S.varmefolie.pendingProductId=this.value?parseInt(this.value):null;updateObjInfo()" onclick="event.stopPropagation()">
       <option value="">— Velg produkt —</option>${opts}
     </select>
-    ${_vfCornerPickerSvg()}
-    <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId,S.varmefolie.direction)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
+    ${_vfWallPickerSvg()}
+    <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
       ＋ Legg til striper
     </button>
     ${roomStrips.length ? `<div class="vf-stat" style="margin-top:6px"><span class="vf-stat-l">Striper i rom</span><span class="vf-stat-v">${roomStrips.length} stk</span></div>` : ''}
