@@ -76,6 +76,19 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .quit-btn-nosave:hover{border-color:#ff5555;color:#ff5555}
 .quit-btn-cancel{background:none;color:var(--muted);border:1px solid transparent;font-weight:400}
 .quit-btn-cancel:hover{color:var(--text)}
+/* ── MARGIN WARNING ── */
+#margin-warn-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:3100;align-items:center;justify-content:center}
+#margin-warn-overlay.show{display:flex}
+#margin-warn-box{background:var(--surface);border:1px solid #ff8c00;border-radius:14px;padding:28px 32px;width:340px;max-width:95vw;display:flex;flex-direction:column;gap:0;box-shadow:0 8px 40px rgba(255,140,0,0.25)}
+.mw-icon{font-size:28px;margin-bottom:8px}
+.mw-title{font-size:15px;font-weight:700;color:#ffa040;margin-bottom:8px}
+.mw-sub{font-size:12px;color:var(--muted);margin-bottom:22px;line-height:1.55}
+.mw-actions{display:flex;flex-direction:column;gap:8px}
+.mw-btn{width:100%;padding:10px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .15s;text-align:left}
+.mw-btn-revert{background:var(--accent);color:#0d1117}
+.mw-btn-revert:hover{filter:brightness(1.1)}
+.mw-btn-keep{background:var(--surface2);color:var(--muted);border:1px solid var(--border);font-weight:400}
+.mw-btn-keep:hover{color:#ff8c00;border-color:#ff8c00}
 
 /* ── CONTENT ── */
 #content{display:flex;flex:1;overflow:hidden}
@@ -636,6 +649,19 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
       <button class="quit-btn quit-btn-save" onclick="quitSaveAndExit()">💾 Lagre og avslutt</button>
       <button class="quit-btn quit-btn-nosave" onclick="quitWithoutSaving()">Avslutt uten å lagre</button>
       <button class="quit-btn quit-btn-cancel" onclick="hideQuitDialog()">Avbryt</button>
+    </div>
+  </div>
+</div>
+
+<!-- MARGIN WARNING DIALOG -->
+<div id="margin-warn-overlay">
+  <div id="margin-warn-box">
+    <div class="mw-icon">⚠️</div>
+    <div class="mw-title">Randsone brutt (25mm)</div>
+    <div class="mw-sub">Varmefolien er plassert nærmere enn 25mm fra veggen. Dette kan skade gulv eller redusere levetid. Vil du beholde plasseringen eller flytte folien tilbake?</div>
+    <div class="mw-actions">
+      <button class="mw-btn mw-btn-revert" onclick="marginWarnRevert()">↩ Flytt tilbake til sikker sone</button>
+      <button class="mw-btn mw-btn-keep" onclick="marginWarnKeep()">Behold plassering (ikke anbefalt)</button>
     </div>
   </div>
 </div>
@@ -1787,12 +1813,11 @@ function _clampStripToRoom(strip, origPos) {
   let posMin, posMax;
   if (strip.direction === 'v') {
     posMin = b.minX; posMax = b.maxX - nc;
-    strip.start_cm = Math.max(b.minY, strip.start_cm);
-    if (strip.start_cm + strip.length_cm > b.maxY) strip.length_cm = b.maxY - strip.start_cm;
+    // Clamp start_cm so strip stays fully inside room — never resize during move
+    strip.start_cm = Math.max(b.minY, Math.min(b.maxY - strip.length_cm, strip.start_cm));
   } else {
     posMin = b.minY; posMax = b.maxY - nc;
-    strip.start_cm = Math.max(b.minX, strip.start_cm);
-    if (strip.start_cm + strip.length_cm > b.maxX) strip.length_cm = b.maxX - strip.start_cm;
+    strip.start_cm = Math.max(b.minX, Math.min(b.maxX - strip.length_cm, strip.start_cm));
   }
   // Collision avoidance: use origPos (drag start) to determine which side of each neighbor
   // we're on — prevents strips from passing through each other during a drag
@@ -4807,8 +4832,18 @@ canvas.addEventListener('mouseup', e=>{
   if (_dimOffDragging) { _dimOffDragging=false; _dimOffId=-1; canvas.style.cursor='default'; return; }
   if (_annotDragging){_annotDragging=false;_annotWallId=null;canvas.style.cursor='default';return;}
   if (_sgEndDragging) { _sgEndDragging=false; _stripId=-1; _sgEndWhich=''; canvas.style.cursor='default'; return; }
-  if (_sgDragging)    { _sgDragging=false;    _stripId=-1; _sgConstraint='free'; canvas.style.cursor='default'; return; }
-  if (_stripDragging) { _stripDragging=false; _stripId=-1; canvas.style.cursor='default'; return; }
+  if (_sgDragging) {
+    const _sid = _stripId, _op = _sgOrigPos, _os = _sgOrigStart;
+    _sgDragging=false; _stripId=-1; _sgConstraint='free'; canvas.style.cursor='default';
+    _checkMarginAfterDrag(S.strips.find(s=>s.id===_sid), _op, _os);
+    return;
+  }
+  if (_stripDragging) {
+    const _sid = _stripId, _op = _stripOrigPos, _os = _stripOrigStart;
+    _stripDragging=false; _stripId=-1; canvas.style.cursor='default';
+    _checkMarginAfterDrag(S.strips.find(s=>s.id===_sid), _op, _os);
+    return;
+  }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
   if (_dhDragging) { _dhDragging=false; _dhId=-1; _dhDragAxis='free'; canvas.style.cursor='default'; return; }
   if(_hwMoving){_hwMoving=false;_hwHindId=-1;_hwWallIdx=-1;canvas.style.cursor='default';return;}
@@ -5397,6 +5432,43 @@ async function initSupabase() {
   }
 }
 initSupabase();
+
+// ─── MARGIN WARNING ───────────────────────────────────────────
+const MARGIN_CM = 2.5; // 25mm safety zone
+let _mwStripId = -1, _mwOrigPos = 0, _mwOrigStart = 0;
+
+function _stripViolatesMargin(strip) {
+  const b = _stripRoomBounds(strip); if (!b) return false;
+  const nc = _stripNettoCm(strip);
+  if (strip.direction === 'v') {
+    return strip.start_cm < b.minY + MARGIN_CM
+        || strip.start_cm + strip.length_cm > b.maxY - MARGIN_CM
+        || strip.pos_cm < b.minX + MARGIN_CM
+        || strip.pos_cm + nc > b.maxX - MARGIN_CM;
+  } else {
+    return strip.start_cm < b.minX + MARGIN_CM
+        || strip.start_cm + strip.length_cm > b.maxX - MARGIN_CM
+        || strip.pos_cm < b.minY + MARGIN_CM
+        || strip.pos_cm + nc > b.maxY - MARGIN_CM;
+  }
+}
+function _checkMarginAfterDrag(strip, origPos, origStart) {
+  if (!strip || !_stripViolatesMargin(strip)) return;
+  _mwStripId = strip.id;
+  _mwOrigPos = origPos;
+  _mwOrigStart = origStart;
+  document.getElementById('margin-warn-overlay').classList.add('show');
+}
+function marginWarnRevert() {
+  const strip = S.strips.find(s => s.id === _mwStripId);
+  if (strip) { strip.pos_cm = _mwOrigPos; strip.start_cm = _mwOrigStart; }
+  document.getElementById('margin-warn-overlay').classList.remove('show');
+  _mwStripId = -1;
+}
+function marginWarnKeep() {
+  document.getElementById('margin-warn-overlay').classList.remove('show');
+  _mwStripId = -1;
+}
 
 // ─── QUIT DIALOG ──────────────────────────────────────────────
 let _skipUnloadWarning = false;
