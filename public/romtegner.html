@@ -321,7 +321,7 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 .vf-toggle.on{background:rgba(255,140,50,0.15);border-color:rgba(255,180,60,0.6);color:rgba(255,200,100,0.9)}
 </style>
 </head>
-<body>
+<body class="light-theme">
 
 <!-- ══════════════ NEW PROJECT SCREEN ══════════════ -->
 <div id="np-screen">
@@ -383,9 +383,6 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
     <button class="zoom-btn" onclick="zoomOut()" title="Zoom ut [−]">−</button>
     <button class="zoom-fit" onclick="fitAll()" title="Tilpass til skjerm">Tilpass</button>
     <button class="zoom-btn" onclick="zoomIn()" title="Zoom inn [+]">+</button>
-    <span class="tc-sep"></span>
-    <button class="snap-chip on" id="chip-theme-dark" onclick="setTheme('dark')" title="Mørk bakgrunn">🌙</button>
-    <button class="snap-chip" id="chip-theme-light" onclick="setTheme('light')" title="Lys bakgrunn">☀️</button>
   </div>
 
   <!-- CONTENT -->
@@ -804,9 +801,10 @@ const S = {
     semiAutoMode: false,         // halvautomatisk placement active
     semiAutoRoomId: null,
     semiAutoCursor: 0,           // world pos filled up to
+    semiAutoFromHigh: false,     // fill direction: true = high→low
     autoFillPending: null,       // {prods, roomId, categoryId} — waiting for direction arrow click
     selectedStripIds: new Set(), // multi-select strip IDs (Edit 1)
-    theme: 'dark'                // 'dark' | 'light' (Edit 7)
+    theme: 'light'               // always light
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -820,7 +818,7 @@ const S = {
   snap     : { grid:true, a90:true, a45:false },
   counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1 },
   shiftHeld: false,
-  varmefolie: { direction: 'v', startWall: 'left', pendingProductId: null, gapCm: 1.0 }
+  varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 }
 };
 
 // ─── CANVAS ──────────────────────────────────────────────────
@@ -1249,11 +1247,13 @@ function autoAddStrips(roomId, productId) {
   if (!room || !p) return;
   pushUndo();
 
-  // Derive direction and fill start from startWall
-  const startWall = S.varmefolie.startWall || 'left';
-  const direction = (startWall === 'left' || startWall === 'right') ? 'v' : 'h';
-  const fromHigh  = (startWall === 'right' || startWall === 'bottom');
-  S.varmefolie.direction = direction;
+  // Derive fill start from startCorner + direction
+  const startCorner = S.varmefolie.startCorner || 'bl';
+  const direction   = S.varmefolie.direction   || 'v';
+  // fromHigh: V → right corners fill right-to-left; H → bottom corners fill bottom-to-top
+  const fromHigh = direction==='v'
+    ? (startCorner==='tr' || startCorner==='br')
+    : (startCorner==='bl' || startCorner==='br');
 
   const nettoCm = (p.netto_width_mm || p.width_mm) / 10;
   const xs = room.points.map(pt => pt.x), ys = room.points.map(pt => pt.y);
@@ -1419,7 +1419,12 @@ function confirmAutoFill(direction, fromHigh) {
   if (!room) { cancelAutoFill(); return; }
 
   S.varmefolie.direction = direction;
-  S.varmefolie.startWall = direction === 'v' ? (fromHigh ? 'right' : 'left') : (fromHigh ? 'bottom' : 'top');
+  // Sync startCorner: preserve secondary axis, update primary from fromHigh
+  // Corner format: [t|b][l|r] — index 0 = top/bottom row, index 1 = left/right column
+  const _sc = S.varmefolie.startCorner || 'bl';
+  S.varmefolie.startCorner = direction === 'v'
+    ? _sc[0] + (fromHigh ? 'r' : 'l')   // V: fromHigh→right column
+    : (fromHigh ? 'b' : 't') + _sc[1];  // H: fromHigh→bottom row
   S.ui.autoFillPending = null;
 
   // Collect all strips to add (without modifying S.strips yet)
@@ -1795,10 +1800,11 @@ function startSemiAutoFill(familyName, categoryId) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) { alert('Velg et rom først'); return; }
   const dir = S.varmefolie.direction;
+  const sc  = S.varmefolie.startCorner || 'bl';
+  const fromHigh = dir==='v' ? (sc[1]==='r') : (sc[0]==='b');
   const coords = dir === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
   const MARGIN = 2.5;
   pushUndo();
-  // Clear existing strips for this room/category
   S.strips = S.strips.filter(s => {
     const sp = _stripProduct(s);
     return !(s.roomId === room.id && sp && sp.category_id === categoryId);
@@ -1807,7 +1813,11 @@ function startSemiAutoFill(familyName, categoryId) {
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
   S.ui.semiAutoRoomId = room.id;
-  S.ui.semiAutoCursor = Math.min(...coords) + MARGIN;
+  S.ui.semiAutoFromHigh = fromHigh;
+  // Cursor starts at the start edge (near side of the selected corner)
+  S.ui.semiAutoCursor = fromHigh
+    ? Math.max(...coords) - MARGIN   // high end: cursor counts DOWN
+    : Math.min(...coords) + MARGIN;  // low end: cursor counts UP
   renderSemiAutoPalette();
 }
 
@@ -1815,7 +1825,10 @@ function _semiAutoRemaining() {
   const room = S.rooms.find(r => r.id === S.ui.semiAutoRoomId); if (!room) return 0;
   const dir = S.varmefolie.direction;
   const coords = dir === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
-  return Math.max(...coords) - 2.5 - S.ui.semiAutoCursor;
+  const fromHigh = !!S.ui.semiAutoFromHigh;
+  return fromHigh
+    ? S.ui.semiAutoCursor - (Math.min(...coords) + 2.5)  // counting down from high end
+    : Math.max(...coords) - 2.5 - S.ui.semiAutoCursor;   // counting up from low end
 }
 
 function renderSemiAutoPalette() {
@@ -1862,20 +1875,30 @@ function doSemiAutoStep(productId) {
   const nc = (prod.netto_width_mm || prod.width_mm) / 10;
   const dir = S.varmefolie.direction;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const MARGIN = 2.5, GAP = 1.0;
-  const roomFar = (dir === 'v' ? Math.max(...xs) : Math.max(...ys)) - MARGIN;
-  const along = dir === 'v' ? Math.max(...ys) - Math.min(...ys) : Math.max(...xs) - Math.min(...xs);
+  const MARGIN = 2.5, GAP = S.varmefolie.gapCm;
+  const fromHigh = !!S.ui.semiAutoFromHigh;
+  const roomNear = (dir === 'v' ? Math.min(...xs) : Math.min(...ys)) + MARGIN;
+  const roomFar  = (dir === 'v' ? Math.max(...xs) : Math.max(...ys)) - MARGIN;
+  const along    = dir === 'v' ? Math.max(...ys) - Math.min(...ys) : Math.max(...xs) - Math.min(...xs);
   const baseAlong = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
   let cursor = S.ui.semiAutoCursor;
-  while (cursor + nc <= roomFar + 0.01) {
-    S.strips.push({
-      id: S.counters.nextStripId++,
-      roomId: room.id, productId: prod.id, direction: dir,
-      pos_cm: cursor,
-      start_cm: baseAlong + MARGIN,
-      length_cm: along - 2 * MARGIN
-    });
-    cursor += nc + GAP;
+
+  if (!fromHigh) {
+    // Fill forward (low → high)
+    while (cursor + nc <= roomFar + 0.01) {
+      S.strips.push({ id: S.counters.nextStripId++,
+        roomId: room.id, productId: prod.id, direction: dir,
+        pos_cm: cursor, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
+      cursor += nc + GAP;
+    }
+  } else {
+    // Fill backward (high → low); cursor marks the RIGHT/BOTTOM edge of next strip
+    while (cursor - nc >= roomNear - 0.01) {
+      S.strips.push({ id: S.counters.nextStripId++,
+        roomId: room.id, productId: prod.id, direction: dir,
+        pos_cm: cursor - nc, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
+      cursor -= nc + GAP;
+    }
   }
   S.ui.semiAutoCursor = cursor;
   renderSemiAutoPalette();
@@ -1886,6 +1909,7 @@ function cancelSemiAutoFill() {
   S.ui.semiAutoMode = false;
   S.ui.semiAutoRoomId = null;
   S.ui.semiAutoCursor = 0;
+  S.ui.semiAutoFromHigh = false;
   document.getElementById('manual-palette').style.display = 'none';
 }
 
@@ -2472,81 +2496,88 @@ function stripCtxMenu(e, id) {
   showCtxAt(e.clientX, e.clientY);
 }
 
-function setVfStartWall(wall) {
-  S.varmefolie.startWall = wall;
-  S.varmefolie.direction = (wall === 'left' || wall === 'right') ? 'v' : 'h';
+function setVfStartCornerDir(corner, dir) {
+  S.varmefolie.startCorner = corner;
+  S.varmefolie.direction   = dir;
   updateObjInfo();
 }
 
-function _vfWallPickerSvg() {
-  const w = S.varmefolie.startWall || 'left';
-  const isLight = S.ui.theme === 'light';
-  const ACT = isLight ? '#0055cc' : '#e8ff47';
-  const DIM = isLight ? 'rgba(80,110,180,0.35)' : 'rgba(200,210,240,0.22)';
-  const PREV = isLight ? 'rgba(40,80,180,0.16)' : 'rgba(200,210,240,0.16)';
+function _vfCornerDirSvg() {
+  const sc = S.varmefolie.startCorner || 'bl';
+  const d  = S.varmefolie.direction   || 'v';
+  // Red = H strips (like X-axis), Green = V strips (like Y-axis)
+  const RED = '#e05050', GRN = '#3ab86a';
+  const DIMR = 'rgba(180,60,60,0.18)', DIMG = 'rgba(40,160,90,0.18)';
+  const PREV = 'rgba(40,80,180,0.14)';
+  const BORD = 'rgba(80,110,160,0.45)';
 
   // Room rect
   const rx1=22, ry1=17, rx2=108, ry2=73;
-  const rmx=(rx1+rx2)/2, rmy=(ry1+ry2)/2;
+  const rw=rx2-rx1, rh=ry2-ry1;
 
-  // Inward arrow from active wall midpoint
-  function inwardArrow(wall) {
-    const offs = 20, s = 5;
-    let x1,y1,x2,y2;
-    if (wall==='left')   { x1=rx1; y1=rmy; x2=rx1+offs; y2=rmy; }
-    else if (wall==='right')  { x1=rx2; y1=rmy; x2=rx2-offs; y2=rmy; }
-    else if (wall==='top')    { x1=rmx; y1=ry1; x2=rmx; y2=ry1+offs; }
-    else                      { x1=rmx; y1=ry2; x2=rmx; y2=ry2-offs; }
-    const dx=x2-x1, dy=y2-y1, len=Math.sqrt(dx*dx+dy*dy);
-    const ux=dx/len, uy=dy/len;
-    const lx2=x2-ux*8, ly2=y2-uy*8;
+  // 4 corners: id, canvas pos, H arrow direction (dx,dy), V arrow direction
+  const corners = [
+    { id:'tl', cx:rx1, cy:ry1, hDx: 1, hDy: 0, vDx: 0, vDy: 1  },
+    { id:'tr', cx:rx2, cy:ry1, hDx:-1, hDy: 0, vDx: 0, vDy: 1  },
+    { id:'bl', cx:rx1, cy:ry2, hDx: 1, hDy: 0, vDx: 0, vDy:-1  },
+    { id:'br', cx:rx2, cy:ry2, hDx:-1, hDy: 0, vDx: 0, vDy:-1  },
+  ];
+
+  const ALEN = 19;
+  function mkArrow(x1,y1,dx,dy,col,dimCol,active,corner,dir) {
+    const x2=x1+dx*ALEN, y2=y1+dy*ALEN;
+    const lx2=x2-dx*8,   ly2=y2-dy*8;
+    const s=5;
     const p1=`${x2.toFixed(1)},${y2.toFixed(1)}`;
-    const p2=`${(x2-ux*10-uy*s).toFixed(1)},${(y2-uy*10+ux*s).toFixed(1)}`;
-    const p3=`${(x2-ux*10+uy*s).toFixed(1)},${(y2-uy*10-ux*s).toFixed(1)}`;
-    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${lx2.toFixed(1)}" y2="${ly2.toFixed(1)}" stroke="${ACT}" stroke-width="2.5" stroke-linecap="round"/>` +
-           `<polygon points="${p1} ${p2} ${p3}" fill="${ACT}"/>`;
+    const p2=`${(x2-dx*10-dy*s).toFixed(1)},${(y2-dy*10+dx*s).toFixed(1)}`;
+    const p3=`${(x2-dx*10+dy*s).toFixed(1)},${(y2-dy*10-dx*s).toFixed(1)}`;
+    const hx=Math.min(x1,x2)-8, hy=Math.min(y1,y2)-8;
+    const hw=Math.abs(x2-x1)+16, hh=Math.abs(y2-y1)+16;
+    const fillCol = active ? col : dimCol;
+    const strokeCol = active ? col : dimCol;
+    const lw = active ? 2.5 : 1.5;
+    return `<g onclick="setVfStartCornerDir('${corner}','${dir}');event.stopPropagation()" style="cursor:pointer">` +
+      `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="transparent"/>` +
+      `<line x1="${x1}" y1="${y1}" x2="${lx2.toFixed(1)}" y2="${ly2.toFixed(1)}" stroke="${strokeCol}" stroke-width="${lw}" stroke-linecap="round"/>` +
+      `<polygon points="${p1} ${p2} ${p3}" fill="${fillCol}"/>` +
+      `</g>`;
   }
 
-  // Strip layout preview
-  const dir = (w==='left'||w==='right') ? 'v' : 'h';
+  let arrowsSvg = '';
+  let activeDot = '';
+  for (const {id,cx,cy,hDx,hDy,vDx,vDy} of corners) {
+    const hAct = sc===id && d==='h';
+    const vAct = sc===id && d==='v';
+    arrowsSvg += mkArrow(cx,cy,hDx,hDy,RED,DIMR,hAct,id,'h');
+    arrowsSvg += mkArrow(cx,cy,vDx,vDy,GRN,DIMG,vAct,id,'v');
+    if (sc===id) {
+      const dotCol = d==='h' ? RED : GRN;
+      activeDot = `<circle cx="${cx}" cy="${cy}" r="4.5" fill="${dotCol}" stroke="white" stroke-width="1.2"/>`;
+    }
+  }
+
+  // Strip preview inside room (direction-aware)
   let preview = '';
-  if (dir === 'v') {
+  if (d === 'v') {
     for (let i=1; i<=4; i++) {
-      const px = (rx1 + i*(rx2-rx1)/5).toFixed(1);
+      const px = (rx1 + i*(rw/5)).toFixed(1);
       preview += `<line x1="${px}" y1="${ry1+3}" x2="${px}" y2="${ry2-3}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
     }
   } else {
     for (let i=1; i<=3; i++) {
-      const py = (ry1 + i*(ry2-ry1)/4).toFixed(1);
+      const py = (ry1 + i*(rh/4)).toFixed(1);
       preview += `<line x1="${rx1+3}" y1="${py}" x2="${rx2-3}" y2="${py}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
     }
   }
 
-  // Clickable walls
-  const WT = 7; // half hit-thickness
-  function mkWall(id, lx1, ly1, lx2, ly2, hx, hy, hw, hh) {
-    const isAct = w === id;
-    const col = isAct ? ACT : DIM;
-    const lw  = isAct ? 4.5 : 2;
-    return `<g onclick="setVfStartWall('${id}');event.stopPropagation()" style="cursor:pointer">` +
-      `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="transparent"/>` +
-      `<line x1="${lx1}" y1="${ly1}" x2="${lx2}" y2="${ly2}" stroke="${col}" stroke-width="${lw}" stroke-linecap="round"/>` +
-      `</g>`;
-  }
-  const walls =
-    mkWall('top',    rx1,ry1, rx2,ry1,   rx1,ry1-WT,    rx2-rx1,WT*2) +
-    mkWall('bottom', rx1,ry2, rx2,ry2,   rx1,ry2-WT,    rx2-rx1,WT*2) +
-    mkWall('left',   rx1,ry1, rx1,ry2,   rx1-WT,ry1,    WT*2,ry2-ry1) +
-    mkWall('right',  rx2,ry1, rx2,ry2,   rx2-WT,ry1,    WT*2,ry2-ry1);
-
-  const lbl = {left:'Fra venstre vegg →',right:'Fra høyre vegg ←',top:'Fra topp-vegg ↓',bottom:'Fra bunn-vegg ↑'}[w]||'';
-  const dirLbl = dir==='v' ? 'vertikale striper' : 'horisontale striper';
+  const cornerNames = {tl:'Øvre venstre',tr:'Øvre høyre',bl:'Nedre venstre',br:'Nedre høyre'};
+  const lbl = `${cornerNames[sc]||''} · ${d==='v'?'vertikalt':'horisontalt'}`;
 
   return `<svg class="vf-corner-picker" width="130" height="90" viewBox="0 0 130 90">` +
-    `<rect x="${rx1}" y="${ry1}" width="${rx2-rx1}" height="${ry2-ry1}" fill="none"/>` +
-    preview + walls + inwardArrow(w) +
+    `<rect x="${rx1}" y="${ry1}" width="${rw}" height="${rh}" fill="none" stroke="${BORD}" stroke-width="1.2"/>` +
+    preview + arrowsSvg + activeDot +
     `</svg>` +
-    `<div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px">${lbl} · ${dirLbl}</div>`;
+    `<div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px">${lbl}</div>`;
 }
 
 function vfPanelHtml(room) {
@@ -2566,7 +2597,7 @@ function vfPanelHtml(room) {
     <select class="vf-select" onchange="S.varmefolie.pendingProductId=this.value?parseInt(this.value):null;updateObjInfo()" onclick="event.stopPropagation()">
       <option value="">— Velg produkt —</option>${opts}
     </select>
-    ${_vfWallPickerSvg()}
+    ${_vfCornerDirSvg()}
     <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
       ＋ Legg til striper
     </button>
