@@ -383,6 +383,9 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
     <button class="zoom-btn" onclick="zoomOut()" title="Zoom ut [−]">−</button>
     <button class="zoom-fit" onclick="fitAll()" title="Tilpass til skjerm">Tilpass</button>
     <button class="zoom-btn" onclick="zoomIn()" title="Zoom inn [+]">+</button>
+    <span class="tc-sep"></span>
+    <button class="snap-chip" id="chip-theme-dark" onclick="setTheme('dark')" title="Mørk bakgrunn">🌙</button>
+    <button class="snap-chip on" id="chip-theme-light" onclick="setTheme('light')" title="Lys bakgrunn">☀️</button>
   </div>
 
   <!-- CONTENT -->
@@ -2496,88 +2499,163 @@ function stripCtxMenu(e, id) {
   showCtxAt(e.clientX, e.clientY);
 }
 
-function setVfStartCornerDir(corner, dir) {
-  S.varmefolie.startCorner = corner;
-  S.varmefolie.direction   = dir;
-  updateObjInfo();
+// ─── VF PERIMETER PICKER (canvas) ────────────────────────────
+// Room rect in canvas coords (canvas = 130×90, room inside):
+const _VF = { rx1:22, ry1:17, rx2:108, ry2:73, D:13, perim:284 };
+// 8 snap positions — clockwise from top-left.
+// px/py = point on wall; dx/dy = direction arrow points INTO room; s = perimeter coord
+const _VF_SNAPS = [
+  { corner:'tl', dir:'h', px:35,  py:17,  dx:0,  dy:1,  s:13  },
+  { corner:'tr', dir:'h', px:95,  py:17,  dx:0,  dy:1,  s:73  },
+  { corner:'tr', dir:'v', px:108, py:30,  dx:-1, dy:0,  s:99  },
+  { corner:'br', dir:'v', px:108, py:60,  dx:-1, dy:0,  s:129 },
+  { corner:'br', dir:'h', px:95,  py:73,  dx:0,  dy:-1, s:155 },
+  { corner:'bl', dir:'h', px:35,  py:73,  dx:0,  dy:-1, s:215 },
+  { corner:'bl', dir:'v', px:22,  py:60,  dx:1,  dy:0,  s:241 },
+  { corner:'tl', dir:'v', px:22,  py:30,  dx:1,  dy:0,  s:271 },
+];
+
+let _vfPickDrag = false, _vfPickCv = null, _vfPickHover = null;
+
+function _vfPerimFromMouse(mx, my) {
+  const {rx1,ry1,rx2,ry2} = _VF, rw=rx2-rx1, rh=ry2-ry1;
+  const topX = Math.max(rx1, Math.min(rx2, mx));
+  const rightY = Math.max(ry1, Math.min(ry2, my));
+  const botX = Math.max(rx1, Math.min(rx2, mx));
+  const leftY = Math.max(ry1, Math.min(ry2, my));
+  const walls = [
+    { dist: Math.hypot(mx-topX,   my-ry1),  s: topX-rx1 },
+    { dist: Math.hypot(mx-rx2,    my-rightY), s: rw+(rightY-ry1) },
+    { dist: Math.hypot(mx-botX,   my-ry2),  s: rw+rh+(rx2-botX) },
+    { dist: Math.hypot(mx-rx1,    my-leftY), s: 2*rw+rh+(ry2-leftY) },
+  ];
+  return walls.reduce((b,w) => w.dist < b.dist ? w : b).s;
 }
 
-function _vfCornerDirSvg() {
+function _vfSnapNearest(s) {
+  let best = null, bd = Infinity;
+  for (const snap of _VF_SNAPS) {
+    let d = Math.abs(s - snap.s);
+    if (d > _VF.perim/2) d = _VF.perim - d;
+    if (d < bd) { bd = d; best = snap; }
+  }
+  return best;
+}
+
+function _vfPickerLabel() {
   const sc = S.varmefolie.startCorner || 'bl';
   const d  = S.varmefolie.direction   || 'v';
-  // Red = H strips (like X-axis), Green = V strips (like Y-axis)
-  const RED = '#e05050', GRN = '#3ab86a';
-  const DIMR = 'rgba(180,60,60,0.18)', DIMG = 'rgba(40,160,90,0.18)';
-  const PREV = 'rgba(40,80,180,0.14)';
-  const BORD = 'rgba(80,110,160,0.45)';
+  const n = {tl:'Øvre venstre',tr:'Øvre høyre',bl:'Nedre venstre',br:'Nedre høyre'};
+  return `${n[sc]||''} · ${d==='v'?'vertikalt':'horisontalt'}`;
+}
 
-  // Room rect
-  const rx1=22, ry1=17, rx2=108, ry2=73;
-  const rw=rx2-rx1, rh=ry2-ry1;
+function _drawVfPicker(cv) {
+  if (!cv) return;
+  const c = cv.getContext('2d');
+  c.clearRect(0, 0, cv.width, cv.height);
+  const {rx1,ry1,rx2,ry2} = _VF, rw=rx2-rx1, rh=ry2-ry1;
+  const sc = S.varmefolie.startCorner || 'bl';
+  const d  = S.varmefolie.direction   || 'v';
 
-  // 4 corners: id, canvas pos, H arrow direction (dx,dy), V arrow direction
-  const corners = [
-    { id:'tl', cx:rx1, cy:ry1, hDx: 1, hDy: 0, vDx: 0, vDy: 1  },
-    { id:'tr', cx:rx2, cy:ry1, hDx:-1, hDy: 0, vDx: 0, vDy: 1  },
-    { id:'bl', cx:rx1, cy:ry2, hDx: 1, hDy: 0, vDx: 0, vDy:-1  },
-    { id:'br', cx:rx2, cy:ry2, hDx:-1, hDy: 0, vDx: 0, vDy:-1  },
-  ];
+  // Room outline
+  c.strokeStyle = 'rgba(50,80,140,0.35)'; c.lineWidth = 1.5;
+  c.strokeRect(rx1, ry1, rw, rh);
 
-  const ALEN = 19;
-  function mkArrow(x1,y1,dx,dy,col,dimCol,active,corner,dir) {
-    const x2=x1+dx*ALEN, y2=y1+dy*ALEN;
-    const lx2=x2-dx*8,   ly2=y2-dy*8;
-    const s=5;
-    const p1=`${x2.toFixed(1)},${y2.toFixed(1)}`;
-    const p2=`${(x2-dx*10-dy*s).toFixed(1)},${(y2-dy*10+dx*s).toFixed(1)}`;
-    const p3=`${(x2-dx*10+dy*s).toFixed(1)},${(y2-dy*10-dx*s).toFixed(1)}`;
-    const hx=Math.min(x1,x2)-8, hy=Math.min(y1,y2)-8;
-    const hw=Math.abs(x2-x1)+16, hh=Math.abs(y2-y1)+16;
-    const fillCol = active ? col : dimCol;
-    const strokeCol = active ? col : dimCol;
-    const lw = active ? 2.5 : 1.5;
-    return `<g onclick="setVfStartCornerDir('${corner}','${dir}');event.stopPropagation()" style="cursor:pointer">` +
-      `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="transparent"/>` +
-      `<line x1="${x1}" y1="${y1}" x2="${lx2.toFixed(1)}" y2="${ly2.toFixed(1)}" stroke="${strokeCol}" stroke-width="${lw}" stroke-linecap="round"/>` +
-      `<polygon points="${p1} ${p2} ${p3}" fill="${fillCol}"/>` +
-      `</g>`;
-  }
-
-  let arrowsSvg = '';
-  let activeDot = '';
-  for (const {id,cx,cy,hDx,hDy,vDx,vDy} of corners) {
-    const hAct = sc===id && d==='h';
-    const vAct = sc===id && d==='v';
-    arrowsSvg += mkArrow(cx,cy,hDx,hDy,RED,DIMR,hAct,id,'h');
-    arrowsSvg += mkArrow(cx,cy,vDx,vDy,GRN,DIMG,vAct,id,'v');
-    if (sc===id) {
-      const dotCol = d==='h' ? RED : GRN;
-      activeDot = `<circle cx="${cx}" cy="${cy}" r="4.5" fill="${dotCol}" stroke="white" stroke-width="1.2"/>`;
-    }
-  }
-
-  // Strip preview inside room (direction-aware)
-  let preview = '';
+  // Strip direction preview (faint dashes)
+  c.strokeStyle = 'rgba(30,60,160,0.12)'; c.lineWidth = 1.5; c.setLineDash([3,3]);
   if (d === 'v') {
     for (let i=1; i<=4; i++) {
-      const px = (rx1 + i*(rw/5)).toFixed(1);
-      preview += `<line x1="${px}" y1="${ry1+3}" x2="${px}" y2="${ry2-3}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
+      const px = rx1 + i*rw/5;
+      c.beginPath(); c.moveTo(px, ry1+3); c.lineTo(px, ry2-3); c.stroke();
     }
   } else {
     for (let i=1; i<=3; i++) {
-      const py = (ry1 + i*(rh/4)).toFixed(1);
-      preview += `<line x1="${rx1+3}" y1="${py}" x2="${rx2-3}" y2="${py}" stroke="${PREV}" stroke-width="2" stroke-dasharray="3,3"/>`;
+      const py = ry1 + i*rh/4;
+      c.beginPath(); c.moveTo(rx1+3, py); c.lineTo(rx2-3, py); c.stroke();
     }
   }
+  c.setLineDash([]);
 
-  const cornerNames = {tl:'Øvre venstre',tr:'Øvre høyre',bl:'Nedre venstre',br:'Nedre høyre'};
-  const lbl = `${cornerNames[sc]||''} · ${d==='v'?'vertikalt':'horisontalt'}`;
+  // 8 snap dots (small, very dim)
+  for (const snap of _VF_SNAPS) {
+    const isAct = snap.corner===sc && snap.dir===d;
+    const isHov = _vfPickHover && _vfPickHover.corner===snap.corner && _vfPickHover.dir===snap.dir;
+    c.beginPath();
+    c.arc(snap.px, snap.py, isAct ? 4.5 : isHov ? 3.5 : 2, 0, Math.PI*2);
+    c.fillStyle = isAct ? '#1a55cc' : isHov ? 'rgba(26,85,204,0.4)' : 'rgba(50,80,140,0.2)';
+    c.fill();
+  }
 
-  return `<svg class="vf-corner-picker" width="130" height="90" viewBox="0 0 130 90">` +
-    `<rect x="${rx1}" y="${ry1}" width="${rw}" height="${rh}" fill="none" stroke="${BORD}" stroke-width="1.2"/>` +
-    preview + arrowsSvg + activeDot +
-    `</svg>` +
-    `<div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px">${lbl}</div>`;
+  // Arrow helper
+  function drawArr(snap, alpha) {
+    const ALEN=18, s=5;
+    const ax=snap.px + snap.dx*ALEN, ay=snap.py + snap.dy*ALEN;
+    c.save(); c.globalAlpha = alpha;
+    c.strokeStyle='#1a55cc'; c.lineWidth=2.5; c.lineCap='round';
+    c.beginPath(); c.moveTo(snap.px, snap.py); c.lineTo(ax-snap.dx*9, ay-snap.dy*9); c.stroke();
+    c.fillStyle='#1a55cc'; c.beginPath();
+    c.moveTo(ax, ay);
+    c.lineTo(ax-snap.dx*10-snap.dy*s, ay-snap.dy*10+snap.dx*s);
+    c.lineTo(ax-snap.dx*10+snap.dy*s, ay-snap.dy*10-snap.dx*s);
+    c.closePath(); c.fill();
+    c.restore();
+  }
+
+  // Ghost at hover position (if different from committed)
+  if (_vfPickHover && !(_vfPickHover.corner===sc && _vfPickHover.dir===d))
+    drawArr(_vfPickHover, 0.32);
+
+  // Committed arrow (full opacity)
+  const act = _VF_SNAPS.find(s => s.corner===sc && s.dir===d);
+  if (act) drawArr(act, 1);
+}
+
+function _vfPickEvt(e) {
+  const cv = _vfPickCv; if (!cv) return;
+  const r = cv.getBoundingClientRect();
+  const mx = (e.clientX-r.left)*(cv.width/r.width);
+  const my = (e.clientY-r.top)*(cv.height/r.height);
+  const snap = _vfSnapNearest(_vfPerimFromMouse(mx, my));
+  if (!snap) return;
+  if (snap.corner !== S.varmefolie.startCorner || snap.dir !== S.varmefolie.direction) {
+    S.varmefolie.startCorner = snap.corner;
+    S.varmefolie.direction = snap.dir;
+    const lbl = document.getElementById('vf-pick-lbl');
+    if (lbl) lbl.textContent = _vfPickerLabel();
+  }
+  _vfPickHover = null;
+  _drawVfPicker(cv);
+}
+
+function initVfPickerCanvas() {
+  const cv = document.getElementById('vf-pick-cv'); if (!cv) return;
+  const isNew = cv !== _vfPickCv; _vfPickCv = cv;
+  _drawVfPicker(cv);
+  const lbl = document.getElementById('vf-pick-lbl');
+  if (lbl) lbl.textContent = _vfPickerLabel();
+
+  // Register global drag handlers once
+  if (!window._vfGlobalInit) {
+    window._vfGlobalInit = true;
+    window.addEventListener('mousemove', e => { if (_vfPickDrag) _vfPickEvt(e); });
+    window.addEventListener('mouseup',   () => { _vfPickDrag = false; });
+  }
+  if (!isNew) return;
+
+  cv.addEventListener('mousedown', e => {
+    _vfPickDrag = true; _vfPickEvt(e); e.stopPropagation(); e.preventDefault();
+  });
+  cv.addEventListener('mousemove', e => {
+    if (_vfPickDrag) return;
+    const r = cv.getBoundingClientRect();
+    const mx = (e.clientX-r.left)*(cv.width/r.width);
+    const my = (e.clientY-r.top)*(cv.height/r.height);
+    _vfPickHover = _vfSnapNearest(_vfPerimFromMouse(mx, my));
+    _drawVfPicker(cv);
+  });
+  cv.addEventListener('mouseleave', () => {
+    if (!_vfPickDrag) { _vfPickHover = null; _drawVfPicker(cv); }
+  });
 }
 
 function vfPanelHtml(room) {
@@ -2597,7 +2675,8 @@ function vfPanelHtml(room) {
     <select class="vf-select" onchange="S.varmefolie.pendingProductId=this.value?parseInt(this.value):null;updateObjInfo()" onclick="event.stopPropagation()">
       <option value="">— Velg produkt —</option>${opts}
     </select>
-    ${_vfCornerDirSvg()}
+    <canvas id="vf-pick-cv" width="130" height="90" style="display:block;margin:6px auto 2px;cursor:crosshair" onclick="event.stopPropagation()"></canvas>
+    <div id="vf-pick-lbl" style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px"></div>
     <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
       ＋ Legg til striper
     </button>
@@ -4166,7 +4245,9 @@ function updateObjInfo() {
         <div class="area-panel">
           <div class="ar"><span class="ar-label">Bruttoareal</span><span class="ar-val">${(areas.gross/10000).toFixed(2)} m²</span></div>
           ${hasHind?`<div class="ar"><span class="ar-label">Hindringer</span><span class="ar-val">−${(areas.hindArea/10000).toFixed(2)} m²</span></div><div class="ar ar-net"><span class="ar-label">Nettoareal</span><span class="ar-val">${(areas.net/10000).toFixed(2)} m²</span></div>`:''}
-        </div>`;
+        </div>
+        ${vfPanelHtml(r)}`;
+      initVfPickerCanvas();
       panel.style.display='block'; return;
     }
   }
