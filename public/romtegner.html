@@ -1217,6 +1217,7 @@ function autoAddStrips(roomId, productId, direction) {
   const room = S.rooms.find(r => r.id === roomId);
   const p = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!room || !p) return;
+  pushUndo();
 
   const nettoCm = (p.netto_width_mm || p.width_mm) / 10;
   const xs = room.points.map(pt => pt.x), ys = room.points.map(pt => pt.y);
@@ -1382,15 +1383,28 @@ function confirmAutoFill(direction, fromHigh) {
   if (!pending) return;
   const room = S.rooms.find(r => r.id === pending.roomId);
   if (!room) { cancelAutoFill(); return; }
-  pushUndo();
-  // Remove existing strips for this room from this category
-  S.strips = S.strips.filter(s => {
-    const sp = _stripProduct(s);
-    return !(s.roomId === room.id && sp && sp.category_id === pending.categoryId);
-  });
+
   S.varmefolie.direction = direction;
-  autoFillRoom(room, pending.prods, direction, fromHigh);
   S.ui.autoFillPending = null;
+
+  // Collect all strips to add (without modifying S.strips yet)
+  const newStripDefs = autoFillRoom(room, pending.prods, direction, fromHigh);
+  if (!newStripDefs.length) { renderSidebar(); updateObjInfo(); return; }
+
+  // Add each strip with its own undo snapshot so Angre removes one at a time.
+  // The very first pushUndo also captures the state before old strips are removed.
+  for (let i = 0; i < newStripDefs.length; i++) {
+    pushUndo();
+    if (i === 0) {
+      // Remove old strips from this room/category as part of the first step
+      S.strips = S.strips.filter(s => {
+        const sp = _stripProduct(s);
+        return !(s.roomId === room.id && sp && sp.category_id === pending.categoryId);
+      });
+    }
+    S.strips.push({ ...newStripDefs[i], id: S.counters.nextStripId++ });
+  }
+
   renderSidebar(); updateObjInfo();
 }
 
@@ -1400,6 +1414,7 @@ function cancelAutoFill() {
   render();
 }
 
+// Returns array of strip definitions (without id) — caller adds them with pushUndo per strip.
 // fromHigh: false = fill left→right (or top→bottom), true = fill right→left (or bottom→top)
 function autoFillRoom(room, sortedProds, direction, fromHigh) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -1410,47 +1425,37 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
   const MARGIN = 2.5, GAP = 1.0;
   const basePos   = direction === 'v' ? minX : minY;
   const baseAlong = direction === 'v' ? minY : minX;
+  const result = [];
 
   if (!fromHigh) {
-    // Fill from low side (left for 'v', top for 'h')
     let remaining = across - 2 * MARGIN;
     let cursor = basePos + MARGIN;
     for (const prod of sortedProds) {
       const nc = (prod.netto_width_mm || prod.width_mm) / 10;
       if (nc <= 0) continue;
       while (remaining >= nc - 0.01) {
-        S.strips.push({
-          id: S.counters.nextStripId++,
-          roomId: room.id, productId: prod.id, direction,
-          pos_cm   : cursor,
-          start_cm : baseAlong + MARGIN,
-          length_cm: along - 2 * MARGIN
-        });
+        result.push({ roomId: room.id, productId: prod.id, direction,
+          pos_cm: cursor, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
         cursor    += nc + GAP;
         remaining -= nc + GAP;
       }
     }
   } else {
-    // Fill from high side (right for 'v', bottom for 'h')
     let remaining = across - 2 * MARGIN;
-    let cursor = basePos + across - MARGIN; // start at far margin
+    let cursor = basePos + across - MARGIN;
     for (const prod of sortedProds) {
       const nc = (prod.netto_width_mm || prod.width_mm) / 10;
       if (nc <= 0) continue;
       while (remaining >= nc - 0.01) {
-        cursor -= nc; // step cursor left to strip's left edge
-        S.strips.push({
-          id: S.counters.nextStripId++,
-          roomId: room.id, productId: prod.id, direction,
-          pos_cm   : cursor,
-          start_cm : baseAlong + MARGIN,
-          length_cm: along - 2 * MARGIN
-        });
+        cursor -= nc;
+        result.push({ roomId: room.id, productId: prod.id, direction,
+          pos_cm: cursor, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
         cursor    -= GAP;
         remaining -= nc + GAP;
       }
     }
   }
+  return result;
 }
 
 // ─── AUTO-FILL DIRECTION ARROWS ───────────────────────────────
@@ -2209,6 +2214,7 @@ function selStrip(id) {
 }
 
 function deleteStrip(id) {
+  pushUndo();
   S.strips = S.strips.filter(s => s.id !== id);
   if (S.ui.selectedStripId === id) S.ui.selectedStripId = null;
   renderSidebar(); updateObjInfo();
@@ -4245,7 +4251,9 @@ const UNDO_MAX=50;
 function pushUndo() {
   _undoStack.push({
     rooms:     S.rooms.map(r=>({...r, points:r.points.map(p=>({x:p.x,y:p.y})), walls:(r.walls||[]).map(w=>({...w}))})),
-    hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({x:p.x,y:p.y}))}))
+    hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({x:p.x,y:p.y}))})),
+    strips:    S.strips.map(s=>({...s})),
+    nextStripId: S.counters.nextStripId
   });
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
   _updUndoBtn();
@@ -4254,11 +4262,18 @@ function undo() {
   if (_undoStack.length===0) return;
   const prev=_undoStack.pop();
   S.rooms=prev.rooms; S.hindrings=prev.hindrings;
+  if (prev.strips !== undefined) {
+    S.strips = prev.strips;
+    S.counters.nextStripId = prev.nextStripId;
+  }
   if (S.ui.selectedRoomId && !S.rooms.find(r=>r.id===S.ui.selectedRoomId)) {
     S.ui.selectedRoomId=null; S.ui.selectedWallId=null; S.ui.selectedVertexIdx=null;
   }
   if (S.ui.selectedHindringId && !S.hindrings.find(h=>h.id===S.ui.selectedHindringId)) {
     S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
+  }
+  if (S.ui.selectedStripId !== null && !S.strips.find(s=>s.id===S.ui.selectedStripId)) {
+    S.ui.selectedStripId = null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
 }
