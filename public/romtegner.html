@@ -779,7 +779,8 @@ const S = {
     showStripLabels: true,       // show product name inside each strip
     semiAutoMode: false,         // halvautomatisk placement active
     semiAutoRoomId: null,
-    semiAutoCursor: 0            // world pos filled up to
+    semiAutoCursor: 0,           // world pos filled up to
+    autoFillPending: null        // {prods, roomId, categoryId} — waiting for direction arrow click
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -930,8 +931,12 @@ function render() {
   else drawPreview();
   if (S.ui.drawMode === 'wbw') drawWbwLines();
   if (S.ui.selectedWallId) drawMoveArrows();
-  // Only one gizmo visible at a time — strip > hindring > room
-  if (S.ui.selectedStripId !== null) {
+  // Auto-fill pending: show direction arrows (overrides strip/hindring gizmo)
+  if (S.ui.autoFillPending) {
+    const pendingRoom = S.rooms.find(r => r.id === S.ui.autoFillPending.roomId);
+    if (pendingRoom) drawAutoFillArrows(pendingRoom);
+  } else if (S.ui.selectedStripId !== null) {
+    // Only one gizmo visible at a time — strip > hindring > room
     drawStripGizmo();
   } else if (S.ui.selectedHindringId) {
     drawHindringMoveGizmo();
@@ -1318,9 +1323,33 @@ function openPlacementMenu(e, familyName, categoryId) {
   const html = `
     <div style="padding:6px 12px 2px;font-size:11px;color:var(--dim)">${esc(familyName)}</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId});hideProduktMenu()">⚡ Tegn ut automatisk</div>
+    <div class="ctx-item" onclick="openWidthMenu(event,${sq(familyName)},${categoryId})">⚡ Tegn ut automatisk ›</div>
     <div class="ctx-item" onclick="startSemiAutoFill(${sq(familyName)},${categoryId});hideProduktMenu()">⚡½ Halvautomatisk</div>
     <div class="ctx-item" onclick="startManualPlace(${sq(familyName)},${categoryId});hideProduktMenu()">✋ Tegn inn manuelt</div>`;
+  showProduktDropdown(html, e.clientX, e.clientY);
+}
+
+// Width selector — opens before auto-fill so user can cap max starting width
+function openWidthMenu(e, familyName, categoryId) {
+  e.stopPropagation();
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName))
+    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  // Collect unique widths (widest first)
+  const seen = new Set(), widths = [];
+  for (const p of prods) {
+    const mm = p.netto_width_mm || p.width_mm;
+    if (!seen.has(mm)) { seen.add(mm); widths.push(mm); }
+  }
+  const widthItems = widths.map(mm =>
+    `<div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId},${mm});hideProduktMenu()">Maks ${Math.round(mm/10)} cm netto</div>`
+  ).join('');
+  const html = `
+    <div style="padding:6px 12px 2px;font-size:11px;color:var(--dim)">Velg maks startbredde</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId},null);hideProduktMenu()">Alle bredder (bredeste først)</div>
+    ${widthItems}`;
   showProduktDropdown(html, e.clientX, e.clientY);
 }
 
@@ -1331,24 +1360,48 @@ document.addEventListener('mousedown', e => {
 }, true);
 
 // ─── AUTO-FILL (alle bredder, bredeste først) ─────────────────
-function startAutoFill(familyName, categoryId) {
+// maxWidthMm: cap products at this netto width (null = use all)
+function startAutoFill(familyName, categoryId, maxWidthMm) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) { alert('Velg et rom først'); return; }
-  const prods = HEATING_PRODUCTS
+  let prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName))
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  if (maxWidthMm != null) {
+    prods = prods.filter(p => (p.netto_width_mm || p.width_mm) <= maxWidthMm + 0.01);
+  }
   if (!prods.length) { alert('Ingen produkter funnet for ' + familyName); return; }
+  // Enter pending mode — user must click a direction arrow on canvas
+  S.ui.autoFillPending = { familyName, categoryId, prods, roomId: room.id };
+  updateCtxBar();
+  render();
+}
+
+function confirmAutoFill(direction, fromHigh) {
+  const pending = S.ui.autoFillPending;
+  if (!pending) return;
+  const room = S.rooms.find(r => r.id === pending.roomId);
+  if (!room) { cancelAutoFill(); return; }
   pushUndo();
   // Remove existing strips for this room from this category
   S.strips = S.strips.filter(s => {
     const sp = _stripProduct(s);
-    return !(s.roomId === room.id && sp && sp.category_id === categoryId);
+    return !(s.roomId === room.id && sp && sp.category_id === pending.categoryId);
   });
-  autoFillRoom(room, prods, S.varmefolie.direction);
+  S.varmefolie.direction = direction;
+  autoFillRoom(room, pending.prods, direction, fromHigh);
+  S.ui.autoFillPending = null;
   renderSidebar(); updateObjInfo();
 }
 
-function autoFillRoom(room, sortedProds, direction) {
+function cancelAutoFill() {
+  S.ui.autoFillPending = null;
+  updateCtxBar();
+  render();
+}
+
+// fromHigh: false = fill left→right (or top→bottom), true = fill right→left (or bottom→top)
+function autoFillRoom(room, sortedProds, direction, fromHigh) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -1358,24 +1411,150 @@ function autoFillRoom(room, sortedProds, direction) {
   const basePos   = direction === 'v' ? minX : minY;
   const baseAlong = direction === 'v' ? minY : minX;
 
-  let remaining = across - 2 * MARGIN;
-  let cursor = basePos + MARGIN;
-
-  for (const prod of sortedProds) {
-    const nc = (prod.netto_width_mm || prod.width_mm) / 10;
-    if (nc <= 0) continue;
-    while (remaining >= nc - 0.01) {
-      S.strips.push({
-        id: S.counters.nextStripId++,
-        roomId: room.id, productId: prod.id, direction,
-        pos_cm   : cursor,
-        start_cm : baseAlong + MARGIN,
-        length_cm: along - 2 * MARGIN
-      });
-      cursor    += nc + GAP;
-      remaining -= nc + GAP;
+  if (!fromHigh) {
+    // Fill from low side (left for 'v', top for 'h')
+    let remaining = across - 2 * MARGIN;
+    let cursor = basePos + MARGIN;
+    for (const prod of sortedProds) {
+      const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+      if (nc <= 0) continue;
+      while (remaining >= nc - 0.01) {
+        S.strips.push({
+          id: S.counters.nextStripId++,
+          roomId: room.id, productId: prod.id, direction,
+          pos_cm   : cursor,
+          start_cm : baseAlong + MARGIN,
+          length_cm: along - 2 * MARGIN
+        });
+        cursor    += nc + GAP;
+        remaining -= nc + GAP;
+      }
+    }
+  } else {
+    // Fill from high side (right for 'v', bottom for 'h')
+    let remaining = across - 2 * MARGIN;
+    let cursor = basePos + across - MARGIN; // start at far margin
+    for (const prod of sortedProds) {
+      const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+      if (nc <= 0) continue;
+      while (remaining >= nc - 0.01) {
+        cursor -= nc; // step cursor left to strip's left edge
+        S.strips.push({
+          id: S.counters.nextStripId++,
+          roomId: room.id, productId: prod.id, direction,
+          pos_cm   : cursor,
+          start_cm : baseAlong + MARGIN,
+          length_cm: along - 2 * MARGIN
+        });
+        cursor    -= GAP;
+        remaining -= nc + GAP;
+      }
     }
   }
+}
+
+// ─── AUTO-FILL DIRECTION ARROWS ───────────────────────────────
+function drawAutoFillArrows(room) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
+
+  const arrows = [
+    { wx: minX, wy: midY,  symbol: '→', label: 'Fra venstre' },
+    { wx: maxX, wy: midY,  symbol: '←', label: 'Fra høyre'  },
+    { wx: midX, wy: minY,  symbol: '↓', label: 'Fra topp'   },
+    { wx: midX, wy: maxY,  symbol: '↑', label: 'Fra bunn'   },
+  ];
+
+  ctx.save();
+  const R = 22;
+  for (const arr of arrows) {
+    const sp = w2s(arr.wx, arr.wy);
+    // Outer glow
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, R + 5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(232,255,71,0.07)';
+    ctx.fill();
+    // Circle body
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, R, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(14,20,30,0.92)';
+    ctx.strokeStyle = 'rgba(232,255,71,0.9)';
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    // Arrow symbol
+    ctx.fillStyle = '#e8ff47';
+    ctx.font = 'bold 17px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(arr.symbol, sp.x, sp.y);
+    // Label
+    ctx.fillStyle = 'rgba(232,255,71,0.65)';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(arr.label, sp.x, sp.y + R + 12);
+  }
+  ctx.restore();
+}
+
+function hitAutoFillArrow(sx, sy, room) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
+
+  const arrows = [
+    { wx: minX, wy: midY,  direction: 'v', fromHigh: false },
+    { wx: maxX, wy: midY,  direction: 'v', fromHigh: true  },
+    { wx: midX, wy: minY,  direction: 'h', fromHigh: false },
+    { wx: midX, wy: maxY,  direction: 'h', fromHigh: true  },
+  ];
+
+  const R = 26;
+  for (const arr of arrows) {
+    const sp = w2s(arr.wx, arr.wy);
+    if (Math.hypot(sx - sp.x, sy - sp.y) < R) return arr;
+  }
+  return null;
+}
+
+// ─── SENTRER VARMEFOLIE ───────────────────────────────────────
+// Shifts all strips in the room so cold zones are equal on both sides
+function centerRoomStrips(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  const roomStrips = S.strips.filter(s => s.roomId === roomId);
+  if (!roomStrips.length) return;
+
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const MARGIN = 2.5, GAP = 1.0;
+
+  // Handle each direction independently
+  const dirs = [...new Set(roomStrips.map(s => s.direction))];
+  let didPushUndo = false;
+  for (const dir of dirs) {
+    const strips = roomStrips.filter(s => s.direction === dir).sort((a, b) => a.pos_cm - b.pos_cm);
+    if (!strips.length) continue;
+    const across  = dir === 'v' ? maxX - minX : maxY - minY;
+    const basePos = dir === 'v' ? minX : minY;
+    // Total occupied width: sum of netto widths + gaps between strips
+    let totalWidth = strips.reduce((sum, s) => sum + _stripNettoCm(s), 0);
+    totalWidth += (strips.length - 1) * GAP;
+    const available = across - 2 * MARGIN;
+    const coldEach  = (available - totalWidth) / 2;
+    if (coldEach < 0) continue; // strips overfill — skip
+    if (!didPushUndo) { pushUndo(); didPushUndo = true; }
+    let cursor = basePos + MARGIN + coldEach;
+    for (const s of strips) {
+      s.pos_cm = cursor;
+      cursor += _stripNettoCm(s) + GAP;
+    }
+  }
+  renderSidebar();
+  render();
 }
 
 // ─── MANUELL DRAG-PLASSERING ──────────────────────────────────
@@ -4216,6 +4395,18 @@ canvas.addEventListener('mousedown', e=>{
     }
   } else {
     // Arrow tool — no draw mode
+
+    // ── Auto-fill pending: check direction arrow click first ──
+    if (S.ui.autoFillPending) {
+      const pendingRoom = S.rooms.find(r => r.id === S.ui.autoFillPending.roomId);
+      if (pendingRoom) {
+        const cRect0 = canvas.getBoundingClientRect();
+        const hit0 = hitAutoFillArrow(e.clientX - cRect0.left, e.clientY - cRect0.top, pendingRoom);
+        if (hit0) { confirmAutoFill(hit0.direction, hit0.fromHigh); return; }
+      }
+      return; // eat click — don't let it propagate to other interactions
+    }
+
     if (e.shiftKey) {
       // Shift+click anywhere = pan view
       S.ui.selectedVertexIdx=null;
@@ -5079,6 +5270,7 @@ document.addEventListener('keydown', e=>{
   S.shiftHeld=e.shiftKey;
 
   if (e.key==='Escape') {
+    if (S.ui.autoFillPending) { cancelAutoFill(); return; }
     if (S.ui.selectedWallId) {
       S.ui.selectedWallId=null; S.ui.movingWall=false;
       _movingWall=false; renderSidebar(); updateWip(); return;
@@ -5214,6 +5406,14 @@ function _ctxBarItems() {
   const room = S.rooms.find(r => r.id === ui.selectedRoomId);
   const dimOn = ui.drawMode === 'dim';
 
+  // Auto-fill pending — override all other context
+  if (ui.autoFillPending) {
+    return `<span class="ctxbar-lbl">Auto-fill</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">Klikk en retningspil i rommet</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="cancelAutoFill()" title="Avbryt auto-fill">✕ Avbryt</button>`;
+  }
+
   // Strip selected
   if (ui.selectedStripId) {
     return `<span class="ctxbar-lbl">Stripe</span>
@@ -5237,9 +5437,11 @@ function _ctxBarItems() {
   // Room selected (body / no sub-selection)
   if (ui.selectedRoomId) {
     const roomDimOn = room?.dims?.some(d=>d.auto==='room');
+    const hasStrips = S.strips.some(s => s.roomId === ui.selectedRoomId);
     return `<span class="ctxbar-lbl">Rom</span>
       <button class="snap-chip" id="chip-hindring" onclick="startHindringMode()" title="Tegn hindring i valgt rom"><span class="snap-dot"></span>Hindring</button>
       <button class="snap-chip" id="chip-produkt" onclick="openProduktMenu(event)" title="Velg og plasser varmeprodukt">🔥 Produkt</button>
+      ${hasStrips ? `<button class="snap-chip" onclick="centerRoomStrips(${ui.selectedRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
       <span class="tc-sep"></span>
       <button class="snap-chip${roomDimOn?' on':''}" id="chip-dim-rom" onclick="autoDimRoom()" title="Lag/fjern mållinjer for alle vegger"><span class="snap-dot"></span>Målsett Rom</button>
       <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje"><span class="snap-dot"></span>Mållinje</button>`;
