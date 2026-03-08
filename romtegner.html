@@ -541,6 +541,17 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
         </div>
       </div>
 
+      <!-- BG UNCALIBRATED OVERLAY (blocks canvas until calibrated) -->
+      <div id="bg-calib-overlay" style="display:none;position:absolute;inset:0;z-index:25;background:rgba(13,14,16,0.7);backdrop-filter:blur(2px);flex-direction:column;align-items:center;justify-content:center;gap:16px;pointer-events:auto">
+        <div style="background:var(--surface);border:1px solid rgba(255,153,0,0.4);border-radius:14px;padding:28px 36px;text-align:center;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,0.4)">
+          <div style="font-size:36px;margin-bottom:8px">📏</div>
+          <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">Sett målestokk</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:18px">Bakgrunnstegningen må kalibreres før du kan tegne rom.<br>Marker en kjent avstand på tegningen.</div>
+          <button class="floor-choice-btn" onclick="document.getElementById('bg-calib-overlay').style.display='none';startBgCalibrate()" style="width:100%;padding:10px;font-size:14px;font-weight:600;margin-bottom:8px;cursor:pointer">📏 Sett målestokk nå</button>
+          <button class="floor-choice-btn" onclick="document.getElementById('bg-calib-overlay').style.display='none';removeBgImage()" style="width:100%;padding:8px;font-size:12px;cursor:pointer;color:var(--dim)">Fjern bakgrunn</button>
+        </div>
+      </div>
+
       <!-- BG CALIBRATION HINT (shown during 2-click calibration) -->
       <div id="bg-cal-hint" style="display:none;position:absolute;top:10px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent);border-radius:8px;padding:7px 16px;font-size:12px;color:var(--accent);pointer-events:none;z-index:30;white-space:nowrap">
         📏 Klikk <span id="bg-cal-step">første</span> punkt på tegningen
@@ -4780,7 +4791,7 @@ function exitDrawing() {
 function abStartDraw(shape) {
   _pendingFloorId = S.ui.activeFloorId ?? (S.floors[0]?.id ?? null);
   const bg = activeBg();
-  if (bg.img && bg.widthCm === 0) { _showCalibWarningInCtxbar(); return; }
+  if (bg.img && (bg.widthCm === 0 || bg._needsCalibration)) { _showCalibWarningInCtxbar(); return; }
   const nameInp = document.getElementById('ctxbar-room-name');
   const name = (nameInp ? nameInp.value.trim() : '') || ('Rom ' + S.counters.nextRoomId);
   S.ui.pendingRoomName = name;
@@ -4940,16 +4951,19 @@ function _installBgImage(img, dataUrl, fileName) {
   bg.fileName = fileName || null;
 
   if (!sameFile) {
-    // New file or different name: auto-fit to canvas
+    // New file: auto-fit to canvas for display, but mark as uncalibrated
     const sc = S.view.zoom * BASE_SCALE;
     const fitW = canvas.width  * 0.85 / sc;
     const fitH = canvas.height * 0.85 / sc;
     const ratio = Math.min(fitW / img.naturalWidth, fitH / img.naturalHeight);
-    bg.widthCm  = img.naturalWidth  * ratio;
-    bg.heightCm = img.naturalHeight * ratio;
+    bg._autoW   = img.naturalWidth  * ratio;   // temp display size
+    bg._autoH   = img.naturalHeight * ratio;
+    bg.widthCm  = bg._autoW;
+    bg.heightCm = bg._autoH;
     bg.originX  = S.view.panX - bg.widthCm  / 2;
     bg.originY  = S.view.panY - bg.heightCm / 2;
     bg.opacity  = 1.0;
+    bg._needsCalibration = true;  // not yet calibrated by user
   }
   // Same filename: keep existing widthCm, heightCm, originX, originY, opacity
 
@@ -4966,6 +4980,11 @@ function _installBgImage(img, dataUrl, fileName) {
   showBgPanel();   // triggers updateCtxBar()
   updateCtxBar();
   render();
+  // Show calibration overlay for new uncalibrated backgrounds
+  if (bg._needsCalibration) {
+    const ov = document.getElementById('bg-calib-overlay');
+    if (ov) ov.style.display = 'flex';
+  }
 }
 
 function setBgOpacity(val) {
@@ -4987,6 +5006,10 @@ function removeBgImage() {
   bg.img = null; bg.dataUrl = null;
   bg.widthCm = 0; bg.heightCm = 0;
   bg.calibrating = false; bg.calPts = [];
+  bg._needsCalibration = false;
+  // Hide calibration overlay if showing
+  const calOv = document.getElementById('bg-calib-overlay');
+  if (calOv) calOv.style.display = 'none';
   hideBgPanel();
   updateCtxBar();
   render();
@@ -4997,6 +5020,9 @@ function startBgCalibrate() {
   bg.calibrating = true; bg.calPts = [];
   S.ui.drawMode = 'bg-calibrate';
   canvas.style.cursor = 'crosshair';
+  // Hide calibration overlay if showing
+  const calOv = document.getElementById('bg-calib-overlay');
+  if (calOv) calOv.style.display = 'none';
   hideBgPanel();
   document.getElementById('bg-cal-hint').style.display = 'block';
   document.getElementById('bg-cal-step').textContent = 'første';
@@ -5022,6 +5048,11 @@ function cancelBgCalibrate() {
   if (bg.img) showBgPanel(); else hideBgPanel();
   document.getElementById('bg-cal-hint').style.display = 'none';
   closeModal(); updMode(); render();
+  // If still needs calibration, re-show overlay
+  if (bg._needsCalibration && bg.img) {
+    const ov = document.getElementById('bg-calib-overlay');
+    if (ov) ov.style.display = 'flex';
+  }
 }
 
 function confirmBgCalibrate() {
@@ -5045,10 +5076,14 @@ function confirmBgCalibrate() {
   bg.originX   = p1.x - rx * bg.widthCm;
   bg.originY   = p1.y - ry * bg.heightCm;
   bg.calibrating = false; bg.calPts = [];
+  bg._needsCalibration = false;  // calibration done
   S.ui.drawMode = null;
   canvas.style.cursor = 'default';
   showBgPanel();
   document.getElementById('bg-cal-hint').style.display = 'none';
+  // Hide calibration overlay if it was showing
+  const calOv = document.getElementById('bg-calib-overlay');
+  if (calOv) calOv.style.display = 'none';
   updMode(); render();
   // Deselect room so canvas ctxbar appears with room creation tools
   S.ui.selectedRoomId = null; S.ui.selectedWallId = null;
@@ -8297,7 +8332,7 @@ function _ctxBarItems() {
   if (S.floors && S.floors.length > 0 && !ui.drawMode) {
     const bg = activeBg();
     const hasBg = !!bg.img;
-    const notCalibrated = hasBg && bg.widthCm === 0;
+    const notCalibrated = hasBg && bg._needsCalibration;
 
     // BG imported but not calibrated — force calibration first
     if (notCalibrated) {
