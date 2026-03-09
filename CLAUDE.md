@@ -73,6 +73,8 @@ Product data (via `productId`) contains:
 - width (mm / netto mm)
 - power (W/m²)
 - article number and name
+- `min_gap_mm` — supplier-specific minimum gap between strips
+- `min_wall_margin_mm` — supplier-specific minimum distance from walls
 
 This enables automatic calculation of installed power, covered area, and material lists.
 
@@ -90,12 +92,30 @@ Objects remain editable after placement.
 
 ---
 
-# Rule System
+# Rule System — Supplier-Aware Installation Rules
 
-The system includes installation rules:
-- 25 mm safety zone from walls
-- no overlapping heating foil
-- no placement inside obstacles
+Installation rules are **supplier-specific** and defined per product.
+Each product in the database can have:
+- `min_gap_mm` — minimum gap between strips (e.g., 10mm for Cenika)
+- `min_wall_margin_mm` — minimum distance from walls/obstacles (e.g., 25mm for Cenika)
+
+Default values (applied at load time if missing from DB):
+- `min_gap_mm = 10` (Cenika default)
+- `min_wall_margin_mm = 25` (Cenika default)
+
+**Central helper functions** (defined near `MARGIN_CM`):
+- `_productMinGapCm(productId)` — supplier's minimum gap in cm
+- `_productMinMarginCm(productId)` — supplier's minimum margin in cm
+- `_effectiveGapCm(productId)` — `max(user preference, supplier min)`
+- `_effectiveGapCmPair(prodId1, prodId2)` — strictest gap between two different products
+- `_effectiveMarginCm(productId)` — supplier's margin for a product
+- `_roomMaxMarginCm(roomId, direction?)` — strictest margin across all products in a room
+
+**Rules:**
+- User can set gap via ctxbar (`S.varmefolie.gapCm`), but it cannot go below supplier minimum
+- When two strips from different suppliers/products are adjacent, the strictest rule applies
+- Wall margin is always determined by the product's supplier rules
+- `MARGIN_CM = 2.5` remains as a **fallback constant** when no product context is available
 
 Rules may be overridden by the user, but the system must always show warnings.
 
@@ -144,6 +164,65 @@ Preferred techniques:
 - incremental updates
 
 Rendering must remain smooth even with many heating elements.
+
+---
+
+# Engine Architecture (established patterns)
+
+The system already follows a structured CAD engine design.
+Do not refactor these patterns — extend them.
+
+## Scene Hierarchy (in place)
+
+```
+S (state)
+ ├─ floors[]
+ │    └─ rooms[] (via floorId)
+ │         ├─ walls[]
+ │         ├─ points[] (polygon)
+ │         ├─ strips[] (via roomId, in S.strips)
+ │         └─ obstacles[] (hindrings, via roomId)
+ └─ view {zoom, panX, panY}
+```
+
+Room is the primary container. All objects reference their room via `roomId`.
+
+## Hit Detection Order (in place)
+
+Priority from top to bottom:
+1. UI gizmos (strip arrows, group handles)
+2. Strip end-handles
+3. Strip bodies
+4. Hindring walls / vertices
+5. Walls
+6. Room bodies
+7. Annotations / dimension lines
+
+Functions: `hitStripGizmo()`, `hitStripEndArrow()`, `hitStrip()`, `hitTest()`, `hitAnnotation()`
+
+## Collision & Snapping (in place)
+
+- `_stripOverlapsAny(strip)` — supplier-aware gap-based overlap detection
+- `_clampStripToRoom(strip, origPos)` — room bounds + supplier-aware neighbor collision avoidance
+- `_snapStripToNearest(strip)` — magnetic snap to nearest neighbor with supplier-aware gap
+- `_stripRoomBounds(strip)` — bounding box for room of a strip
+- `_effectiveGapCmPair(prodId1, prodId2)` — strictest gap rule between two products
+- `_effectiveMarginCm(productId)` — supplier-aware wall margin for a product
+
+## Scalability Guidelines (for future growth)
+
+When the project grows beyond ~50 rooms / 200 heating objects:
+
+1. **Viewport culling**: Only render objects whose bounding box intersects the visible viewport. Check `w2s()` bounds against canvas dimensions before drawing.
+
+2. **Spatial indexing**: If linear hit-testing becomes slow, add a simple grid index (not quadtree — overkill for 2D axis-aligned rooms). Partition world space into cells, bucket objects by cell.
+
+3. **Dirty rendering**: Add a `_dirty` flag. Only call `render()` when state actually changes. Avoid redundant renders from mousemove when nothing moves.
+
+4. **Per-room rendering**: Room-scoped operations (collision, rendering, validation) should filter by `roomId` first — never scan all objects globally when the room is known.
+
+These optimizations should be added **only when needed**, not preemptively.
+Current performance is fine for the expected project sizes (1-20 rooms, 10-100 strips).
 
 ---
 
