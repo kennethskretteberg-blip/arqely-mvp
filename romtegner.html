@@ -2702,6 +2702,25 @@ function drawDropPreview() {
   ctx.fillRect(bx, by, bw, bh);
   ctx.strokeRect(bx, by, bw, bh);
   ctx.setLineDash([]);
+  // Draw green ghost at snap position if overlapping
+  if (s.invalid && s.snapPos != null) {
+    let gx, gy, gw, gh;
+    if (s.direction === 'v') {
+      const g1 = w2s(s.snapPos, s.start_cm), g2 = w2s(s.snapPos + nc, s.start_cm + s.length_cm);
+      gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+    } else {
+      const g1 = w2s(s.start_cm, s.snapPos), g2 = w2s(s.start_cm + s.length_cm, s.snapPos + nc);
+      gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+    }
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = 'rgba(34,197,94,0.2)';
+    ctx.strokeStyle = 'rgba(34,197,94,0.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.fillRect(gx, gy, gw, gh);
+    ctx.strokeRect(gx, gy, gw, gh);
+    ctx.setLineDash([]);
+  }
   ctx.restore();
 }
 
@@ -2824,7 +2843,13 @@ canvas.addEventListener('dragover', e => {
     const gap = pos >= o.pos_cm ? pos - (o.pos_cm + onc) : o.pos_cm - (pos + nc);
     if (gap < GAP_PREV - 0.01) { previewInvalid = true; break; }
   }
-  S.ui.dropPreviewStrip = { pos_cm: pos, start_cm: startCm, length_cm: Math.max(5, lengthCm), direction: dir, nc, roomId: room.id, invalid: previewInvalid };
+  // Compute magnetic snap position if overlapping
+  let snapPos = null;
+  if (previewInvalid) {
+    const tmpStrip = { id: -999, roomId: room.id, direction: dir, pos_cm: pos, productId: S.ui.dragWidth.productId };
+    snapPos = _snapStripToNearest(tmpStrip);
+  }
+  S.ui.dropPreviewStrip = { pos_cm: pos, start_cm: startCm, length_cm: Math.max(5, lengthCm), direction: dir, nc, roomId: room.id, invalid: previewInvalid, snapPos };
 });
 
 canvas.addEventListener('dragleave', () => {
@@ -2861,11 +2886,23 @@ canvas.addEventListener('drop', e => {
     };
     S.strips.push(newStrip);
     if (_stripOverlapsAny(newStrip)) {
-      S.strips.pop();
-      S.counters.nextStripId--;
-    } else {
-      if (!placed) { selStrip(newStrip.id); placed = true; }
+      // Magnetic snap: try snapping to nearest neighbor
+      const snappedPos = _snapStripToNearest(newStrip);
+      if (snappedPos !== null) {
+        newStrip.pos_cm = snappedPos;
+        // Re-compute clipped segments for new position (hindrings may differ)
+        const reSegs = computeClippedSegments(room.id, dir, snappedPos, prod.id);
+        if (reSegs.length > 0) {
+          newStrip.start_cm = reSegs[0].start_cm;
+          newStrip.length_cm = reSegs[0].length_cm;
+        }
+      } else {
+        S.strips.pop();
+        S.counters.nextStripId--;
+        continue;
+      }
     }
+    if (!placed) { selStrip(newStrip.id); placed = true; }
   }
   S.ui.dropPreviewStrip = null;
   S.ui.dragWidth = null;
@@ -3115,6 +3152,41 @@ function _stripOverlapsAny(strip) {
     if (gap < GAP_CM - 0.01) return true;
   }
   return false;
+}
+
+// Magnetic snap: find nearest valid pos_cm adjacent to a neighbor strip
+function _snapStripToNearest(strip) {
+  const nc = _stripNettoCm(strip);
+  const gapCm = S.varmefolie.gapCm ?? 1.0;
+  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  if (!others.length) return null;
+  const bounds = _stripRoomBounds(strip);
+  if (!bounds) return null;
+  const dir = strip.direction;
+  const minB = dir === 'v' ? bounds.minX : bounds.minY;
+  const maxB = dir === 'v' ? bounds.maxX : bounds.maxY;
+
+  let bestPos = null, bestDist = Infinity;
+  for (const o of others) {
+    const onc = _stripNettoCm(o);
+    const candidates = [
+      o.pos_cm - nc - gapCm,   // snap to left/top of neighbor
+      o.pos_cm + onc + gapCm   // snap to right/bottom of neighbor
+    ];
+    for (const pos of candidates) {
+      // Room bounds check
+      if (pos < minB + 0.01 || pos + nc > maxB - 0.01) continue;
+      const dist = Math.abs(pos - strip.pos_cm);
+      if (dist >= bestDist) continue;
+      // Overlap check at candidate position
+      const tmp = { id: strip.id, roomId: strip.roomId, direction: dir, pos_cm: pos, productId: strip.productId };
+      if (!_stripOverlapsAny(tmp)) {
+        bestPos = pos;
+        bestDist = dist;
+      }
+    }
+  }
+  return bestPos;
 }
 
 // ── Strip gizmo screen positions ──
@@ -9139,7 +9211,13 @@ canvas.addEventListener('mouseup', e=>{
   if (_sgDragging) {
     const _sid = _stripId;
     _sgDragging=false; _stripId=-1; _sgConstraint='free'; canvas.style.cursor='default';
-    _checkMarginAfterDrag(S.strips.find(s=>s.id===_sid));
+    const _sgStrip = S.strips.find(s=>s.id===_sid);
+    if (_sgStrip && _stripOverlapsAny(_sgStrip)) {
+      const sp = _snapStripToNearest(_sgStrip);
+      if (sp !== null) _sgStrip.pos_cm = sp;
+    }
+    _checkMarginAfterDrag(_sgStrip);
+    render();
     return;
   }
   if (_groupEndDragging) {
@@ -9153,7 +9231,13 @@ canvas.addEventListener('mouseup', e=>{
   if (_stripDragging) {
     const _sid = _stripId;
     _stripDragging=false; _stripId=-1; canvas.style.cursor='default';
-    _checkMarginAfterDrag(S.strips.find(s=>s.id===_sid));
+    const _drStrip = S.strips.find(s=>s.id===_sid);
+    if (_drStrip && _stripOverlapsAny(_drStrip)) {
+      const sp = _snapStripToNearest(_drStrip);
+      if (sp !== null) _drStrip.pos_cm = sp;
+    }
+    _checkMarginAfterDrag(_drStrip);
+    render();
     return;
   }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
