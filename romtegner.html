@@ -1255,7 +1255,13 @@ function getWorldPos(e) {
 }
 
 // ─── RENDER LOOP ─────────────────────────────────────────────
+let _needsRender = true;
+
+/** Mark canvas as needing a re-render. The rAF loop will pick it up. */
+function markDirty() { _needsRender = true; }
+
 function render() {
+  _needsRender = false;   // we're rendering now — rAF loop can skip until next change
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   _violationsDirty = true;
   _recomputeViolationsIfDirty();
@@ -1355,7 +1361,7 @@ function _computeRoomStats(room) {
   const hinds = S.hindrings.filter(h => h.roomId === room.id);
   const hindM2 = hinds.reduce((a, h) => a + (h.points && h.points.length >= 3 ? compArea(h.points) : 0), 0) / 10000;
   const nettoM2 = Math.max(0, bruttoM2 - hindM2);
-  const roomStrips = S.strips.filter(s => s.roomId === room.id);
+  const roomStrips = _stripsForRoom(room.id);
   let stripAreaCm2 = 0;
   for (const s of roomStrips) {
     const nc = _stripNettoCm(s);
@@ -1367,7 +1373,7 @@ function _computeRoomStats(room) {
 }
 
 function _computeStripGaps(room) {
-  const strips = S.strips.filter(s => s.roomId === room.id).sort((a, b) => a.pos_cm - b.pos_cm);
+  const strips = _stripsForRoom(room.id).slice().sort((a, b) => a.pos_cm - b.pos_cm);
   const gaps = [];
   for (let i = 0; i < strips.length - 1; i++) {
     const gap = strips[i + 1].pos_cm - (strips[i].pos_cm + _stripNettoCm(strips[i]));
@@ -1822,6 +1828,7 @@ function autoAddStrips(roomId, productId) {
   // Remove existing strips for all family products in this direction
   const familyIds = new Set(familyProducts.map(fp => fp.id));
   S.strips = S.strips.filter(s => !(s.roomId === roomId && familyIds.has(s.productId) && s.direction === direction));
+  _invalidateStripCache();
 
   const basePos = direction === 'v' ? minX : minY;
   const baseMax = direction === 'v' ? maxX : maxY;
@@ -1843,6 +1850,7 @@ function autoAddStrips(roomId, productId) {
       }
       cursor += chosenNc + GAP_CM;
     }
+    _invalidateStripCache();
   } else {
     let cursor = baseMax - MIN_MARGIN_CM;
     while (cursor - smallestNc >= basePos + MIN_MARGIN_CM - 0.01) {
@@ -1861,6 +1869,7 @@ function autoAddStrips(roomId, productId) {
       }
       cursor = pos - GAP_CM;
     }
+    _invalidateStripCache();
   }
   renderSidebar(); updateObjInfo();
 }
@@ -2028,6 +2037,7 @@ function startAutoFill(familyName, categoryId, maxWidthMm) {
     }
     S.strips.push({ ...newStripDefs[i], id: S.counters.nextStripId++ });
   }
+  _invalidateStripCache();
   hideVfPlacePanel();
   renderSidebar(); updateObjInfo();
   showAddRoomModal();
@@ -2065,6 +2075,7 @@ function confirmAutoFill(direction, fromHigh) {
     }
     S.strips.push({ ...newStripDefs[i], id: S.counters.nextStripId++ });
   }
+  _invalidateStripCache();
 
   renderSidebar(); updateObjInfo();
   showAddRoomModal();
@@ -2243,7 +2254,7 @@ function hitAutoFillArrow(sx, sy, room) {
 function centerRoomStrips(roomId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return;
-  const roomStrips = S.strips.filter(s => s.roomId === roomId);
+  const roomStrips = _stripsForRoom(roomId);
   if (!roomStrips.length) return;
 
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -2328,9 +2339,9 @@ function setRoomGap(roomId, gapMm, skipUndo) {
 
   let hasMarginWarning = false;
 
-  const dirs = [...new Set(S.strips.filter(s => s.roomId === roomId).map(s => s.direction))];
+  const dirs = [...new Set(_stripsForRoom(roomId).map(s => s.direction))];
   for (const dir of dirs) {
-    const strips = S.strips.filter(s => s.roomId === roomId && s.direction === dir)
+    const strips = _stripsForRoomDir(roomId, dir).slice()
                            .sort((a, b) => a.pos_cm - b.pos_cm);
     if (!strips.length) continue;
 
@@ -2561,6 +2572,7 @@ function startSemiAutoFill(familyName, categoryId) {
     const sp = _stripProduct(s);
     return !(s.roomId === room.id && sp && sp.category_id === categoryId);
   });
+  _invalidateStripCache();
   S.ui.semiAutoMode = true;
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
@@ -2665,6 +2677,7 @@ function doSemiAutoStep(productId) {
       cursor -= nc + GAP;
     }
   }
+  _invalidateStripCache();
   S.ui.semiAutoCursor = cursor;
   renderSemiAutoPalette();
   renderSidebar(); updateObjInfo();
@@ -2848,7 +2861,7 @@ canvas.addEventListener('dragover', e => {
   // Check whether this preview position would overlap an existing strip
   const dragProdId = S.ui.dragWidth.productId;
   let previewInvalid = false;
-  for (const o of S.strips.filter(s => s.roomId === room.id && s.direction === dir)) {
+  for (const o of _stripsForRoomDir(room.id, dir)) {
     const onc = _stripNettoCm(o);
     const gapReq = _effectiveGapCmPair(dragProdId, o.productId);
     const gap = pos >= o.pos_cm ? pos - (o.pos_cm + onc) : o.pos_cm - (pos + nc);
@@ -2896,6 +2909,7 @@ canvas.addEventListener('drop', e => {
       pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm
     };
     S.strips.push(newStrip);
+    _invalidateStripCache();
     if (_stripOverlapsAny(newStrip)) {
       // Magnetic snap: try snapping to nearest neighbor
       const snappedPos = _snapStripToNearest(newStrip);
@@ -2908,7 +2922,7 @@ canvas.addEventListener('drop', e => {
           newStrip.length_cm = reSegs[0].length_cm;
         }
       } else {
-        S.strips.pop();
+        S.strips.pop(); _invalidateStripCache();
         S.counters.nextStripId--;
         continue;
       }
@@ -3112,6 +3126,35 @@ function hitStrip(wx, wy) {
   return null;
 }
 
+// ── Strip cache (room-indexed lookup) ──────────────────────
+// Version-based lazy cache: invalidated when strips are added/removed/reassigned.
+// Property changes (pos_cm, length_cm) do NOT invalidate — the cache returns
+// references to the same strip objects, so callers always see current values.
+let _stripCacheVer = 0;
+const _stripCacheStore = {};
+
+function _invalidateStripCache() { _stripCacheVer++; }
+
+/** All strips belonging to a room */
+function _stripsForRoom(roomId) {
+  const key = 'r_' + roomId;
+  const c = _stripCacheStore[key];
+  if (c && c.v === _stripCacheVer) return c.d;
+  const d = S.strips.filter(s => s.roomId === roomId);
+  _stripCacheStore[key] = { v: _stripCacheVer, d };
+  return d;
+}
+
+/** All strips belonging to a room+direction */
+function _stripsForRoomDir(roomId, direction) {
+  const key = 'rd_' + roomId + '_' + direction;
+  const c = _stripCacheStore[key];
+  if (c && c.v === _stripCacheVer) return c.d;
+  const d = S.strips.filter(s => s.roomId === roomId && s.direction === direction);
+  _stripCacheStore[key] = { v: _stripCacheVer, d };
+  return d;
+}
+
 // ── Strip room-bounds clamping ──
 function _stripRoomBounds(strip) {
   const room = S.rooms.find(r => r.id === strip.roomId);
@@ -3135,7 +3178,7 @@ function _clampStripToRoom(strip, origPos) {
   // Collision avoidance: use origPos (drag start) to determine which side of each neighbor
   // we're on — prevents strips from passing through each other during a drag
   const refPos = (origPos !== undefined) ? origPos : strip.pos_cm;
-  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   let lo = posMin, hi = posMax;
   for (const o of others) {
     const onc = _stripNettoCm(o);
@@ -3153,7 +3196,7 @@ function _clampStripToRoom(strip, origPos) {
 // Returns true if strip overlaps (or is closer than supplier min gap to) any same-direction strip in the same room
 function _stripOverlapsAny(strip) {
   const nc = _stripNettoCm(strip);
-  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   for (const o of others) {
     const onc = _stripNettoCm(o);
     const gapCm = _effectiveGapCmPair(strip.productId, o.productId);
@@ -3168,7 +3211,7 @@ function _stripOverlapsAny(strip) {
 // Magnetic snap: find nearest valid pos_cm adjacent to a neighbor strip
 function _snapStripToNearest(strip) {
   const nc = _stripNettoCm(strip);
-  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   if (!others.length) return null;
   const bounds = _stripRoomBounds(strip);
   if (!bounds) return null;
@@ -3377,7 +3420,7 @@ function _clampStripToRoomBoundsOnly(strip) {
 function deleteMultiStrips() {
   pushUndo();
   const ids = new Set(S.ui.selectedStripIds);
-  S.strips = S.strips.filter(s => !ids.has(s.id));
+  S.strips = S.strips.filter(s => !ids.has(s.id)); _invalidateStripCache();
   // Remove deleted strips from any groups; discard now-empty groups
   S.groups = S.groups.map(g => ({...g, stripIds: g.stripIds.filter(sid => !ids.has(sid))}))
                      .filter(g => g.stripIds.length > 0);
@@ -3515,7 +3558,7 @@ function selStrip(id, addToMulti) {
 
 function deleteStrip(id) {
   pushUndo();
-  S.strips = S.strips.filter(s => s.id !== id);
+  S.strips = S.strips.filter(s => s.id !== id); _invalidateStripCache();
   // Remove strip from any groups; discard empty groups
   S.groups = S.groups.map(g => ({...g, stripIds: g.stripIds.filter(sid => sid !== id)}))
                      .filter(g => g.stripIds.length > 0);
@@ -4092,7 +4135,7 @@ function vfPanelHtml(room) {
     `<option value="${p.id}" ${p.id===vf.pendingProductId?'selected':''}>${esc(p.name)} — ${(p.netto_width_mm||p.width_mm)/10}cm netto</option>`
   ).join('');
 
-  const roomStrips = S.strips.filter(s => s.roomId === room.id);
+  const roomStrips = _stripsForRoom(room.id);
   const canAdd = !!vf.pendingProductId;
 
   return `<div class="vf-panel">
@@ -4671,7 +4714,7 @@ function _drawDimAnnotationsForRoom(room) {
 
 // ─── STRIP DIMENSION CHAIN (Målsett Folie) ────────────────────
 function _drawStripDimChainForRoom(room) {
-  const strips = S.strips.filter(s => s.roomId === room.id);
+  const strips = _stripsForRoom(room.id);
   if (!strips.length) return;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const M = _roomMaxMarginCm(room.id); // supplier-aware safety margin
@@ -6159,7 +6202,7 @@ function roomItemHtml(room, indented) {
   }
 
   // Strip items for this room (hidden when room is collapsed)
-  const roomStripsItem = S.strips.filter(s => s.roomId === room.id);
+  const roomStripsItem = _stripsForRoom(room.id);
 
   // ── Groups for this room ──
   const roomGroups = S.groups.filter(g => g.stripIds.some(sid => S.strips.find(s => s.id === sid && s.roomId === room.id)));
@@ -6759,7 +6802,7 @@ function commitSkillevegg() {
     h.roomId = ptInPoly(cx, cy, polyA) ? roomA.id : roomB.id;
   });
   // Reassign strips
-  S.strips.filter(s => s.roomId === parentId).forEach(s => {
+  _stripsForRoom(parentId).forEach(s => {
     const prod = HEATING_PRODUCTS.find(p => p.id === s.productId);
     const sw = prod ? prod.netto_mm / 10 : 50;
     let cx, cy;
@@ -7505,9 +7548,14 @@ function computeClippedSegments(roomId, direction, pos_cm, productId) {
   if (roomHindrings.length > 0) {
     segments = clipStripAroundHindrings(segments, pos_cm, nc, direction, roomHindrings, MARGIN);
   }
+  const cutCm = (p.cut_interval_mm || 0) / 10;   // convert mm→cm (0 = no rounding)
   return segments
-    .filter(([lo, hi]) => (hi - lo) >= MIN_LEN)
-    .map(([lo, hi]) => ({ start_cm: lo, length_cm: hi - lo }));
+    .map(([lo, hi]) => {
+      let len = hi - lo;
+      if (cutCm > 0) len = Math.floor(len / cutCm) * cutCm;
+      return { start_cm: lo, length_cm: len };
+    })
+    .filter(seg => seg.length_cm >= MIN_LEN);
 }
 
 // Max potential strip length at a given position (scanline at left edge)
@@ -7976,7 +8024,7 @@ function undo() {
   const prev=_undoStack.pop();
   S.rooms=prev.rooms; S.hindrings=prev.hindrings;
   if (prev.strips !== undefined) {
-    S.strips = prev.strips;
+    S.strips = prev.strips; _invalidateStripCache();
     S.counters.nextStripId = prev.nextStripId;
     if (prev.gapCm !== undefined) S.varmefolie.gapCm = prev.gapCm;
   }
@@ -8287,7 +8335,7 @@ canvas.addEventListener('mousedown', e=>{
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
-      _thOrigSPts=S.strips.filter(s=>s.roomId===rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
+      _thOrigSPts=_stripsForRoom(rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
       canvas.style.cursor='ew-resize'; return;
     }
     // ── Room gizmo Y arrow (move room along Y) ──
@@ -8297,7 +8345,7 @@ canvas.addEventListener('mousedown', e=>{
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
-      _thOrigSPts=S.strips.filter(s=>s.roomId===rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
+      _thOrigSPts=_stripsForRoom(rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
       canvas.style.cursor='ns-resize'; return;
     }
     // ── Rotation drag (rotate mode) ──
@@ -8308,7 +8356,7 @@ canvas.addEventListener('mousedown', e=>{
       _thOrigStart={x:e.clientX,y:e.clientY};
       _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
       _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
-      _thOrigSPts=S.strips.filter(s=>s.roomId===rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
+      _thOrigSPts=_stripsForRoom(rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
       _thRotCenter={x:aw.x,y:aw.y};
       const sAnchor=w2s(aw.x,aw.y);
       _thRotStartAngle=Math.atan2(sy0-sAnchor.y, sx0-sAnchor.x);
@@ -8323,7 +8371,7 @@ canvas.addEventListener('mousedown', e=>{
         _thOrigStart={x:e.clientX,y:e.clientY};
         _thOrigPts=rmGizmo.points.map(p=>({x:p.x,y:p.y}));
         _thOrigHPts=S.hindrings.filter(h=>h.roomId===rmGizmo.id).map(h=>({id:h.id,pts:h.points.map(p=>({x:p.x,y:p.y}))}));
-      _thOrigSPts=S.strips.filter(s=>s.roomId===rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
+      _thOrigSPts=_stripsForRoom(rmGizmo.id).map(s=>({id:s.id,pos_cm:s.pos_cm,start_cm:s.start_cm,direction:s.direction}));
         const aw=getAnchorWorld(rmGizmo.id);
         _thRotCenter={x:aw.x,y:aw.y};
         const sAnchor=w2s(aw.x,aw.y);
@@ -9478,7 +9526,7 @@ document.addEventListener('keydown', e=>{
       e.preventDefault();
       const _curStrip = S.strips.find(s=>s.id===S.ui.selectedStripId);
       if (_curStrip) {
-        const roomStrips = S.strips.filter(s=>s.roomId===_curStrip.roomId).sort((a,b)=>a.pos_cm-b.pos_cm);
+        const roomStrips = _stripsForRoom(_curStrip.roomId).slice().sort((a,b)=>a.pos_cm-b.pos_cm);
         const idx = roomStrips.findIndex(s=>s.id===S.ui.selectedStripId);
         const nextIdx = e.key==='ArrowDown' ? idx+1 : idx-1;
         if (nextIdx>=0 && nextIdx<roomStrips.length) {
@@ -10126,7 +10174,7 @@ const SUPABASE_URL = 'https://nhzhffertfqdeslhzyxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_0QOhnETGSeJ4TiNCH12vtA_U3kIjSvC';
 let _db = null;
 let HEATING_PRODUCTS = [];   // [{id, category_id, name, width_mm, cut_interval_mm, watt_per_m2, ...}]
-let PRODUCT_CATEGORIES = []; // [{id, name, ...}]
+let PRODUCT_CATEGORIES = []; // [{id, name, module_type, sort_order, ...}]
 
 async function initSupabase() {
   try {
@@ -10142,12 +10190,25 @@ async function initSupabase() {
       if (p.min_gap_mm == null)         p.min_gap_mm = 10;          // Cenika default
       if (p.min_wall_margin_mm == null) p.min_wall_margin_mm = 25;  // Cenika default
     }
-    console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter fra Supabase`);
+    console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
   } catch(err) {
     console.warn('Supabase ikke tilgjengelig, fortsetter uten produktdata:', err.message);
   }
 }
 initSupabase();
+
+/** Module type for a product category: 'foil' | 'cable' | 'mat' | 'plate' */
+function _categoryModuleType(categoryId) {
+  const cat = PRODUCT_CATEGORIES.find(c => c.id === categoryId);
+  return cat?.module_type || 'foil';
+}
+
+/** Module type for a specific product (via its category) */
+function _productModuleType(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return 'foil';
+  return _categoryModuleType(prod.category_id);
+}
 
 // ─── VIOLATION DETECTION & MARGIN WARNING ─────────────────────
 const MARGIN_CM = 2.5; // 25mm — fallback safety zone when no product context
@@ -10187,7 +10248,7 @@ function _effectiveMarginCm(productId) {
 
 /** Max margin across all strips in a room/direction (for room-level operations) */
 function _roomMaxMarginCm(roomId, direction) {
-  const strips = S.strips.filter(s => s.roomId === roomId && (!direction || s.direction === direction));
+  const strips = direction ? _stripsForRoomDir(roomId, direction) : _stripsForRoom(roomId);
   if (!strips.length) return MARGIN_CM;
   return Math.max(...strips.map(s => _effectiveMarginCm(s.productId)));
 }
@@ -10265,7 +10326,7 @@ function getStripViolations(strip) {
   }
 
   // --- 2. Inter-strip gap (supplier-aware, user-configurable) ---
-  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   let worstGap = Infinity, worstNeighbor = null, worstGapMin = 0;
   for (const o of others) {
     const onc = _stripNettoCm(o);
@@ -10377,7 +10438,7 @@ function marginWarnSnap() {
   }
 
   // Step 2: Check for neighbor overlap and adjust to maintain gap
-  const others = S.strips.filter(s => s.id !== strip.id && s.roomId === strip.roomId && s.direction === strip.direction);
+  const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   for (const o of others) {
     const onc = _stripNettoCm(o);
     const pairG = _effectiveGapCmPair(strip.productId, o.productId);
@@ -10431,7 +10492,7 @@ function _resetToNpScreen() {
   // Full state reset — back to factory defaults
   S.project  = { id:1, name:'', description:'', createdAt:Date.now() };
   S.floors   = [];
-  S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = [];
+  S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; _invalidateStripCache();
   S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1 };
   S.view     = { zoom:1, panX:0, panY:0 };
   S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null;
@@ -10475,7 +10536,7 @@ window.addEventListener('beforeunload', e => {
 });
 
 // ─── RENDER LOOP ──────────────────────────────────────────────
-(function loop(){ render(); requestAnimationFrame(loop); })();
+(function loop(){ if (_needsRender) render(); requestAnimationFrame(loop); })();
 </script>
 </body>
 </html>
