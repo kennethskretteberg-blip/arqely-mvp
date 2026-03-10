@@ -1798,6 +1798,15 @@ function autoAddStrips(roomId, productId) {
   if (!room || !p) return;
   pushUndo();
 
+  // Auto-detect optimal direction if room has no existing strips
+  const existingStrips = _stripsForRoom(roomId);
+  if (!existingStrips.length) {
+    const suggested = _suggestDirection(room);
+    if (suggested !== S.varmefolie.direction) {
+      S.varmefolie.direction = suggested;
+    }
+  }
+
   // Derive fill start from startCorner + direction
   const startCorner = S.varmefolie.startCorner || 'bl';
   const direction   = S.varmefolie.direction   || 'v';
@@ -1871,6 +1880,28 @@ function autoAddStrips(roomId, productId) {
     }
     _invalidateStripCache();
   }
+
+  // Center strips symmetrically for equal cold zones
+  const roomStripsDir = _stripsForRoomDir(roomId, direction);
+  if (roomStripsDir.length > 0) {
+    const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+    const basePos = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+    const baseMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+    const sorted = roomStripsDir.slice().sort((a, b) => a.pos_cm - b.pos_cm);
+    const MARGIN = Math.max(...sorted.map(s => _effectiveMarginCm(s.productId)));
+    const GAP = Math.max(...sorted.map(s => _effectiveGapCm(s.productId)));
+    let totalWidth = sorted.reduce((sum, s) => sum + _stripNettoCm(s), 0);
+    totalWidth += (sorted.length - 1) * GAP;
+    const available = (baseMax - basePos) - 2 * MARGIN;
+    const coldEach = (available - totalWidth) / 2;
+    if (coldEach > 0.01) {
+      const shift = (basePos + MARGIN + coldEach) - sorted[0].pos_cm;
+      if (Math.abs(shift) > 0.01) {
+        for (const s of sorted) s.pos_cm += shift;
+      }
+    }
+  }
+
   renderSidebar(); updateObjInfo();
 }
 
@@ -2087,6 +2118,44 @@ function cancelAutoFill() {
   render();
 }
 
+// Center strip definitions symmetrically within room bounds
+function _centerStripDefs(defs, room, direction) {
+  if (!defs.length) return defs;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const basePos = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const baseMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+  const across = baseMax - basePos;
+
+  // Get unique "columns" (strips at same pos_cm)
+  const cols = [...new Set(defs.map(d => d.pos_cm))].sort((a, b) => a - b);
+  if (!cols.length) return defs;
+
+  // Compute MARGIN and GAP from strip products
+  const MARGIN = Math.max(...defs.map(d => _effectiveMarginCm(d.productId)));
+  const GAP = defs.length > 1
+    ? Math.max(...defs.map(d => _effectiveGapCm(d.productId)))
+    : 0;
+
+  // Total occupied width: sum of netto widths per column + gaps between columns
+  let totalWidth = 0;
+  for (const pos of cols) {
+    const colDef = defs.find(d => d.pos_cm === pos);
+    const p = HEATING_PRODUCTS.find(pr => pr.id === colDef.productId);
+    totalWidth += p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+  }
+  totalWidth += (cols.length - 1) * GAP;
+
+  const available = across - 2 * MARGIN;
+  const coldEach = (available - totalWidth) / 2;
+  if (coldEach < 0.01) return defs; // no room to shift
+
+  // Compute shift: first column should start at basePos + MARGIN + coldEach
+  const shift = (basePos + MARGIN + coldEach) - cols[0];
+  if (Math.abs(shift) < 0.01) return defs; // already centered
+
+  return defs.map(d => ({ ...d, pos_cm: d.pos_cm + shift }));
+}
+
 // Wrapper: tries both fill sides and both orientations, picks the best coverage.
 function autoFillRoom(room, sortedProds, direction, fromHigh) {
   const score = defs => defs.reduce((s, st) => {
@@ -2094,26 +2163,36 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
     const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
     return s + nc * st.length_cm;
   }, 0);
-  // Try user's chosen direction from both sides, pick the better one
+  // Try user's chosen direction from both sides, pick the better one (greedy)
   const a = _autoFillRoomOnce(room, sortedProds, direction, false);
   const b = _autoFillRoomOnce(room, sortedProds, direction, true);
-  const bestChosen = score(a) >= score(b) ? a : b;
-  // Try alternate orientation from both sides
+  const bestGreedy = score(a) >= score(b) ? a : b;
+  // Try beam search for chosen direction (explores width combinations)
+  const beamResult = _beamSearchFill(room, sortedProds, direction);
+  const bestChosen = score(beamResult) > score(bestGreedy) ? beamResult : bestGreedy;
+  // Try alternate orientation: greedy + beam search
   const altDir = direction === 'v' ? 'h' : 'v';
   const c = _autoFillRoomOnce(room, sortedProds, altDir, false);
   const d = _autoFillRoomOnce(room, sortedProds, altDir, true);
-  const bestAlt = score(c) >= score(d) ? c : d;
+  const bestAltGreedy = score(c) >= score(d) ? c : d;
+  const beamAlt = _beamSearchFill(room, sortedProds, altDir);
+  const bestAlt = score(beamAlt) > score(bestAltGreedy) ? beamAlt : bestAltGreedy;
   // Only switch orientation if alt gives >10% more coverage
   const chosenScore = score(bestChosen), altScore = score(bestAlt);
+  let best;
   if (altScore > chosenScore * 1.10 && altScore > 0) {
     S.varmefolie.direction = altDir;
-    return bestAlt;
+    best = bestAlt;
+  } else {
+    best = bestChosen;
   }
-  return bestChosen;
+  // Center strips symmetrically (equal cold zones on both sides)
+  const dir = best.length ? best[0].direction : direction;
+  return _centerStripDefs(best, room, dir);
 }
 
-// Core fill: single pass, single direction.
-function _autoFillRoomOnce(room, sortedProds, direction, fromHigh) {
+// Core fill: single pass, single direction. Optional startCursor overrides default start position.
+function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -2130,7 +2209,7 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh) {
   const smallestNc = Math.min(...validNcs);
 
   if (!fromHigh) {
-    let cursor = basePos + MARGIN;
+    let cursor = startCursor ?? (basePos + MARGIN);
     while (cursor + smallestNc <= baseMax - MARGIN + 0.01) {
       // Find widest product that fits in remaining space (sortedProds is widest-first)
       let requestedProd = null;
@@ -2155,7 +2234,7 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh) {
       cursor += chosenNc + GAP;
     }
   } else {
-    let cursor = baseMax - MARGIN;
+    let cursor = startCursor ?? (baseMax - MARGIN);
     while (cursor - smallestNc >= basePos + MARGIN - 0.01) {
       // Find widest product that fits (sortedProds is widest-first)
       let requestedProd = null;
@@ -2181,6 +2260,203 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh) {
     }
   }
   return result;
+}
+
+// ─── BEAM SEARCH WIDTH OPTIMIZATION ─────────────────────────
+/** Beam search: explore multiple product-width combinations to minimize waste.
+ *  Instead of greedy widest-first, keeps top-K partial layouts at each column
+ *  and branches on each available product width. Returns best layout (defs[]). */
+function _beamSearchFill(room, sortedProds, direction, beamWidth) {
+  beamWidth = beamWidth || 5;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP    = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+  const basePos = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const baseMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+  const available = baseMax - basePos - 2 * MARGIN;
+
+  // Valid products (positive netto width) — deduplicate by width
+  const seen = new Set();
+  const prods = [];
+  for (const p of sortedProds) {
+    const nc = (p.netto_width_mm || p.width_mm) / 10;
+    if (nc <= 0) continue;
+    const key = Math.round(nc * 100);   // dedup at 0.1mm precision
+    if (seen.has(key)) continue;
+    seen.add(key);
+    prods.push({ id: p.id, nc });
+  }
+  if (!prods.length) return [];
+  const smallestNc = Math.min(...prods.map(p => p.nc));
+
+  // Score a beam: primary = total coverage area, secondary = fewer columns
+  function _scoreBeam(b) {
+    return b.area - b.cols * 5;   // 5 cm² penalty per extra column (slight preference for fewer strips)
+  }
+
+  // Initial beam: cursor at left margin, no strips yet
+  let beams = [{ cursor: basePos + MARGIN, defs: [], area: 0, cols: 0 }];
+
+  const MAX_ITER = 200;   // safety limit
+  let iter = 0;
+  while (iter++ < MAX_ITER) {
+    let nextBeams = [];
+    let anyAdvanced = false;
+
+    for (const beam of beams) {
+      // If this beam can't fit even the smallest product → it's finished
+      if (beam.cursor + smallestNc > baseMax - MARGIN + 0.01) {
+        nextBeams.push(beam);
+        continue;
+      }
+      // Branch: try each distinct product width at this cursor position
+      for (const prod of prods) {
+        if (beam.cursor + prod.nc > baseMax - MARGIN + 0.01) continue;
+
+        const segs = computeClippedSegments(room.id, direction, beam.cursor, prod.id);
+        if (!segs.length) continue;
+
+        let addedArea = 0;
+        const newDefs = beam.defs.slice();
+        for (const seg of segs) {
+          newDefs.push({
+            roomId: room.id, productId: prod.id, direction,
+            pos_cm: beam.cursor, start_cm: seg.start_cm, length_cm: seg.length_cm
+          });
+          addedArea += prod.nc * seg.length_cm;
+        }
+        nextBeams.push({
+          cursor: beam.cursor + prod.nc + GAP,
+          defs: newDefs,
+          area: beam.area + addedArea,
+          cols: beam.cols + 1
+        });
+        anyAdvanced = true;
+      }
+    }
+
+    if (!anyAdvanced) break;
+
+    // Keep only top-K beams by score
+    nextBeams.sort((a, b) => _scoreBeam(b) - _scoreBeam(a));
+    beams = nextBeams.slice(0, beamWidth);
+  }
+
+  if (!beams.length) return [];
+  // Final scoring: among finished beams, prefer most coverage then fewest columns
+  beams.sort((a, b) => {
+    const da = b.area - a.area;
+    if (Math.abs(da) > 0.01) return da;
+    return a.cols - b.cols;
+  });
+  return beams[0].defs;
+}
+
+// ─── SEED-BASED LAYOUT (fill from click point) ──────────────
+/** Fill room bidirectionally from a seed position (cm in across-axis).
+ *  Places first strip centered on seed, then fills left + right. */
+function _autoFillFromSeed(room, sortedProds, direction, seedPosCm) {
+  if (!sortedProds.length) return [];
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+  const basePos = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const baseMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+
+  // Pick widest product for first strip
+  const firstProd = sortedProds[0];
+  const firstNc = (firstProd.netto_width_mm || firstProd.width_mm) / 10;
+  // Center first strip on seed, clamp to room bounds
+  let firstPos = seedPosCm - firstNc / 2;
+  firstPos = Math.max(basePos + MARGIN, Math.min(baseMax - MARGIN - firstNc, firstPos));
+
+  const firstSegs = computeClippedSegments(room.id, direction, firstPos, firstProd.id);
+  const firstDefs = firstSegs.map(seg => ({
+    roomId: room.id, productId: firstProd.id, direction,
+    pos_cm: firstPos, start_cm: seg.start_cm, length_cm: seg.length_cm
+  }));
+
+  // Fill rightward from first strip's right edge
+  const rightDefs = _autoFillRoomOnce(room, sortedProds, direction, false, firstPos + firstNc + GAP);
+  // Fill leftward from first strip's left edge
+  const leftDefs = _autoFillRoomOnce(room, sortedProds, direction, true, firstPos - GAP);
+
+  // Combine: left (reversed for order) + center + right
+  return [...leftDefs, ...firstDefs, ...rightDefs];
+}
+
+/** Entry point: seed-fill a room from a click position. */
+function seedFillRoom(roomId, seedPosCm) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+
+  // Get product context: existing strips in room → their category → family products
+  const existing = _stripsForRoom(roomId);
+  let sortedProds;
+  if (existing.length) {
+    const firstProd = HEATING_PRODUCTS.find(p => p.id === existing[0].productId);
+    if (!firstProd) return;
+    sortedProds = getProductFamily(firstProd.id)
+      .slice().sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  } else if (S.varmefolie.pendingProductId) {
+    const prod = HEATING_PRODUCTS.find(p => p.id === S.varmefolie.pendingProductId);
+    if (!prod) return;
+    sortedProds = getProductFamily(prod.id)
+      .slice().sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  } else {
+    return; // no product context
+  }
+  if (!sortedProds.length) return;
+
+  const direction = S.varmefolie.direction || _suggestDirection(room);
+  pushUndo();
+
+  // Remove existing strips in this room/direction from same family
+  const familyIds = new Set(sortedProds.map(p => p.id));
+  S.strips = S.strips.filter(s => !(s.roomId === roomId && familyIds.has(s.productId) && s.direction === direction));
+  _invalidateStripCache();
+
+  // Fill from seed
+  const defs = _autoFillFromSeed(room, sortedProds, direction, seedPosCm);
+  // Center the result for symmetry
+  const centered = _centerStripDefs(defs, room, direction);
+
+  for (const d of centered) {
+    S.strips.push({ ...d, id: S.counters.nextStripId++ });
+  }
+  _invalidateStripCache();
+  renderSidebar(); updateObjInfo(); render();
+}
+
+// Seed mode: user clicks on canvas to set seed point
+function startSeedMode() {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  S.ui.seedMode = true;
+  S.ui.seedRoomId = roomId;
+  canvas.style.cursor = 'crosshair';
+  updateCtxBar();
+}
+
+function cancelSeedMode() {
+  S.ui.seedMode = false;
+  S.ui.seedRoomId = null;
+  canvas.style.cursor = 'default';
+  updateCtxBar();
+}
+
+// ─── AUTOMATIC DIRECTION DETECTION ───────────────────────────
+/** Suggest optimal foil direction based on room geometry.
+ *  Strips along the longer axis → longer strips → better coverage & less waste.
+ *  Returns 'v' or 'h'. */
+function _suggestDirection(room) {
+  if (!room || !room.points || room.points.length < 3) return 'v';
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const width  = Math.max(...xs) - Math.min(...xs);   // X extent
+  const height = Math.max(...ys) - Math.min(...ys);   // Y extent
+  // 'v' means strips run vertically (along Y) — good when height > width
+  // 'h' means strips run horizontally (along X) — good when width > height
+  return height >= width ? 'v' : 'h';
 }
 
 // ─── AUTO-FILL DIRECTION ARROWS ───────────────────────────────
@@ -4105,7 +4381,15 @@ function _drawVfDirWidget() {
   const cv = _vfDirCv || document.getElementById('vf-dir-cv'); if (!cv) return;
   _drawVfPicker(cv, _vfDirHover);
   const lbl = document.getElementById('vf-dir-lbl');
-  if (lbl) lbl.textContent = '✓ ' + _vfPickerLabel();
+  if (lbl) {
+    const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+    const suggested = room ? _suggestDirection(room) : null;
+    const currentDir = S.varmefolie.direction || 'v';
+    const hint = suggested && suggested !== currentDir
+      ? ` (anbefalt: ${suggested === 'v' ? 'vertikalt' : 'horisontalt'})`
+      : '';
+    lbl.textContent = '✓ ' + _vfPickerLabel() + hint;
+  }
 }
 
 function _vfDirEvt(e) {
@@ -8110,6 +8394,23 @@ canvas.addEventListener('mousedown', e=>{
     return;
   }
 
+  // Seed mode: click sets seed point for foil fill
+  if (S.ui.seedMode) {
+    const wp = getWorldPos(e);
+    const roomId = S.ui.seedRoomId;
+    const room = S.rooms.find(r => r.id === roomId);
+    if (room) {
+      const dir = S.varmefolie.direction || _suggestDirection(room);
+      // Extract across-axis position from click
+      const seedPosCm = (dir === 'v') ? wp.x : wp.y;
+      cancelSeedMode();
+      seedFillRoom(roomId, seedPosCm);
+    } else {
+      cancelSeedMode();
+    }
+    return;
+  }
+
   const wp=getWorldPos(e);
   const mode=S.ui.drawMode;
 
@@ -9458,6 +9759,7 @@ document.addEventListener('keydown', e=>{
 
   if (e.key==='Escape') {
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
+    if (S.ui.seedMode) { cancelSeedMode(); return; }
     if (S.ui.autoFillPending) { cancelAutoFill(); return; }
     if (S.ui.selectedStripId!==null) {
       S.ui.selectedStripIds.clear(); S.ui.selectedStripId=null;
@@ -9736,6 +10038,14 @@ function _ctxBarItems() {
   const room = S.rooms.find(r => r.id === ui.selectedRoomId);
   const dimOn = ui.drawMode === 'dim';
 
+  // Seed mode — override all other context
+  if (ui.seedMode) {
+    return `<span class="ctxbar-lbl">Seed-fyll</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">Klikk i rommet der folien skal starte</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="cancelSeedMode()" title="Avbryt seed-modus">✕ Avbryt</button>`;
+  }
+
   // Auto-fill pending — override all other context
   if (ui.autoFillPending) {
     return `<span class="ctxbar-lbl">Auto-fill</span>
@@ -9791,6 +10101,7 @@ function _ctxBarItems() {
       <button class="snap-chip" id="chip-skillevegg" onclick="startSkilleveggMode()" title="Tegn skillevegg for å dele rommet">⫿ Skillevegg</button>
       <button class="snap-chip" id="chip-hindring" onclick="startHindringMode()" title="Tegn hindring i valgt rom">+ Hindring</button>
       <button class="snap-chip" id="chip-produkt" onclick="openProduktMenu(event)" title="Velg og plasser varmeprodukt">+ Produkt</button>
+      ${hasStrips ? `<button class="snap-chip" onclick="startSeedMode()" title="Klikk et punkt i rommet — folie fylles ut derfra">📍 Fra punkt</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="centerRoomStrips(${ui.selectedRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="openGapPanel(event,${ui.selectedRoomId})" title="Juster avstand mellom varmefolier">⟷ ${gapMm} mm</button>` : ''}
       <span class="tc-sep"></span>
