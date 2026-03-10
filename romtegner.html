@@ -1279,6 +1279,7 @@ function markDirty() { _needsRender = true; }
 function render() {
   _needsRender = false;   // we're rendering now — rAF loop can skip until next change
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  _rebuildActiveFloorRoomIds();
   _violationsDirty = true;
   _cableViolationsDirty = true;
   _recomputeViolationsIfDirty();
@@ -1310,6 +1311,26 @@ function render() {
   drawScaleBar();
   if (S.ui.widgetMinimapVisible) drawMinimap();
   drawSnapDot();
+}
+
+// ─── FLOOR FILTERING HELPER ─────────────────────────────────
+/** Returns true if a room belongs to the active floor (or no floor is active). */
+function _roomOnActiveFloor(room) {
+  if (!S.ui.activeFloorId) return true; // no floor selected → show all
+  return room.floorId === S.ui.activeFloorId;
+}
+/** Set of roomIds on the active floor (rebuilt each render). */
+let _activeFloorRoomIds = null;
+function _rebuildActiveFloorRoomIds() {
+  if (!S.ui.activeFloorId) { _activeFloorRoomIds = null; return; }
+  _activeFloorRoomIds = new Set(
+    S.rooms.filter(r => r.floorId === S.ui.activeFloorId).map(r => r.id)
+  );
+}
+/** Returns true if a roomId belongs to the active floor. */
+function _roomIdOnActiveFloor(roomId) {
+  if (!_activeFloorRoomIds) return true; // no floor filter
+  return _activeFloorRoomIds.has(roomId);
 }
 
 // ─── SNAP DOT (red cursor dot) ──────────────────────────────
@@ -1447,6 +1468,7 @@ function hitRoomCard(sx, sy) {
 
 function drawRoomCards() {
   for (const room of S.rooms) {
+    if (!_roomOnActiveFloor(room)) continue;
     if (room.cardVisible) drawRoomCard(room);
   }
 }
@@ -1599,6 +1621,7 @@ function drawRooms() {
 
   // ── Pass 1: draw all non-selected rooms (dimmed, click to select) ──
   for (const room of S.rooms) {
+    if (!_roomOnActiveFloor(room)) continue;
     if (room.id === S.ui.selectedRoomId) continue;
     if (!room.points || room.points.length < 3) continue;
     const spts = room.points.map(p => w2s(p.x, p.y));
@@ -1660,6 +1683,7 @@ function drawRooms() {
   // ── Pass 2: draw selected room on top (full detail) ──
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room || !room.points || room.points.length < 3) return;
+  if (!_roomOnActiveFloor(room)) return;
   const spts = room.points.map(p => w2s(p.x, p.y));
 
   // Fill
@@ -1767,6 +1791,7 @@ function drawHindrings() {
   // ── Pass 1: non-selected rooms' hindrings (dimmed) ──
   for (const h of S.hindrings) {
     if (!h.points || h.points.length < 3) continue;
+    if (!_roomIdOnActiveFloor(h.roomId)) continue;
     if (h.roomId === S.ui.selectedRoomId) continue;
     const spts=h.points.map(p=>w2s(p.x,p.y));
     ctx.save();
@@ -1982,16 +2007,22 @@ function openFamilyMenu(e, categoryId) {
     showProduktDropdown('<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Ingen produkter</div>', e.clientX, e.clientY);
     return;
   }
-  // Group by longest common word prefix (finds "FlexFoil 60W" from "FlexFoil 60W 140cm" etc.)
-  const splitName = p => p.name.trim().split(/\s+/);
-  let prefixWords = splitName(prods[0]);
-  for (const p of prods.slice(1)) {
-    const w = splitName(p);
-    let len = 0;
-    while (len < prefixWords.length && len < w.length && prefixWords[len] === w[len]) len++;
-    prefixWords = prefixWords.slice(0, Math.max(1, len));
+  // Group by product_family (DB column) if available, else by name prefix
+  const hasFamily = prods.some(p => p.product_family);
+  let famKey;
+  if (hasFamily) {
+    famKey = p => p.product_family || p.name;
+  } else {
+    const splitName = p => p.name.trim().split(/\s+/);
+    let prefixWords = splitName(prods[0]);
+    for (const p of prods.slice(1)) {
+      const w = splitName(p);
+      let len = 0;
+      while (len < prefixWords.length && len < w.length && prefixWords[len] === w[len]) len++;
+      prefixWords = prefixWords.slice(0, Math.max(1, len));
+    }
+    famKey = p => splitName(p).slice(0, prefixWords.length).join(' ');
   }
-  const famKey = p => splitName(p).slice(0, prefixWords.length).join(' ');
   const seen = new Set();
   const families = [];
   for (const p of prods) {
@@ -2572,10 +2603,20 @@ function autoFillCable(roomId, productId) {
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return null;
 
-  const minSp = (prod.min_spacing_mm || 60) / 10;   // cm
-  const maxSp = (prod.max_spacing_mm || 120) / 10;
-  const recSp = (prod.recommended_spacing_mm || ((prod.min_spacing_mm||60)+(prod.max_spacing_mm||120))/2) / 10;
-  const spacing = Math.max(minSp, Math.min(maxSp, recSp));
+  const minSp = (prod.min_spacing_mm || 50) / 10;   // cm
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const recSp = (prod.recommended_spacing_mm || 100) / 10;
+
+  // For cables with fixed length: calculate optimal CC from room area
+  let spacing;
+  if (prod.cable_length_m) {
+    const areas = roomAreas(room);
+    // CC (cm) = (area_m2 / cable_length_m) × 100
+    const calcSp = (areas.nettoM2 / prod.cable_length_m) * 100;
+    spacing = Math.max(minSp, Math.min(maxSp, calcSp));
+  } else {
+    spacing = Math.max(minSp, Math.min(maxSp, recSp));
+  }
 
   // Try both directions, pick best coverage
   const dirV = _suggestDirection(room);
@@ -2611,14 +2652,31 @@ function autoFillCable(roomId, productId) {
 function autoPlaceCable(familyName, categoryId) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) return;
-  // Pick first product in family
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+
+  // Get all active products in this family, sorted by cable_length_m
   const prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName));
+    .filter(p => p.category_id === categoryId && p.active !== false
+      && (p.product_family === familyName || p.name.startsWith(familyName)))
+    .sort((a, b) => (a.cable_length_m || 999) - (b.cable_length_m || 999));
   if (!prods.length) return;
-  const prod = prods[0];
+
+  // Calculate ideal cable length: room area / CC-spacing × 100 → cm, then to m
+  const areas = roomAreas(room);
+  const recSp = (prods[0].recommended_spacing_mm || 100) / 10; // cm
+  const idealLengthM = (areas.nettoM2 * 10000 / recSp) / 100; // m
+
+  // Pick best cable: smallest cable_length_m that covers the room
+  let bestProd = prods[prods.length - 1]; // default: largest
+  for (const p of prods) {
+    if ((p.cable_length_m || 0) >= idealLengthM * 0.9) {
+      bestProd = p; break;
+    }
+  }
 
   pushUndo();
-  const cable = autoFillCable(roomId, prod.id);
+  const cable = autoFillCable(roomId, bestProd.id);
   if (!cable) { console.warn('autoPlaceCable: could not generate cable layout'); return; }
   S.cables.push(cable); _invalidateCableCache();
   S.ui.selectedCableId = cable.id;
@@ -3398,6 +3456,7 @@ function getProductFamily(productId) {
 
 function drawStrips() {
   for (const strip of S.strips) {
+    if (!_roomIdOnActiveFloor(strip.roomId)) continue;
     const room = S.rooms.find(r => r.id === strip.roomId);
     const nettoCm = _stripNettoCm(strip);
     if (!room || nettoCm <= 0) continue;
@@ -3543,6 +3602,7 @@ let _hoveredCableId = null;
 
 function drawCables() {
   for (const cable of S.cables) {
+    if (!_roomIdOnActiveFloor(cable.roomId)) continue;
     const room = S.rooms.find(r => r.id === cable.roomId);
     if (!room || !cable.runs || cable.runs.length === 0) continue;
 
@@ -3703,6 +3763,7 @@ function hitStrip(wx, wy) {
   const tol = 2 / (S.view.zoom * BASE_SCALE); // 2px hit-tolerance — locked, snap-independent
   for (let i = S.strips.length - 1; i >= 0; i--) {
     const s = S.strips[i];
+    if (!_roomIdOnActiveFloor(s.roomId)) continue;
     const nc = _stripNettoCm(s); if (nc <= 0) continue;
     const border = Math.max(_stripBorderCm(s), tol);
     if (s.direction === 'v') {
@@ -3721,6 +3782,7 @@ function hitCable(wx, wy) {
   const tolCm = 5 / (S.view.zoom * BASE_SCALE); // ~5px tolerance in world coords
   for (let i = S.cables.length - 1; i >= 0; i--) {
     const cable = S.cables[i];
+    if (!_roomIdOnActiveFloor(cable.roomId)) continue;
     if (!cable.runs) continue;
     for (const run of cable.runs) {
       for (const seg of run.segments) {
@@ -4635,19 +4697,23 @@ function initStatsWidget() {
 function updateStatsWidget() {
   const body = document.getElementById('widget-stats-body');
   if (!body || document.getElementById('widget-stats')?.style.display === 'none') return;
-  const totalAreaM2 = S.rooms.reduce((s, r) => s + (r.area || 0), 0) / 10000;
-  const strips = S.strips;
+  // Filter by active floor
+  const floorRooms = S.rooms.filter(r => _roomOnActiveFloor(r));
+  const floorRoomIds = new Set(floorRooms.map(r => r.id));
+  const totalAreaM2 = floorRooms.reduce((s, r) => s + (r.area || 0), 0) / 10000;
+  const floorStrips = S.strips.filter(st => floorRoomIds.has(st.roomId));
   let stripAreaM2 = 0, totalW = 0;
-  for (const st of strips) {
+  for (const st of floorStrips) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === st.productId); if (!p) continue;
     const nwM = (p.netto_width_mm || p.width_mm || 0) / 1000;
     const lenM = (st.length_cm || 0) / 100;
     stripAreaM2 += nwM * lenM;
     totalW += (p.effect_w || p.watt || p.power_w || 0) / Math.max(1, (p.length_m || 1)) * lenM;
   }
-  // Cable power
+  // Cable power (floor-filtered)
   let cableW = 0, cableLenM = 0;
-  for (const cab of S.cables) {
+  const floorCables = S.cables.filter(c => floorRoomIds.has(c.roomId));
+  for (const cab of floorCables) {
     const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId); if (!cp) continue;
     const lenM = (cab.totalLength_cm || 0) / 100;
     cableLenM += lenM;
@@ -4657,10 +4723,10 @@ function updateStatsWidget() {
   const cov = totalAreaM2 > 0 ? Math.round(stripAreaM2 / totalAreaM2 * 100) : 0;
   const row = (l, v) => `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px;border-bottom:1px solid var(--border)"><span style="color:var(--dim)">${l}</span><span style="font-weight:600;font-family:'DM Mono',monospace">${v}</span></div>`;
   body.innerHTML =
-    row('Rom', S.rooms.length + ' stk') +
+    row('Rom', floorRooms.length + ' stk') +
     row('Totalt areal', totalAreaM2.toFixed(1) + ' m²') +
-    (strips.length > 0 ? row('Folie-striper', strips.length + ' stk') : '') +
-    (S.cables.length > 0 ? row('Kabler', S.cables.length + ' stk (' + cableLenM.toFixed(0) + ' m)') : '') +
+    (floorStrips.length > 0 ? row('Folie-striper', floorStrips.length + ' stk') : '') +
+    (floorCables.length > 0 ? row('Kabler', floorCables.length + ' stk (' + cableLenM.toFixed(0) + ' m)') : '') +
     (cov > 0 ? row('Dekningsgrad (folie)', cov + ' %') : '') +
     (totalAllW > 0 ? row('Total effekt', Math.round(totalAllW) + ' W') : '');
 }
@@ -5321,6 +5387,7 @@ function drawDimPreview(mp) {
 // ─── DIMENSION ANNOTATIONS (Målsetting chip) ──────────────────
 function drawAllDimAnnotations() {
   for (const room of S.rooms) {
+    if (!_roomOnActiveFloor(room)) continue;
     if (room.dimSnap && room.walls && room.points) _drawDimAnnotationsForRoom(room);
     if (room.stripDimSnap && room.points) _drawStripDimChainForRoom(room);
   }
@@ -5617,6 +5684,7 @@ function _drawStripDimChainForRoom(room) {
 // ─── ANNOTATION HIT TESTS ─────────────────────────────────────
 function hitAnnotation(sx,sy) {
   for (const room of S.rooms) {
+    if (!_roomOnActiveFloor(room)) continue;
     if (!room.dimSnap||!room.walls||!room.points) continue;
     const cxW=room.points.reduce((a,p)=>a+p.x,0)/room.points.length;
     const cyW=room.points.reduce((a,p)=>a+p.y,0)/room.points.length;
@@ -5656,7 +5724,7 @@ function hitAnnotGizmo(sx,sy) {
 // ─── USER DIM LINES ───────────────────────────────────────────
 function drawUserDimLines() {
   let _dims=[];
-  for (const room of S.rooms) { if (room.dims && room.dims.length) _dims=_dims.concat(room.dims); }
+  for (const room of S.rooms) { if (_roomOnActiveFloor(room) && room.dims && room.dims.length) _dims=_dims.concat(room.dims); }
   if(!_dims.length) return;
   const TICK=7, OVERHANG=6;
   ctx.save();
@@ -7070,11 +7138,12 @@ function roomItemHtml(room, indented) {
     const cp = HEATING_PRODUCTS.find(p => p.id === c.productId);
     const cnm = cp ? esc(cp.name) : 'Kabel';
     const clen = (c.totalLength_cm / 100).toFixed(1);
+    const cwatt = cp?.watt_per_m ? Math.round(cp.watt_per_m * c.totalLength_cm / 100) : null;
     return `<div class="strip-item${csel}${cind}"
       onclick="selectCable(${c.id});event.stopPropagation()">
       <span class="strip-ico">〰</span>
       <span class="strip-nm">${cnm}</span>
-      <span class="strip-len">${clen} m</span>
+      <span class="strip-len">${clen} m${cwatt ? ' · ' + cwatt + 'W' : ''}</span>
     </div>`;
   }).join('') : '';
 
@@ -7103,6 +7172,14 @@ function esc(s) {
 
 function selRoom(id) {
   S.ui.selectedRoomId=id; S.ui.selectedWallId=null;
+  // Switch to the room's floor if it's on a different floor
+  const _sr = S.rooms.find(r => r.id === id);
+  if (_sr && _sr.floorId && _sr.floorId !== S.ui.activeFloorId) {
+    S.ui.activeFloorId = _sr.floorId;
+    // Expand that floor in sidebar
+    const _sf = S.floors.find(f => f.id === _sr.floorId);
+    if (_sf) _sf.collapsed = false;
+  }
   fitRoom(id);
   renderSidebar(); updateWip();
 }
@@ -7193,7 +7270,26 @@ function editWallLen(roomId, wallId, span) {
 
 function toggleFloor(id) {
   const f=S.floors.find(f=>f.id===id);
-  if (f) { f.collapsed=!f.collapsed; renderSidebar(); }
+  if (f) {
+    // Switch active floor when clicking a floor header
+    if (S.ui.activeFloorId !== id) {
+      S.ui.activeFloorId = id;
+      // Clear selections from other floors
+      if (S.ui.selectedRoomId) {
+        const selRoom = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+        if (selRoom && selRoom.floorId !== id) {
+          S.ui.selectedRoomId = null;
+          S.ui.selectedStripId = null;
+          S.ui.selectedStripIds = new Set();
+          S.ui.selectedCableId = null;
+          S.ui.selectedHindringId = null;
+          S.ui.selectedWallId = null;
+        }
+      }
+    }
+    f.collapsed = !f.collapsed;
+    renderSidebar(); updateCtxBar(); render();
+  }
 }
 
 function startRename(id, el) {
@@ -8140,7 +8236,14 @@ function updateObjInfo() {
       if (_cv.minSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Min avstand</span><span class="soi-v">${Math.round(_cv.minSpacing.actual*10)} mm (min ${Math.round(_cv.minSpacing.min*10)} mm)</span></div>`;
       if (_cv.maxSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks avstand</span><span class="soi-v">${Math.round(_cv.maxSpacing.actual*10)} mm (maks ${Math.round(_cv.maxSpacing.max*10)} mm)</span></div>`;
       if (_cv.bendRadius) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Bøyeradius</span><span class="soi-v">${Math.round(_cv.bendRadius.actual*10)} mm (min ${Math.round(_cv.bendRadius.min*10)} mm)</span></div>`;
+      // Build supplier info rows
+      let _supHtml = '';
+      if (cp?.article_no) _supHtml += `<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(cp.article_no)}</span></div>`;
+      if (cp?.el_no) _supHtml += `<div class="soi-row"><span class="soi-k">El.nummer</span><span class="soi-v">${esc(cp.el_no)}</span></div>`;
+      if (cp?.supplier) _supHtml += `<div class="soi-row"><span class="soi-k">Leverandør</span><span class="soi-v">${esc(cp.supplier)}</span></div>`;
+      if (cp?.product_family) _supHtml += `<div class="soi-row"><span class="soi-k">Produktfamilie</span><span class="soi-v">${esc(cp.product_family)}</span></div>`;
       panel.innerHTML=`<div class="soi-title">🔌 ${esc(cp?.name||'Varmekabel')}</div>
+        ${_supHtml}
         <div class="soi-row"><span class="soi-k">Total lengde</span><span class="soi-v">${(cable.totalLength_cm/100).toFixed(1)} m</span></div>
         <div class="soi-row"><span class="soi-k">Avstand (cc)</span><span class="soi-v">${Math.round(cable.spacing_cm*10)} mm</span></div>
         <div class="soi-row"><span class="soi-k">Retning</span><span class="soi-v">${dirLabel}</span></div>
@@ -8226,11 +8329,12 @@ function hitTest(wx, wy) {
   // Check walls of selected room first for accuracy
   if (S.ui.selectedRoomId) {
     const r=S.rooms.find(r=>r.id===S.ui.selectedRoomId);
-    if (r) for (const wl of r.walls)
+    if (r && _roomOnActiveFloor(r)) for (const wl of r.walls)
       if (distSeg(wx,wy,wl.x1,wl.y1,wl.x2,wl.y2)<thr) return {roomId:r.id,wallId:wl.id};
   }
-  // All rooms, reverse (top-most first)
+  // All rooms on active floor, reverse (top-most first)
   for (const r of [...S.rooms].reverse()) {
+    if (!_roomOnActiveFloor(r)) continue;
     for (const wl of r.walls)
       if (distSeg(wx,wy,wl.x1,wl.y1,wl.x2,wl.y2)<thr) return {roomId:r.id,wallId:wl.id};
     if (ptInPoly(wx,wy,r.points)) return {roomId:r.id,wallId:null};
@@ -8481,6 +8585,7 @@ function hitVertex(sx, sy) {
 function hitHindring(wx, wy) {
   for (const h of S.hindrings) {
     if (!h.points || h.points.length < 3) continue;
+    if (!_roomIdOnActiveFloor(h.roomId)) continue;
     // Use bounding box so the entire visual area is clickable (incl. L-shapes)
     const xs=h.points.map(p=>p.x), ys=h.points.map(p=>p.y);
     if(wx>=Math.min(...xs)&&wx<=Math.max(...xs)&&wy>=Math.min(...ys)&&wy<=Math.max(...ys)) return h.id;
@@ -9473,7 +9578,7 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
     // ── Dim line click — select (keep selectedRoomId so room stays visible) ──
-    const _allDims=[]; for(const r of S.rooms){if(r.dims) for(const d of r.dims) _allDims.push(d);}
+    const _allDims=[]; for(const r of S.rooms){if(_roomOnActiveFloor(r) && r.dims) for(const d of r.dims) _allDims.push(d);}
     for (const dim of _allDims) {
       const off=dim.offset||0;
       const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
@@ -10642,7 +10747,7 @@ function _ctxBarItems() {
     const spMm = cable ? Math.round(cable.spacing_cm * 10) : 0;
     const lenM = cable ? (cable.totalLength_cm / 100).toFixed(1) : '0';
     return `<span class="ctxbar-lbl">🔌 Kabel</span>
-      <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Kabel'} — ${lenM} m</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Kabel'}${prod?.article_no ? ' ('+esc(prod.article_no)+')' : ''} — ${lenM} m</span>
       <button class="snap-chip" onclick="_cableSpacingDelta(-10)" title="Reduser avstand mellom baner">⟷ −</button>
       <span style="font-size:12px;padding:0 2px">${spMm} mm</span>
       <button class="snap-chip" onclick="_cableSpacingDelta(10)" title="Øk avstand mellom baner">⟷ +</button>
@@ -11082,10 +11187,12 @@ async function initSupabase() {
     ]);
     if (catRes.data)  PRODUCT_CATEGORIES = catRes.data;
     if (prodRes.data) HEATING_PRODUCTS   = prodRes.data;
-    // Apply supplier defaults for products missing min_gap_mm / min_wall_margin_mm
+    // Apply supplier defaults for products missing rule columns
     for (const p of HEATING_PRODUCTS) {
-      if (p.min_gap_mm == null)         p.min_gap_mm = 10;          // Cenika default
-      if (p.min_wall_margin_mm == null) p.min_wall_margin_mm = 25;  // Cenika default
+      if (p.min_gap_mm == null)              p.min_gap_mm = 10;           // Cenika default
+      if (p.min_wall_margin_mm == null)      p.min_wall_margin_mm = 25;   // Cenika default
+      if (p.min_obstacle_distance_mm == null) p.min_obstacle_distance_mm = 50;  // 5cm standard
+      if (p.min_drain_distance_mm == null)    p.min_drain_distance_mm = 100;    // 10cm standard
     }
     console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
     _ensureCableTestProducts();
