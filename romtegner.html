@@ -1027,6 +1027,7 @@ const S = {
   rooms    : [],
   hindrings: [],
   strips   : [],   // [{id,roomId,productId,direction,pos_cm,start_cm,length_cm}]
+  cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm}]
   groups   : [],   // [{id,name,stripIds:[]}]
   ui : {
     selectedRoomId  : null,
@@ -1052,6 +1053,7 @@ const S = {
     wallThicknessModeWallId: null,
     wallThicknessOriginal: null,   // for undo on ESC
     selectedStripId: null,       // selected strip id
+    selectedCableId: null,       // selected cable id
     manualPlaceMode: false,      // manual strip placement active
     manualFamilyName: null,      // family name for manual placement
     manualCategoryId: null,      // category id for manual placement
@@ -1101,7 +1103,7 @@ const S = {
     outerWallLiveSide: 'out'
   },
   snap     : { grid:false, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1 },
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   bgs: {}   // keyed by floor id (number) or '__global__'
@@ -1278,11 +1280,14 @@ function render() {
   _needsRender = false;   // we're rendering now — rAF loop can skip until next change
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   _violationsDirty = true;
+  _cableViolationsDirty = true;
   _recomputeViolationsIfDirty();
+  _recomputeCableViolationsIfDirty();
   drawBgImage();
   drawGrid();
   drawRooms();
   drawStrips();
+  drawCables();
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
   drawAllDimAnnotations();
@@ -1382,8 +1387,21 @@ function _computeRoomStats(room) {
     stripAreaCm2 += nc * s.length_cm;
   }
   const stripM2 = stripAreaCm2 / 10000;
-  const totalW = Math.round(stripM2 * 60); // 60 W/m² locked for FlexFoil
-  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW };
+  let foilW = 0;
+  for (const s of roomStrips) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
+    if (p?.watt_per_lm) foilW += p.watt_per_lm * s.length_cm / 100;
+    else foilW += _stripNettoCm(s) * s.length_cm / 10000 * 60; // fallback 60 W/m²
+  }
+  let cableW = 0, cableLenM = 0;
+  for (const cab of _cablesForRoom(room.id)) {
+    const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId);
+    const lenM = (cab.totalLength_cm || 0) / 100;
+    cableLenM += lenM;
+    cableW += (cp?.watt_per_m || 0) * lenM;
+  }
+  const totalW = Math.round(foilW + cableW);
+  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM };
 }
 
 function _computeStripGaps(room) {
@@ -1443,12 +1461,16 @@ function drawRoomCard(room) {
     ['Brutto areal',    stats.bruttoM2.toFixed(2) + ' m²'],
     ['Netto areal',     stats.nettoM2.toFixed(2)  + ' m²'],
     ['Hindringer',      stats.hindM2.toFixed(2)   + ' m²'],
-    ['Dekket av VF',    stats.stripM2.toFixed(2)  + ' m²'],
-    ['Udekket',         stats.uncoveredM2.toFixed(2) + ' m²'],
-    ['Avstand striper', _formatGaps(gaps)],
-    ['Installert effekt', stats.totalW + ' W'],
-    ['Flate effekt',    '60 W/m²'],
   ];
+  if (stats.stripM2 > 0) {
+    rows.push(['Dekket av VF',    stats.stripM2.toFixed(2)  + ' m²']);
+    rows.push(['Udekket',         stats.uncoveredM2.toFixed(2) + ' m²']);
+    rows.push(['Avstand striper', _formatGaps(gaps)]);
+  }
+  if (stats.cableLenM > 0) {
+    rows.push(['Kabellengde', stats.cableLenM.toFixed(1) + ' m']);
+  }
+  rows.push(['Installert effekt', stats.totalW + ' W']);
   const H = HHEAD + PAD + rows.length * HROW + PAD;
   const x = sp.x, y = sp.y;
   ctx.save();
@@ -1984,7 +2006,12 @@ function openFamilyMenu(e, categoryId) {
 }
 function openPlacementMenu(e, familyName, categoryId) {
   e.stopPropagation();
-  showVfPlacePanel(familyName, categoryId);
+  const modType = _categoryModuleType(categoryId);
+  if (modType === 'cable') {
+    showCablePlacePanel(familyName, categoryId);
+  } else {
+    showVfPlacePanel(familyName, categoryId);
+  }
 }
 
 function showVfPlacePanel(familyName, categoryId) {
@@ -2012,6 +2039,23 @@ function showVfPlacePanel(familyName, categoryId) {
 function hideVfPlacePanel() {
   const s = document.getElementById('rwp-product-actions');
   if (s) s.style.display = 'none';
+}
+
+function showCablePlacePanel(familyName, categoryId) {
+  S.ui.manualFamilyName = familyName;
+  S.ui.manualCategoryId = categoryId;
+  hideProduktMenu();
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
+  const section = document.getElementById('rwp-product-actions');
+  if (section) {
+    section.innerHTML = `
+      <div class="rwp-section-label">🔌 ${esc(familyName)}</div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <div class="ctx-item vfp-btn" onclick="autoPlaceCable(${sq(familyName)},${categoryId});hideVfPlacePanel();">Automatisk</div>
+      </div>`;
+    section.style.display = 'block';
+  }
+  showRoomWorkflowPanel();
 }
 
 // Width selector — opens before auto-fill so user can cap max starting width
@@ -2459,6 +2503,126 @@ function cancelSeedMode() {
   S.ui.seedRoomId = null;
   canvas.style.cursor = 'default';
   updateCtxBar();
+}
+
+// ─── CABLE SERPENTINE LAYOUT ENGINE ──────────────────────────
+
+/**
+ * Generate serpentine cable pattern inside a room.
+ * Returns { runs, totalLength_cm } or null on failure.
+ * runs = [{ pos_cm, segments: [{start_cm, end_cm}] }, ...]
+ */
+function generateCableSerpentine(roomId, productId, direction, spacing_cm, startCorner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const margin = _effectiveMarginCm(productId);
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+  // Perpendicular axis: cable runs sweep across this axis
+  const perpMin = direction === 'v' ? minX : minY;
+  const perpMax = direction === 'v' ? maxX : maxY;
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+
+  const runs = [];
+  let pos = startFromHigh ? (perpMax - margin) : (perpMin + margin);
+  const step = startFromHigh ? -spacing_cm : spacing_cm;
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const roomH = S.hindrings.filter(h => h.roomId === roomId);
+
+  const inBounds = () => startFromHigh ? (pos >= perpMin + margin) : (pos <= perpMax - margin);
+
+  while (inBounds()) {
+    // Cable is a line (zero width) — get intervals along sweep axis
+    let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
+    // Shrink by wall margin
+    intervals = intervals.map(([lo, hi]) => [lo + margin, hi - margin]).filter(([lo, hi]) => hi > lo);
+    // Subtract hindrings
+    for (const h of roomH) {
+      if (!h.points || h.points.length < 3) continue;
+      const hIntervals = clipScanlineToPolygon(sweepAxis, pos, h.points);
+      const hExpanded = hIntervals.map(([lo, hi]) => [lo - margin, hi + margin]);
+      intervals = subtractIntervalSets(intervals, hExpanded);
+    }
+    if (intervals.length > 0) {
+      runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
+    }
+    pos += step;
+  }
+
+  // Calculate total length: segments + U-turns
+  let totalLength = 0;
+  for (const run of runs) {
+    for (const seg of run.segments) totalLength += Math.abs(seg.end_cm - seg.start_cm);
+  }
+  // U-turns: half-circle with radius = spacing/2
+  const uTurnLength = Math.PI * (spacing_cm / 2);
+  if (runs.length > 1) totalLength += (runs.length - 1) * uTurnLength;
+
+  return { runs, totalLength_cm: totalLength };
+}
+
+/**
+ * Auto-fill cable: picks optimal direction & spacing, returns cable object ready for insertion.
+ */
+function autoFillCable(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  const minSp = (prod.min_spacing_mm || 60) / 10;   // cm
+  const maxSp = (prod.max_spacing_mm || 120) / 10;
+  const recSp = (prod.recommended_spacing_mm || ((prod.min_spacing_mm||60)+(prod.max_spacing_mm||120))/2) / 10;
+  const spacing = Math.max(minSp, Math.min(maxSp, recSp));
+
+  // Try both directions, pick best coverage
+  const dirV = _suggestDirection(room);
+  const dirAlt = dirV === 'v' ? 'h' : 'v';
+  const rV = generateCableSerpentine(roomId, productId, dirV, spacing, 'bl');
+  const rA = generateCableSerpentine(roomId, productId, dirAlt, spacing, 'bl');
+  const lenV = rV ? rV.totalLength_cm : 0;
+  const lenA = rA ? rA.totalLength_cm : 0;
+
+  let best, bestDir;
+  if (lenA > lenV * 1.05) {
+    best = rA; bestDir = dirAlt;
+  } else {
+    best = rV || rA; bestDir = (rV ? dirV : dirAlt);
+  }
+  if (!best || best.runs.length === 0) return null;
+
+  return {
+    id: S.counters.nextCableId++,
+    roomId,
+    productId,
+    direction: bestDir,
+    spacing_cm: spacing,
+    startCorner: 'bl',
+    runs: best.runs,
+    totalLength_cm: best.totalLength_cm
+  };
+}
+
+/**
+ * Place cable automatically in selected room.
+ */
+function autoPlaceCable(familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  // Pick first product in family
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName));
+  if (!prods.length) return;
+  const prod = prods[0];
+
+  pushUndo();
+  const cable = autoFillCable(roomId, prod.id);
+  if (!cable) { console.warn('autoPlaceCable: could not generate cable layout'); return; }
+  S.cables.push(cable); _invalidateCableCache();
+  S.ui.selectedCableId = cable.id;
+  renderSidebar(); updateCtxBar(); render();
 }
 
 // ─── AUTOMATIC DIRECTION DETECTION ───────────────────────────
@@ -3374,6 +3538,167 @@ function drawStrips() {
   }
 }
 
+// ─── CABLE RENDERING ──────────────────────────────────────────
+let _hoveredCableId = null;
+
+function drawCables() {
+  for (const cable of S.cables) {
+    const room = S.rooms.find(r => r.id === cable.roomId);
+    if (!room || !cable.runs || cable.runs.length === 0) continue;
+
+    const isSel = S.ui.selectedCableId === cable.id;
+    const isHov = !isSel && _hoveredCableId === cable.id;
+
+    ctx.save();
+    // Clip to room polygon
+    const spts = room.points.map(p => w2s(p.x, p.y));
+    ctx.beginPath(); ctx.moveTo(spts[0].x, spts[0].y);
+    for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
+    ctx.closePath(); ctx.clip();
+
+    ctx.strokeStyle = isSel ? _lc('#e04020','#ff6040')
+                    : isHov ? _lc('#50c830','#70e850')
+                    :         _lc('#c06030','#e08050');
+    ctx.lineWidth = isSel ? 2.5 : isHov ? 2 : 1.5;
+    ctx.setLineDash([]);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Draw run segments
+    for (const run of cable.runs) {
+      for (const seg of run.segments) {
+        let p1, p2;
+        if (cable.direction === 'v') {
+          p1 = w2s(run.pos_cm, seg.start_cm);
+          p2 = w2s(run.pos_cm, seg.end_cm);
+        } else {
+          p1 = w2s(seg.start_cm, run.pos_cm);
+          p2 = w2s(seg.end_cm, run.pos_cm);
+        }
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      }
+    }
+
+    // Draw U-turns between adjacent runs
+    _drawCableUTurns(cable);
+
+    // Violation overlay
+    const cViol = _getCableViolation(cable.id);
+    if (cViol.hasAny) {
+      // Draw dashed red border around cable bounding box
+      const allPos = cable.runs.map(r => r.pos_cm);
+      const allSweep = cable.runs.flatMap(r => r.segments.flatMap(s => [s.start_cm, s.end_cm]));
+      const bMin = Math.min(...allPos) - cable.spacing_cm/2;
+      const bMax = Math.max(...allPos) + cable.spacing_cm/2;
+      const sMin = Math.min(...allSweep);
+      const sMax = Math.max(...allSweep);
+      let p1, p2;
+      if (cable.direction === 'v') {
+        p1 = w2s(bMin, sMin); p2 = w2s(bMax, sMax);
+      } else {
+        p1 = w2s(sMin, bMin); p2 = w2s(sMax, bMax);
+      }
+      ctx.save();
+      ctx.strokeStyle = _lc('rgba(220,38,38,0.85)','rgba(255,80,80,0.9)');
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // Cable label at center
+    if (S.ui.showStripLabels && cable.runs.length > 0) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+      if (prod) {
+        // Find center of cable area
+        const allPos = cable.runs.map(r => r.pos_cm);
+        const allSweep = cable.runs.flatMap(r => r.segments.flatMap(s => [s.start_cm, s.end_cm]));
+        const cPerp = (Math.min(...allPos) + Math.max(...allPos)) / 2;
+        const cSweep = (Math.min(...allSweep) + Math.max(...allSweep)) / 2;
+        const cPt = cable.direction === 'v' ? w2s(cPerp, cSweep) : w2s(cSweep, cPerp);
+
+        const fontSize = 10;
+        const name = prod.name;
+        const lengthM = (cable.totalLength_cm / 100).toFixed(1) + ' m';
+
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.translate(cPt.x, cPt.y);
+
+        // Background frame
+        ctx.font = `bold ${fontSize}px 'DM Sans',sans-serif`;
+        const nameW = ctx.measureText(name).width;
+        ctx.font = `${Math.round(fontSize * 0.88)}px 'DM Mono',monospace`;
+        const lenW = ctx.measureText(lengthM).width;
+        const padX = 8, padY = 4, lineH = fontSize + 3;
+        const frameW = Math.max(nameW, lenW) + padX * 2;
+        const frameH = lineH * 2 + padY * 2;
+        const fx = -frameW/2, fy = -frameH/2, r = 5;
+
+        ctx.beginPath();
+        ctx.moveTo(fx+r, fy); ctx.lineTo(fx+frameW-r, fy);
+        ctx.quadraticCurveTo(fx+frameW, fy, fx+frameW, fy+r);
+        ctx.lineTo(fx+frameW, fy+frameH-r);
+        ctx.quadraticCurveTo(fx+frameW, fy+frameH, fx+frameW-r, fy+frameH);
+        ctx.lineTo(fx+r, fy+frameH);
+        ctx.quadraticCurveTo(fx, fy+frameH, fx, fy+frameH-r);
+        ctx.lineTo(fx, fy+r);
+        ctx.quadraticCurveTo(fx, fy, fx+r, fy);
+        ctx.closePath();
+        ctx.fillStyle = _lc('rgba(255,255,255,0.92)','rgba(12,18,28,0.78)');
+        ctx.strokeStyle = _lc('rgba(180,80,30,0.7)','rgba(255,140,60,0.65)');
+        ctx.lineWidth = 1; ctx.fill(); ctx.stroke();
+
+        ctx.font = `bold ${fontSize}px 'DM Sans',sans-serif`;
+        ctx.fillStyle = _lc('rgba(20,30,50,0.95)','rgba(255,255,255,0.95)');
+        ctx.fillText(name, 0, -lineH/2);
+        ctx.font = `${Math.round(fontSize*0.88)}px 'DM Mono',monospace`;
+        ctx.fillStyle = _lc('rgba(180,80,30,0.95)','rgba(255,140,60,0.92)');
+        ctx.fillText(lengthM, 0, lineH/2);
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+function _drawCableUTurns(cable) {
+  if (cable.runs.length < 2) return;
+
+  for (let i = 0; i < cable.runs.length - 1; i++) {
+    const runA = cable.runs[i], runB = cable.runs[i + 1];
+    if (!runA.segments.length || !runB.segments.length) continue;
+
+    // Alternating connection: even index → connect at high end, odd → connect at low end
+    const connectHigh = (i % 2 === 0);
+    const segA = connectHigh ? runA.segments[runA.segments.length - 1] : runA.segments[0];
+    const segB = connectHigh ? runB.segments[runB.segments.length - 1] : runB.segments[0];
+    const endA = connectHigh ? segA.end_cm : segA.start_cm;
+    const endB = connectHigh ? segB.end_cm : segB.start_cm;
+
+    let pA, pB;
+    if (cable.direction === 'v') {
+      pA = w2s(runA.pos_cm, endA);
+      pB = w2s(runB.pos_cm, endB);
+    } else {
+      pA = w2s(endA, runA.pos_cm);
+      pB = w2s(endB, runB.pos_cm);
+    }
+
+    // Draw arc (half-circle) between the two endpoints
+    const midX = (pA.x + pB.x) / 2, midY = (pA.y + pB.y) / 2;
+    const radius = Math.hypot(pB.x - pA.x, pB.y - pA.y) / 2;
+    if (radius < 1) continue;
+
+    const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+    ctx.beginPath();
+    ctx.arc(midX, midY, radius, angle + Math.PI, angle, false);
+    ctx.stroke();
+  }
+}
+
 function hitStrip(wx, wy) {
   const tol = 2 / (S.view.zoom * BASE_SCALE); // 2px hit-tolerance — locked, snap-independent
   for (let i = S.strips.length - 1; i >= 0; i--) {
@@ -3389,6 +3714,65 @@ function hitStrip(wx, wy) {
     }
   }
   return null;
+}
+
+/** Hit-test cables — returns cable object or null */
+function hitCable(wx, wy) {
+  const tolCm = 5 / (S.view.zoom * BASE_SCALE); // ~5px tolerance in world coords
+  for (let i = S.cables.length - 1; i >= 0; i--) {
+    const cable = S.cables[i];
+    if (!cable.runs) continue;
+    for (const run of cable.runs) {
+      for (const seg of run.segments) {
+        let x1, y1, x2, y2;
+        if (cable.direction === 'v') {
+          x1 = run.pos_cm; y1 = seg.start_cm;
+          x2 = run.pos_cm; y2 = seg.end_cm;
+        } else {
+          x1 = seg.start_cm; y1 = run.pos_cm;
+          x2 = seg.end_cm;   y2 = run.pos_cm;
+        }
+        if (distSeg(wx, wy, x1, y1, x2, y2) <= tolCm) return cable;
+      }
+    }
+    // Also check U-turns (approximate as line between endpoints)
+    for (let j = 0; j < cable.runs.length - 1; j++) {
+      const rA = cable.runs[j], rB = cable.runs[j+1];
+      if (!rA.segments.length || !rB.segments.length) continue;
+      const connectHigh = (j % 2 === 0);
+      const sA = connectHigh ? rA.segments[rA.segments.length-1] : rA.segments[0];
+      const sB = connectHigh ? rB.segments[rB.segments.length-1] : rB.segments[0];
+      const eA = connectHigh ? sA.end_cm : sA.start_cm;
+      const eB = connectHigh ? sB.end_cm : sB.start_cm;
+      let x1, y1, x2, y2;
+      if (cable.direction === 'v') {
+        x1 = rA.pos_cm; y1 = eA; x2 = rB.pos_cm; y2 = eB;
+      } else {
+        x1 = eA; y1 = rA.pos_cm; x2 = eB; y2 = rB.pos_cm;
+      }
+      if (distSeg(wx, wy, x1, y1, x2, y2) <= tolCm) return cable;
+    }
+  }
+  return null;
+}
+
+function selectCable(id) {
+  S.ui.selectedCableId = id;
+  S.ui.selectedStripId = null;
+  S.ui.selectedStripIds = new Set();
+  const cable = S.cables.find(c => c.id === id);
+  if (cable) {
+    S.ui.selectedRoomId = cable.roomId;
+    S.ui.selectedWallId = null;
+    S.ui.selectedHindringId = null;
+    S.ui.selectedVertexIdx = null;
+  }
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function deselectCable() {
+  S.ui.selectedCableId = null;
+  renderSidebar(); updateCtxBar(); render();
 }
 
 // ── Strip cache (room-indexed lookup) ──────────────────────
@@ -3417,6 +3801,19 @@ function _stripsForRoomDir(roomId, direction) {
   if (c && c.v === _stripCacheVer) return c.d;
   const d = S.strips.filter(s => s.roomId === roomId && s.direction === direction);
   _stripCacheStore[key] = { v: _stripCacheVer, d };
+  return d;
+}
+
+// ── Cable cache (same pattern as strip cache) ──
+let _cableCacheVer = 0;
+const _cableCacheStore = {};
+function _invalidateCableCache() { _cableCacheVer++; }
+function _cablesForRoom(roomId) {
+  const key = 'r_' + roomId;
+  const c = _cableCacheStore[key];
+  if (c && c.v === _cableCacheVer) return c.d;
+  const d = S.cables.filter(c => c.roomId === roomId);
+  _cableCacheStore[key] = { v: _cableCacheVer, d };
   return d;
 }
 
@@ -3853,9 +4250,62 @@ function _showPostDeleteActions(roomId, deletedProd) {
   // Extract family name from product (e.g. "FlexFoil" from "FlexFoil B=140cm")
   const familyName = deletedProd.name.split(' ')[0];
   const categoryId = deletedProd.category_id;
+  const modType = _categoryModuleType(categoryId);
   // Show workflow panel with placement options for the deleted product family
   showRoomWorkflowPanel();
-  showVfPlacePanel(familyName, categoryId);
+  if (modType === 'cable') {
+    showCablePlacePanel(familyName, categoryId);
+  } else {
+    showVfPlacePanel(familyName, categoryId);
+  }
+}
+
+function deleteCable(id) {
+  const cable = S.cables.find(c => c.id === id);
+  const roomId = cable?.roomId;
+  const prod = cable ? HEATING_PRODUCTS.find(p => p.id === cable.productId) : null;
+  pushUndo();
+  S.cables = S.cables.filter(c => c.id !== id); _invalidateCableCache();
+  S.ui.selectedCableId = null;
+  if (roomId) {
+    S.ui.selectedRoomId = roomId;
+    _showPostDeleteActions(roomId, prod);
+  }
+  renderSidebar(); updateCtxBar(); render();
+}
+
+/** Adjust cable spacing by deltaMm (e.g. +10 or -10) and regenerate layout */
+function _cableSpacingDelta(deltaMm) {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable) return;
+  const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+  const minSp = prod?.min_spacing_mm ? prod.min_spacing_mm / 10 : 4;
+  const maxSp = prod?.max_spacing_mm ? prod.max_spacing_mm / 10 : 20;
+  const newSpacing = Math.max(minSp, Math.min(maxSp, cable.spacing_cm + deltaMm / 10));
+  if (newSpacing === cable.spacing_cm) return;
+  pushUndo();
+  const result = generateCableSerpentine(cable.roomId, cable.productId, cable.direction, newSpacing, cable.startCorner);
+  if (result) {
+    cable.spacing_cm = newSpacing;
+    cable.runs = result.runs;
+    cable.totalLength_cm = result.totalLength_cm;
+  }
+  renderSidebar(); updateCtxBar(); render();
+}
+
+/** Flip cable direction (v↔h) and regenerate layout */
+function _cableFlipDirection() {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable) return;
+  pushUndo();
+  const newDir = cable.direction === 'v' ? 'h' : 'v';
+  const result = generateCableSerpentine(cable.roomId, cable.productId, newDir, cable.spacing_cm, cable.startCorner);
+  if (result) {
+    cable.direction = newDir;
+    cable.runs = result.runs;
+    cable.totalLength_cm = result.totalLength_cm;
+  }
+  renderSidebar(); updateCtxBar(); render();
 }
 
 // ── Folie-grupper ────────────────────────────────────────────
@@ -4195,14 +4645,24 @@ function updateStatsWidget() {
     stripAreaM2 += nwM * lenM;
     totalW += (p.effect_w || p.watt || p.power_w || 0) / Math.max(1, (p.length_m || 1)) * lenM;
   }
+  // Cable power
+  let cableW = 0, cableLenM = 0;
+  for (const cab of S.cables) {
+    const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId); if (!cp) continue;
+    const lenM = (cab.totalLength_cm || 0) / 100;
+    cableLenM += lenM;
+    cableW += (cp.watt_per_m || 0) * lenM;
+  }
+  const totalAllW = totalW + cableW;
   const cov = totalAreaM2 > 0 ? Math.round(stripAreaM2 / totalAreaM2 * 100) : 0;
   const row = (l, v) => `<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px;border-bottom:1px solid var(--border)"><span style="color:var(--dim)">${l}</span><span style="font-weight:600;font-family:'DM Mono',monospace">${v}</span></div>`;
   body.innerHTML =
     row('Rom', S.rooms.length + ' stk') +
     row('Totalt areal', totalAreaM2.toFixed(1) + ' m²') +
-    row('Striper', strips.length + ' stk') +
-    row('Dekningsgrad', cov + ' %') +
-    (totalW > 0 ? row('Est. effekt', Math.round(totalW) + ' W') : '');
+    (strips.length > 0 ? row('Folie-striper', strips.length + ' stk') : '') +
+    (S.cables.length > 0 ? row('Kabler', S.cables.length + ' stk (' + cableLenM.toFixed(0) + ' m)') : '') +
+    (cov > 0 ? row('Dekningsgrad (folie)', cov + ' %') : '') +
+    (totalAllW > 0 ? row('Total effekt', Math.round(totalAllW) + ' W') : '');
 }
 
 // ─── SNAP WIDGET ─────────────────────────────────────────────
@@ -6602,6 +7062,22 @@ function roomItemHtml(room, indented) {
     </div>${hwallsHtml}`;
   }).join('');
 
+  // Cable items for this room
+  const roomCables = _cablesForRoom(room.id);
+  const cablesHtml = exp ? roomCables.map(c => {
+    const csel = S.ui.selectedCableId === c.id ? ' sel' : '';
+    const cind = indented ? ' indented' : '';
+    const cp = HEATING_PRODUCTS.find(p => p.id === c.productId);
+    const cnm = cp ? esc(cp.name) : 'Kabel';
+    const clen = (c.totalLength_cm / 100).toFixed(1);
+    return `<div class="strip-item${csel}${cind}"
+      onclick="selectCable(${c.id});event.stopPropagation()">
+      <span class="strip-ico">〰</span>
+      <span class="strip-nm">${cnm}</span>
+      <span class="strip-len">${clen} m</span>
+    </div>`;
+  }).join('') : '';
+
   return `<div class="room-item${sel?' sel':''}${indented?' indented':''}"
     onclick="selRoom(${room.id})"
     ondblclick="startRename(${room.id},this)"
@@ -6615,8 +7091,8 @@ function roomItemHtml(room, indented) {
       </div>
     </div>
     <button class="room-card-btn${room.cardVisible?' active':''}" onclick="toggleRoomCard(${room.id});event.stopPropagation()" title="${room.cardVisible?'Skjul':'Vis'} infokort">📋</button>
-    ${(hasWalls || roomStripsItem.length || roomHindrings.length || roomGroups.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
-  </div>${wallsHtml}${groupsHtml}${stripsHtml}${hindringsHtml}`;
+    ${(hasWalls || roomStripsItem.length || roomCables.length || roomHindrings.length || roomGroups.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
+  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${hindringsHtml}`;
 }
 
 function esc(s) {
@@ -7651,6 +8127,30 @@ function updateObjInfo() {
       panel.style.display='block'; return;
     }
   }
+  if(S.ui.selectedCableId!==null) {
+    const cable=S.cables.find(c=>c.id===S.ui.selectedCableId);
+    if(cable) {
+      const cp=HEATING_PRODUCTS.find(p=>p.id===cable.productId);
+      const wattPerM=cp?.watt_per_m||0;
+      const totalWatt=wattPerM ? Math.round(wattPerM * cable.totalLength_cm / 100) : null;
+      const dirLabel = cable.direction==='v' ? 'Vertikal' : 'Horisontal';
+      const _cv = _getCableViolation(cable.id);
+      let _cvHtml = '';
+      if (_cv.maxLength) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks lengde</span><span class="soi-v">${_cv.maxLength.actual.toFixed(1)} m (maks ${_cv.maxLength.max} m)</span></div>`;
+      if (_cv.minSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Min avstand</span><span class="soi-v">${Math.round(_cv.minSpacing.actual*10)} mm (min ${Math.round(_cv.minSpacing.min*10)} mm)</span></div>`;
+      if (_cv.maxSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks avstand</span><span class="soi-v">${Math.round(_cv.maxSpacing.actual*10)} mm (maks ${Math.round(_cv.maxSpacing.max*10)} mm)</span></div>`;
+      if (_cv.bendRadius) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Bøyeradius</span><span class="soi-v">${Math.round(_cv.bendRadius.actual*10)} mm (min ${Math.round(_cv.bendRadius.min*10)} mm)</span></div>`;
+      panel.innerHTML=`<div class="soi-title">🔌 ${esc(cp?.name||'Varmekabel')}</div>
+        <div class="soi-row"><span class="soi-k">Total lengde</span><span class="soi-v">${(cable.totalLength_cm/100).toFixed(1)} m</span></div>
+        <div class="soi-row"><span class="soi-k">Avstand (cc)</span><span class="soi-v">${Math.round(cable.spacing_cm*10)} mm</span></div>
+        <div class="soi-row"><span class="soi-k">Retning</span><span class="soi-v">${dirLabel}</span></div>
+        <div class="soi-row"><span class="soi-k">Antall løp</span><span class="soi-v">${cable.runs.length}</span></div>
+        ${totalWatt?`<div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${totalWatt} W</span></div>`:''}
+        ${_cvHtml}
+        <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteCable(${cable.id})">✕ Slett kabel</button></div>`;
+      panel.style.display='block'; return;
+    }
+  }
   if(S.ui.selectedHindringId) {
     const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId);
     if(h&&h.points) {
@@ -8332,9 +8832,11 @@ function pushUndo() {
     rooms:     S.rooms.map(r=>({...r, points:r.points.map(p=>({x:p.x,y:p.y})), walls:(r.walls||[]).map(w=>({...w}))})),
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({x:p.x,y:p.y}))})),
     strips:    S.strips.map(s=>({...s})),
+    cables:    S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     groups:    S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     nextStripId: S.counters.nextStripId,
     nextGroupId: S.counters.nextGroupId,
+    nextCableId: S.counters.nextCableId,
     gapCm: S.varmefolie.gapCm
   });
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
@@ -8349,6 +8851,10 @@ function undo() {
     S.counters.nextStripId = prev.nextStripId;
     if (prev.gapCm !== undefined) S.varmefolie.gapCm = prev.gapCm;
   }
+  if (prev.cables !== undefined) {
+    S.cables = prev.cables; _invalidateCableCache();
+    S.counters.nextCableId = prev.nextCableId;
+  }
   if (prev.groups !== undefined) {
     S.groups = prev.groups;
     S.counters.nextGroupId = prev.nextGroupId;
@@ -8361,6 +8867,9 @@ function undo() {
   }
   if (S.ui.selectedStripId !== null && !S.strips.find(s=>s.id===S.ui.selectedStripId)) {
     S.ui.selectedStripId = null;
+  }
+  if (S.ui.selectedCableId !== null && !S.cables.find(c=>c.id===S.ui.selectedCableId)) {
+    S.ui.selectedCableId = null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
 }
@@ -8905,6 +9414,13 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Cable body click — select ──
+    const hc=hitCable(rawWp0.x, rawWp0.y);
+    if (hc) {
+      selectCable(hc.id);
+      return;
+    }
+
     // ── Hindring body click — select + start drag immediately ──
     const hhid=hitHindring(rawWp0.x, rawWp0.y);
     if (hhid !== null) {
@@ -8990,9 +9506,10 @@ canvas.addEventListener('mousedown', e=>{
       S.ui.movingWall=false;
       renderSidebar(); updateWip();
     } else if (hit?.roomId && hit.roomId===S.ui.selectedRoomId) {
-      // Room body click — clear ALL sub-selections (including strips), room stays selected
+      // Room body click — clear ALL sub-selections (including strips & cables), room stays selected
       S.ui.selectedStripId=null;
       S.ui.selectedStripIds=new Set();
+      S.ui.selectedCableId=null;
       S.ui.selectedWallId=null;
       S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
       S.ui.selectedVertexIdx=null;
@@ -9522,10 +10039,16 @@ canvas.addEventListener('mousemove', e=>{
       const cRect2=canvas.getBoundingClientRect();
       const sx2=e.clientX-cRect2.left, sy2=e.clientY-cRect2.top;
       const rawWp2=s2w(sx2,sy2); // raw unsnapped world pos for hover hit tests
-      // ── Hover tracking for strip highlight ──
+      // ── Hover tracking for strip & cable highlight ──
       const _hovHit = hitStrip(rawWp2.x, rawWp2.y);
       const _newHovId = _hovHit ? _hovHit.id : null;
-      if (_newHovId !== _hoveredStripId) { _hoveredStripId = _newHovId; render(); }
+      const _hovCableHit = hitCable(rawWp2.x, rawWp2.y);
+      const _newHovCableId = _hovCableHit ? _hovCableHit.id : null;
+      if (_newHovId !== _hoveredStripId || _newHovCableId !== _hoveredCableId) {
+        _hoveredStripId = _newHovId;
+        _hoveredCableId = _newHovCableId;
+        render();
+      }
       if (hitRotCircle(sx2, sy2)) {
         canvas.style.cursor='crosshair';        // rotate drag handle
       } else if (hitRoomGizmoX(sx2, sy2)) {
@@ -9568,6 +10091,8 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor=_wallMoveCursor();  // wall move arrow — direction matches wall orientation
       } else if (hitStrip(rawWp2.x, rawWp2.y)) {
         canvas.style.cursor='pointer';          // selectable strip body
+      } else if (hitCable(rawWp2.x, rawWp2.y)) {
+        canvas.style.cursor='pointer';          // selectable cable body
       } else if (hitHindring(rawWp2.x, rawWp2.y) !== null) {
         canvas.style.cursor='pointer';          // selectable hindring body
       } else if (hitRoomCard(sx2, sy2)) {
@@ -9837,6 +10362,7 @@ document.addEventListener('keydown', e=>{
   if ((e.ctrlKey||e.metaKey)&&e.key==='r') { e.preventDefault(); setTransformMode('rotate'); return; }
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
   if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
+  if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   // Edit 6: Arrow keys move selected strip (no modifier = 10cm step)
   if (S.ui.selectedStripId!==null && !S.ui.drawMode && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
@@ -10109,6 +10635,22 @@ function _ctxBarItems() {
       <button class="snap-chip${stripRoom?.stripDimSnap?' on':''}" id="chip-dim-folie" onclick="toggleStripDimSnap()"><span class="snap-dot"></span>Målsett Folie</button>`;
   }
 
+  // Cable selected
+  if (ui.selectedCableId) {
+    const cable = S.cables.find(c => c.id === ui.selectedCableId);
+    const prod = cable ? HEATING_PRODUCTS.find(p => p.id === cable.productId) : null;
+    const spMm = cable ? Math.round(cable.spacing_cm * 10) : 0;
+    const lenM = cable ? (cable.totalLength_cm / 100).toFixed(1) : '0';
+    return `<span class="ctxbar-lbl">🔌 Kabel</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Kabel'} — ${lenM} m</span>
+      <button class="snap-chip" onclick="_cableSpacingDelta(-10)" title="Reduser avstand mellom baner">⟷ −</button>
+      <span style="font-size:12px;padding:0 2px">${spMm} mm</span>
+      <button class="snap-chip" onclick="_cableSpacingDelta(10)" title="Øk avstand mellom baner">⟷ +</button>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="_cableFlipDirection()" title="Bytt retning (V↔H)">↻ Retning</button>
+      <button class="snap-chip" onclick="deleteCable(${ui.selectedCableId})" title="Slett kabel">🗑 Slett</button>`;
+  }
+
   // Hindring selected
   if (ui.selectedHindringId) {
     const hindDimOn = room?.dims?.some(d=>d.auto==='hindring');
@@ -10246,6 +10788,7 @@ function _buildSaveData() {
     })),
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({...p}))})),
     strips   : S.strips.map(s=>({...s})),
+    cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -10330,12 +10873,16 @@ function _restoreProject(data) {
   S.rooms     = data.rooms     || [];
   S.hindrings = data.hindrings || [];
   S.strips    = data.strips    || [];
+  S.cables    = data.cables    || [];
   S.counters  = data.counters  || S.counters;
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
+  if (!S.counters.nextCableId) S.counters.nextCableId = 1;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
   S.ui.selectedStripId = null;
+  S.ui.selectedCableId = null;
+  _invalidateCableCache();
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; if(r.wallThicknessCm==null) r.wallThicknessCm=0; if(r.stripDimSnap==null) r.stripDimSnap=false;
     if(r.walls) r.walls.forEach(w=>{ if(w.thicknessCm==null) w.thicknessCm=r.wallThicknessCm||0; if(!w.side) w.side='out'; });
   });
@@ -10541,11 +11088,47 @@ async function initSupabase() {
       if (p.min_wall_margin_mm == null) p.min_wall_margin_mm = 25;  // Cenika default
     }
     console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
+    _ensureCableTestProducts();
   } catch(err) {
     console.warn('Supabase ikke tilgjengelig, fortsetter uten produktdata:', err.message);
+    _ensureCableTestProducts();
   }
 }
 initSupabase();
+
+/** Inject test cable products if no cable products exist in Supabase yet */
+function _ensureCableTestProducts() {
+  // Check if any cable products already exist (not just the category)
+  const cableCats = PRODUCT_CATEGORIES.filter(c => c.module_type === 'cable');
+  const hasCableProds = cableCats.some(cat =>
+    HEATING_PRODUCTS.some(p => p.category_id === cat.id && p.active !== false));
+  if (hasCableProds) return; // Real cable products in DB — skip test data
+  // Use existing cable category if available, otherwise create test category
+  const testCatId = cableCats.length > 0 ? cableCats[0].id : 9900;
+  if (cableCats.length === 0) {
+    PRODUCT_CATEGORIES.push({
+      id: testCatId, name: 'Varmekabel', module_type: 'cable',
+      sort_order: 100, active: true
+    });
+  }
+  HEATING_PRODUCTS.push({
+    id: 99001, category_id: testCatId, name: 'TestKabel 10W/m',
+    active: true, sort_order: 1,
+    watt_per_m: 10,
+    min_spacing_mm: 60, max_spacing_mm: 120, recommended_spacing_mm: 80,
+    min_bend_radius_mm: 40, max_length_m: 100,
+    min_gap_mm: 10, min_wall_margin_mm: 50
+  });
+  HEATING_PRODUCTS.push({
+    id: 99002, category_id: testCatId, name: 'TestKabel 17W/m',
+    active: true, sort_order: 2,
+    watt_per_m: 17,
+    min_spacing_mm: 80, max_spacing_mm: 150, recommended_spacing_mm: 100,
+    min_bend_radius_mm: 50, max_length_m: 150,
+    min_gap_mm: 10, min_wall_margin_mm: 50
+  });
+  console.log('Romtegner: injiserte test-kabelprodukter (ingen cable-produkter i DB)');
+}
 
 /** Module type for a product category: 'foil' | 'cable' | 'mat' | 'plate' */
 function _categoryModuleType(categoryId) {
@@ -10738,6 +11321,60 @@ function _getViolation(stripId) {
 function _stripViolatesMargin(strip) {
   const v = getStripViolations(strip);
   return v.hasAny;
+}
+
+// ─── CABLE VIOLATION DETECTION ─────────────────────────────────
+const _cableViolationCache = new Map();
+let _cableViolationsDirty = true;
+
+function getCableViolations(cable) {
+  const result = { hasAny: false, maxLength: null, minSpacing: null, maxSpacing: null, bendRadius: null };
+  const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+  if (!prod) return result;
+
+  // 1. Max cable length
+  const maxLenM = prod.max_length_m || 999;
+  const totalLenM = cable.totalLength_cm / 100;
+  if (totalLenM > maxLenM) {
+    result.maxLength = { actual: totalLenM, max: maxLenM };
+    result.hasAny = true;
+  }
+
+  // 2. Spacing check (min/max)
+  const minSpCm = (prod.min_spacing_mm || 60) / 10;
+  const maxSpCm = (prod.max_spacing_mm || 999) / 10;
+  if (cable.spacing_cm < minSpCm - 0.01) {
+    result.minSpacing = { actual: cable.spacing_cm, min: minSpCm };
+    result.hasAny = true;
+  }
+  if (cable.spacing_cm > maxSpCm + 0.01) {
+    result.maxSpacing = { actual: cable.spacing_cm, max: maxSpCm };
+    result.hasAny = true;
+  }
+
+  // 3. Bend radius check (U-turn radius = spacing/2, must be >= min_bend_radius)
+  const minBendCm = (prod.min_bend_radius_mm || 0) / 10;
+  const uTurnRadius = cable.spacing_cm / 2;
+  if (minBendCm > 0 && uTurnRadius < minBendCm - 0.01) {
+    result.bendRadius = { actual: uTurnRadius, min: minBendCm };
+    result.hasAny = true;
+  }
+
+  return result;
+}
+
+function _recomputeCableViolationsIfDirty() {
+  if (!_cableViolationsDirty) return;
+  _cableViolationCache.clear();
+  for (const cable of S.cables) {
+    _cableViolationCache.set(cable.id, getCableViolations(cable));
+  }
+  _cableViolationsDirty = false;
+}
+
+function _getCableViolation(cableId) {
+  _recomputeCableViolationsIfDirty();
+  return _cableViolationCache.get(cableId) || { hasAny: false };
 }
 
 // Call at drag START to capture full snapshot
