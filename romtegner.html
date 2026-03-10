@@ -1010,6 +1010,14 @@ const HINDRING_TYPES = [
   {id:'annet',     name:'Annet',          ico:'⬛'},
 ];
 
+const ZONE_TYPES = [
+  {id:'shower',    name:'Dusj / våtrom',      ico:'🚿', default:'forbidden'},
+  {id:'fixed',     name:'Fast installasjon',   ico:'🔧', default:'forbidden'},
+  {id:'thermostat',name:'Termostat-posisjon',  ico:'🌡️', default:'preferred'},
+  {id:'conduit',   name:'Føringsvei',          ico:'📐', default:'preferred'},
+  {id:'custom',    name:'Egendefinert',        ico:'📍', default:'forbidden'},
+];
+
 const DRAW_COLORS = [
   {name:'Cyan',hex:'#22d3ee'},{name:'Grønn',hex:'#4ade80'},{name:'Oransje',hex:'#fb923c'},{name:'Rød',hex:'#f87171'},
   {name:'Lilla',hex:'#c084fc'},{name:'Gul',hex:'#facc15'},{name:'Hvit',hex:'#e2e8f0'},{name:'Rosa',hex:'#f472b6'}
@@ -1027,7 +1035,8 @@ const S = {
   rooms    : [],
   hindrings: [],
   strips   : [],   // [{id,roomId,productId,direction,pos_cm,start_cm,length_cm}]
-  cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm}]
+  cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm,multiCableIndex?,multiCableGroup?,leadRun?}]
+  zones    : [],   // [{id,roomId,type:'forbidden'|'preferred',purpose,points:[{x,y}],label}]
   groups   : [],   // [{id,name,stripIds:[]}]
   ui : {
     selectedRoomId  : null,
@@ -1054,6 +1063,10 @@ const S = {
     wallThicknessOriginal: null,   // for undo on ESC
     selectedStripId: null,       // selected strip id
     selectedCableId: null,       // selected cable id
+    selectedZoneId: null,        // selected zone id
+    zoneDrawMode: false,         // zone polygon drawing active
+    zoneType: 'shower',          // current zone type being placed
+    zoneKind: 'forbidden',       // 'forbidden' or 'preferred'
     manualPlaceMode: false,      // manual strip placement active
     manualFamilyName: null,      // family name for manual placement
     manualCategoryId: null,      // category id for manual placement
@@ -1103,9 +1116,10 @@ const S = {
     outerWallLiveSide: 'out'
   },
   snap     : { grid:false, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1 },
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
+  varmekabel: { targetWm2: 130, screedThicknessCm: 4 },
   bgs: {}   // keyed by floor id (number) or '__global__'
 };
 
@@ -1216,6 +1230,12 @@ function getWorldPos(e) {
   const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
 
   // Snap to first polygon point when close enough (auto-close assist)
+  if (S.ui.zoneDrawMode && S.drawing.points.length >= 3) {
+    const sp0 = w2s(S.drawing.points[0].x, S.drawing.points[0].y);
+    if (Math.hypot(sx - sp0.x, sy - sp0.y) < 18) {
+      return { x: S.drawing.points[0].x, y: S.drawing.points[0].y };
+    }
+  }
   if ((S.ui.drawMode === 'polygon'||S.ui.drawMode==='hindring-polygon') && S.drawing.points.length >= 3) {
     const sp0 = w2s(S.drawing.points[0].x, S.drawing.points[0].y);
     if (Math.hypot(sx - sp0.x, sy - sp0.y) < 18) {
@@ -1293,6 +1313,7 @@ function render() {
   else if (_stripDragging || _sgDragging) drawStripGapLine();
   drawAllDimAnnotations();
   drawHindrings();
+  drawZones();
   if (S.ui.drawMode === 'import') drawImportOverlay();
   else drawPreview();
   if (S.ui.drawMode === 'wbw') drawWbwLines();
@@ -1991,8 +2012,9 @@ function openProduktMenuFrom(x, y) {
 function openProduktMenu(e) {
   e.stopPropagation();
   const cats = PRODUCT_CATEGORIES.filter(c => c.active !== false);
+  console.log('openProduktMenu: ' + cats.length + ' kategorier, ' + HEATING_PRODUCTS.length + ' produkter');
   if (!cats.length) {
-    showProduktDropdown('<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Ingen kategorier lastet</div>', e.clientX, e.clientY);
+    showProduktDropdown('<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Produktdata laster… Prøv igjen om noen sekunder.</div>', e.clientX, e.clientY);
     return;
   }
   const html = cats.map(c =>
@@ -2049,6 +2071,7 @@ function showVfPlacePanel(familyName, categoryId) {
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
   hideProduktMenu();
+  console.log('showVfPlacePanel: family=' + familyName + ', catId=' + categoryId + ', selectedRoom=' + S.ui.selectedRoomId);
   const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
   // Inject into room workflow panel section
   const section = document.getElementById('rwp-product-actions');
@@ -2078,15 +2101,156 @@ function showCablePlacePanel(familyName, categoryId) {
   hideProduktMenu();
   const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
   const section = document.getElementById('rwp-product-actions');
-  if (section) {
-    section.innerHTML = `
-      <div class="rwp-section-label">🔌 ${esc(familyName)}</div>
-      <div style="display:flex;flex-direction:column;gap:3px">
-        <div class="ctx-item vfp-btn" onclick="autoPlaceCable(${sq(familyName)},${categoryId});hideVfPlacePanel();">Automatisk</div>
-      </div>`;
-    section.style.display = 'block';
-  }
+  if (!section) return;
+
+  const roomId = S.ui.selectedRoomId;
+  const room = S.rooms.find(r => r.id === roomId);
+  const areas = room ? roomAreas(room) : null;
+  const nettoM2 = areas ? (areas.net / 10000) : 0;
+
+  section.innerHTML = `
+    <div class="rwp-section-label">🔌 ${esc(familyName)}</div>
+    <div style="display:flex;flex-direction:column;gap:6px;padding:0 2px">
+      <div style="font-size:11px;color:var(--dim)">Rom: ${nettoM2.toFixed(1)} m² netto</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:11px;white-space:nowrap">W/m²</label>
+        <input type="number" id="cable-target-wm2" value="${S.varmekabel.targetWm2}" min="50" max="300" step="10"
+          style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
+          onchange="S.varmekabel.targetWm2=parseInt(this.value)||130;_updateCableSelection(${sq(familyName)},${categoryId})">
+        <label style="font-size:11px;white-space:nowrap">Avretning cm</label>
+        <input type="number" id="cable-screed" value="${S.varmekabel.screedThicknessCm}" min="2" max="10" step="0.5"
+          style="width:50px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
+          onchange="S.varmekabel.screedThicknessCm=parseFloat(this.value)||4;_updateCableSelection(${sq(familyName)},${categoryId})">
+      </div>
+      <div id="cable-selection-results" style="font-size:11px"></div>
+    </div>`;
+  section.style.display = 'block';
   showRoomWorkflowPanel();
+  _updateCableSelection(familyName, categoryId);
+}
+
+/** Update cable selection results panel based on current W/m² target */
+function _updateCableSelection(familyName, categoryId) {
+  const container = document.getElementById('cable-selection-results');
+  if (!container) return;
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { container.innerHTML = '<div style="color:var(--dim)">Velg et rom først</div>'; return; }
+
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false
+      && (p.product_family === familyName || p.name.startsWith(familyName)))
+    .sort((a, b) => (a.cable_length_m || 999) - (b.cable_length_m || 999));
+  if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen produkter funnet</div>'; return; }
+
+  const result = selectCableByPower(roomId, prods, S.varmekabel.targetWm2);
+  if (!result) { container.innerHTML = '<div style="color:var(--warn)">Kan ikke beregne</div>'; return; }
+
+  const maxCC = 3 * (S.varmekabel.screedThicknessCm || 4);
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
+
+  // Build table of top cable options (closest below, closest above, overall closest)
+  const shown = new Set();
+  const picks = [];
+  if (result.below.length > 0) picks.push({ ...result.below[0], tag: '▼ Under' });
+  if (result.above.length > 0) picks.push({ ...result.above[0], tag: '▲ Over' });
+  if (result.closest && !picks.find(p => p.product.id === result.closest.product.id)) {
+    picks.push({ ...result.closest, tag: '● Nærmest' });
+  }
+
+  // Check for multi-cable options when single cable coverage is insufficient
+  const multiResult = selectMultiCables(roomId, prods, S.varmekabel.targetWm2);
+
+  if (picks.length === 0 && (!multiResult || multiResult.strategy === 'none')) {
+    container.innerHTML = `<div style="color:var(--warn)">Ingen kabel gir gyldig CC for ${S.varmekabel.targetWm2} W/m²</div>
+      <div class="ctx-item vfp-btn" style="margin-top:4px" onclick="autoPlaceCable(${sq(familyName)},${categoryId});hideVfPlacePanel();">Automatisk (nærmeste)</div>`;
+    return;
+  }
+
+  let html = `<div style="color:var(--dim);margin-bottom:3px">Ønsket: ${Math.round(result.desiredW)} W (${S.varmekabel.targetWm2} W/m²)</div>`;
+
+  // Single cable options
+  if (picks.length > 0) {
+    html += '<div style="display:flex;flex-direction:column;gap:2px">';
+    for (const pick of picks) {
+      const p = pick.product;
+      const ccMm = Math.round(pick.cc_cm * 10);
+      const ccWarn = pick.cc_cm > maxCC;
+      const warnIcon = ccWarn ? ' ⚠' : '';
+      const ccColor = ccWarn ? 'color:var(--warn)' : '';
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:4px 8px;line-height:1.4"
+        onclick="_placeCableProduct(${p.id},${sq(familyName)},${categoryId});hideVfPlacePanel();">
+        <span style="font-size:10px;color:var(--dim)">${pick.tag}</span><br>
+        <b>${esc(p.name)}</b> — ${Math.round(pick.productW)} W (${Math.round(pick.wm2)} W/m²)<br>
+        <span style="${ccColor}">CC: ${ccMm} mm${warnIcon}</span>
+        ${ccWarn ? `<span style="font-size:10px;color:var(--warn)"> (maks ${Math.round(maxCC*10)} mm)</span>` : ''}
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Multi-cable options (2× identical)
+  if (multiResult && multiResult.strategy === '2x' && multiResult.cables.length > 0) {
+    html += `<div style="color:var(--accent);margin-top:8px;font-weight:600;font-size:11px">⚡ 2× kabel (rommet deles i to)</div>`;
+    const shown2x = multiResult.cables.slice(0, 3);
+    for (const mc of shown2x) {
+      const ccMm = Math.round(mc.cc_cm * 10);
+      const ccWarn = mc.cc_cm > maxCC;
+      const warnIcon = ccWarn ? ' ⚠' : '';
+      const ccColor = ccWarn ? 'color:var(--warn)' : '';
+      const isBest = mc === multiResult.bestMulti;
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:4px 8px;line-height:1.4;${isBest ? 'border-left:3px solid var(--accent)' : ''}"
+        onclick="_placeMultiCableProduct(${mc.product.id},${sq(familyName)},${categoryId});hideVfPlacePanel();">
+        <b>2× ${esc(mc.product.name)}</b> — ${Math.round(mc.totalW)} W (${Math.round(mc.wm2)} W/m²)<br>
+        <span style="${ccColor}">CC: ${ccMm} mm${warnIcon}</span>
+        ${isBest ? '<span style="font-size:10px;color:var(--accent)"> ★ Anbefalt</span>' : ''}
+      </div>`;
+    }
+  } else if (picks.length === 0) {
+    html += `<div style="color:var(--warn);margin-top:4px">Ingen enkelt kabel eller 2-kabel-løsning passer</div>`;
+  }
+
+  // Show additional valid single options
+  const extras = result.allValid.filter(c => !picks.find(p => p.product.id === c.product.id)).slice(0, 3);
+  if (extras.length > 0) {
+    html += '<div style="color:var(--dim);margin-top:4px;font-size:10px">Andre gyldige:</div>';
+    for (const ex of extras) {
+      const ccMm = Math.round(ex.cc_cm * 10);
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:3px 8px;font-size:11px"
+        onclick="_placeCableProduct(${ex.product.id},${sq(familyName)},${categoryId});hideVfPlacePanel();">
+        ${esc(ex.product.name)} — ${Math.round(ex.productW)} W, CC ${ccMm} mm
+      </div>`;
+    }
+  }
+  container.innerHTML = html;
+}
+
+/** Place a specific cable product in the selected room */
+function _placeCableProduct(productId, familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  pushUndo();
+  const cable = autoFillCable(roomId, productId);
+  if (!cable) { console.warn('_placeCableProduct: could not generate cable layout'); return; }
+  S.cables.push(cable); _invalidateCableCache();
+  S.ui.selectedCableId = cable.id;
+  renderSidebar(); updateCtxBar(); render();
+}
+
+/** Place 2× identical cable products in the selected room (multi-cable mode) */
+function _placeMultiCableProduct(productId, familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  pushUndo();
+  const cables = autoFillMultiCable(roomId, productId);
+  if (!cables || cables.length < 2) {
+    console.warn('_placeMultiCableProduct: could not generate multi-cable layout, falling back to single');
+    _placeCableProduct(productId, familyName, categoryId);
+    return;
+  }
+  for (const c of cables) S.cables.push(c);
+  _invalidateCableCache();
+  S.ui.selectedCableId = cables[0].id;
+  renderSidebar(); updateCtxBar(); render();
 }
 
 // Width selector — opens before auto-fill so user can cap max starting width
@@ -2094,7 +2258,8 @@ function openWidthMenu(e, familyName, categoryId) {
   e.stopPropagation();
   const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
   const prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName))
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
   // Collect unique widths (widest first), keep first product name per width
   const seen = new Set(), widths = [];
@@ -2125,7 +2290,8 @@ function startAutoFill(familyName, categoryId, maxWidthMm) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) { alert('Velg et rom først'); return; }
   let prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName))
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
   if (maxWidthMm != null) {
     prods = prods.filter(p => (p.netto_width_mm || p.width_mm) <= maxWidthMm + 0.01);
@@ -2510,7 +2676,8 @@ function seedFillRoom(roomId, seedPosCm) {
 function _seedFromPanel(familyName, categoryId) {
   // Set up product context for seed fill
   const prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === categoryId && p.active !== false && p.name.startsWith(familyName))
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
     .sort((a,b) => (b.netto_width_mm||b.width_mm) - (a.netto_width_mm||a.width_mm));
   if (prods.length) S.varmefolie.pendingProductId = prods[0].id;
   S.ui.manualFamilyName = familyName;
@@ -2539,11 +2706,26 @@ function cancelSeedMode() {
 // ─── CABLE SERPENTINE LAYOUT ENGINE ──────────────────────────
 
 /**
+ * Determine if U-turn index i connects at the HIGH end of the sweep axis.
+ * The pattern depends on startCorner: for TL/BL with 'h' (or TL/TR with 'v'),
+ * the first U-turn is at HIGH; for TR/BR with 'h' (or BL/BR with 'v'), it's at LOW.
+ */
+function _uTurnIsHigh(i, direction, startCorner) {
+  // Cable free end (start) is at HIGH sweep axis for these corners:
+  const freeHigh = (direction === 'h')
+    ? (startCorner === 'tr' || startCorner === 'br')
+    : (startCorner === 'bl' || startCorner === 'br');
+  // First U-turn is at the OPPOSITE end from the free start
+  const firstHigh = !freeHigh;
+  return firstHigh ? (i % 2 === 0) : (i % 2 !== 0);
+}
+
+/**
  * Generate serpentine cable pattern inside a room.
  * Returns { runs, totalLength_cm } or null on failure.
  * runs = [{ pos_cm, segments: [{start_cm, end_cm}] }, ...]
  */
-function generateCableSerpentine(roomId, productId, direction, spacing_cm, startCorner) {
+function generateCableSerpentine(roomId, productId, direction, spacing_cm, startCorner, zoneBounds) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
   const margin = _effectiveMarginCm(productId);
@@ -2552,8 +2734,13 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
   const minY = Math.min(...ys), maxY = Math.max(...ys);
 
   // Perpendicular axis: cable runs sweep across this axis
-  const perpMin = direction === 'v' ? minX : minY;
-  const perpMax = direction === 'v' ? maxX : maxY;
+  // zoneBounds allows restricting to a sub-region {perpMin, perpMax}
+  let perpMin = direction === 'v' ? minX : minY;
+  let perpMax = direction === 'v' ? maxX : maxY;
+  if (zoneBounds) {
+    if (zoneBounds.perpMin != null) perpMin = Math.max(perpMin, zoneBounds.perpMin);
+    if (zoneBounds.perpMax != null) perpMax = Math.min(perpMax, zoneBounds.perpMax);
+  }
   const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
 
   const runs = [];
@@ -2580,6 +2767,36 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
       runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
     }
     pos += step;
+  }
+
+  // Post-process: inset segment endpoints at U-turn connections so the
+  // outward-facing arc (radius = spacing/2) stays within the wall margin.
+  // Only cable start (first run's free end) and cable end (last run's free end)
+  // remain at wall+margin; all turning ends are inset by uRadius.
+  if (runs.length >= 2) {
+    const uRadius = spacing_cm / 2;
+    for (let r = 0; r < runs.length; r++) {
+      const segs = runs[r].segments;
+      if (!segs.length) continue;
+      let insetLow = false, insetHigh = false;
+      // Previous U-turn (index r-1): check which end it connects at
+      if (r > 0) { if (_uTurnIsHigh(r - 1, direction, startCorner)) insetHigh = true; else insetLow = true; }
+      // Next U-turn (index r): check which end it connects at
+      if (r < runs.length - 1) { if (_uTurnIsHigh(r, direction, startCorner)) insetHigh = true; else insetLow = true; }
+      if (insetLow && segs.length > 0) {
+        segs[0].start_cm += uRadius;
+        if (segs[0].start_cm >= segs[0].end_cm) segs.splice(0, 1);
+      }
+      if (insetHigh && segs.length > 0) {
+        const last = segs[segs.length - 1];
+        last.end_cm -= uRadius;
+        if (last.end_cm <= last.start_cm) segs.splice(segs.length - 1, 1);
+      }
+    }
+    // Remove runs with no remaining segments
+    for (let r = runs.length - 1; r >= 0; r--) {
+      if (runs[r].segments.length === 0) runs.splice(r, 1);
+    }
   }
 
   // Calculate total length: segments + U-turns
@@ -2611,8 +2828,9 @@ function autoFillCable(roomId, productId) {
   let spacing;
   if (prod.cable_length_m) {
     const areas = roomAreas(room);
+    const nettoM2 = areas.net / 10000;  // cm² → m²
     // CC (cm) = (area_m2 / cable_length_m) × 100
-    const calcSp = (areas.nettoM2 / prod.cable_length_m) * 100;
+    const calcSp = (nettoM2 / prod.cable_length_m) * 100;
     spacing = Math.max(minSp, Math.min(maxSp, calcSp));
   } else {
     spacing = Math.max(minSp, Math.min(maxSp, recSp));
@@ -2634,16 +2852,301 @@ function autoFillCable(roomId, productId) {
   }
   if (!best || best.runs.length === 0) return null;
 
+  // Zone-aware start corner + direction: try all combos and also adjusted spacings
+  // to find a combination where neither start nor end falls in a forbidden zone.
+  let bestCorner = 'bl';
+  const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
+  const preferredZones = S.zones.filter(z => z.roomId === roomId && z.type === 'preferred' && z.points && z.points.length >= 3);
+  if (forbiddenZones.length > 0 || preferredZones.length > 0) {
+    const corners = ['bl', 'br', 'tl', 'tr'];
+    const dirs = [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    // Try original spacing + slight adjustments (to get odd/even run count variations)
+    const minSp = (prod.min_spacing_mm || 50) / 10;
+    const maxSp = (prod.max_spacing_mm || 200) / 10;
+    const spacings = [spacing];
+    // Add ±5% spacing variants (clamped) to vary run count parity
+    const sp1 = Math.max(minSp, spacing * 0.95);
+    const sp2 = Math.min(maxSp, spacing * 1.05);
+    if (Math.abs(sp1 - spacing) > 0.1) spacings.push(sp1);
+    if (Math.abs(sp2 - spacing) > 0.1) spacings.push(sp2);
+    let bestScore = -Infinity;
+    for (const dir of dirs) {
+      for (const corner of corners) {
+        for (const sp of spacings) {
+          const res = generateCableSerpentine(roomId, productId, dir, sp, corner);
+          if (!res || res.runs.length === 0) continue;
+          const tmpCable = { roomId, direction: dir, runs: res.runs };
+          const ep = _cableEndpoints(tmpCable);
+          if (!ep) continue;
+          let score = 0;
+          // Penalize start in forbidden zones (heavier — start carries the splice)
+          for (const fz of forbiddenZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
+            if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
+          }
+          // Reward start in preferred zone
+          for (const pz of preferredZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+          }
+          // Small bonus for original direction and original spacing
+          if (dir === bestDir) score += 1;
+          if (sp === spacing) score += 0.5;
+          if (score > bestScore) {
+            bestScore = score;
+            bestCorner = corner;
+            bestDir = dir;
+            spacing = sp;
+            best = res;
+          }
+        }
+      }
+    }
+  }
+
+  // Edit 4: Always auto-adjust CC to use full cable length when product has fixed length
+  if (prod.cable_length_m) {
+    const targetLen = prod.cable_length_m * 100;
+    const adjusted = _adjustSpacingForLength(roomId, productId, bestDir, bestCorner, targetLen, null);
+    if (adjusted && adjusted.runs.length > 0) {
+      spacing = adjusted.spacing_cm;
+      best = { runs: adjusted.runs, totalLength_cm: adjusted.totalLength_cm };
+    }
+  }
+
   return {
     id: S.counters.nextCableId++,
     roomId,
     productId,
     direction: bestDir,
     spacing_cm: spacing,
-    startCorner: 'bl',
+    startCorner: bestCorner,
     runs: best.runs,
-    totalLength_cm: best.totalLength_cm
+    totalLength_cm: best.totalLength_cm,
+    lockedEnd: !!prod.cable_length_m,    // auto-lock: cable has fixed length
+    lockedStart: false
   };
+}
+
+/**
+ * Select cable product(s) based on target W/m² for a room.
+ * Returns { allValid, closest, below, above } where each entry has
+ * { product, productW, cc_cm, wm2 } sorted by deviation from target.
+ */
+function selectCableByPower(roomId, familyProducts, targetWm2) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !familyProducts.length) return null;
+  const areas = roomAreas(room);
+  const nettoM2 = areas.net / 10000;
+  if (nettoM2 <= 0) return null;
+  const desiredW = nettoM2 * targetWm2;
+
+  const candidates = [];
+  for (const prod of familyProducts) {
+    if (!prod.cable_length_m || !prod.watt_per_m) continue;
+    const productW = prod.watt_per_m * prod.cable_length_m;
+    const cc_cm = (nettoM2 / prod.cable_length_m) * 100;
+    const minSp = (prod.min_spacing_mm || 50) / 10;
+    const maxSp = (prod.max_spacing_mm || 200) / 10;
+    const minBend = (prod.min_bend_radius_mm || 0) / 10;
+    // Check if CC is physically valid
+    const ccValid = cc_cm >= minSp && cc_cm <= maxSp;
+    const bendOk = minBend <= 0 || (cc_cm / 2) >= minBend;
+    const wm2 = productW / nettoM2;
+    const deviation = Math.abs(productW - desiredW);
+    candidates.push({ product: prod, productW, cc_cm, wm2, deviation, ccValid, bendOk, valid: ccValid && bendOk });
+  }
+  candidates.sort((a, b) => a.deviation - b.deviation);
+
+  const allValid = candidates.filter(c => c.valid);
+  const below = allValid.filter(c => c.productW <= desiredW).sort((a,b) => b.productW - a.productW);
+  const above = allValid.filter(c => c.productW > desiredW).sort((a,b) => a.productW - b.productW);
+  const closest = allValid.length > 0 ? allValid[0] : (candidates.length > 0 ? candidates[0] : null);
+  return { allValid, below, above, closest, desiredW, nettoM2, candidates };
+}
+
+/**
+ * Select multi-cable configuration when single cable cannot cover the room.
+ * Strategy: 2× identical cable, each covering half the room.
+ * Returns { strategy: '1x'|'2x', cables: [{ product, cc_cm, wm2, productW, zoneBounds }], desiredW, nettoM2 }
+ */
+function selectMultiCables(roomId, familyProducts, targetWm2) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !familyProducts.length) return null;
+  const areas = roomAreas(room);
+  const nettoM2 = areas.net / 10000;
+  if (nettoM2 <= 0) return null;
+  const desiredW = nettoM2 * targetWm2;
+
+  // Check single cable first
+  const singleResult = selectCableByPower(roomId, familyProducts, targetWm2);
+  if (singleResult && singleResult.closest && singleResult.closest.valid) {
+    return { strategy: '1x', cables: [singleResult.closest], desiredW, nettoM2, singleResult };
+  }
+
+  // Try 2× identical cable: each cable covers half the area
+  const halfArea = nettoM2 / 2;
+  const halfW = desiredW / 2;
+  const multiCandidates = [];
+  for (const prod of familyProducts) {
+    if (!prod.cable_length_m || !prod.watt_per_m) continue;
+    const productW = prod.watt_per_m * prod.cable_length_m;
+    const cc_cm = (halfArea / prod.cable_length_m) * 100;
+    const minSp = (prod.min_spacing_mm || 50) / 10;
+    const maxSp = (prod.max_spacing_mm || 200) / 10;
+    const minBend = (prod.min_bend_radius_mm || 0) / 10;
+    const ccValid = cc_cm >= minSp && cc_cm <= maxSp;
+    const bendOk = minBend <= 0 || (cc_cm / 2) >= minBend;
+    const wm2 = (productW * 2) / nettoM2;
+    const deviation = Math.abs(productW - halfW);
+    if (ccValid && bendOk) {
+      multiCandidates.push({ product: prod, productW, totalW: productW * 2, cc_cm, wm2, deviation, valid: true });
+    }
+  }
+  multiCandidates.sort((a, b) => a.deviation - b.deviation);
+
+  if (multiCandidates.length === 0) {
+    return { strategy: 'none', cables: [], desiredW, nettoM2, singleResult };
+  }
+
+  // Return best 2× option
+  const best = multiCandidates[0];
+  // Compute zone split: divide room perpendicular axis in half
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const dir = _suggestDirection(room);
+  const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
+  const mid = (perpMin + perpMax) / 2;
+
+  return {
+    strategy: '2x', desiredW, nettoM2,
+    direction: dir,
+    singleResult,
+    cables: multiCandidates.slice(0, 3),
+    bestMulti: best,
+    zoneSplit: { perpMin, perpMax, mid }
+  };
+}
+
+/**
+ * Generate lead-run path along wall from startPos to target zone.
+ * Returns array of {x,y} waypoints following the room edge.
+ */
+function _generateLeadRun(room, fromPos, toPerp, direction, margin) {
+  // Simple lead-run: straight path along the nearest wall (sweep-axis edge)
+  // from one half to the other, keeping margin from wall
+  const pts = room.points;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+  // Route along the sweep-axis wall closest to startPos
+  if (direction === 'h') {
+    // Perpendicular is Y axis, sweep is X axis
+    // Route along bottom or top wall (min or max Y + margin)
+    const wallY = fromPos.y < (minY + maxY) / 2 ? minY + margin : maxY - margin;
+    return [
+      { x: fromPos.x, y: fromPos.y },
+      { x: fromPos.x, y: wallY },
+      { x: fromPos.x, y: wallY },  // along wall
+      { x: fromPos.x + (toPerp - fromPos.perpPos) * (direction === 'h' ? 0 : 1), y: wallY }
+    ];
+  } else {
+    // Perpendicular is X axis, sweep is Y axis
+    const wallX = fromPos.x < (minX + maxX) / 2 ? minX + margin : maxX - margin;
+    return [
+      { x: fromPos.x, y: fromPos.y },
+      { x: wallX, y: fromPos.y },
+      { x: wallX, y: fromPos.y }
+    ];
+  }
+}
+
+/**
+ * Auto-fill two cables in a room, both starting from the same corner.
+ * Cable 1: covers near-half, Cable 2: covers far-half with lead-run.
+ * Returns array of 2 cable objects, or null if not possible.
+ */
+function autoFillMultiCable(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod || !prod.cable_length_m) return null;
+
+  const margin = _effectiveMarginCm(productId);
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const dir = _suggestDirection(room);
+  const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
+  const mid = (perpMin + perpMax) / 2;
+
+  // Half area
+  const areas = roomAreas(room);
+  const halfAreaM2 = (areas.net / 10000) / 2;
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+
+  // CC for half area
+  const spacing = Math.max(minSp, Math.min(maxSp, (halfAreaM2 / prod.cable_length_m) * 100));
+
+  // Cable 1: near-half (from start corner)
+  const startCorner = 'bl';
+  const zone1 = { perpMin: perpMin, perpMax: mid };
+  const zone2 = { perpMin: mid, perpMax: perpMax };
+
+  const r1 = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone1);
+  if (!r1 || r1.runs.length === 0) return null;
+
+  // Cable 2: far-half, starts offset by 1×CC from cable 1's start
+  // For 'bl' start corner: cable 1 starts at perpMin+margin, cable 2 starts at perpMin+margin+spacing
+  const r2 = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone2);
+  if (!r2 || r2.runs.length === 0) return null;
+
+  // Calculate lead-run for cable 2 (from start corner along wall to zone 2)
+  // Lead-run: simple straight path along the nearest wall from start corner to the far half
+  const sweepAxis = dir === 'v' ? 'y' : 'x';
+  const sweepMin = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
+  const sweepMax = dir === 'v' ? Math.max(...ys) : Math.max(...xs);
+  const leadRunLength = Math.abs(mid - perpMin); // distance along wall from start to zone2 entry
+  // Add lead-run length to cable 2's total
+  const cable2TotalWithLead = r2.totalLength_cm + leadRunLength;
+
+  const cable1 = {
+    id: S.counters.nextCableId++,
+    roomId, productId,
+    direction: dir,
+    spacing_cm: spacing,
+    startCorner: startCorner,
+    runs: r1.runs,
+    totalLength_cm: r1.totalLength_cm,
+    multiCableIndex: 0,  // first cable
+    multiCableGroup: null // will be set after both created
+  };
+
+  const cable2 = {
+    id: S.counters.nextCableId++,
+    roomId, productId,
+    direction: dir,
+    spacing_cm: spacing,
+    startCorner: startCorner,
+    runs: r2.runs,
+    totalLength_cm: cable2TotalWithLead,
+    multiCableIndex: 1,  // second cable
+    multiCableGroup: null,
+    leadRun: {
+      // Lead-run path from start corner to zone2 entry, along wall
+      fromPerp: perpMin + margin,
+      toPerp: mid,
+      wallPos: sweepMin + margin,  // along near wall
+      lengthCm: leadRunLength
+    }
+  };
+
+  // Link them
+  const groupId = cable1.id;
+  cable1.multiCableGroup = groupId;
+  cable2.multiCableGroup = groupId;
+
+  return [cable1, cable2];
 }
 
 /**
@@ -2662,17 +3165,15 @@ function autoPlaceCable(familyName, categoryId) {
     .sort((a, b) => (a.cable_length_m || 999) - (b.cable_length_m || 999));
   if (!prods.length) return;
 
-  // Calculate ideal cable length: room area / CC-spacing × 100 → cm, then to m
-  const areas = roomAreas(room);
-  const recSp = (prods[0].recommended_spacing_mm || 100) / 10; // cm
-  const idealLengthM = (areas.nettoM2 * 10000 / recSp) / 100; // m
-
-  // Pick best cable: smallest cable_length_m that covers the room
-  let bestProd = prods[prods.length - 1]; // default: largest
-  for (const p of prods) {
-    if ((p.cable_length_m || 0) >= idealLengthM * 0.9) {
-      bestProd = p; break;
-    }
+  // Use power-based selection: pick cable closest to target W/m²
+  const targetWm2 = S.varmekabel.targetWm2 || 130;
+  const result = selectCableByPower(roomId, prods, targetWm2);
+  let bestProd;
+  if (result && result.closest) {
+    bestProd = result.closest.product;
+  } else {
+    // Fallback: use largest cable
+    bestProd = prods[prods.length - 1];
   }
 
   pushUndo();
@@ -3598,6 +4099,77 @@ function drawStrips() {
 // ─── CABLE RENDERING ──────────────────────────────────────────
 let _hoveredCableId = null;
 
+/** Draw margin zone (randsone) around all walls for a cable */
+function _drawCableMarginZone(cable, room) {
+  const margin = _effectiveMarginCm(cable.productId);
+  if (margin <= 0) return;
+  const pts = room.points;
+  if (!pts || pts.length < 3) return;
+  const n = pts.length;
+
+  // Signed area → winding direction
+  let area2 = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area2 += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  const sign = area2 > 0 ? 1 : -1;
+
+  // Offset each edge inward by margin
+  const edges = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.001) continue;
+    const nx = -dy / len * sign * margin, ny = dx / len * sign * margin;
+    edges.push({ x1: pts[i].x + nx, y1: pts[i].y + ny, x2: pts[j].x + nx, y2: pts[j].y + ny });
+  }
+
+  // Intersect consecutive offset edges → inset polygon
+  const inner = [];
+  for (let i = 0; i < edges.length; i++) {
+    const e1 = edges[i], e2 = edges[(i + 1) % edges.length];
+    const d1x = e1.x2 - e1.x1, d1y = e1.y2 - e1.y1;
+    const d2x = e2.x2 - e2.x1, d2y = e2.y2 - e2.y1;
+    const denom = d1x * d2y - d1y * d2x;
+    if (Math.abs(denom) < 1e-9) { inner.push({ x: e1.x2, y: e1.y2 }); continue; }
+    const t = ((e2.x1 - e1.x1) * d2y - (e2.y1 - e1.y1) * d2x) / denom;
+    inner.push({ x: e1.x1 + t * d1x, y: e1.y1 + t * d1y });
+  }
+  if (inner.length < 3) return;
+
+  // Draw margin zone using even-odd fill (ring between room and inset polygon)
+  ctx.save();
+  ctx.fillStyle = _lc('rgba(180, 160, 100, 0.10)', 'rgba(200, 180, 120, 0.08)');
+  ctx.beginPath();
+  // Outer path (room boundary)
+  const sp0 = w2s(pts[0].x, pts[0].y);
+  ctx.moveTo(sp0.x, sp0.y);
+  for (let i = 1; i < n; i++) { const sp = w2s(pts[i].x, pts[i].y); ctx.lineTo(sp.x, sp.y); }
+  ctx.closePath();
+  // Inner path (inset boundary, reversed winding)
+  const rev = [...inner].reverse();
+  const ip0 = w2s(rev[0].x, rev[0].y);
+  ctx.moveTo(ip0.x, ip0.y);
+  for (let i = 1; i < rev.length; i++) { const ip = w2s(rev[i].x, rev[i].y); ctx.lineTo(ip.x, ip.y); }
+  ctx.closePath();
+  ctx.fill('evenodd');
+
+  // Dashed inner boundary line
+  ctx.strokeStyle = _lc('rgba(180, 160, 100, 0.40)', 'rgba(200, 180, 120, 0.30)');
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const dp0 = w2s(inner[0].x, inner[0].y);
+  ctx.moveTo(dp0.x, dp0.y);
+  for (let i = 1; i < inner.length; i++) { const dp = w2s(inner[i].x, inner[i].y); ctx.lineTo(dp.x, dp.y); }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function drawCables() {
   for (const cable of S.cables) {
     if (!_roomIdOnActiveFloor(cable.roomId)) continue;
@@ -3606,6 +4178,9 @@ function drawCables() {
 
     const isSel = S.ui.selectedCableId === cable.id;
     const isHov = !isSel && _hoveredCableId === cable.id;
+
+    // Draw margin zone (randsone) along all walls
+    _drawCableMarginZone(cable, room);
 
     ctx.save();
     // Clip to room polygon
@@ -3639,6 +4214,49 @@ function drawCables() {
 
     // Draw U-turns between adjacent runs
     _drawCableUTurns(cable);
+
+    // Draw lead-run for multi-cable (dashed line along wall)
+    if (cable.leadRun) {
+      const lr = cable.leadRun;
+      ctx.save();
+      ctx.strokeStyle = isSel ? _lc('#e04020','#ff6040') : _lc('#c06030','#e08050');
+      ctx.lineWidth = isSel ? 2 : 1.5;
+      ctx.setLineDash([4, 3]);
+      if (cable.direction === 'h') {
+        // Perp=Y, sweep=X: lead-run goes along Y axis at wallPos X
+        const pStart = w2s(lr.wallPos, lr.fromPerp);
+        const pEnd = w2s(lr.wallPos, lr.toPerp);
+        ctx.beginPath(); ctx.moveTo(pStart.x, pStart.y); ctx.lineTo(pEnd.x, pEnd.y); ctx.stroke();
+      } else {
+        // Perp=X, sweep=Y: lead-run goes along X axis at wallPos Y
+        const pStart = w2s(lr.fromPerp, lr.wallPos);
+        const pEnd = w2s(lr.toPerp, lr.wallPos);
+        ctx.beginPath(); ctx.moveTo(pStart.x, pStart.y); ctx.lineTo(pEnd.x, pEnd.y); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // Multi-cable group indicator
+    if (cable.multiCableGroup != null) {
+      const label = cable.multiCableIndex === 0 ? 'K1' : 'K2';
+      const firstRun = cable.runs[0];
+      if (firstRun && firstRun.segments.length > 0) {
+        const seg = firstRun.segments[0];
+        let lp;
+        if (cable.direction === 'v') {
+          lp = w2s(firstRun.pos_cm, seg.start_cm);
+        } else {
+          lp = w2s(seg.start_cm, firstRun.pos_cm);
+        }
+        ctx.save();
+        ctx.font = `bold ${10}px 'DM Sans',sans-serif`;
+        ctx.fillStyle = _lc('#c06030','#ff8060');
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(label, lp.x, lp.y - 8);
+        ctx.restore();
+      }
+    }
 
     // Violation overlay
     const cViol = _getCableViolation(cable.id);
@@ -3718,6 +4336,47 @@ function drawCables() {
       }
     }
 
+    // Start/end gizmos (only for selected cable)
+    if (isSel) {
+      const ep = _cableEndpoints(cable);
+      if (ep) {
+        // Start gizmo — diamond shape
+        const sP = w2s(ep.start.x, ep.start.y);
+        ctx.save();
+        const gSize = 7;
+        ctx.translate(sP.x, sP.y);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = cable.lockedStart ? '#ef4444' : '#22c55e';
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.fillRect(-gSize, -gSize, gSize*2, gSize*2);
+        ctx.strokeRect(-gSize, -gSize, gSize*2, gSize*2);
+        ctx.restore();
+        // "S" label
+        ctx.save();
+        ctx.font = "bold 9px 'DM Sans',sans-serif";
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('S', sP.x, sP.y);
+        ctx.restore();
+
+        // End gizmo — circle
+        const eP = w2s(ep.end.x, ep.end.y);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(eP.x, eP.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle = cable.lockedEnd ? '#ef4444' : '#f59e0b';
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.fill(); ctx.stroke();
+        ctx.font = "bold 9px 'DM Sans',sans-serif";
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('E', eP.x, eP.y);
+        ctx.restore();
+      }
+    }
+
     ctx.restore();
   }
 }
@@ -3729,8 +4388,8 @@ function _drawCableUTurns(cable) {
     const runA = cable.runs[i], runB = cable.runs[i + 1];
     if (!runA.segments.length || !runB.segments.length) continue;
 
-    // Alternating connection: even index → connect at high end, odd → connect at low end
-    const connectHigh = (i % 2 === 0);
+    // Alternating connection: depends on startCorner
+    const connectHigh = _uTurnIsHigh(i, cable.direction, cable.startCorner);
     const segA = connectHigh ? runA.segments[runA.segments.length - 1] : runA.segments[0];
     const segB = connectHigh ? runB.segments[runB.segments.length - 1] : runB.segments[0];
     const endA = connectHigh ? segA.end_cm : segA.start_cm;
@@ -3745,16 +4404,254 @@ function _drawCableUTurns(cable) {
       pB = w2s(endB, runB.pos_cm);
     }
 
-    // Draw arc (half-circle) between the two endpoints
+    // Draw arc (half-circle) between the two endpoints, bulging toward the wall
     const midX = (pA.x + pB.x) / 2, midY = (pA.y + pB.y) / 2;
     const radius = Math.hypot(pB.x - pA.x, pB.y - pA.y) / 2;
     if (radius < 1) continue;
 
     const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+    // Determine counterclockwise flag so arc bulges toward the wall:
+    // cross product of (pA→pB) × (wall direction) tells us which side the wall is on
+    const dx = pB.x - pA.x, dy = pB.y - pA.y;
+    let wallDirX = 0, wallDirY = 0;
+    if (cable.direction === 'h') { wallDirX = connectHigh ? 1 : -1; }
+    else { wallDirY = connectHigh ? 1 : -1; }
+    const rightDot = dy * wallDirX + (-dx) * wallDirY;
+    const ccw = rightDot < 0;
     ctx.beginPath();
-    ctx.arc(midX, midY, radius, angle + Math.PI, angle, false);
+    ctx.arc(midX, midY, radius, angle + Math.PI, angle, ccw);
     ctx.stroke();
   }
+}
+
+// ─── ZONES (forbidden / preferred) ──────────────────────────
+function drawZones() {
+  for (const zone of S.zones) {
+    if (!_roomIdOnActiveFloor(zone.roomId)) continue;
+    if (!zone.points || zone.points.length < 3) continue;
+    const isSel = zone.id === S.ui.selectedZoneId;
+    const isForbidden = zone.type === 'forbidden';
+
+    ctx.save();
+    // Fill
+    ctx.beginPath();
+    const p0 = w2s(zone.points[0].x, zone.points[0].y);
+    ctx.moveTo(p0.x, p0.y);
+    for (let i = 1; i < zone.points.length; i++) {
+      const p = w2s(zone.points[i].x, zone.points[i].y);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+
+    if (isForbidden) {
+      // Red hatching pattern for forbidden zones
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+      ctx.fill();
+      // Diagonal hatch lines
+      ctx.save();
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.25)';
+      ctx.lineWidth = 1;
+      const bb = _zoneBBox(zone);
+      const s0 = w2s(bb.minX, bb.minY), s1 = w2s(bb.maxX, bb.maxY);
+      const sx0 = Math.min(s0.x, s1.x), sy0 = Math.min(s0.y, s1.y);
+      const sx1 = Math.max(s0.x, s1.x), sy1 = Math.max(s0.y, s1.y);
+      const step = 10;
+      for (let d = sx0 - (sy1 - sy0); d < sx1 + (sy1 - sy0); d += step) {
+        ctx.beginPath();
+        ctx.moveTo(d, sy0);
+        ctx.lineTo(d + (sy1 - sy0), sy1);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // Dashed red border
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = isSel ? '#ef4444' : 'rgba(239, 68, 68, 0.5)';
+      ctx.lineWidth = isSel ? 2.5 : 1.5;
+    } else {
+      // Green dashed border for preferred zones
+      ctx.fillStyle = 'rgba(34, 197, 94, 0.06)';
+      ctx.fill();
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = isSel ? '#22c55e' : 'rgba(34, 197, 94, 0.5)';
+      ctx.lineWidth = isSel ? 2.5 : 1.5;
+    }
+    // Stroke the border
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    for (let i = 1; i < zone.points.length; i++) {
+      const p = w2s(zone.points[i].x, zone.points[i].y);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label with icon
+    const zType = ZONE_TYPES.find(t => t.id === zone.purpose);
+    const ico = zType ? zType.ico : '📍';
+    const cx = zone.points.reduce((s, p) => s + p.x, 0) / zone.points.length;
+    const cy = zone.points.reduce((s, p) => s + p.y, 0) / zone.points.length;
+    const cs = w2s(cx, cy);
+    ctx.font = "11px 'DM Sans',sans-serif";
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = isForbidden ? 'rgba(239, 68, 68, 0.8)' : 'rgba(34, 197, 94, 0.8)';
+    ctx.fillText(`${ico} ${zone.label || zType?.name || ''}`, cs.x, cs.y);
+
+    ctx.restore();
+  }
+
+  // Draw zone polygon being drawn
+  if (S.ui.zoneDrawMode && S.drawing.active && S.drawing.points.length > 0) {
+    ctx.save();
+    ctx.setLineDash([4, 3]);
+    const isForbid = S.ui.zoneKind === 'forbidden';
+    ctx.strokeStyle = isForbid ? '#ef4444' : '#22c55e';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const fp = w2s(S.drawing.points[0].x, S.drawing.points[0].y);
+    ctx.moveTo(fp.x, fp.y);
+    for (let i = 1; i < S.drawing.points.length; i++) {
+      const p = w2s(S.drawing.points[i].x, S.drawing.points[i].y);
+      ctx.lineTo(p.x, p.y);
+    }
+    if (S.drawing.mousePos) {
+      const mp = w2s(S.drawing.mousePos.x, S.drawing.mousePos.y);
+      ctx.lineTo(mp.x, mp.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Draw vertices
+    for (const pt of S.drawing.points) {
+      const sp = w2s(pt.x, pt.y);
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 4, 0, Math.PI*2);
+      ctx.fillStyle = isForbid ? '#ef4444' : '#22c55e';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function _zoneBBox(zone) {
+  const xs = zone.points.map(p => p.x), ys = zone.points.map(p => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+
+/** Hit-test: is world point inside any zone? Returns zone object or null */
+function hitZone(wx, wy) {
+  for (let i = S.zones.length - 1; i >= 0; i--) {
+    const z = S.zones[i];
+    if (!_roomIdOnActiveFloor(z.roomId)) continue;
+    if (z.points && z.points.length >= 3 && ptInPoly(wx, wy, z.points)) {
+      return z;
+    }
+  }
+  return null;
+}
+
+/** Check if a world point is inside a forbidden zone for a given room */
+function _isInForbiddenZone(roomId, wx, wy) {
+  return S.zones.some(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3 && ptInPoly(wx, wy, z.points));
+}
+
+/** Select a zone */
+function selectZone(id) {
+  S.ui.selectedZoneId = id;
+  S.ui.selectedStripId = null;
+  S.ui.selectedStripIds = new Set();
+  S.ui.selectedCableId = null;
+  S.ui.selectedHindringId = null;
+  S.ui.selectedHindringWallIdx = null;
+  S.ui.selectedWallId = null;
+  S.ui.selectedVertexIdx = null;
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+/** Toggle zone type between forbidden and preferred */
+function _toggleZoneType() {
+  const zone = S.zones.find(z => z.id === S.ui.selectedZoneId);
+  if (!zone) return;
+  pushUndo();
+  zone.type = zone.type === 'forbidden' ? 'preferred' : 'forbidden';
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+/** Delete a zone by id */
+function deleteZone(id) {
+  pushUndo();
+  S.zones = S.zones.filter(z => z.id !== id);
+  if (S.ui.selectedZoneId === id) S.ui.selectedZoneId = null;
+  renderSidebar(); updateCtxBar(); updateObjInfo(); render();
+}
+
+/** Start zone drawing mode for a given room */
+function startZoneDraw(roomId, purposeId, kind) {
+  S.ui.zoneDrawMode = true;
+  S.ui.zoneType = purposeId;
+  S.ui.zoneKind = kind;
+  S.ui.hindringRoomId = roomId; // reuse hindring room context for drawing
+  S.drawing.active = true;
+  S.drawing.points = [];
+  S.drawing.mousePos = null;
+  canvas.style.cursor = 'crosshair';
+  render();
+}
+
+/** Finish zone polygon drawing → creates the zone object */
+function finishZoneDraw() {
+  if (!S.ui.zoneDrawMode || S.drawing.points.length < 3) {
+    cancelZoneDraw();
+    return;
+  }
+  pushUndo();
+  const zType = ZONE_TYPES.find(t => t.id === S.ui.zoneType);
+  const zone = {
+    id: S.counters.nextZoneId++,
+    roomId: S.ui.hindringRoomId,
+    type: S.ui.zoneKind,
+    purpose: S.ui.zoneType,
+    points: S.drawing.points.map(p => ({x: p.x, y: p.y})),
+    label: zType?.name || 'Sone'
+  };
+  S.zones.push(zone);
+  cancelZoneDraw();
+  selectZone(zone.id);
+  renderSidebar();
+}
+
+/** Cancel zone drawing */
+function cancelZoneDraw() {
+  S.ui.zoneDrawMode = false;
+  S.drawing.active = false;
+  S.drawing.points = [];
+  canvas.style.cursor = 'default';
+  render();
+}
+
+/** Show zone type picker modal for a room */
+function showZoneTypePicker(roomId) {
+  // Use same modal pattern as hindring type picker
+  const modal = document.createElement('div');
+  modal.id = 'zone-type-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3)';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--surface);border-radius:12px;padding:20px;min-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.3)';
+  box.innerHTML = `<div style="font-weight:600;margin-bottom:12px;font-size:14px">Velg sonetype</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${ZONE_TYPES.map(t => `
+        <button class="floor-choice-btn" style="display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:13px;cursor:pointer;border:1px solid var(--border);border-radius:8px;background:var(--surface2)"
+          onclick="document.getElementById('zone-type-modal').remove(); startZoneDraw(${roomId}, '${t.id}', '${t.default}')">
+          <span style="font-size:18px">${t.ico}</span>
+          <span>${t.name}</span>
+          <span style="margin-left:auto;font-size:10px;padding:2px 6px;border-radius:4px;background:${t.default==='forbidden'?'rgba(239,68,68,0.15);color:#ef4444':'rgba(34,197,94,0.15);color:#22c55e'}">${t.default==='forbidden'?'Forbudt':'Foretrukket'}</span>
+        </button>
+      `).join('')}
+    </div>
+    <button style="margin-top:12px;width:100%;padding:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--dim);font-size:12px;cursor:pointer"
+      onclick="document.getElementById('zone-type-modal').remove()">Avbryt</button>`;
+  modal.appendChild(box);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
 }
 
 function hitStrip(wx, wy) {
@@ -3799,7 +4696,7 @@ function hitCable(wx, wy) {
     for (let j = 0; j < cable.runs.length - 1; j++) {
       const rA = cable.runs[j], rB = cable.runs[j+1];
       if (!rA.segments.length || !rB.segments.length) continue;
-      const connectHigh = (j % 2 === 0);
+      const connectHigh = _uTurnIsHigh(j, cable.direction, cable.startCorner);
       const sA = connectHigh ? rA.segments[rA.segments.length-1] : rA.segments[0];
       const sB = connectHigh ? rB.segments[rB.segments.length-1] : rB.segments[0];
       const eA = connectHigh ? sA.end_cm : sA.start_cm;
@@ -3815,6 +4712,74 @@ function hitCable(wx, wy) {
   }
   return null;
 }
+
+/** Get start and end world coordinates of a cable's serpentine path */
+function _cableEndpoints(cable) {
+  if (!cable.runs || cable.runs.length === 0) return null;
+  const firstRun = cable.runs[0];
+  const lastRun = cable.runs[cable.runs.length - 1];
+  if (!firstRun.segments.length || !lastRun.segments.length) return null;
+  const N = cable.runs.length;
+
+  // Cable START: free end of first run (opposite of first U-turn)
+  const firstUHigh = N >= 2 ? _uTurnIsHigh(0, cable.direction, cable.startCorner) : true;
+  // If first U-turn at HIGH, start is at LOW end; if at LOW, start is at HIGH end
+  const startAtLow = firstUHigh;
+  const startSweep = startAtLow ? firstRun.segments[0].start_cm
+                                : firstRun.segments[firstRun.segments.length - 1].end_cm;
+
+  // Cable END: free end of last run (opposite of last U-turn)
+  let endAtLow;
+  if (N >= 2) {
+    const lastUHigh = _uTurnIsHigh(N - 2, cable.direction, cable.startCorner);
+    endAtLow = lastUHigh;  // last U-turn at HIGH → free end at LOW
+  } else {
+    endAtLow = !startAtLow; // single run: end is opposite of start
+  }
+  const endSweep = endAtLow ? lastRun.segments[0].start_cm
+                            : lastRun.segments[lastRun.segments.length - 1].end_cm;
+
+  let sx, sy, ex, ey;
+  if (cable.direction === 'v') {
+    sx = firstRun.pos_cm; sy = startSweep;
+    ex = lastRun.pos_cm;  ey = endSweep;
+  } else {
+    sx = startSweep; sy = firstRun.pos_cm;
+    ex = endSweep;   ey = lastRun.pos_cm;
+  }
+  return { start: {x: sx, y: sy}, end: {x: ex, y: ey} };
+}
+
+/** Hit-test cable start gizmo (diamond shape at cable start point).
+ * Returns cable object if hit, null otherwise.
+ * Only works for selected cable. */
+function hitCableStartGizmo(sx, sy) {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable) return null;
+  const ep = _cableEndpoints(cable);
+  if (!ep) return null;
+  const sp = w2s(ep.start.x, ep.start.y);
+  const dist = Math.hypot(sx - sp.x, sy - sp.y);
+  if (dist <= 12) return cable; // 12px hit radius
+  return null;
+}
+
+/** Hit-test cable end gizmo */
+function hitCableEndGizmo(sx, sy) {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable) return null;
+  const ep = _cableEndpoints(cable);
+  if (!ep) return null;
+  const sp = w2s(ep.end.x, ep.end.y);
+  const dist = Math.hypot(sx - sp.x, sy - sp.y);
+  if (dist <= 12) return cable;
+  return null;
+}
+
+// Cable gizmo drag state
+let _cableGizmoDragging = false;
+let _cableGizmoDragType = null; // 'start' or 'end'
+let _cableGizmoDragCable = null;
 
 function selectCable(id) {
   S.ui.selectedCableId = id;
@@ -4338,18 +5303,22 @@ function deleteCable(id) {
 function _cableSpacingDelta(deltaMm) {
   const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
   if (!cable) return;
+  // When end is locked (fixed cable length), CC is determined by cable length — block manual spacing
+  if (cable.lockedEnd) return;
   const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
   const minSp = prod?.min_spacing_mm ? prod.min_spacing_mm / 10 : 4;
   const maxSp = prod?.max_spacing_mm ? prod.max_spacing_mm / 10 : 20;
   const newSpacing = Math.max(minSp, Math.min(maxSp, cable.spacing_cm + deltaMm / 10));
   if (newSpacing === cable.spacing_cm) return;
   pushUndo();
-  const result = generateCableSerpentine(cable.roomId, cable.productId, cable.direction, newSpacing, cable.startCorner);
+  // Preserve startCorner always (locked start keeps position, unlocked start keeps current corner)
+  const result = generateCableSerpentine(cable.roomId, cable.productId, cable.direction, newSpacing, cable.startCorner, cable.zoneBounds);
   if (result) {
     cable.spacing_cm = newSpacing;
     cable.runs = result.runs;
     cable.totalLength_cm = result.totalLength_cm;
   }
+  _cableViolationsDirty = true;
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -4359,13 +5328,184 @@ function _cableFlipDirection() {
   if (!cable) return;
   pushUndo();
   const newDir = cable.direction === 'v' ? 'h' : 'v';
-  const result = generateCableSerpentine(cable.roomId, cable.productId, newDir, cable.spacing_cm, cable.startCorner);
+  let spacing = cable.spacing_cm;
+  // If end is locked, auto-adjust CC for new direction to match product cable length
+  if (cable.lockedEnd) {
+    const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+    if (prod && prod.cable_length_m) {
+      const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, newDir, cable.startCorner, prod.cable_length_m * 100, cable.zoneBounds);
+      if (adjusted) {
+        cable.direction = newDir;
+        cable.spacing_cm = adjusted.spacing_cm;
+        cable.runs = adjusted.runs;
+        cable.totalLength_cm = adjusted.totalLength_cm;
+        _cableViolationsDirty = true;
+        renderSidebar(); updateCtxBar(); render();
+        return;
+      }
+    }
+  }
+  const result = generateCableSerpentine(cable.roomId, cable.productId, newDir, spacing, cable.startCorner, cable.zoneBounds);
   if (result) {
     cable.direction = newDir;
     cable.runs = result.runs;
     cable.totalLength_cm = result.totalLength_cm;
   }
+  _cableViolationsDirty = true;
   renderSidebar(); updateCtxBar(); render();
+}
+
+/** Set screed thickness and revalidate cables */
+function _setScreedThickness(cm) {
+  const val = Math.max(2, Math.min(10, cm));
+  S.varmekabel.screedThicknessCm = val;
+  _cableViolationsDirty = true;
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+/** Toggle cable lock on start or end */
+function _toggleCableLock(which) {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable) return;
+  pushUndo();
+  if (which === 'start') {
+    cable.lockedStart = !cable.lockedStart;
+  } else if (which === 'end') {
+    cable.lockedEnd = !cable.lockedEnd;
+    // When locking end, auto-adjust CC so cable path matches product cable length
+    if (cable.lockedEnd) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+      if (prod && prod.cable_length_m) {
+        const targetLenCm = prod.cable_length_m * 100;
+        const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, cable.direction, cable.startCorner, targetLenCm, cable.zoneBounds);
+        if (adjusted) {
+          cable.spacing_cm = adjusted.spacing_cm;
+          cable.runs = adjusted.runs;
+          cable.totalLength_cm = adjusted.totalLength_cm;
+        }
+      }
+    }
+  }
+  _cableViolationsDirty = true;
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+/**
+ * Binary search to find optimal spacing that produces a serpentine path
+ * matching the target cable length as precisely as possible.
+ * Uses two-phase approach: (1) coarse search for run count, (2) precise search within
+ * each run-count-stable spacing range to achieve < 1 cm deviation.
+ * Returns {spacing_cm, runs, totalLength_cm} or null if no valid spacing found.
+ */
+function _adjustSpacingForLength(roomId, productId, direction, startCorner, targetLengthCm, zoneBounds) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+  const minSp = (prod.min_spacing_mm || 50) / 10;   // cm
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  // Note: screed rule (CC ≤ 3× screed) is a soft warning shown in UI,
+  // not a hard limit here — allows cable to end at corner with full runs
+
+  // Phase 1: Coarse binary search to find approximate spacing and run count
+  let lo = minSp, hi = maxSp;
+  let coarseBest = null, coarseBestDiff = Infinity;
+  for (let iter = 0; iter < 20; iter++) {
+    const mid = (lo + hi) / 2;
+    const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
+    if (!result || result.runs.length === 0) { hi = mid; continue; }
+    const diff = result.totalLength_cm - targetLengthCm;
+    if (Math.abs(diff) < coarseBestDiff) {
+      coarseBestDiff = Math.abs(diff);
+      coarseBest = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
+    }
+    if (diff > 0) lo = mid; else hi = mid;
+  }
+  if (!coarseBest) return null;
+
+  // Phase 2: Try the found run count and adjacent counts for precise matching
+  const centerN = coarseBest.runs.length;
+  let overallBest = coarseBest;
+  let overallBestDiff = coarseBestDiff;
+
+  for (const targetN of [centerN - 1, centerN, centerN + 1]) {
+    if (targetN < 1) continue;
+    // Find spacing range that produces exactly targetN runs
+    const range = _findSpacingRangeForRunCount(roomId, productId, direction, startCorner, zoneBounds, targetN, minSp, maxSp);
+    if (!range) continue;
+    // Precise binary search within this stable run-count range
+    let rLo = range.lo, rHi = range.hi;
+    for (let iter = 0; iter < 40; iter++) {
+      const mid = (rLo + rHi) / 2;
+      const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
+      if (!result || result.runs.length !== targetN) {
+        if (result && result.runs.length > targetN) rLo = mid; else rHi = mid;
+        continue;
+      }
+      const diff = result.totalLength_cm - targetLengthCm;
+      if (Math.abs(diff) < overallBestDiff) {
+        overallBestDiff = Math.abs(diff);
+        overallBest = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
+      }
+      if (Math.abs(diff) < 1) break; // within 1 cm of target — excellent
+      // Within fixed N: larger spacing → longer total (arc contribution π/2-1 > 0)
+      if (diff > 0) rHi = mid; else rLo = mid;
+    }
+  }
+
+  // Prefer full runs (cable ends at corner). Only trim last run if overshooting.
+  if (overallBest && overallBest.totalLength_cm <= targetLengthCm + 1) {
+    // Undershoot or exact: all full runs, cable ends at corner, unused = cold lead
+    return overallBest;
+  }
+
+  // Overshoot: total > target — must trim last run to fit exact cable length
+  if (overallBest && overallBest.totalLength_cm > targetLengthCm + 1) {
+    const runs = JSON.parse(JSON.stringify(overallBest.runs));
+    const excess = overallBest.totalLength_cm - targetLengthCm;
+    const lastRun = runs[runs.length - 1];
+    if (lastRun && lastRun.segments.length) {
+      const uIdx = runs.length - 2;
+      const connectHigh = _uTurnIsHigh(uIdx, direction, startCorner);
+      let ok = false;
+      if (connectHigh) {
+        const s = lastRun.segments[0];
+        s.start_cm += excess;
+        ok = s.start_cm < s.end_cm;
+      } else {
+        const s = lastRun.segments[lastRun.segments.length - 1];
+        s.end_cm -= excess;
+        ok = s.end_cm > s.start_cm;
+      }
+      if (ok) {
+        return { spacing_cm: overallBest.spacing_cm, runs, totalLength_cm: targetLengthCm };
+      }
+    }
+  }
+
+  return overallBest;
+}
+
+/** Find spacing range [lo, hi] that produces exactly targetN runs */
+function _findSpacingRangeForRunCount(roomId, productId, direction, startCorner, zoneBounds, targetN, minSp, maxSp) {
+  // Find hi: largest spacing that still gives >= targetN runs
+  let sLo = minSp, sHi = maxSp;
+  for (let i = 0; i < 30; i++) {
+    const mid = (sLo + sHi) / 2;
+    const r = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
+    if ((r ? r.runs.length : 0) >= targetN) sLo = mid; else sHi = mid;
+  }
+  const hi = sLo;
+  // Find lo: smallest spacing that gives <= targetN runs
+  sLo = minSp; sHi = hi;
+  for (let i = 0; i < 30; i++) {
+    const mid = (sLo + sHi) / 2;
+    const r = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
+    if ((r ? r.runs.length : 0) <= targetN) sHi = mid; else sLo = mid;
+  }
+  const lo = sHi;
+  // Verify midpoint gives targetN
+  const test = generateCableSerpentine(roomId, productId, direction, (lo + hi) / 2, startCorner, zoneBounds);
+  if (!test || test.runs.length !== targetN) return null;
+  return { lo, hi };
 }
 
 // ── Folie-grupper ────────────────────────────────────────────
@@ -7147,6 +8287,21 @@ function roomItemHtml(room, indented) {
     </div>`;
   }).join('') : '';
 
+  // Zone items for this room
+  const roomZones = S.zones.filter(z => z.roomId === room.id);
+  const zonesHtml = exp ? roomZones.map(z => {
+    const zsel = S.ui.selectedZoneId === z.id ? ' sel' : '';
+    const zind = indented ? ' indented' : '';
+    const zType = ZONE_TYPES.find(t => t.id === z.purpose);
+    const zico = zType?.ico || '📍';
+    return `<div class="strip-item${zsel}${zind}"
+      onclick="selectZone(${z.id});event.stopPropagation()">
+      <span class="strip-ico">${zico}</span>
+      <span class="strip-nm">${esc(z.label || 'Sone')}</span>
+      <span class="strip-len" style="font-size:9px;color:${z.type==='forbidden'?'#ef4444':'#22c55e'}">${z.type==='forbidden'?'Forbudt':'Foretrukket'}</span>
+    </div>`;
+  }).join('') : '';
+
   return `<div class="room-item${sel?' sel':''}${indented?' indented':''}"
     onclick="selRoom(${room.id})"
     ondblclick="startRename(${room.id},this)"
@@ -7160,8 +8315,8 @@ function roomItemHtml(room, indented) {
       </div>
     </div>
     <button class="room-card-btn${room.cardVisible?' active':''}" onclick="toggleRoomCard(${room.id});event.stopPropagation()" title="${room.cardVisible?'Skjul':'Vis'} infokort">📋</button>
-    ${(hasWalls || roomStripsItem.length || roomCables.length || roomHindrings.length || roomGroups.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
-  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${hindringsHtml}`;
+    ${(hasWalls || roomStripsItem.length || roomCables.length || roomHindrings.length || roomGroups.length || roomZones.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
+  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${zonesHtml}${hindringsHtml}`;
 }
 
 function esc(s) {
@@ -8236,21 +9391,83 @@ function updateObjInfo() {
       if (_cv.minSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Min avstand</span><span class="soi-v">${Math.round(_cv.minSpacing.actual*10)} mm (min ${Math.round(_cv.minSpacing.min*10)} mm)</span></div>`;
       if (_cv.maxSpacing) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks avstand</span><span class="soi-v">${Math.round(_cv.maxSpacing.actual*10)} mm (maks ${Math.round(_cv.maxSpacing.max*10)} mm)</span></div>`;
       if (_cv.bendRadius) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Bøyeradius</span><span class="soi-v">${Math.round(_cv.bendRadius.actual*10)} mm (min ${Math.round(_cv.bendRadius.min*10)} mm)</span></div>`;
+      if (_cv.maxCC) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks CC</span><span class="soi-v">${Math.round(_cv.maxCC.actual*10)} mm (maks ${Math.round(_cv.maxCC.max*10)} mm, avr. ${_cv.maxCC.screed} cm)</span></div>`;
+      if (_cv.forbiddenStart) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Start i forbudt sone</span><span class="soi-v">${esc(_cv.forbiddenStart.zoneName)}</span></div>`;
+      if (_cv.forbiddenEnd) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Slutt i forbudt sone</span><span class="soi-v">${esc(_cv.forbiddenEnd.zoneName)}</span></div>`;
       // Build supplier info rows
       let _supHtml = '';
       if (cp?.article_no) _supHtml += `<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(cp.article_no)}</span></div>`;
       if (cp?.el_no) _supHtml += `<div class="soi-row"><span class="soi-k">El.nummer</span><span class="soi-v">${esc(cp.el_no)}</span></div>`;
       if (cp?.supplier) _supHtml += `<div class="soi-row"><span class="soi-k">Leverandør</span><span class="soi-v">${esc(cp.supplier)}</span></div>`;
       if (cp?.product_family) _supHtml += `<div class="soi-row"><span class="soi-k">Produktfamilie</span><span class="soi-v">${esc(cp.product_family)}</span></div>`;
+      // W/m² calculation
+      const room = S.rooms.find(r => r.id === cable.roomId);
+      const netAreaM2 = room ? roomAreas(room).net / 10000 : 0;
+      const installedWm2 = (totalWatt && netAreaM2 > 0) ? Math.round(totalWatt / netAreaM2) : null;
+      // Cable product length vs installed length
+      const productLenM = cp?.cable_length_m || 0;
+      const installedLenM = cable.totalLength_cm / 100;
+      const lenDiffPct = productLenM > 0 ? Math.round((installedLenM / productLenM - 1) * 100) : 0;
+      const lenDiffLabel = productLenM > 0 ? ` / ${productLenM} m (${lenDiffPct >= 0 ? '+' : ''}${lenDiffPct}%)` : '';
+      // Max CC indicator
+      const screedCm = S.varmekabel?.screedThicknessCm || 4;
+      const maxCCmm = screedCm * 3 * 10;
+      const ccMm = Math.round(cable.spacing_cm * 10);
+      const ccColor = ccMm <= maxCCmm ? '#22c55e' : '#ef4444';  // green or red
+      const ccIndicator = `<span style="color:${ccColor};font-weight:600">${ccMm} mm</span> <span style="color:var(--dim);font-size:10px">(maks ${maxCCmm} mm)</span>`;
+      // Multi-cable info
+      let _multiHtml = '';
+      if (cable.multiCableGroup != null) {
+        const groupCables = S.cables.filter(c => c.multiCableGroup === cable.multiCableGroup);
+        const idx = cable.multiCableIndex != null ? cable.multiCableIndex + 1 : '?';
+        const totalGroupW = groupCables.reduce((s, c) => {
+          const p = HEATING_PRODUCTS.find(pp => pp.id === c.productId);
+          return s + (p?.watt_per_m || 0) * (c.totalLength_cm / 100);
+        }, 0);
+        const groupWm2 = netAreaM2 > 0 ? Math.round(totalGroupW / netAreaM2) : 0;
+        _multiHtml = `<div class="soi-row" style="background:var(--surface2);border-radius:4px;padding:2px 4px;margin:2px 0"><span class="soi-k">🔗 Kabel ${idx} av ${groupCables.length}</span><span class="soi-v">Totalt: ${Math.round(totalGroupW)} W (${groupWm2} W/m²)</span></div>`;
+        if (cable.leadRun) {
+          _multiHtml += `<div class="soi-row"><span class="soi-k">Føringsvei</span><span class="soi-v">${(cable.leadRun.lengthCm/100).toFixed(1)} m</span></div>`;
+        }
+      }
       panel.innerHTML=`<div class="soi-title">🔌 ${esc(cp?.name||'Varmekabel')}</div>
         ${_supHtml}
-        <div class="soi-row"><span class="soi-k">Total lengde</span><span class="soi-v">${(cable.totalLength_cm/100).toFixed(1)} m</span></div>
-        <div class="soi-row"><span class="soi-k">Avstand (cc)</span><span class="soi-v">${Math.round(cable.spacing_cm*10)} mm</span></div>
+        ${_multiHtml}
+        <div class="soi-row"><span class="soi-k">Total lengde</span><span class="soi-v">${installedLenM.toFixed(1)} m${lenDiffLabel}</span></div>
+        <div class="soi-row"><span class="soi-k">Avstand (CC)</span><span class="soi-v">${ccIndicator}</span></div>
+        <div class="soi-row"><span class="soi-k">Maks CC</span><span class="soi-v">${maxCCmm} mm <span style="color:var(--dim);font-size:10px">(3 × ${screedCm} cm avretning)</span></span></div>
         <div class="soi-row"><span class="soi-k">Retning</span><span class="soi-v">${dirLabel}</span></div>
         <div class="soi-row"><span class="soi-k">Antall løp</span><span class="soi-v">${cable.runs.length}</span></div>
+        <div class="soi-row"><span class="soi-k">Starthjørne</span><span class="soi-v">${({bl:'Nedre venstre',br:'Nedre høyre',tl:'Øvre venstre',tr:'Øvre høyre'})[cable.startCorner]||cable.startCorner} ${cable.lockedStart?'🔒':''}</span></div>
+        <div class="soi-row"><span class="soi-k">Låsing</span><span class="soi-v">${cable.lockedStart?'🔒 Start':'🔓 Start'} · ${cable.lockedEnd?'🔒 Slutt':'🔓 Slutt'}${cable.lockedStart&&cable.lockedEnd?' <span style="color:var(--warn);font-size:10px">(CC fastlåst)</span>':''}</span></div>
         ${totalWatt?`<div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${totalWatt} W</span></div>`:''}
+        ${installedWm2?`<div class="soi-row"><span class="soi-k">W/m²</span><span class="soi-v" style="font-weight:600">${installedWm2} W/m²</span></div>`:''}
         ${_cvHtml}
         <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteCable(${cable.id})">✕ Slett kabel</button></div>`;
+      panel.style.display='block'; return;
+    }
+  }
+  if(S.ui.selectedZoneId!==null) {
+    const zone=S.zones.find(z=>z.id===S.ui.selectedZoneId);
+    if(zone&&zone.points&&zone.points.length>=3) {
+      const zType = ZONE_TYPES.find(t => t.id === zone.purpose);
+      const isForbid = zone.type === 'forbidden';
+      const xs=zone.points.map(p=>p.x),ys=zone.points.map(p=>p.y);
+      const w=Math.round(Math.max(...xs)-Math.min(...xs));
+      const ht=Math.round(Math.max(...ys)-Math.min(...ys));
+      // Calculate zone area using shoelace
+      let zArea = 0;
+      for (let i = 0; i < zone.points.length; i++) {
+        const j = (i+1) % zone.points.length;
+        zArea += zone.points[i].x * zone.points[j].y - zone.points[j].x * zone.points[i].y;
+      }
+      zArea = Math.abs(zArea) / 2;
+      panel.innerHTML=`<div class="soi-title">${zType?.ico||'📍'} ${esc(zone.label||'Sone')}</div>
+        <div class="soi-row"><span class="soi-k">Type</span><span class="soi-v"><span style="padding:1px 6px;border-radius:4px;font-size:10px;background:${isForbid?'rgba(239,68,68,0.15);color:#ef4444':'rgba(34,197,94,0.15);color:#22c55e'}">${isForbid?'Forbudt sone':'Foretrukket sone'}</span></span></div>
+        <div class="soi-row"><span class="soi-k">Bredde</span><span class="soi-v">${w} cm</span></div>
+        <div class="soi-row"><span class="soi-k">Høyde</span><span class="soi-v">${ht} cm</span></div>
+        <div class="soi-row"><span class="soi-k">Areal</span><span class="soi-v">${(zArea/10000).toFixed(2)} m²</span></div>
+        <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteZone(${zone.id})">✕ Slett sone</button></div>`;
       panel.style.display='block'; return;
     }
   }
@@ -8938,10 +10155,12 @@ function pushUndo() {
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({x:p.x,y:p.y}))})),
     strips:    S.strips.map(s=>({...s})),
     cables:    S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
+    zones:     S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     groups:    S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     nextStripId: S.counters.nextStripId,
     nextGroupId: S.counters.nextGroupId,
     nextCableId: S.counters.nextCableId,
+    nextZoneId: S.counters.nextZoneId,
     gapCm: S.varmefolie.gapCm
   });
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
@@ -8964,6 +10183,10 @@ function undo() {
     S.groups = prev.groups;
     S.counters.nextGroupId = prev.nextGroupId;
   }
+  if (prev.zones !== undefined) {
+    S.zones = prev.zones;
+    S.counters.nextZoneId = prev.nextZoneId;
+  }
   if (S.ui.selectedRoomId && !S.rooms.find(r=>r.id===S.ui.selectedRoomId)) {
     S.ui.selectedRoomId=null; S.ui.selectedWallId=null; S.ui.selectedVertexIdx=null;
   }
@@ -8975,6 +10198,9 @@ function undo() {
   }
   if (S.ui.selectedCableId !== null && !S.cables.find(c=>c.id===S.ui.selectedCableId)) {
     S.ui.selectedCableId = null;
+  }
+  if (S.ui.selectedZoneId !== null && !S.zones.find(z=>z.id===S.ui.selectedZoneId)) {
+    S.ui.selectedZoneId = null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
 }
@@ -9063,6 +10289,22 @@ canvas.addEventListener('mousedown', e=>{
   }
 
   const wp=getWorldPos(e);
+
+  // Zone polygon drawing
+  if (S.ui.zoneDrawMode) {
+    // Check if closing the polygon (click near first point)
+    if (S.drawing.points.length >= 3) {
+      const firstPt = S.drawing.points[0];
+      if (Math.hypot(wp.x - firstPt.x, wp.y - firstPt.y) < 5) {
+        finishZoneDraw();
+        return;
+      }
+    }
+    S.drawing.points.push({x: wp.x, y: wp.y});
+    render();
+    return;
+  }
+
   const mode=S.ui.drawMode;
 
   if (mode==='rect'||mode==='hindring') {
@@ -9519,10 +10761,28 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Cable start/end gizmo — drag ──
+    const csgHit = hitCableStartGizmo(sx0, sy0);
+    if (csgHit && !csgHit.lockedStart) {
+      pushUndo();
+      _cableGizmoDragging = true;
+      _cableGizmoDragType = 'start';
+      _cableGizmoDragCable = csgHit;
+      canvas.style.cursor = 'crosshair';
+      return;
+    }
+
     // ── Cable body click — select ──
     const hc=hitCable(rawWp0.x, rawWp0.y);
     if (hc) {
       selectCable(hc.id);
+      return;
+    }
+
+    // ── Zone body click — select ──
+    const hz=hitZone(rawWp0.x, rawWp0.y);
+    if (hz) {
+      selectZone(hz.id);
       return;
     }
 
@@ -9636,7 +10896,7 @@ canvas.addEventListener('mousedown', e=>{
         S.ui.selectedVertexIdx=null; S.ui.selectedDimId=null;
         S.ui.movingWall=false;
       }
-      renderSidebar(); updateWip();
+      renderSidebar(); updateCtxBar(); updateWip();
     }
   }
 });
@@ -9777,6 +11037,53 @@ canvas.addEventListener('mousemove', e=>{
         if(rm) clampHindringToRoom(h,rm);
       }
     }
+    return;
+  }
+  if (_cableGizmoDragging && _cableGizmoDragCable) {
+    const cable = _cableGizmoDragCable;
+    const room = S.rooms.find(r => r.id === cable.roomId);
+    if (room) {
+      const sc = S.view.zoom * BASE_SCALE;
+      const rect = canvas.getBoundingClientRect();
+      const wx = S.view.panX + (e.clientX - rect.left - canvas.width/2) / (S.view.zoom * BASE_SCALE);
+      const wy = S.view.panY + (e.clientY - rect.top - canvas.height/2) / (S.view.zoom * BASE_SCALE);
+      // Determine new startCorner based on mouse world position
+      const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+      const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+      let newCorner;
+      if (wx < midX && wy < midY) newCorner = 'tl';
+      else if (wx >= midX && wy < midY) newCorner = 'tr';
+      else if (wx < midX && wy >= midY) newCorner = 'bl';
+      else newCorner = 'br';
+      if (newCorner !== cable.startCorner) {
+        // If end is locked, auto-adjust CC to match product cable length
+        if (cable.lockedEnd) {
+          const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+          if (prod && prod.cable_length_m) {
+            const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, cable.direction, newCorner, prod.cable_length_m * 100, cable.zoneBounds);
+            if (adjusted && adjusted.runs.length > 0) {
+              cable.startCorner = newCorner;
+              cable.spacing_cm = adjusted.spacing_cm;
+              cable.runs = adjusted.runs;
+              cable.totalLength_cm = adjusted.totalLength_cm;
+              _cableViolationsDirty = true;
+              updateObjInfo(); updateCtxBar();
+            }
+          }
+        } else {
+          const result = generateCableSerpentine(cable.roomId, cable.productId, cable.direction, cable.spacing_cm, newCorner, cable.zoneBounds);
+          if (result && result.runs.length > 0) {
+            cable.startCorner = newCorner;
+            cable.runs = result.runs;
+            cable.totalLength_cm = result.totalLength_cm;
+            _cableViolationsDirty = true;
+            updateObjInfo(); updateCtxBar();
+          }
+        }
+      }
+    }
+    render();
     return;
   }
   if (_sgDragging) {
@@ -10174,6 +11481,10 @@ canvas.addEventListener('mousemove', e=>{
       } else if (S.ui.selectedStripIds.size > 1 && hitGroupGizmo(sx2, sy2)) {
         const ggH2 = hitGroupGizmo(sx2, sy2);
         canvas.style.cursor = ggH2 === 'free' ? 'move' : ggH2 === 'x' ? 'ew-resize' : 'ns-resize';
+      } else if (hitCableStartGizmo(sx2, sy2)) {
+        canvas.style.cursor = 'crosshair';           // cable start gizmo
+      } else if (hitCableEndGizmo(sx2, sy2)) {
+        canvas.style.cursor = 'crosshair';           // cable end gizmo
       } else if (hitStripEndArrow(sx2,sy2)) {
         canvas.style.cursor = S.strips.find(s=>s.id===S.ui.selectedStripId)?.direction === 'v'
           ? 'ns-resize' : 'ew-resize';
@@ -10238,6 +11549,13 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_dimOffDragging) { _dimOffDragging=false; _dimOffId=-1; canvas.style.cursor='default'; return; }
   if (_annotDragging){_annotDragging=false;_annotWallId=null;canvas.style.cursor='default';return;}
+  if (_cableGizmoDragging) {
+    _cableGizmoDragging = false; _cableGizmoDragCable = null; _cableGizmoDragType = null;
+    canvas.style.cursor = 'default';
+    _cableViolationsDirty = true;
+    updateObjInfo(); updateCtxBar(); render();
+    return;
+  }
   if (_sgEndDragging) { const _sid=_stripId; _sgEndDragging=false; _stripId=-1; _sgEndWhich=''; canvas.style.cursor='default'; _checkMarginAfterDrag(S.strips.find(s=>s.id===_sid)); return; }
   if (_sgDragging) {
     const _sid = _stripId;
@@ -10427,6 +11745,7 @@ document.addEventListener('keydown', e=>{
   S.shiftHeld=e.shiftKey;
 
   if (e.key==='Escape') {
+    if (S.ui.zoneDrawMode) { cancelZoneDraw(); return; }
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
     if (S.ui.autoFillPending) { cancelAutoFill(); return; }
@@ -10468,6 +11787,7 @@ document.addEventListener('keydown', e=>{
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
   if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
+  if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
   // Edit 6: Arrow keys move selected strip (no modifier = 10cm step)
   if (S.ui.selectedStripId!==null && !S.ui.drawMode && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
@@ -10528,6 +11848,9 @@ document.addEventListener('keydown', e=>{
   }
   if (e.key==='Enter'&&S.ui.drawMode==='hindring-polygon'&&S.drawing.points.length>=3) {
     pushUndo(); createHindringFromPolygon([...S.drawing.points]); return;
+  }
+  if (e.key==='Enter'&&S.ui.zoneDrawMode&&S.drawing.points.length>=3) {
+    finishZoneDraw(); return;
   }
   if ((e.ctrlKey||e.metaKey)&&(e.key==='z'||e.key==='Z')) {
     e.preventDefault();
@@ -10746,14 +12069,43 @@ function _ctxBarItems() {
     const prod = cable ? HEATING_PRODUCTS.find(p => p.id === cable.productId) : null;
     const spMm = cable ? Math.round(cable.spacing_cm * 10) : 0;
     const lenM = cable ? (cable.totalLength_cm / 100).toFixed(1) : '0';
+    const screedCm = S.varmekabel?.screedThicknessCm || 4;
+    const maxCCmm = screedCm * 3 * 10;
+    const ccWarn = spMm > maxCCmm;
+    const ccStyle = ccWarn ? 'color:#ef4444;font-weight:700' : '';
+    const ccLocked = cable?.lockedEnd;
+    const spDisabled = ccLocked ? ' disabled style="opacity:0.4;pointer-events:none"' : '';
     return `<span class="ctxbar-lbl">🔌 Kabel</span>
       <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Kabel'}${prod?.article_no ? ' ('+esc(prod.article_no)+')' : ''} — ${lenM} m</span>
-      <button class="snap-chip" onclick="_cableSpacingDelta(-10)" title="Reduser avstand mellom baner">⟷ −</button>
-      <span style="font-size:12px;padding:0 2px">${spMm} mm</span>
-      <button class="snap-chip" onclick="_cableSpacingDelta(10)" title="Øk avstand mellom baner">⟷ +</button>
+      <button class="snap-chip"${spDisabled} onclick="_cableSpacingDelta(-10)" title="Reduser avstand mellom baner">⟷ −</button>
+      <span style="font-size:12px;padding:0 2px;${ccStyle}">${spMm} mm${ccLocked?' 🔒':''}</span>
+      <button class="snap-chip"${spDisabled} onclick="_cableSpacingDelta(10)" title="Øk avstand mellom baner">⟷ +</button>
+      ${ccWarn ? '<span style="font-size:10px;color:#ef4444" title="CC overstiger 3× avrettingstykkelse">⚠</span>' : ''}
+      <span class="tc-sep"></span>
+      <span style="font-size:10px;color:var(--dim)">Avretning:</span>
+      <input type="number" min="2" max="10" step="0.5" value="${screedCm}" style="width:36px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:1px 3px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setScreedThickness(+this.value)" onclick="event.stopPropagation()" title="Avrettingstykkelse i cm (maks CC = 3×)">
+      <span style="font-size:10px;color:var(--dim)">cm</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip${cable?.lockedStart?' on':''}" onclick="_toggleCableLock('start')" title="${cable?.lockedStart?'Lås opp start':'Lås startposisjon'}">${cable?.lockedStart?'🔒':'🔓'} Start</button>
+      <button class="snap-chip${cable?.lockedEnd?' on':''}" onclick="_toggleCableLock('end')" title="${cable?.lockedEnd?'Lås opp slutt':'Lås sluttposisjon'}">${cable?.lockedEnd?'🔒':'🔓'} Slutt</button>
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="_cableFlipDirection()" title="Bytt retning (V↔H)">↻ Retning</button>
       <button class="snap-chip" onclick="deleteCable(${ui.selectedCableId})" title="Slett kabel">🗑 Slett</button>`;
+  }
+
+  // Zone selected
+  if (ui.selectedZoneId) {
+    const zone = S.zones.find(z => z.id === ui.selectedZoneId);
+    const zType = zone ? ZONE_TYPES.find(t => t.id === zone.purpose) : null;
+    const isForbid = zone?.type === 'forbidden';
+    const typeLabel = isForbid ? 'Forbudt' : 'Foretrukket';
+    const typeColor = isForbid ? '#ef4444' : '#22c55e';
+    return `<span class="ctxbar-lbl">${zType?.ico||'📍'} Sone</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${zone?.label || 'Sone'}</span>
+      <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:${isForbid?'rgba(239,68,68,0.15)':'rgba(34,197,94,0.15)'};color:${typeColor}">${typeLabel}</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="_toggleZoneType()" title="Bytt mellom forbudt og foretrukket">↻ ${isForbid?'→ Foretrukket':'→ Forbudt'}</button>
+      <button class="snap-chip" onclick="deleteZone(${ui.selectedZoneId})" title="Slett sone">🗑 Slett</button>`;
   }
 
   // Hindring selected
@@ -10786,6 +12138,7 @@ function _ctxBarItems() {
     return `<span class="ctxbar-lbl">Rom</span>
       <button class="snap-chip" id="chip-skillevegg" onclick="startSkilleveggMode()" title="Tegn skillevegg for å dele rommet">⫿ Skillevegg</button>
       <button class="snap-chip" id="chip-hindring" onclick="startHindringMode()" title="Tegn hindring i valgt rom">+ Hindring</button>
+      <button class="snap-chip" onclick="showZoneTypePicker(${ui.selectedRoomId})" title="Tegn sone (forbudt/foretrukket) i rommet">+ Sone</button>
       <button class="snap-chip" id="chip-produkt" onclick="openProduktMenu(event)" title="Velg og plasser varmeprodukt">+ Produkt</button>
       ${hasStrips ? `<button class="snap-chip" onclick="startSeedMode()" title="Klikk et punkt i rommet — folie fylles ut derfra">📍 Fra punkt</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="centerRoomStrips(${ui.selectedRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
@@ -10894,10 +12247,12 @@ function _buildSaveData() {
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({...p}))})),
     strips   : S.strips.map(s=>({...s})),
     cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
+    zones    : S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
     varmefolie : {...S.varmefolie},
+    varmekabel : {...S.varmekabel},
     bgs: Object.fromEntries(
       Object.entries(S.bgs)
         .filter(([,bg]) => bg.dataUrl)
@@ -10979,12 +12334,15 @@ function _restoreProject(data) {
   S.hindrings = data.hindrings || [];
   S.strips    = data.strips    || [];
   S.cables    = data.cables    || [];
+  S.zones     = data.zones     || [];
   S.counters  = data.counters  || S.counters;
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   if (!S.counters.nextCableId) S.counters.nextCableId = 1;
+  if (!S.counters.nextZoneId) S.counters.nextZoneId = 1;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
+  if (data.varmekabel) Object.assign(S.varmekabel, data.varmekabel);
   S.ui.selectedStripId = null;
   S.ui.selectedCableId = null;
   _invalidateCableCache();
@@ -10996,6 +12354,7 @@ function _restoreProject(data) {
   const _cdot=document.getElementById('color-dot'); if(_cdot) _cdot.style.background=S.ui.drawColor;
   S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
   S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
+  S.ui.selectedZoneId=null; S.ui.zoneDrawMode=false;
   S.ui.selectedDimId=null; S.ui.selectedAnnot=null;
   S.ui.drawMode=null; S.drawing.active=false; S.drawing.points=[];
   S.drawing.rectStart=null; S.drawing.dimPending=null;
@@ -11201,7 +12560,9 @@ async function initSupabase() {
     _ensureCableTestProducts();
   }
 }
-initSupabase();
+initSupabase().then(() => {
+  try { renderSidebar(); updateCtxBar(); } catch(e) { /* no project yet */ }
+});
 
 /** Inject test cable products if no cable products exist in Supabase yet */
 function _ensureCableTestProducts() {
@@ -11435,7 +12796,7 @@ const _cableViolationCache = new Map();
 let _cableViolationsDirty = true;
 
 function getCableViolations(cable) {
-  const result = { hasAny: false, maxLength: null, minSpacing: null, maxSpacing: null, bendRadius: null };
+  const result = { hasAny: false, maxLength: null, minSpacing: null, maxSpacing: null, bendRadius: null, maxCC: null, forbiddenStart: null, forbiddenEnd: null };
   const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
   if (!prod) return result;
 
@@ -11465,6 +12826,32 @@ function getCableViolations(cable) {
   if (minBendCm > 0 && uTurnRadius < minBendCm - 0.01) {
     result.bendRadius = { actual: uTurnRadius, min: minBendCm };
     result.hasAny = true;
+  }
+
+  // 4. Max CC rule: CC ≤ 3 × screed thickness
+  const screedCm = S.varmekabel?.screedThicknessCm || 4;
+  const maxCCcm = 3 * screedCm;
+  if (cable.spacing_cm > maxCCcm + 0.01) {
+    result.maxCC = { actual: cable.spacing_cm, max: maxCCcm, screed: screedCm };
+    result.hasAny = true;
+  }
+
+  // 5. Zone checks: cable start/end must not be in forbidden zones
+  const ep = _cableEndpoints(cable);
+  if (ep) {
+    const forbiddenZones = S.zones.filter(z => z.roomId === cable.roomId && z.type === 'forbidden');
+    for (const fz of forbiddenZones) {
+      if (fz.points && fz.points.length >= 3) {
+        if (ptInPoly(ep.start.x, ep.start.y, fz.points)) {
+          result.forbiddenStart = { zoneName: fz.label || 'Forbudt sone' };
+          result.hasAny = true;
+        }
+        if (ptInPoly(ep.end.x, ep.end.y, fz.points)) {
+          result.forbiddenEnd = { zoneName: fz.label || 'Forbudt sone' };
+          result.hasAny = true;
+        }
+      }
+    }
   }
 
   return result;
@@ -11586,8 +12973,8 @@ function _resetToNpScreen() {
   // Full state reset — back to factory defaults
   S.project  = { id:1, name:'', description:'', createdAt:Date.now() };
   S.floors   = [];
-  S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; _invalidateStripCache();
-  S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1 };
+  S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; S.zones = []; _invalidateStripCache();
+  S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextCableId:1, nextZoneId:1 };
   S.view     = { zoom:1, panX:0, panY:0 };
   S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null;
   Object.assign(S.ui, {

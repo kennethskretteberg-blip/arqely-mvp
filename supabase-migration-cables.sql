@@ -4,6 +4,13 @@
 -- Dato: 2026-03-10
 -- =============================================================================
 
+-- ─── STEG 0: Gjor folie-spesifikke kolonner nullable (kabler har ikke bredde) ─
+
+ALTER TABLE heating_products ALTER COLUMN width_mm DROP NOT NULL;
+ALTER TABLE heating_products ALTER COLUMN netto_width_mm DROP NOT NULL;
+ALTER TABLE heating_products ALTER COLUMN brutto_width_mm DROP NOT NULL;
+ALTER TABLE heating_products ALTER COLUMN watt_per_lm DROP NOT NULL;
+
 -- ─── STEG 1: Nye kolonner pa heating_products ─────────────────────────────────
 
 ALTER TABLE heating_products
