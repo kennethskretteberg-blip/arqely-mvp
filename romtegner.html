@@ -2743,15 +2743,28 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
   }
   const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
 
+  // ─── CENTERED LAYOUT ──────────────────────────────────────────
+  // Instead of starting from one wall and stepping until out-of-bounds,
+  // calculate N runs and center them symmetrically within the usable width.
+  const usableWidth = (perpMax - margin) - (perpMin + margin);
+  if (usableWidth <= 0) return null;
+
+  // Number of runs that fit with this spacing
+  const N = Math.max(1, Math.floor(usableWidth / spacing_cm) + 1);
+
+  // Center the N runs: equal distance from both margin boundaries
+  const actualSpan = (N - 1) * spacing_cm;
+  const sideMargin = (usableWidth - actualSpan) / 2;
+  const firstPos = perpMin + margin + sideMargin;
+
   const runs = [];
-  let pos = startFromHigh ? (perpMax - margin) : (perpMin + margin);
-  const step = startFromHigh ? -spacing_cm : spacing_cm;
   const sweepAxis = direction === 'v' ? 'y' : 'x';
   const roomH = S.hindrings.filter(h => h.roomId === roomId);
 
-  const inBounds = () => startFromHigh ? (pos >= perpMin + margin) : (pos <= perpMax - margin);
-
-  while (inBounds()) {
+  for (let i = 0; i < N; i++) {
+    const pos = startFromHigh
+      ? (firstPos + actualSpan - i * spacing_cm)
+      : (firstPos + i * spacing_cm);
     // Cable is a line (zero width) — get intervals along sweep axis
     let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
     // Shrink by wall margin
@@ -2766,7 +2779,6 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
     if (intervals.length > 0) {
       runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
     }
-    pos += step;
   }
 
   // Post-process: inset segment endpoints at U-turn connections so the
@@ -2852,12 +2864,14 @@ function autoFillCable(roomId, productId) {
   }
   if (!best || best.runs.length === 0) return null;
 
-  // Zone-aware start corner + direction: try all combos and also adjusted spacings
-  // to find a combination where neither start nor end falls in a forbidden zone.
+  // Auto-select start corner: try all 4 corners and pick the best.
+  // With zones: avoid forbidden zones, prefer preferred zones.
+  // Without zones: pick corner that gives best cable length utilization.
   let bestCorner = 'bl';
   const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
   const preferredZones = S.zones.filter(z => z.roomId === roomId && z.type === 'preferred' && z.points && z.points.length >= 3);
-  if (forbiddenZones.length > 0 || preferredZones.length > 0) {
+  {
+    // Always try all corners for best result (not just when zones exist)
     const corners = ['bl', 'br', 'tl', 'tr'];
     const dirs = [bestDir, bestDir === 'v' ? 'h' : 'v'];
     // Try original spacing + slight adjustments (to get odd/even run count variations)
@@ -2888,7 +2902,23 @@ function autoFillCable(roomId, productId) {
           for (const pz of preferredZones) {
             if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
           }
-          // Small bonus for original direction and original spacing
+          // Reward cable endpoints being close to room corners (corner landing)
+          const innerPts = _offsetPolygon(room.points, _effectiveMarginCm(productId));
+          if (innerPts.length >= 3) {
+            const minDist = (pt) => Math.min(...innerPts.map(c => Math.hypot(c.x - pt.x, c.y - pt.y)));
+            const startDist = minDist(ep.start);
+            const endDist = minDist(ep.end);
+            // Reward proximity to corners (max 5 points, diminishes with distance)
+            score += Math.max(0, 5 - startDist * 0.1);
+            score += Math.max(0, 3 - endDist * 0.1);
+          }
+          // Reward higher cable length (better utilization for fixed-length cables)
+          if (prod.cable_length_m) {
+            const targetLen = prod.cable_length_m * 100;
+            const utilization = res.totalLength_cm / targetLen;
+            score += utilization * 2;  // up to 2 points for 100% utilization
+          }
+          // Small bonus for PCA-preferred direction and original spacing
           if (dir === bestDir) score += 1;
           if (sp === spacing) score += 0.5;
           if (score > bestScore) {
@@ -3185,17 +3215,25 @@ function autoPlaceCable(familyName, categoryId) {
 }
 
 // ─── AUTOMATIC DIRECTION DETECTION ───────────────────────────
-/** Suggest optimal foil direction based on room geometry.
- *  Strips along the longer axis → longer strips → better coverage & less waste.
+/** Suggest optimal direction using PCA (area-weighted second moments of inertia).
+ *  Works correctly for L-shapes, trapezoids, and irregular polygons
+ *  where bounding-box comparison would be misleading.
  *  Returns 'v' or 'h'. */
 function _suggestDirection(room) {
   if (!room || !room.points || room.points.length < 3) return 'v';
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const width  = Math.max(...xs) - Math.min(...xs);   // X extent
-  const height = Math.max(...ys) - Math.min(...ys);   // Y extent
-  // 'v' means strips run vertically (along Y) — good when height > width
-  // 'h' means strips run horizontally (along X) — good when width > height
-  return height >= width ? 'v' : 'h';
+  const pts = room.points, n = pts.length;
+  // Compute area-weighted second moments of inertia (shoelace-style)
+  let Ixx = 0, Iyy = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+    const cross = xi * yj - xj * yi;
+    Ixx += (yi * yi + yi * yj + yj * yj) * cross;
+    Iyy += (xi * xi + xi * xj + xj * xj) * cross;
+  }
+  // Larger Iyy → room is wider in X → cable runs sweep X → direction 'h'
+  // Larger Ixx → room is taller in Y → cable runs sweep Y → direction 'v'
+  return Math.abs(Iyy) >= Math.abs(Ixx) ? 'h' : 'v';
 }
 
 // ─── AUTO-FILL DIRECTION ARROWS ───────────────────────────────
@@ -4099,6 +4137,44 @@ function drawStrips() {
 // ─── CABLE RENDERING ──────────────────────────────────────────
 let _hoveredCableId = null;
 
+/**
+ * Offset a polygon inward by `dist` cm. Returns array of {x, y} points.
+ * Positive dist = inset (shrink), negative = outset (expand).
+ */
+function _offsetPolygon(pts, dist) {
+  const n = pts.length;
+  if (n < 3) return [];
+  // Signed area → winding direction
+  let area2 = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area2 += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+  }
+  const sign = area2 > 0 ? 1 : -1;
+  // Offset each edge inward
+  const edges = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.001) continue;
+    const nx = -dy / len * sign * dist, ny = dx / len * sign * dist;
+    edges.push({ x1: pts[i].x + nx, y1: pts[i].y + ny, x2: pts[j].x + nx, y2: pts[j].y + ny });
+  }
+  // Intersect consecutive offset edges → inset polygon
+  const result = [];
+  for (let i = 0; i < edges.length; i++) {
+    const e1 = edges[i], e2 = edges[(i + 1) % edges.length];
+    const d1x = e1.x2 - e1.x1, d1y = e1.y2 - e1.y1;
+    const d2x = e2.x2 - e2.x1, d2y = e2.y2 - e2.y1;
+    const denom = d1x * d2y - d1y * d2x;
+    if (Math.abs(denom) < 1e-9) { result.push({ x: e1.x2, y: e1.y2 }); continue; }
+    const t = ((e2.x1 - e1.x1) * d2y - (e2.y1 - e1.y1) * d2x) / denom;
+    result.push({ x: e1.x1 + t * d1x, y: e1.y1 + t * d1y });
+  }
+  return result.length >= 3 ? result : [];
+}
+
 /** Draw margin zone (randsone) around all walls for a cable */
 function _drawCableMarginZone(cable, room) {
   const margin = _effectiveMarginCm(cable.productId);
@@ -4107,36 +4183,7 @@ function _drawCableMarginZone(cable, room) {
   if (!pts || pts.length < 3) return;
   const n = pts.length;
 
-  // Signed area → winding direction
-  let area2 = 0;
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    area2 += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
-  }
-  const sign = area2 > 0 ? 1 : -1;
-
-  // Offset each edge inward by margin
-  const edges = [];
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    const dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
-    const len = Math.hypot(dx, dy);
-    if (len < 0.001) continue;
-    const nx = -dy / len * sign * margin, ny = dx / len * sign * margin;
-    edges.push({ x1: pts[i].x + nx, y1: pts[i].y + ny, x2: pts[j].x + nx, y2: pts[j].y + ny });
-  }
-
-  // Intersect consecutive offset edges → inset polygon
-  const inner = [];
-  for (let i = 0; i < edges.length; i++) {
-    const e1 = edges[i], e2 = edges[(i + 1) % edges.length];
-    const d1x = e1.x2 - e1.x1, d1y = e1.y2 - e1.y1;
-    const d2x = e2.x2 - e2.x1, d2y = e2.y2 - e2.y1;
-    const denom = d1x * d2y - d1y * d2x;
-    if (Math.abs(denom) < 1e-9) { inner.push({ x: e1.x2, y: e1.y2 }); continue; }
-    const t = ((e2.x1 - e1.x1) * d2y - (e2.y1 - e1.y1) * d2x) / denom;
-    inner.push({ x: e1.x1 + t * d1x, y: e1.y1 + t * d1y });
-  }
+  const inner = _offsetPolygon(pts, margin);
   if (inner.length < 3) return;
 
   // Draw margin zone using even-odd fill (ring between room and inset polygon)
@@ -5391,10 +5438,10 @@ function _toggleCableLock(which) {
 }
 
 /**
- * Binary search to find optimal spacing that produces a serpentine path
+ * Find optimal spacing that produces a centered serpentine path
  * matching the target cable length as precisely as possible.
- * Uses two-phase approach: (1) coarse search for run count, (2) precise search within
- * each run-count-stable spacing range to achieve < 1 cm deviation.
+ * Uses direct N calculation: for each candidate run count N, compute the CC
+ * that centers N runs, then fine-tune with binary search within that N.
  * Returns {spacing_cm, runs, totalLength_cm} or null if no valid spacing found.
  */
 function _adjustSpacingForLength(roomId, productId, direction, startCorner, targetLengthCm, zoneBounds) {
@@ -5405,62 +5452,77 @@ function _adjustSpacingForLength(roomId, productId, direction, startCorner, targ
   // Note: screed rule (CC ≤ 3× screed) is a soft warning shown in UI,
   // not a hard limit here — allows cable to end at corner with full runs
 
-  // Phase 1: Coarse binary search to find approximate spacing and run count
-  let lo = minSp, hi = maxSp;
-  let coarseBest = null, coarseBestDiff = Infinity;
-  for (let iter = 0; iter < 20; iter++) {
-    const mid = (lo + hi) / 2;
-    const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
-    if (!result || result.runs.length === 0) { hi = mid; continue; }
-    const diff = result.totalLength_cm - targetLengthCm;
-    if (Math.abs(diff) < coarseBestDiff) {
-      coarseBestDiff = Math.abs(diff);
-      coarseBest = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
-    }
-    if (diff > 0) lo = mid; else hi = mid;
+  // Get room dimensions for the perpendicular (sweep) axis
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const margin = _effectiveMarginCm(productId);
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  let perpMin = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  let perpMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+  if (zoneBounds) {
+    if (zoneBounds.perpMin != null) perpMin = Math.max(perpMin, zoneBounds.perpMin);
+    if (zoneBounds.perpMax != null) perpMax = Math.min(perpMax, zoneBounds.perpMax);
   }
-  if (!coarseBest) return null;
+  const usableWidth = (perpMax - margin) - (perpMin + margin);
+  if (usableWidth <= 0) return null;
 
-  // Phase 2: Try the found run count and adjacent counts for precise matching
-  const centerN = coarseBest.runs.length;
-  let overallBest = coarseBest;
-  let overallBestDiff = coarseBestDiff;
+  // Range of N values from product spacing limits
+  const minN = Math.max(1, Math.floor(usableWidth / maxSp) + 1);
+  const maxN = Math.floor(usableWidth / minSp) + 1;
 
-  for (const targetN of [centerN - 1, centerN, centerN + 1]) {
-    if (targetN < 1) continue;
-    // Find spacing range that produces exactly targetN runs
-    const range = _findSpacingRangeForRunCount(roomId, productId, direction, startCorner, zoneBounds, targetN, minSp, maxSp);
-    if (!range) continue;
-    // Precise binary search within this stable run-count range
-    let rLo = range.lo, rHi = range.hi;
+  let best = null, bestDiff = Infinity;
+
+  // Phase 1: Try each candidate N, compute CC that gives N centered runs
+  for (let N = minN; N <= maxN; N++) {
+    const cc = N > 1 ? usableWidth / (N - 1) : usableWidth;
+    // Verify within product limits (with small tolerance)
+    if (N > 1 && (cc < minSp - 0.01 || cc > maxSp + 0.01)) continue;
+
+    const result = generateCableSerpentine(roomId, productId, direction, cc, startCorner, zoneBounds);
+    if (!result || result.runs.length === 0) continue;
+
+    const diff = Math.abs(result.totalLength_cm - targetLengthCm);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = { spacing_cm: cc, runs: result.runs, totalLength_cm: result.totalLength_cm };
+    }
+  }
+  if (!best) return null;
+
+  // Phase 2: Fine-tune with binary search around best N for exact length match
+  if (bestDiff > 1) {
+    const N = best.runs.length;
+    // CC range that keeps exactly N centered runs:
+    // N = floor(usableWidth / cc) + 1  →  cc range is [usableWidth/N, usableWidth/(N-1)]
+    const ccLo = N > 1 ? usableWidth / N : minSp;
+    const ccHi = N > 1 ? usableWidth / (N - 1) : maxSp;
+    let lo = Math.max(minSp, ccLo), hi = Math.min(maxSp, ccHi);
     for (let iter = 0; iter < 40; iter++) {
-      const mid = (rLo + rHi) / 2;
+      const mid = (lo + hi) / 2;
       const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
-      if (!result || result.runs.length !== targetN) {
-        if (result && result.runs.length > targetN) rLo = mid; else rHi = mid;
-        continue;
-      }
+      if (!result || result.runs.length === 0) { hi = mid; continue; }
       const diff = result.totalLength_cm - targetLengthCm;
-      if (Math.abs(diff) < overallBestDiff) {
-        overallBestDiff = Math.abs(diff);
-        overallBest = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
+      if (Math.abs(diff) < bestDiff) {
+        bestDiff = Math.abs(diff);
+        best = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
       }
-      if (Math.abs(diff) < 1) break; // within 1 cm of target — excellent
-      // Within fixed N: larger spacing → longer total (arc contribution π/2-1 > 0)
-      if (diff > 0) rHi = mid; else rLo = mid;
+      if (Math.abs(diff) < 1) break;  // within 1 cm — excellent
+      // Within fixed N: larger CC → longer total (π/2-1 > 0), so:
+      // diff > 0 (too long) → need smaller CC → hi = mid
+      // diff < 0 (too short) → need larger CC → lo = mid
+      if (diff > 0) hi = mid; else lo = mid;
     }
   }
 
   // Prefer full runs (cable ends at corner). Only trim last run if overshooting.
-  if (overallBest && overallBest.totalLength_cm <= targetLengthCm + 1) {
-    // Undershoot or exact: all full runs, cable ends at corner, unused = cold lead
-    return overallBest;
+  if (best && best.totalLength_cm <= targetLengthCm + 1) {
+    return best;
   }
 
   // Overshoot: total > target — must trim last run to fit exact cable length
-  if (overallBest && overallBest.totalLength_cm > targetLengthCm + 1) {
-    const runs = JSON.parse(JSON.stringify(overallBest.runs));
-    const excess = overallBest.totalLength_cm - targetLengthCm;
+  if (best && best.totalLength_cm > targetLengthCm + 1) {
+    const runs = JSON.parse(JSON.stringify(best.runs));
+    const excess = best.totalLength_cm - targetLengthCm;
     const lastRun = runs[runs.length - 1];
     if (lastRun && lastRun.segments.length) {
       const uIdx = runs.length - 2;
@@ -5476,36 +5538,12 @@ function _adjustSpacingForLength(roomId, productId, direction, startCorner, targ
         ok = s.end_cm > s.start_cm;
       }
       if (ok) {
-        return { spacing_cm: overallBest.spacing_cm, runs, totalLength_cm: targetLengthCm };
+        return { spacing_cm: best.spacing_cm, runs, totalLength_cm: targetLengthCm };
       }
     }
   }
 
-  return overallBest;
-}
-
-/** Find spacing range [lo, hi] that produces exactly targetN runs */
-function _findSpacingRangeForRunCount(roomId, productId, direction, startCorner, zoneBounds, targetN, minSp, maxSp) {
-  // Find hi: largest spacing that still gives >= targetN runs
-  let sLo = minSp, sHi = maxSp;
-  for (let i = 0; i < 30; i++) {
-    const mid = (sLo + sHi) / 2;
-    const r = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
-    if ((r ? r.runs.length : 0) >= targetN) sLo = mid; else sHi = mid;
-  }
-  const hi = sLo;
-  // Find lo: smallest spacing that gives <= targetN runs
-  sLo = minSp; sHi = hi;
-  for (let i = 0; i < 30; i++) {
-    const mid = (sLo + sHi) / 2;
-    const r = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
-    if ((r ? r.runs.length : 0) <= targetN) sHi = mid; else sLo = mid;
-  }
-  const lo = sHi;
-  // Verify midpoint gives targetN
-  const test = generateCableSerpentine(roomId, productId, direction, (lo + hi) / 2, startCorner, zoneBounds);
-  if (!test || test.runs.length !== targetN) return null;
-  return { lo, hi };
+  return best;
 }
 
 // ── Folie-grupper ────────────────────────────────────────────
