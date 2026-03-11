@@ -2311,53 +2311,41 @@ function autoFillMatSerpentine(productId) {
 
   for (let row = 0; row < nRows; row++) {
     const rowCenter = acrossOffset + matWidthCm / 2 + row * (matWidthCm + gapCm);
+    const rowEdge = rowCenter - matWidthCm / 2;
 
-    // Scan along-axis to find where room polygon intersects this row
-    const alongMin = dir === 'h' ? rMinX : rMinY;
-    const alongMax = dir === 'h' ? rMaxX : rMaxY;
+    // Use band-clipping: clip mat-width band against room polygon
+    // dir='h' → rowEdge is Y, returns X intervals; dir='v' → rowEdge is X, returns Y intervals
+    const intervals = clipStripToRoom(rowEdge, matWidthCm, dir, room.points, marginCm);
 
-    // Sample points along the row center-line to find min/max inside polygon
-    let inMin = Infinity, inMax = -Infinity;
-    const step = 1;  // 1cm steps
-    for (let a = alongMin; a <= alongMax; a += step) {
-      const px = dir === 'h' ? a : rowCenter;
-      const py = dir === 'h' ? rowCenter : a;
-      if (ptInPoly(px, py, room.points)) {
-        if (a < inMin) inMin = a;
-        if (a > inMax) inMax = a;
-      }
+    // Each interval is a valid along-axis segment — may be multiple for L-shaped rooms
+    for (const [segStart, segEnd] of intervals) {
+      let availLen = segEnd - segStart;
+      if (availLen < minLenCm) continue;
+
+      // Snap length down to nearest cut interval
+      let matLen = Math.floor(availLen / cutCm) * cutCm;
+      if (matLen > maxLenCm) matLen = Math.floor(maxLenCm / cutCm) * cutCm;
+      if (matLen < minLenCm) matLen = minLenCm;
+      if (matLen > availLen) continue;
+
+      // Center the mat within this segment
+      const segCenter = (segStart + segEnd) / 2;
+      const matX = dir === 'h' ? segCenter - matLen / 2 : rowEdge;
+      const matY = dir === 'h' ? rowEdge : segCenter - matLen / 2;
+
+      const mat = {
+        id: S.counters.nextMatId++,
+        roomId: room.id,
+        productId: productId,
+        x_cm: matX,
+        y_cm: matY,
+        width_cm: matWidthCm,
+        length_cm: matLen,
+        rotation_deg: dir === 'h' ? 90 : 0
+      };
+      S.mats.push(mat);
+      mats.push(mat);
     }
-    if (inMin >= inMax) continue;  // row doesn't intersect room
-
-    // Apply wall margin
-    inMin += marginCm;
-    inMax -= marginCm;
-    let availLen = inMax - inMin;
-    if (availLen < minLenCm) continue;  // too short for minimum mat
-
-    // Snap length down to nearest cut interval
-    let matLen = Math.floor(availLen / cutCm) * cutCm;
-    if (matLen > maxLenCm) matLen = Math.floor(maxLenCm / cutCm) * cutCm;
-    if (matLen < minLenCm) matLen = minLenCm;  // allow minimum even if not perfectly snapped
-    if (matLen > availLen) continue;
-
-    // Center the mat within the available along-span
-    const alongCenter = (inMin + inMax) / 2;
-    const matX = dir === 'h' ? alongCenter - matLen / 2 : rowCenter - matWidthCm / 2;
-    const matY = dir === 'h' ? rowCenter - matWidthCm / 2 : alongCenter - matLen / 2;
-
-    const mat = {
-      id: S.counters.nextMatId++,
-      roomId: room.id,
-      productId: productId,
-      x_cm: matX,
-      y_cm: matY,
-      width_cm: matWidthCm,
-      length_cm: matLen,
-      rotation_deg: dir === 'h' ? 90 : 0
-    };
-    S.mats.push(mat);
-    mats.push(mat);
   }
 
   if (mats.length === 0) {
@@ -2461,47 +2449,51 @@ function _autoFillPlates(productId) {
 
   // Room bounding box
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const rMinX = Math.min(...xs) + margin, rMaxX = Math.max(...xs) - margin;
-  const rMinY = Math.min(...ys) + margin, rMaxY = Math.max(...ys) - margin;
+  const polyMinY = Math.min(...ys), polyMaxY = Math.max(...ys);
+  const yStart = polyMinY + margin, yEnd = polyMaxY - margin;
+  const ySpan = yEnd - yStart;
 
-  // Determine best direction: try both orientations, pick the one with more plates
+  // Try both orientations, count plates via band-clipping, pick best
   const fills = [];
   for (const flip of [false, true]) {
-    const pw = flip ? lCm : wCm;
-    const pl = flip ? wCm : lCm;
-    const cols = Math.floor((rMaxX - rMinX) / pw);
-    const rows = Math.floor((rMaxY - rMinY) / pl);
-    if (cols > 0 && rows > 0) {
-      fills.push({ flip, pw, pl, cols, rows, count: cols * rows });
+    const pw = flip ? lCm : wCm;  // plate X-dimension
+    const pl = flip ? wCm : lCm;  // plate Y-dimension
+    const maxRows = Math.floor(ySpan / pl);
+    if (maxRows <= 0) continue;
+    const totalH = maxRows * pl;
+    const rowStartY = yStart + (ySpan - totalH) / 2;
+    let count = 0;
+    for (let r = 0; r < maxRows; r++) {
+      const rowY = rowStartY + r * pl;
+      const intervals = clipStripToRoom(rowY, pl, 'h', room.points, margin);
+      for (const [xLo, xHi] of intervals) count += Math.floor((xHi - xLo) / pw);
     }
+    if (count > 0) fills.push({ flip, pw, pl, maxRows, rowStartY, count });
   }
   if (fills.length === 0) return;
   fills.sort((a, b) => b.count - a.count);
   const best = fills[0];
 
-  // Center the grid in the room
-  const totalW = best.cols * best.pw;
-  const totalH = best.rows * best.pl;
-  const startX = rMinX + (rMaxX - rMinX - totalW) / 2;
-  const startY = rMinY + (rMaxY - rMinY - totalH) / 2;
-
-  for (let row = 0; row < best.rows; row++) {
-    for (let col = 0; col < best.cols; col++) {
-      const px = startX + col * best.pw;
-      const py = startY + row * best.pl;
-      // Check that center of plate is inside room polygon
-      const cx = px + best.pw / 2, cy = py + best.pl / 2;
-      if (!ptInPoly(cx, cy, room.points)) continue;
-      S.plates.push({
-        id: S.counters.nextPlateId++,
-        roomId: room.id,
-        productId: productId,
-        x_cm: px,
-        y_cm: py,
-        width_cm: best.pw,
-        length_cm: best.pl,
-        direction: best.flip ? 'h' : 'v'
-      });
+  // Place plates using band-clipping per row
+  for (let row = 0; row < best.maxRows; row++) {
+    const rowY = best.rowStartY + row * best.pl;
+    const intervals = clipStripToRoom(rowY, best.pl, 'h', room.points, margin);
+    for (const [xLo, xHi] of intervals) {
+      const nCols = Math.floor((xHi - xLo) / best.pw);
+      if (nCols <= 0) continue;
+      const colOffset = xLo + ((xHi - xLo) - nCols * best.pw) / 2;  // center in interval
+      for (let col = 0; col < nCols; col++) {
+        S.plates.push({
+          id: S.counters.nextPlateId++,
+          roomId: room.id,
+          productId: productId,
+          x_cm: colOffset + col * best.pw,
+          y_cm: rowY,
+          width_cm: best.pw,
+          length_cm: best.pl,
+          direction: best.flip ? 'h' : 'v'
+        });
+      }
     }
   }
   _invalidatePlateCache();
