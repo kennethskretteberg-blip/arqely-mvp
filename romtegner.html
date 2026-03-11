@@ -4948,12 +4948,18 @@ function drawMats() {
       const cutCm = (prod?.mat_cut_interval_mm || 160) / 10;
 
       // In mat-local coords: X = width axis (narrow, ~50cm), Y = length axis (long)
-      // Cable runs horizontally across X, spaced by CC along Y
-      const nRuns = Math.max(2, Math.floor(mat.length_cm / ccCm) + 1);
+      // Cable runs horizontally across X, spaced by CC along Y.
+      // Technical drawing (TPL-ECOMT-CA-2183): cable runs across width, U-turn arcs
+      // at width edges stay INSIDE the mat boundary. Runs end short so arcs fit within.
+      // Min ~20mm length margin at each end (per technical drawing)
+      const minLenMgn = 2.0; // cm
+      const usableLen = mat.length_cm - 2 * minLenMgn;
+      const nRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
       const totalSpan = (nRuns - 1) * ccCm;
       const edgeMgn = (mat.length_cm - totalSpan) / 2;
-      const pad = 2; // px padding from mat edge
       const ccPx = ccCm * sc;
+      const arcR = ccPx / 2;  // arc radius in pixels = half the CC spacing
+      const edgePad = Math.max(1, 0.5 * sc); // ~5mm edge margin
 
       // At low zoom, skip runs so lines stay ≥ 3px apart
       const step = ccPx < 3 ? Math.ceil(3 / ccPx) : 1;
@@ -4964,8 +4970,10 @@ function drawMats() {
         : _lc('rgba(200, 60, 30, 0.28)', 'rgba(255, 100, 60, 0.22)');
       ctx.lineWidth = Math.max(0.7, sc * 0.4);
 
-      // Draw continuous serpentine path: run → arc → run → arc → ...
-      const left = -hw + pad, right = hw - pad;
+      // Cable runs end at ±(hw - arcR - edgePad) so arcs stay inside mat.
+      // Arc center at run endpoint, arc extends arcR outward → reaches hw - edgePad.
+      const left  = -hw + arcR + edgePad;
+      const right =  hw - arcR - edgePad;
       ctx.beginPath();
       let goingRight = true;
       for (let i = 0; i < nRuns; i += step) {
@@ -4976,13 +4984,13 @@ function drawMats() {
         // Cable run across width
         ctx.lineTo(goingRight ? right : left, yPos);
 
-        // U-turn arc to next run (if not last)
+        // U-turn arc to next run (if not last) — semicircle curving outward,
+        // staying within mat boundary (arc extends from run endpoint to hw - edgePad)
         const nextI = i + step;
         if (nextI < nRuns) {
           const nextY = -hl + (edgeMgn + nextI * ccCm) * sc;
           const r = (nextY - yPos) / 2;
           const arcX = goingRight ? right : left;
-          // Arc curving outward: right edge → clockwise, left edge → counter-clockwise
           if (goingRight) {
             ctx.arc(arcX, yPos + r, r, -Math.PI / 2, Math.PI / 2);
           } else {
@@ -5001,7 +5009,7 @@ function drawMats() {
         const nCuts = Math.floor(mat.length_cm / cutCm);
         for (let i = 1; i <= nCuts; i++) {
           const yPos = -hl + i * cutCm * sc;
-          if (yPos > hl - pad) break;
+          if (yPos > hl - edgePad) break;
           ctx.beginPath();
           ctx.moveTo(-hw + 1, yPos);
           ctx.lineTo(hw - 1, yPos);
@@ -5043,21 +5051,38 @@ function drawMats() {
     ctx.fillRect(-hw, -hl, hw * 2, hl * 2);
     ctx.strokeRect(-hw, -hl, hw * 2, hl * 2);
     ctx.setLineDash([]);
-    // Ghost serpentine pattern — cable runs across width, spaced by CC along length
+    // Ghost serpentine pattern — cable runs across width with U-turn arcs inside mat
     if (S.view.zoom > 0.25 && S.ui.matPlaceProductId) {
       const gProd = HEATING_PRODUCTS.find(p => p.id === S.ui.matPlaceProductId);
       const gCC = (gProd?.mat_cc_mm || 80) / 10;
       const gN = Math.max(2, Math.floor(lCm / gCC) + 1);
       const gSpan = (gN - 1) * gCC;
       const gMgn = (lCm - gSpan) / 2;
-      const gStep = (gCC * sc < 3) ? Math.ceil(3 / (gCC * sc)) : 1;
+      const gCcPx = gCC * sc;
+      const gStep = (gCcPx < 3) ? Math.ceil(3 / gCcPx) : 1;
+      const gArcR = gCcPx / 2;
+      const gEdge = Math.max(1, 0.5 * sc);
+      const gL = -hw + gArcR + gEdge, gR = hw - gArcR - gEdge;
       ctx.strokeStyle = 'rgba(200, 60, 30, 0.18)';
       ctx.lineWidth = Math.max(0.5, sc * 0.3);
       ctx.setLineDash([]);
+      ctx.beginPath();
+      let gRight = true;
       for (let i = 0; i < gN; i += gStep) {
         const yP = -hl + (gMgn + i * gCC) * sc;
-        ctx.beginPath(); ctx.moveTo(-hw + 2, yP); ctx.lineTo(hw - 2, yP); ctx.stroke();
+        if (i === 0) ctx.moveTo(gRight ? gL : gR, yP);
+        ctx.lineTo(gRight ? gR : gL, yP);
+        const ni = i + gStep;
+        if (ni < gN) {
+          const nY = -hl + (gMgn + ni * gCC) * sc;
+          const r = (nY - yP) / 2;
+          const ax = gRight ? gR : gL;
+          if (gRight) ctx.arc(ax, yP + r, r, -Math.PI/2, Math.PI/2);
+          else ctx.arc(ax, yP + r, r, Math.PI/2, -Math.PI/2);
+        }
+        gRight = !gRight;
       }
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -14243,27 +14268,31 @@ function _renderRoomToImage(room) {
     offCtx.lineWidth = 1;
     offCtx.strokeRect(-mw, -mh, mw * 2, mh * 2);
     // Serpentine cable runs — across width, spaced by CC along length
+    // Arcs stay inside mat boundary (runs end short by arcR)
     const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
     const mCC = (mp?.mat_cc_mm || 80) / 10;
     const mNR = Math.max(2, Math.floor(mat.length_cm / mCC) + 1);
     const mTS = (mNR - 1) * mCC;
     const mEM = (mat.length_cm - mTS) / 2;
-    const mStep = (mCC * scale < 2) ? Math.ceil(2 / (mCC * scale)) : 1;
+    const mCcPx = mCC * scale;
+    const mStep = (mCcPx < 2) ? Math.ceil(2 / mCcPx) : 1;
+    const mArcR = mCcPx / 2;
+    const mEdge = Math.max(1, 0.5 * scale);
+    const pL = -mw + mArcR + mEdge, pR = mw - mArcR - mEdge;
     offCtx.strokeStyle = 'rgba(200, 60, 30, 0.35)';
     offCtx.lineWidth = 0.8;
-    // Continuous serpentine path
     offCtx.beginPath();
     let pRight = true;
     for (let i = 0; i < mNR; i += mStep) {
       const yP = -mh + (mEM + i * mCC) * scale;
-      if (i === 0) offCtx.moveTo(pRight ? -mw + 1 : mw - 1, yP);
-      offCtx.lineTo(pRight ? mw - 1 : -mw + 1, yP);
+      if (i === 0) offCtx.moveTo(pRight ? pL : pR, yP);
+      offCtx.lineTo(pRight ? pR : pL, yP);
       const ni = i + mStep;
       if (ni < mNR) {
         const nY = -mh + (mEM + ni * mCC) * scale;
         const r = (nY - yP) / 2;
-        if (pRight) offCtx.arc(mw - 1, yP + r, r, -Math.PI / 2, Math.PI / 2);
-        else offCtx.arc(-mw + 1, yP + r, r, Math.PI / 2, -Math.PI / 2);
+        if (pRight) offCtx.arc(pR, yP + r, r, -Math.PI / 2, Math.PI / 2);
+        else offCtx.arc(pL, yP + r, r, Math.PI / 2, -Math.PI / 2);
       }
       pRight = !pRight;
     }
