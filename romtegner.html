@@ -2200,8 +2200,12 @@ function showMatPlacePanel(familyName, categoryId) {
         html += `<option value="${p.id}"${lenM === 4 ? ' selected' : ''}>${lenM}m (${areaM2}m\u00b2 \u00b7 ${p.total_effect_w || Math.round(wm2*areaM2)}W)</option>`;
       }
       html += `</select></div>
-      <div class="ctx-item vfp-btn" style="margin-top:4px;text-align:center"
-        onclick="_startMatPlacementFromSelect(${firstP.id})">Plasser matte</div>`;
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_startMatPlacementFromSelect(${firstP.id})">Plasser matte</div>
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
+          onclick="autoFillMatSerpentine(${firstP.id})">Fyll rom</div>
+      </div>`;
     } else {
       // Test products or single-product family — show length input
       const p = firstP;
@@ -2214,8 +2218,12 @@ function showMatPlacePanel(familyName, categoryId) {
         <input type="number" id="mat-len-${p.id}" value="${defaultLen}" min="${minLenCm}" max="${maxLenCm}" step="${stepCm}"
           style="width:65px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)">
       </div>
-      <div class="ctx-item vfp-btn" style="margin-top:4px;text-align:center"
-        onclick="_startMatPlacement(${p.id})">Plasser matte</div>`;
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_startMatPlacement(${p.id})">Plasser matte</div>
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
+          onclick="autoFillMatSerpentine(${p.id})">Fyll rom</div>
+      </div>`;
     }
 
     html += '</div>';
@@ -2259,6 +2267,117 @@ function _startMatPlacement(productId) {
   S.ui.matPlaceWidthCm = widthCm;
   S.ui.matPlaceLengthCm = lengthCm;
   canvas.style.cursor = 'crosshair';
+}
+
+/* ── Auto-fill room with serpentine mat rows ── */
+function autoFillMatSerpentine(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room || !room.points || room.points.length < 3) { alert('Velg et rom først'); return; }
+
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;  // snap length to this
+  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
+  const gapCm = (prod.min_gap_mm || 50) / 10;
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const maxLenCm = (prod.mat_max_length_mm || 10000) / 10;
+
+  // Determine layout direction via PCA
+  const dir = _suggestDirection(room);  // 'h' or 'v'
+
+  // Room bounding box
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+
+  // "across" = direction rows are stacked, "along" = direction mat unrolls
+  // dir='h' → mat unrolls in X (length along X), rows stack in Y
+  // dir='v' → mat unrolls in Y (length along Y), rows stack in X
+  const acrossMin = dir === 'h' ? rMinY + marginCm : rMinX + marginCm;
+  const acrossMax = dir === 'h' ? rMaxY - marginCm : rMaxX - marginCm;
+  const acrossSpan = acrossMax - acrossMin;
+  if (acrossSpan < matWidthCm) return;  // room too narrow
+
+  const nRows = Math.floor((acrossSpan + gapCm) / (matWidthCm + gapCm));
+  if (nRows <= 0) return;
+
+  // Center rows in the across-axis
+  const totalAcross = nRows * matWidthCm + (nRows - 1) * gapCm;
+  const acrossOffset = acrossMin + (acrossSpan - totalAcross) / 2;
+
+  pushUndo();
+  const mats = [];
+
+  for (let row = 0; row < nRows; row++) {
+    const rowCenter = acrossOffset + matWidthCm / 2 + row * (matWidthCm + gapCm);
+
+    // Scan along-axis to find where room polygon intersects this row
+    const alongMin = dir === 'h' ? rMinX : rMinY;
+    const alongMax = dir === 'h' ? rMaxX : rMaxY;
+
+    // Sample points along the row center-line to find min/max inside polygon
+    let inMin = Infinity, inMax = -Infinity;
+    const step = 1;  // 1cm steps
+    for (let a = alongMin; a <= alongMax; a += step) {
+      const px = dir === 'h' ? a : rowCenter;
+      const py = dir === 'h' ? rowCenter : a;
+      if (ptInPoly(px, py, room.points)) {
+        if (a < inMin) inMin = a;
+        if (a > inMax) inMax = a;
+      }
+    }
+    if (inMin >= inMax) continue;  // row doesn't intersect room
+
+    // Apply wall margin
+    inMin += marginCm;
+    inMax -= marginCm;
+    let availLen = inMax - inMin;
+    if (availLen < minLenCm) continue;  // too short for minimum mat
+
+    // Snap length down to nearest cut interval
+    let matLen = Math.floor(availLen / cutCm) * cutCm;
+    if (matLen > maxLenCm) matLen = Math.floor(maxLenCm / cutCm) * cutCm;
+    if (matLen < minLenCm) matLen = minLenCm;  // allow minimum even if not perfectly snapped
+    if (matLen > availLen) continue;
+
+    // Center the mat within the available along-span
+    const alongCenter = (inMin + inMax) / 2;
+    const matX = dir === 'h' ? alongCenter - matLen / 2 : rowCenter - matWidthCm / 2;
+    const matY = dir === 'h' ? rowCenter - matWidthCm / 2 : alongCenter - matLen / 2;
+
+    const mat = {
+      id: S.counters.nextMatId++,
+      roomId: room.id,
+      productId: productId,
+      x_cm: matX,
+      y_cm: matY,
+      width_cm: matWidthCm,
+      length_cm: matLen,
+      rotation_deg: dir === 'h' ? 90 : 0
+    };
+    S.mats.push(mat);
+    mats.push(mat);
+  }
+
+  if (mats.length === 0) {
+    // Undo since we didn't place anything
+    S.undoStack.pop();
+    alert('Ingen matter passer i dette rommet');
+    return;
+  }
+
+  _invalidateMatCache();
+
+  // Select first mat, close panel, update UI
+  S.ui.selectedMatId = mats[0].id;
+  const box = document.getElementById('rwp-product-actions');
+  if (box) box.style.display = 'none';
+  renderSidebar(); updateCtxBar(); render();
+
+  // Log summary
+  const totalLen = mats.reduce((s, m) => s + m.length_cm, 0);
+  console.log(`autoFillMatSerpentine: ${mats.length} rader, total lengde ${totalLen}cm, retning=${dir}`);
 }
 
 function showVfPlacePanel(familyName, categoryId) {
@@ -4814,13 +4933,70 @@ function drawMats() {
     ctx.lineWidth = isSel ? 2 : 1.5;
     ctx.strokeRect(-hw, -hl, hw * 2, hl * 2);
 
-    // Internal mesh lines to indicate mat pattern
-    if (S.view.zoom > 0.3 && !isOtherRoom) {
-      ctx.strokeStyle = _lc('rgba(40, 100, 200, 0.15)', 'rgba(80, 160, 240, 0.12)');
-      ctx.lineWidth = 0.5;
-      const meshStep = 5 * sc; // 5cm grid inside mat
-      for (let x = -hw + meshStep; x < hw; x += meshStep) {
-        ctx.beginPath(); ctx.moveTo(x, -hl); ctx.lineTo(x, hl); ctx.stroke();
+    // Serpentine cable pattern inside mat
+    if (S.view.zoom > 0.25 && !isOtherRoom) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+      const ccCm = (prod?.mat_cc_mm || 80) / 10;
+      const cutCm = (prod?.mat_cut_interval_mm || 160) / 10;
+
+      // Cable runs along length axis, spaced by CC across width
+      // In mat-local coords: X = width axis, Y = length axis
+      const nRuns = Math.max(2, Math.floor(mat.width_cm / ccCm));
+      const totalSpan = (nRuns - 1) * ccCm;
+      const sideMgn = (mat.width_cm - totalSpan) / 2;
+      const pad = 2; // px padding from mat edge
+
+      // Cable color (warm red/orange — distinct from blue mat)
+      ctx.strokeStyle = isSel
+        ? _lc('rgba(200, 60, 30, 0.5)', 'rgba(255, 100, 60, 0.5)')
+        : _lc('rgba(200, 60, 30, 0.28)', 'rgba(255, 100, 60, 0.22)');
+      ctx.lineWidth = Math.max(0.7, sc * 0.4);
+
+      // Draw cable runs (vertical lines in mat-local space)
+      for (let i = 0; i < nRuns; i++) {
+        const xPos = -hw + (sideMgn + i * ccCm) * sc;
+        ctx.beginPath();
+        ctx.moveTo(xPos, -hl + pad);
+        ctx.lineTo(xPos, hl - pad);
+        ctx.stroke();
+      }
+
+      // Draw U-turn arcs at alternating ends
+      if (nRuns > 1) {
+        for (let i = 0; i < nRuns - 1; i++) {
+          const x1 = -hw + (sideMgn + i * ccCm) * sc;
+          const x2 = -hw + (sideMgn + (i + 1) * ccCm) * sc;
+          const r = (x2 - x1) / 2;
+          const midX = (x1 + x2) / 2;
+          if (i % 2 === 0) {
+            // Arc at bottom (positive Y = hl)
+            ctx.beginPath();
+            ctx.arc(midX, hl - pad, r, Math.PI, 0);
+            ctx.stroke();
+          } else {
+            // Arc at top (negative Y = -hl)
+            ctx.beginPath();
+            ctx.arc(midX, -hl + pad, r, 0, Math.PI);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Cut lines — dashed lines where mesh can be cut
+      if (S.view.zoom > 0.4 && cutCm > 0) {
+        ctx.strokeStyle = _lc('rgba(80, 170, 50, 0.35)', 'rgba(100, 200, 70, 0.3)');
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([3, 3]);
+        const nCuts = Math.floor(mat.length_cm / cutCm);
+        for (let i = 1; i <= nCuts; i++) {
+          const yPos = -hl + i * cutCm * sc;
+          if (yPos > hl - pad) break;
+          ctx.beginPath();
+          ctx.moveTo(-hw + 1, yPos);
+          ctx.lineTo(hw - 1, yPos);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
       }
     }
 
@@ -4856,6 +5032,21 @@ function drawMats() {
     ctx.fillRect(-hw, -hl, hw * 2, hl * 2);
     ctx.strokeRect(-hw, -hl, hw * 2, hl * 2);
     ctx.setLineDash([]);
+    // Ghost serpentine pattern
+    if (S.view.zoom > 0.25 && S.ui.matPlaceProductId) {
+      const gProd = HEATING_PRODUCTS.find(p => p.id === S.ui.matPlaceProductId);
+      const gCC = (gProd?.mat_cc_mm || 80) / 10;
+      const gN = Math.max(2, Math.floor(wCm / gCC));
+      const gSpan = (gN - 1) * gCC;
+      const gMgn = (wCm - gSpan) / 2;
+      ctx.strokeStyle = 'rgba(200, 60, 30, 0.18)';
+      ctx.lineWidth = Math.max(0.5, sc * 0.3);
+      ctx.setLineDash([]);
+      for (let i = 0; i < gN; i++) {
+        const xP = -hw + (gMgn + i * gCC) * sc;
+        ctx.beginPath(); ctx.moveTo(xP, -hl + 2); ctx.lineTo(xP, hl - 2); ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 }
@@ -10258,11 +10449,15 @@ function updateObjInfo() {
       let _supHtml='';
       if(mp?.article_no) _supHtml+=`<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(mp.article_no)}</span></div>`;
       if(mp?.supplier) _supHtml+=`<div class="soi-row"><span class="soi-k">Leverand\u00f8r</span><span class="soi-v">${esc(mp.supplier)}</span></div>`;
+      const _ccMm = mp?.mat_cc_mm || 0;
+      const _cutMm = mp?.mat_cut_interval_mm || 0;
       panel.innerHTML=`<div class="soi-title">\u{1F7EB} ${esc(mp?.name||'Varmematte')}</div>
         ${_supHtml}
         <div class="soi-row"><span class="soi-k">Bredde</span><span class="soi-v">${Math.round(mat.width_cm)} cm</span></div>
         <div class="soi-row"><span class="soi-k">Lengde</span><span class="soi-v">${Math.round(mat.length_cm)} cm</span></div>
         <div class="soi-row"><span class="soi-k">Areal</span><span class="soi-v">${areaM2.toFixed(2)} m\u00b2</span></div>
+        ${_ccMm ? `<div class="soi-row"><span class="soi-k">CC</span><span class="soi-v">${_ccMm} mm</span></div>` : ''}
+        ${_cutMm ? `<div class="soi-row"><span class="soi-k">Klipp</span><span class="soi-v">hver ${_cutMm} mm</span></div>` : ''}
         <div class="soi-row"><span class="soi-k">Rotasjon</span><span class="soi-v">${Math.round(mat.rotation_deg||0)}\u00b0</span></div>
         <div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${watt} W (${wm2} W/m\u00b2)</span></div>
         <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteMat(${mat.id})">\u2715 Slett matte</button></div>`;
@@ -14022,7 +14217,7 @@ function _renderRoomToImage(room) {
     }
   }
 
-  // Draw mats
+  // Draw mats (with serpentine cable pattern)
   for (const mat of _matsForRoom(room.id)) {
     const cx = mat.x_cm + mat.width_cm / 2;
     const cy = mat.y_cm + mat.length_cm / 2;
@@ -14035,6 +14230,27 @@ function _renderRoomToImage(room) {
     offCtx.strokeStyle = 'rgba(60, 130, 200, 0.6)';
     offCtx.lineWidth = 1;
     offCtx.strokeRect(-mw, -mh, mw * 2, mh * 2);
+    // Serpentine cable runs
+    const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
+    const mCC = (mp?.mat_cc_mm || 80) / 10;
+    const mNR = Math.max(2, Math.floor(mat.width_cm / mCC));
+    const mTS = (mNR - 1) * mCC;
+    const mSM = (mat.width_cm - mTS) / 2;
+    offCtx.strokeStyle = 'rgba(200, 60, 30, 0.35)';
+    offCtx.lineWidth = 0.8;
+    for (let i = 0; i < mNR; i++) {
+      const xP = -mw + (mSM + i * mCC) * scale;
+      offCtx.beginPath(); offCtx.moveTo(xP, -mh + 1); offCtx.lineTo(xP, mh - 1); offCtx.stroke();
+    }
+    for (let i = 0; i < mNR - 1; i++) {
+      const x1 = -mw + (mSM + i * mCC) * scale;
+      const x2 = -mw + (mSM + (i + 1) * mCC) * scale;
+      const r = (x2 - x1) / 2, midX = (x1 + x2) / 2;
+      offCtx.beginPath();
+      if (i % 2 === 0) offCtx.arc(midX, mh - 1, r, Math.PI, 0);
+      else offCtx.arc(midX, -mh + 1, r, 0, Math.PI);
+      offCtx.stroke();
+    }
     offCtx.restore();
   }
 
@@ -14305,7 +14521,8 @@ function _ensureMatTestProducts() {
     mat_width_mm: 500, mat_min_length_mm: 1000, mat_max_length_mm: 10000,
     mat_length_step_mm: 500,
     watt_per_m2: 100,
-    min_gap_mm: 50, min_wall_margin_mm: 50
+    min_gap_mm: 50, min_wall_margin_mm: 50,
+    mat_cc_mm: 80, mat_cut_interval_mm: 160
   });
   HEATING_PRODUCTS.push({
     id: 98002, category_id: testCatId, name: 'TestMatte 80cm',
@@ -14313,7 +14530,8 @@ function _ensureMatTestProducts() {
     mat_width_mm: 800, mat_min_length_mm: 1000, mat_max_length_mm: 8000,
     mat_length_step_mm: 500,
     watt_per_m2: 150,
-    min_gap_mm: 50, min_wall_margin_mm: 50
+    min_gap_mm: 50, min_wall_margin_mm: 50,
+    mat_cc_mm: 120, mat_cut_interval_mm: 240
   });
   console.log('Romtegner: injiserte test-matteprodukter (ingen mat-produkter i DB)');
 }
