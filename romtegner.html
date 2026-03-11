@@ -2099,7 +2099,7 @@ function showMatPlacePanel(familyName, categoryId) {
   const prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false
       && (p.product_family === familyName || p.name.startsWith(familyName)))
-    .sort((a, b) => (a.mat_width_mm || 0) - (b.mat_width_mm || 0));
+    .sort((a, b) => (a.mat_width_mm || 0) - (b.mat_width_mm || 0) || (a.mat_length_mm || 0) - (b.mat_length_mm || 0));
 
   if (!prods.length) {
     section.innerHTML = '<div style="color:var(--warn);padding:8px">Ingen matteprodukter funnet</div>';
@@ -2107,28 +2107,58 @@ function showMatPlacePanel(familyName, categoryId) {
     return;
   }
 
+  // Group products by product_family
+  const families = {};
+  for (const p of prods) {
+    const fam = p.product_family || p.name;
+    if (!families[fam]) families[fam] = [];
+    families[fam].push(p);
+  }
+
   let html = `<div class="rwp-section-label">\u{1F7EB} ${esc(familyName)}</div>
     <div style="display:flex;flex-direction:column;gap:6px;padding:0 2px">`;
 
-  for (const p of prods) {
-    const widthCm = (p.mat_width_mm || 500) / 10;
-    const minLenCm = (p.mat_min_length_mm || 1000) / 10;
-    const maxLenCm = (p.mat_max_length_mm || 10000) / 10;
-    const stepCm = (p.mat_length_step_mm || 500) / 10;
-    const defaultLen = Math.min(200, maxLenCm); // default 200cm or max
-    const wm2 = p.watt_per_m2 || 0;
+  for (const [fam, famProds] of Object.entries(families)) {
+    const firstP = famProds[0];
+    const widthCm = (firstP.mat_width_mm || 500) / 10;
+    const wm2 = firstP.watt_per_m2 || 0;
+    const hasFixedLengths = famProds.some(p => p.mat_length_mm);
 
     html += `<div style="border:1px solid var(--brd);border-radius:6px;padding:6px 8px">
-      <div style="font-weight:600;font-size:12px">${esc(p.name)}</div>
-      <div style="font-size:11px;color:var(--dim)">Bredde: ${widthCm} cm \u00b7 ${wm2} W/m\u00b2</div>
-      <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+      <div style="font-weight:600;font-size:12px">${esc(fam)}</div>
+      <div style="font-size:11px;color:var(--dim)">Bredde: ${widthCm} cm \u00b7 ${wm2} W/m\u00b2</div>`;
+
+    if (hasFixedLengths && famProds.length > 1) {
+      // Real products with fixed lengths — show dropdown
+      html += `<div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+        <label style="font-size:11px;white-space:nowrap">Lengde</label>
+        <select id="mat-sel-${firstP.id}" style="flex:1;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)">`;
+      for (const p of famProds) {
+        const lenM = (p.mat_length_mm / 1000);
+        const areaM2 = p.mat_area_m2 || (widthCm / 100 * lenM);
+        const sel = lenM === 2 ? '' : (lenM >= 3 && lenM <= 5 ? ' selected' : '');
+        html += `<option value="${p.id}"${lenM === 4 ? ' selected' : ''}>${lenM}m (${areaM2}m\u00b2 \u00b7 ${p.total_effect_w || Math.round(wm2*areaM2)}W)</option>`;
+      }
+      html += `</select></div>
+      <div class="ctx-item vfp-btn" style="margin-top:4px;text-align:center"
+        onclick="_startMatPlacementFromSelect(${firstP.id})">Plasser matte</div>`;
+    } else {
+      // Test products or single-product family — show length input
+      const p = firstP;
+      const minLenCm = (p.mat_min_length_mm || 1000) / 10;
+      const maxLenCm = (p.mat_max_length_mm || 10000) / 10;
+      const stepCm = (p.mat_length_step_mm || 500) / 10;
+      const defaultLen = Math.min(200, maxLenCm);
+      html += `<div style="display:flex;gap:6px;align-items:center;margin-top:4px">
         <label style="font-size:11px;white-space:nowrap">Lengde cm</label>
         <input type="number" id="mat-len-${p.id}" value="${defaultLen}" min="${minLenCm}" max="${maxLenCm}" step="${stepCm}"
           style="width:65px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)">
       </div>
       <div class="ctx-item vfp-btn" style="margin-top:4px;text-align:center"
-        onclick="_startMatPlacement(${p.id})">Plasser matte</div>
-    </div>`;
+        onclick="_startMatPlacement(${p.id})">Plasser matte</div>`;
+    }
+
+    html += '</div>';
   }
 
   html += '</div>';
@@ -2137,13 +2167,31 @@ function showMatPlacePanel(familyName, categoryId) {
   showRoomWorkflowPanel();
 }
 
+function _startMatPlacementFromSelect(firstProdId) {
+  const sel = document.getElementById('mat-sel-' + firstProdId);
+  if (!sel) return;
+  const productId = parseInt(sel.value, 10);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { alert('Velg et rom f\u00f8rst'); return; }
+  const widthCm = (prod.mat_width_mm || 500) / 10;
+  const lengthCm = (prod.mat_length_mm || 2000) / 10;
+
+  S.ui.matPlaceMode = true;
+  S.ui.matPlaceProductId = productId;
+  S.ui.matPlaceWidthCm = widthCm;
+  S.ui.matPlaceLengthCm = lengthCm;
+  canvas.style.cursor = 'crosshair';
+}
+
 function _startMatPlacement(productId) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) { alert('Velg et rom f\u00f8rst'); return; }
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return;
   const lenInput = document.getElementById('mat-len-' + productId);
-  const lengthCm = lenInput ? parseFloat(lenInput.value) : (prod.mat_min_length_mm || 1000) / 10;
+  const lengthCm = lenInput ? parseFloat(lenInput.value) : (prod.mat_length_mm || prod.mat_min_length_mm || 1000) / 10;
   const widthCm = (prod.mat_width_mm || 500) / 10;
 
   S.ui.matPlaceMode = true;
