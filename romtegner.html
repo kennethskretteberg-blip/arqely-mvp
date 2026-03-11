@@ -1037,6 +1037,7 @@ const S = {
   strips   : [],   // [{id,roomId,productId,direction,pos_cm,start_cm,length_cm}]
   cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm,multiCableIndex?,multiCableGroup?,leadRun?}]
   zones    : [],   // [{id,roomId,type:'forbidden'|'preferred',purpose,points:[{x,y}],label}]
+  mats     : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,rotation_deg}]
   groups   : [],   // [{id,name,stripIds:[]}]
   ui : {
     selectedRoomId  : null,
@@ -1064,9 +1065,14 @@ const S = {
     selectedStripId: null,       // selected strip id
     selectedCableId: null,       // selected cable id
     selectedZoneId: null,        // selected zone id
+    selectedMatId: null,         // selected mat id
     zoneDrawMode: false,         // zone polygon drawing active
     zoneType: 'shower',          // current zone type being placed
     zoneKind: 'forbidden',       // 'forbidden' or 'preferred'
+    matPlaceMode: false,         // mat placement click mode active
+    matPlaceProductId: null,     // product id for mat placement
+    matPlaceWidthCm: null,       // width of mat being placed
+    matPlaceLengthCm: null,      // length of mat being placed
     manualPlaceMode: false,      // manual strip placement active
     manualFamilyName: null,      // family name for manual placement
     manualCategoryId: null,      // category id for manual placement
@@ -1116,7 +1122,7 @@ const S = {
     outerWallLiveSide: 'out'
   },
   snap     : { grid:false, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1 },
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   varmekabel: { targetWm2: 130, screedThicknessCm: 4 },
@@ -1309,6 +1315,7 @@ function render() {
   drawRooms();
   drawStrips();
   drawCables();
+  drawMats();
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
   drawAllDimAnnotations();
@@ -1322,6 +1329,8 @@ function render() {
   if (S.ui.selectedStripId !== null) {
     if (S.ui.selectedStripIds.size > 1) drawGroupGizmo();
     else drawStripGizmo();
+  } else if (S.ui.selectedMatId) {
+    drawMatMoveGizmo();
   } else if (S.ui.selectedHindringId) {
     drawHindringMoveGizmo();
     if (S.ui.selectedHindringWallIdx !== null) drawHindringWallArrows();
@@ -1442,8 +1451,15 @@ function _computeRoomStats(room) {
     cableLenM += lenM;
     cableW += (cp?.watt_per_m || 0) * lenM;
   }
-  const totalW = Math.round(foilW + cableW);
-  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM };
+  let matW = 0, matAreaM2 = 0;
+  for (const mat of _matsForRoom(room.id)) {
+    const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
+    const areaM2 = (mat.width_cm * mat.length_cm) / 10000;
+    matAreaM2 += areaM2;
+    matW += (mp?.watt_per_m2 || 0) * areaM2;
+  }
+  const totalW = Math.round(foilW + cableW + matW);
+  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM, matW: Math.round(matW), matAreaM2 };
 }
 
 function _computeStripGaps(room) {
@@ -1512,6 +1528,9 @@ function drawRoomCard(room) {
   }
   if (stats.cableLenM > 0) {
     rows.push(['Kabellengde', stats.cableLenM.toFixed(1) + ' m']);
+  }
+  if (stats.matAreaM2 > 0) {
+    rows.push(['Matte-areal', stats.matAreaM2.toFixed(2) + ' m\u00b2']);
   }
   rows.push(['Installert effekt', stats.totalW + ' W']);
   const H = HHEAD + PAD + rows.length * HROW + PAD;
@@ -2062,9 +2081,76 @@ function openPlacementMenu(e, familyName, categoryId) {
   const modType = _categoryModuleType(categoryId);
   if (modType === 'cable') {
     showCablePlacePanel(familyName, categoryId);
+  } else if (modType === 'mat') {
+    showMatPlacePanel(familyName, categoryId);
   } else {
     showVfPlacePanel(familyName, categoryId);
   }
+}
+
+// ── Mat placement panel ──
+function showMatPlacePanel(familyName, categoryId) {
+  S.ui.manualFamilyName = familyName;
+  S.ui.manualCategoryId = categoryId;
+  hideProduktMenu();
+  const section = document.getElementById('rwp-product-actions');
+  if (!section) return;
+
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false
+      && (p.product_family === familyName || p.name.startsWith(familyName)))
+    .sort((a, b) => (a.mat_width_mm || 0) - (b.mat_width_mm || 0));
+
+  if (!prods.length) {
+    section.innerHTML = '<div style="color:var(--warn);padding:8px">Ingen matteprodukter funnet</div>';
+    section.style.display = 'block';
+    return;
+  }
+
+  let html = `<div class="rwp-section-label">\u{1F7EB} ${esc(familyName)}</div>
+    <div style="display:flex;flex-direction:column;gap:6px;padding:0 2px">`;
+
+  for (const p of prods) {
+    const widthCm = (p.mat_width_mm || 500) / 10;
+    const minLenCm = (p.mat_min_length_mm || 1000) / 10;
+    const maxLenCm = (p.mat_max_length_mm || 10000) / 10;
+    const stepCm = (p.mat_length_step_mm || 500) / 10;
+    const defaultLen = Math.min(200, maxLenCm); // default 200cm or max
+    const wm2 = p.watt_per_m2 || 0;
+
+    html += `<div style="border:1px solid var(--brd);border-radius:6px;padding:6px 8px">
+      <div style="font-weight:600;font-size:12px">${esc(p.name)}</div>
+      <div style="font-size:11px;color:var(--dim)">Bredde: ${widthCm} cm \u00b7 ${wm2} W/m\u00b2</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+        <label style="font-size:11px;white-space:nowrap">Lengde cm</label>
+        <input type="number" id="mat-len-${p.id}" value="${defaultLen}" min="${minLenCm}" max="${maxLenCm}" step="${stepCm}"
+          style="width:65px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)">
+      </div>
+      <div class="ctx-item vfp-btn" style="margin-top:4px;text-align:center"
+        onclick="_startMatPlacement(${p.id})">Plasser matte</div>
+    </div>`;
+  }
+
+  html += '</div>';
+  section.innerHTML = html;
+  section.style.display = 'block';
+  showRoomWorkflowPanel();
+}
+
+function _startMatPlacement(productId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { alert('Velg et rom f\u00f8rst'); return; }
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  const lenInput = document.getElementById('mat-len-' + productId);
+  const lengthCm = lenInput ? parseFloat(lenInput.value) : (prod.mat_min_length_mm || 1000) / 10;
+  const widthCm = (prod.mat_width_mm || 500) / 10;
+
+  S.ui.matPlaceMode = true;
+  S.ui.matPlaceProductId = productId;
+  S.ui.matPlaceWidthCm = widthCm;
+  S.ui.matPlaceLengthCm = lengthCm;
+  canvas.style.cursor = 'crosshair';
 }
 
 function showVfPlacePanel(familyName, categoryId) {
@@ -4471,6 +4557,130 @@ function _drawCableUTurns(cable) {
   }
 }
 
+// ─── MATS (heating mats) ────────────────────────────────────
+let _hoveredMatId = null;
+
+function drawMats() {
+  for (const mat of S.mats) {
+    if (!_roomIdOnActiveFloor(mat.roomId)) continue;
+    const isSel = S.ui.selectedMatId === mat.id;
+    const isHov = !isSel && _hoveredMatId === mat.id;
+    const isOtherRoom = mat.roomId !== S.ui.selectedRoomId;
+
+    ctx.save();
+    const cx = mat.x_cm + mat.width_cm / 2;
+    const cy = mat.y_cm + mat.length_cm / 2;
+    const sp = w2s(cx, cy);
+    const sc = S.view.zoom * BASE_SCALE;
+    const rad = (mat.rotation_deg || 0) * Math.PI / 180;
+
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(rad);
+
+    const hw = mat.width_cm * sc / 2;
+    const hl = mat.length_cm * sc / 2;
+
+    // Fill
+    if (isOtherRoom) {
+      ctx.fillStyle = _lc('rgba(80, 120, 200, 0.08)', 'rgba(100, 150, 230, 0.06)');
+    } else {
+      ctx.fillStyle = isSel
+        ? _lc('rgba(60, 130, 200, 0.25)', 'rgba(80, 160, 240, 0.3)')
+        : isHov
+          ? _lc('rgba(60, 130, 200, 0.18)', 'rgba(80, 160, 240, 0.22)')
+          : _lc('rgba(60, 130, 200, 0.14)', 'rgba(80, 160, 240, 0.16)');
+    }
+    ctx.fillRect(-hw, -hl, hw * 2, hl * 2);
+
+    // Border
+    ctx.strokeStyle = isSel
+      ? _lc('rgba(40, 100, 200, 1)', 'rgba(80, 160, 240, 1)')
+      : isHov
+        ? _lc('rgba(40, 100, 200, 0.7)', 'rgba(80, 160, 240, 0.7)')
+        : isOtherRoom
+          ? _lc('rgba(40, 100, 200, 0.3)', 'rgba(80, 160, 240, 0.2)')
+          : _lc('rgba(40, 100, 200, 0.55)', 'rgba(80, 160, 240, 0.5)');
+    ctx.lineWidth = isSel ? 2 : 1.5;
+    ctx.strokeRect(-hw, -hl, hw * 2, hl * 2);
+
+    // Internal mesh lines to indicate mat pattern
+    if (S.view.zoom > 0.3 && !isOtherRoom) {
+      ctx.strokeStyle = _lc('rgba(40, 100, 200, 0.15)', 'rgba(80, 160, 240, 0.12)');
+      ctx.lineWidth = 0.5;
+      const meshStep = 5 * sc; // 5cm grid inside mat
+      for (let x = -hw + meshStep; x < hw; x += meshStep) {
+        ctx.beginPath(); ctx.moveTo(x, -hl); ctx.lineTo(x, hl); ctx.stroke();
+      }
+    }
+
+    // Label
+    if (S.view.zoom > 0.38 && !isOtherRoom) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+      const label = prod ? prod.name : 'Matte';
+      const dims = `${Math.round(mat.width_cm)}\u00d7${Math.round(mat.length_cm)} cm`;
+      ctx.fillStyle = _lc('rgba(30, 80, 160, 0.85)', 'rgba(120, 180, 255, 0.85)');
+      ctx.font = "10px 'DM Sans',sans-serif";
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, 0, -6);
+      ctx.fillText(dims, 0, 6);
+    }
+
+    ctx.restore();
+  }
+
+  // Ghost preview during placement mode
+  if (S.ui.matPlaceMode && S.ui.matPlaceWidthCm && S.ui.matPlaceLengthCm && S.drawing.mousePos) {
+    const mx = S.drawing.mousePos.x, my = S.drawing.mousePos.y;
+    const wCm = S.ui.matPlaceWidthCm, lCm = S.ui.matPlaceLengthCm;
+    const sp = w2s(mx, my);
+    const sc = S.view.zoom * BASE_SCALE;
+    const hw = wCm * sc / 2, hl = lCm * sc / 2;
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.fillStyle = 'rgba(60, 130, 200, 0.15)';
+    ctx.strokeStyle = 'rgba(60, 130, 200, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.fillRect(-hw, -hl, hw * 2, hl * 2);
+    ctx.strokeRect(-hw, -hl, hw * 2, hl * 2);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+// ── Mat gizmo rendering ──
+function drawMatMoveGizmo() {
+  if (!S.ui.selectedMatId) return;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return;
+  // Gizmo at bottom-left of mat (unrotated, offset outward)
+  const gx = mat.x_cm, gy = mat.y_cm + mat.length_cm;
+  const gp = w2s(gx - 2, gy + 2);
+  ctx.save();
+  // X arrow (red)
+  drawGizmoArrow(gp.x + 18, gp.y, gp.x + 72, gp.y, 'rgba(255,75,75,0.9)');
+  // Y arrow (green)
+  drawGizmoArrow(gp.x, gp.y - 18, gp.x, gp.y - 72, 'rgba(75,210,100,0.9)');
+  // Center dot
+  ctx.beginPath(); ctx.arc(gp.x, gp.y, 13, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(34,211,238,0.1)'; ctx.strokeStyle = 'rgba(34,211,238,0.85)';
+  ctx.lineWidth = 1.5; ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(gp.x - 9, gp.y); ctx.lineTo(gp.x + 9, gp.y);
+  ctx.moveTo(gp.x, gp.y - 9); ctx.lineTo(gp.x, gp.y + 9);
+  ctx.stroke();
+  // Rotation handle
+  const rx = gp.x + 52, ry = gp.y - 52;
+  ctx.beginPath(); ctx.arc(rx, ry, 10, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(34,211,238,0.1)'; ctx.strokeStyle = 'rgba(34,211,238,0.85)';
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(34,211,238,0.85)';
+  ctx.font = "bold 13px sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('\u21bb', rx, ry);
+  ctx.restore();
+}
+
 // ─── ZONES (forbidden / preferred) ──────────────────────────
 function drawZones() {
   for (const zone of S.zones) {
@@ -4607,6 +4817,7 @@ function selectZone(id) {
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null;
+  S.ui.selectedMatId = null;
   S.ui.selectedHindringId = null;
   S.ui.selectedHindringWallIdx = null;
   S.ui.selectedWallId = null;
@@ -4629,6 +4840,53 @@ function deleteZone(id) {
   S.zones = S.zones.filter(z => z.id !== id);
   if (S.ui.selectedZoneId === id) S.ui.selectedZoneId = null;
   renderSidebar(); updateCtxBar(); updateObjInfo(); render();
+}
+
+// ── Mat selection, deletion and helpers ──
+function selectMat(id) {
+  S.ui.selectedMatId = id;
+  S.ui.selectedStripId = null;
+  S.ui.selectedStripIds = new Set();
+  S.ui.selectedCableId = null;
+  S.ui.selectedZoneId = null;
+  S.ui.selectedHindringId = null;
+  S.ui.selectedHindringWallIdx = null;
+  S.ui.selectedWallId = null;
+  S.ui.selectedVertexIdx = null;
+  const mat = S.mats.find(m => m.id === id);
+  if (mat) S.ui.selectedRoomId = mat.roomId;
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+function deleteMat(id) {
+  const mat = S.mats.find(m => m.id === id);
+  const roomId = mat?.roomId;
+  const prod = mat ? HEATING_PRODUCTS.find(p => p.id === mat.productId) : null;
+  pushUndo();
+  S.mats = S.mats.filter(m => m.id !== id); _invalidateMatCache();
+  S.ui.selectedMatId = null;
+  if (roomId) {
+    S.ui.selectedRoomId = roomId;
+    _showPostDeleteActions(roomId, prod);
+  }
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function _matRotate90() {
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return;
+  pushUndo();
+  mat.rotation_deg = ((mat.rotation_deg || 0) + 90) % 360;
+  updateCtxBar(); render();
+}
+
+function _clampMatToRoom(mat, room) {
+  if (!room || !room.points) return;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  mat.x_cm = Math.max(rMinX, Math.min(rMaxX - mat.width_cm, mat.x_cm));
+  mat.y_cm = Math.max(rMinY, Math.min(rMaxY - mat.length_cm, mat.y_cm));
 }
 
 /** Start zone drawing mode for a given room */
@@ -4832,6 +5090,8 @@ function selectCable(id) {
   S.ui.selectedCableId = id;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
+  S.ui.selectedMatId = null;
+  S.ui.selectedZoneId = null;
   const cable = S.cables.find(c => c.id === id);
   if (cable) {
     S.ui.selectedRoomId = cable.roomId;
@@ -4886,6 +5146,19 @@ function _cablesForRoom(roomId) {
   if (c && c.v === _cableCacheVer) return c.d;
   const d = S.cables.filter(c => c.roomId === roomId);
   _cableCacheStore[key] = { v: _cableCacheVer, d };
+  return d;
+}
+
+// ── Mat cache (same pattern as cable cache) ──
+let _matCacheVer = 0;
+const _matCacheStore = {};
+function _invalidateMatCache() { _matCacheVer++; }
+function _matsForRoom(roomId) {
+  const key = 'r_' + roomId;
+  const c = _matCacheStore[key];
+  if (c && c.v === _matCacheVer) return c.d;
+  const d = S.mats.filter(m => m.roomId === roomId);
+  _matCacheStore[key] = { v: _matCacheVer, d };
   return d;
 }
 
@@ -5293,6 +5566,9 @@ function selStrip(id, addToMulti) {
       S.ui.selectedWallId = null;
       S.ui.selectedHindringId = null;
       S.ui.selectedHindringWallIdx = null;
+      S.ui.selectedCableId = null;
+      S.ui.selectedMatId = null;
+      S.ui.selectedZoneId = null;
     }
   }
   renderSidebar(); updateObjInfo();
@@ -5325,7 +5601,9 @@ function _showPostDeleteActions(roomId, deletedProd) {
   const modType = _categoryModuleType(categoryId);
   // Show workflow panel with placement options for the deleted product family
   showRoomWorkflowPanel();
-  if (modType === 'cable') {
+  if (modType === 'mat') {
+    showMatPlacePanel(familyName, categoryId);
+  } else if (modType === 'cable') {
     showCablePlacePanel(familyName, categoryId);
   } else {
     showVfPlacePanel(familyName, categoryId);
@@ -7758,9 +8036,11 @@ function finishRoomWorkflow() {
   hideRoomWorkflowPanel();
   S.ui.selectedRoomId = null;
   S.ui.selectedStripId = null;
+  S.ui.selectedMatId = null;
   S.ui.selectedWallId = null;
   S.ui.selectedHindringId = null;
   S.ui.manualPlaceMode = false;
+  S.ui.matPlaceMode = false;
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
   updateCtxBar();
@@ -8325,6 +8605,23 @@ function roomItemHtml(room, indented) {
     </div>`;
   }).join('') : '';
 
+  // Mat items for this room
+  const roomMats = _matsForRoom(room.id);
+  const matsHtml = exp ? roomMats.map(m => {
+    const msel = S.ui.selectedMatId === m.id ? ' sel' : '';
+    const mind = indented ? ' indented' : '';
+    const mp = HEATING_PRODUCTS.find(p => p.id === m.productId);
+    const mnm = mp ? esc(mp.name) : 'Matte';
+    const wm2 = mp?.watt_per_m2 || 0;
+    const watt = Math.round(wm2 * m.width_cm * m.length_cm / 10000);
+    return `<div class="strip-item${msel}${mind}"
+      onclick="selectMat(${m.id});event.stopPropagation()">
+      <span class="strip-ico">\u{1F7EB}</span>
+      <span class="strip-nm">${mnm}</span>
+      <span class="strip-len">${Math.round(m.width_cm)}\u00d7${Math.round(m.length_cm)} cm \u00b7 ${watt}W</span>
+    </div>`;
+  }).join('') : '';
+
   // Zone items for this room
   const roomZones = S.zones.filter(z => z.roomId === room.id);
   const zonesHtml = exp ? roomZones.map(z => {
@@ -8353,8 +8650,8 @@ function roomItemHtml(room, indented) {
       </div>
     </div>
     <button class="room-card-btn${room.cardVisible?' active':''}" onclick="toggleRoomCard(${room.id});event.stopPropagation()" title="${room.cardVisible?'Skjul':'Vis'} infokort">📋</button>
-    ${(hasWalls || roomStripsItem.length || roomCables.length || roomHindrings.length || roomGroups.length || roomZones.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
-  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${zonesHtml}${hindringsHtml}`;
+    ${(hasWalls || roomStripsItem.length || roomCables.length || roomMats.length || roomHindrings.length || roomGroups.length || roomZones.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
+  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${matsHtml}${zonesHtml}${hindringsHtml}`;
 }
 
 function esc(s) {
@@ -8475,6 +8772,7 @@ function toggleFloor(id) {
           S.ui.selectedStripId = null;
           S.ui.selectedStripIds = new Set();
           S.ui.selectedCableId = null;
+          S.ui.selectedMatId = null;
           S.ui.selectedHindringId = null;
           S.ui.selectedWallId = null;
         }
@@ -9509,6 +9807,28 @@ function updateObjInfo() {
       panel.style.display='block'; return;
     }
   }
+  if(S.ui.selectedMatId!==null) {
+    const mat=S.mats.find(m=>m.id===S.ui.selectedMatId);
+    if(mat) {
+      const mp=HEATING_PRODUCTS.find(p=>p.id===mat.productId);
+      const wm2=mp?.watt_per_m2||0;
+      const areaCm2=mat.width_cm*mat.length_cm;
+      const areaM2=areaCm2/10000;
+      const watt=Math.round(wm2*areaM2);
+      let _supHtml='';
+      if(mp?.article_no) _supHtml+=`<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(mp.article_no)}</span></div>`;
+      if(mp?.supplier) _supHtml+=`<div class="soi-row"><span class="soi-k">Leverand\u00f8r</span><span class="soi-v">${esc(mp.supplier)}</span></div>`;
+      panel.innerHTML=`<div class="soi-title">\u{1F7EB} ${esc(mp?.name||'Varmematte')}</div>
+        ${_supHtml}
+        <div class="soi-row"><span class="soi-k">Bredde</span><span class="soi-v">${Math.round(mat.width_cm)} cm</span></div>
+        <div class="soi-row"><span class="soi-k">Lengde</span><span class="soi-v">${Math.round(mat.length_cm)} cm</span></div>
+        <div class="soi-row"><span class="soi-k">Areal</span><span class="soi-v">${areaM2.toFixed(2)} m\u00b2</span></div>
+        <div class="soi-row"><span class="soi-k">Rotasjon</span><span class="soi-v">${Math.round(mat.rotation_deg||0)}\u00b0</span></div>
+        <div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${watt} W (${wm2} W/m\u00b2)</span></div>
+        <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteMat(${mat.id})">\u2715 Slett matte</button></div>`;
+      panel.style.display='block'; return;
+    }
+  }
   if(S.ui.selectedHindringId) {
     const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId);
     if(h&&h.points) {
@@ -9982,6 +10302,61 @@ function hitHindringRotHandle(sx,sy) {
   const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId); if(!h) return false;
   const gp=getHindringGizmoPos(h); return Math.hypot(sx-(gp.x+52),sy-(gp.y-52))<13;
 }
+
+// ── Mat hit detection ──
+function hitMat(wx, wy) {
+  for (let i = S.mats.length - 1; i >= 0; i--) {
+    const m = S.mats[i];
+    if (!_roomIdOnActiveFloor(m.roomId)) continue;
+    // Transform world point into mat-local coords (inverse rotation around center)
+    const cx = m.x_cm + m.width_cm / 2;
+    const cy = m.y_cm + m.length_cm / 2;
+    const rad = -(m.rotation_deg || 0) * Math.PI / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const dx = wx - cx, dy = wy - cy;
+    const lx = dx * cos - dy * sin + m.width_cm / 2;
+    const ly = dx * sin + dy * cos + m.length_cm / 2;
+    if (lx >= 0 && lx <= m.width_cm && ly >= 0 && ly <= m.length_cm) return m.id;
+  }
+  return null;
+}
+
+function _getMatGizmoPos(mat) {
+  const gx = mat.x_cm, gy = mat.y_cm + mat.length_cm;
+  return w2s(gx - 2, gy + 2);
+}
+function hitMatGizmoFree(sx, sy) {
+  if (!S.ui.selectedMatId) return false;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return false;
+  const gp = _getMatGizmoPos(mat);
+  return Math.hypot(sx - gp.x, sy - gp.y) < 15 ? 'free' : false;
+}
+function hitMatGizmoX(sx, sy) {
+  if (!S.ui.selectedMatId) return false;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return false;
+  const gp = _getMatGizmoPos(mat);
+  return distSegPx(sx, sy, gp.x + 18, gp.y, gp.x + 72, gp.y) < 12 ? 'x' : false;
+}
+function hitMatGizmoY(sx, sy) {
+  if (!S.ui.selectedMatId) return false;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return false;
+  const gp = _getMatGizmoPos(mat);
+  return distSegPx(sx, sy, gp.x, gp.y - 18, gp.x, gp.y - 72) < 12 ? 'y' : false;
+}
+function hitMatGizmo(sx, sy) {
+  return hitMatGizmoFree(sx, sy) || hitMatGizmoX(sx, sy) || hitMatGizmoY(sx, sy) || false;
+}
+function hitMatRotHandle(sx, sy) {
+  if (!S.ui.selectedMatId) return false;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return false;
+  const gp = _getMatGizmoPos(mat);
+  return Math.hypot(sx - (gp.x + 52), sy - (gp.y - 52)) < 13;
+}
+
 function drawHindringMoveGizmo() {
   if(!S.ui.selectedHindringId) return;
   const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId); if(!h||!h.points||h.points.length<3) return;
@@ -10164,6 +10539,11 @@ let _roomDragging=false, _rdStart={x:0,y:0}, _rdRoomId=null, _rdMoved=false;
 // Hindring drag
 let _dhDragging=false, _dhId=-1, _dhOrigStart={x:0,y:0}, _dhOrigPts=null, _dhLastValidPts=null, _dhDragAxis='free';
 let _dhRotating=false, _dhRotStart=0, _dhRotOrigPts=null, _dhRotCenter={x:0,y:0};
+// Mat drag/rotate
+let _matDragging=false, _matDragId=-1, _matDragAxis='free';
+let _matDragOrigStart={x:0,y:0}, _matDragOrigPos={x:0,y:0};
+let _matRotating=false, _matRotId=-1, _matRotStart=0, _matRotOrigDeg=0;
+let _matRotCenter={x:0,y:0};
 // Vertex drag (Edit 3+4)
 let _vdDragging=false, _vdPending=false, _vdRoomId=-1, _vdIdx=-1;
 let _vdOrigPt=null, _vdOrigStart={x:0,y:0}, _vdConstraint='free';
@@ -10194,11 +10574,13 @@ function pushUndo() {
     strips:    S.strips.map(s=>({...s})),
     cables:    S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     zones:     S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
+    mats:      S.mats.map(m=>({...m})),
     groups:    S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     nextStripId: S.counters.nextStripId,
     nextGroupId: S.counters.nextGroupId,
     nextCableId: S.counters.nextCableId,
     nextZoneId: S.counters.nextZoneId,
+    nextMatId: S.counters.nextMatId,
     gapCm: S.varmefolie.gapCm
   });
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
@@ -10225,6 +10607,10 @@ function undo() {
     S.zones = prev.zones;
     S.counters.nextZoneId = prev.nextZoneId;
   }
+  if (prev.mats !== undefined) {
+    S.mats = prev.mats; _invalidateMatCache();
+    S.counters.nextMatId = prev.nextMatId;
+  }
   if (S.ui.selectedRoomId && !S.rooms.find(r=>r.id===S.ui.selectedRoomId)) {
     S.ui.selectedRoomId=null; S.ui.selectedWallId=null; S.ui.selectedVertexIdx=null;
   }
@@ -10239,6 +10625,9 @@ function undo() {
   }
   if (S.ui.selectedZoneId !== null && !S.zones.find(z=>z.id===S.ui.selectedZoneId)) {
     S.ui.selectedZoneId = null;
+  }
+  if (S.ui.selectedMatId !== null && !S.mats.find(m=>m.id===S.ui.selectedMatId)) {
+    S.ui.selectedMatId = null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
 }
@@ -10799,6 +11188,59 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Mat placement mode — click to place ──
+    if (S.ui.matPlaceMode && S.ui.matPlaceProductId) {
+      const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+      if (room && ptInPoly(rawWp0.x, rawWp0.y, room.points)) {
+        pushUndo();
+        const mat = {
+          id: S.counters.nextMatId++,
+          roomId: room.id,
+          productId: S.ui.matPlaceProductId,
+          x_cm: rawWp0.x - S.ui.matPlaceWidthCm / 2,
+          y_cm: rawWp0.y - S.ui.matPlaceLengthCm / 2,
+          width_cm: S.ui.matPlaceWidthCm,
+          length_cm: S.ui.matPlaceLengthCm,
+          rotation_deg: 0
+        };
+        S.mats.push(mat); _invalidateMatCache();
+        S.ui.matPlaceMode = false;
+        S.ui.matPlaceProductId = null;
+        S.ui.selectedMatId = mat.id;
+        canvas.style.cursor = 'default';
+        renderSidebar(); updateCtxBar(); render();
+        return;
+      }
+    }
+
+    // ── Mat gizmo (rotation + move) ──
+    if (S.ui.selectedMatId) {
+      if (hitMatRotHandle(sx0, sy0)) {
+        pushUndo();
+        _matRotating = true;
+        _matRotId = S.ui.selectedMatId;
+        const mat = S.mats.find(m => m.id === _matRotId);
+        _matRotCenter = { x: mat.x_cm + mat.width_cm/2, y: mat.y_cm + mat.length_cm/2 };
+        const gp = w2s(_matRotCenter.x, _matRotCenter.y);
+        _matRotStart = Math.atan2(sy0 - gp.y, sx0 - gp.x);
+        _matRotOrigDeg = mat.rotation_deg || 0;
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
+      const matGizmoHit = hitMatGizmo(sx0, sy0);
+      if (matGizmoHit) {
+        pushUndo();
+        _matDragging = true;
+        _matDragId = S.ui.selectedMatId;
+        _matDragAxis = matGizmoHit;
+        _matDragOrigStart = { x: e.clientX, y: e.clientY };
+        const mat = S.mats.find(m => m.id === _matDragId);
+        _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
+    }
+
     // ── Cable start/end gizmo — drag ──
     const csgHit = hitCableStartGizmo(sx0, sy0);
     if (csgHit && !csgHit.lockedStart) {
@@ -10821,6 +11263,33 @@ canvas.addEventListener('mousedown', e=>{
     const hz=hitZone(rawWp0.x, rawWp0.y);
     if (hz) {
       selectZone(hz.id);
+      return;
+    }
+
+    // ── Mat body click — select + start drag immediately ──
+    const hmid = hitMat(rawWp0.x, rawWp0.y);
+    if (hmid !== null) {
+      const mat = S.mats.find(m => m.id === hmid);
+      S.ui.selectedMatId = hmid;
+      S.ui.selectedStripId = null;
+      S.ui.selectedStripIds = new Set();
+      S.ui.selectedCableId = null;
+      S.ui.selectedZoneId = null;
+      S.ui.selectedHindringId = null;
+      S.ui.selectedHindringWallIdx = null;
+      S.ui.selectedWallId = null;
+      S.ui.selectedVertexIdx = null;
+      if (mat) S.ui.selectedRoomId = mat.roomId;
+      renderSidebar(); updateObjInfo();
+      if (mat) {
+        pushUndo();
+        _matDragging = true;
+        _matDragId = hmid;
+        _matDragAxis = 'free';
+        _matDragOrigStart = { x: e.clientX, y: e.clientY };
+        _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        canvas.style.cursor = 'crosshair';
+      }
       return;
     }
 
@@ -10909,10 +11378,11 @@ canvas.addEventListener('mousedown', e=>{
       S.ui.movingWall=false;
       renderSidebar(); updateWip();
     } else if (hit?.roomId && hit.roomId===S.ui.selectedRoomId) {
-      // Room body click — clear ALL sub-selections (including strips & cables), room stays selected
+      // Room body click — clear ALL sub-selections (including strips, cables, mats), room stays selected
       S.ui.selectedStripId=null;
       S.ui.selectedStripIds=new Set();
       S.ui.selectedCableId=null;
+      S.ui.selectedMatId=null;
       S.ui.selectedWallId=null;
       S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
       S.ui.selectedVertexIdx=null;
@@ -10922,14 +11392,14 @@ canvas.addEventListener('mousedown', e=>{
       if (!hit?.roomId) {
         // Truly empty grid — clear ALL selections
         S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
-        S.ui.selectedStripId=null;
+        S.ui.selectedStripId=null; S.ui.selectedMatId=null;
         S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
         S.ui.selectedVertexIdx=null; S.ui.selectedDimId=null;
         S.ui.movingWall=false;
       } else {
         // Different room — select it and clear sub-selections
         S.ui.selectedRoomId=hit.roomId;
-        S.ui.selectedWallId=null;
+        S.ui.selectedWallId=null; S.ui.selectedMatId=null;
         S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
         S.ui.selectedVertexIdx=null; S.ui.selectedDimId=null;
         S.ui.movingWall=false;
@@ -11021,6 +11491,40 @@ canvas.addEventListener('mousemove', e=>{
       room.annotOffsets[_annotWallId]=Math.max(0,_annotOrigOff+delta);
     }
     return;
+  }
+  // ── Mat rotation ──
+  if (_matRotating) {
+    const mat = S.mats.find(m => m.id === _matRotId);
+    if (mat) {
+      const gp = w2s(_matRotCenter.x, _matRotCenter.y);
+      const angle = Math.atan2(e.clientY - gp.y, e.clientX - gp.x);
+      let dAngle = (angle - _matRotStart) * 180 / Math.PI;
+      if (!S.shiftHeld) { dAngle = Math.round(dAngle / 45) * 45; }
+      mat.rotation_deg = _matRotOrigDeg + dAngle;
+    }
+    render(); return;
+  }
+  // ── Mat dragging ──
+  if (_matDragging) {
+    const mat = S.mats.find(m => m.id === _matDragId);
+    if (mat) {
+      const sc = S.view.zoom * BASE_SCALE;
+      let totalDx = (e.clientX - _matDragOrigStart.x) / sc;
+      let totalDy = (e.clientY - _matDragOrigStart.y) / sc;
+      if (_matDragAxis === 'x') totalDy = 0;
+      if (_matDragAxis === 'y') totalDx = 0;
+      if (S.snap.grid && !S.shiftHeld && _matDragAxis === 'free') {
+        const nx = Math.round((_matDragOrigPos.x + totalDx) / GRID) * GRID;
+        const ny = Math.round((_matDragOrigPos.y + totalDy) / GRID) * GRID;
+        totalDx = nx - _matDragOrigPos.x;
+        totalDy = ny - _matDragOrigPos.y;
+      }
+      mat.x_cm = _matDragOrigPos.x + totalDx;
+      mat.y_cm = _matDragOrigPos.y + totalDy;
+      const room = S.rooms.find(r => r.id === mat.roomId);
+      if (room) _clampMatToRoom(mat, room);
+    }
+    render(); return;
   }
   if (_dhRotating) {
     const h=S.hindrings.find(h=>h.id===_dhId);
@@ -11489,14 +11993,17 @@ canvas.addEventListener('mousemove', e=>{
       const cRect2=canvas.getBoundingClientRect();
       const sx2=e.clientX-cRect2.left, sy2=e.clientY-cRect2.top;
       const rawWp2=s2w(sx2,sy2); // raw unsnapped world pos for hover hit tests
-      // ── Hover tracking for strip & cable highlight ──
+      // ── Hover tracking for strip, cable & mat highlight ──
       const _hovHit = hitStrip(rawWp2.x, rawWp2.y);
       const _newHovId = _hovHit ? _hovHit.id : null;
       const _hovCableHit = hitCable(rawWp2.x, rawWp2.y);
       const _newHovCableId = _hovCableHit ? _hovCableHit.id : null;
-      if (_newHovId !== _hoveredStripId || _newHovCableId !== _hoveredCableId) {
+      const _hovMatHit = hitMat(rawWp2.x, rawWp2.y);
+      const _newHovMatId = _hovMatHit !== null ? _hovMatHit : null;
+      if (_newHovId !== _hoveredStripId || _newHovCableId !== _hoveredCableId || _newHovMatId !== _hoveredMatId) {
         _hoveredStripId = _newHovId;
         _hoveredCableId = _newHovCableId;
+        _hoveredMatId = _newHovMatId;
         render();
       }
       if (hitRotCircle(sx2, sy2)) {
@@ -11529,6 +12036,14 @@ canvas.addEventListener('mousemove', e=>{
       } else if (hitStripGizmo(sx2,sy2)) {
         const sgH2 = hitStripGizmo(sx2,sy2);
         canvas.style.cursor = sgH2==='free' ? 'move' : sgH2==='x' ? 'ew-resize' : 'ns-resize';
+      } else if (hitMatRotHandle(sx2,sy2)) {
+        canvas.style.cursor='crosshair';        // mat rotation handle
+      } else if (hitMatGizmoX(sx2,sy2)) {
+        canvas.style.cursor='ew-resize';        // mat X arrow
+      } else if (hitMatGizmoY(sx2,sy2)) {
+        canvas.style.cursor='ns-resize';        // mat Y arrow
+      } else if (hitMatGizmoFree(sx2,sy2)) {
+        canvas.style.cursor='move';             // mat gizmo ⊕
       } else if (hitHindringRotHandle(sx2,sy2)) {
         canvas.style.cursor='crosshair';        // hindring rotation handle
       } else if (hitHindringGizmoX(sx2,sy2)) {
@@ -11547,6 +12062,8 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor='pointer';          // selectable strip body
       } else if (hitCable(rawWp2.x, rawWp2.y)) {
         canvas.style.cursor='pointer';          // selectable cable body
+      } else if (hitMat(rawWp2.x, rawWp2.y) !== null) {
+        canvas.style.cursor='pointer';          // selectable mat body
       } else if (hitHindring(rawWp2.x, rawWp2.y) !== null) {
         canvas.style.cursor='pointer';          // selectable hindring body
       } else if (hitRoomCard(sx2, sy2)) {
@@ -11627,6 +12144,8 @@ canvas.addEventListener('mouseup', e=>{
     render();
     return;
   }
+  if (_matRotating) { _matRotating=false; _matRotId=-1; canvas.style.cursor='default'; render(); return; }
+  if (_matDragging) { _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return; }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
   if (_dhDragging) { _dhDragging=false; _dhId=-1; _dhDragAxis='free'; canvas.style.cursor='default'; return; }
   if(_hwMoving){_hwMoving=false;_hwHindId=-1;_hwWallIdx=-1;canvas.style.cursor='default';return;}
@@ -11783,6 +12302,7 @@ document.addEventListener('keydown', e=>{
   S.shiftHeld=e.shiftKey;
 
   if (e.key==='Escape') {
+    if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.zoneDrawMode) { cancelZoneDraw(); return; }
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
@@ -11826,6 +12346,7 @@ document.addEventListener('keydown', e=>{
   if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
+  if (e.key==='Delete'&&S.ui.selectedMatId!==null) { deleteMat(S.ui.selectedMatId); return; }
   // Edit 6: Arrow keys move selected strip (no modifier = 10cm step)
   if (S.ui.selectedStripId!==null && !S.ui.drawMode && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
@@ -12146,6 +12667,22 @@ function _ctxBarItems() {
       <button class="snap-chip" onclick="deleteZone(${ui.selectedZoneId})" title="Slett sone">🗑 Slett</button>`;
   }
 
+  // Mat selected
+  if (ui.selectedMatId) {
+    const mat = S.mats.find(m => m.id === ui.selectedMatId);
+    const prod = mat ? HEATING_PRODUCTS.find(p => p.id === mat.productId) : null;
+    const wm2 = prod?.watt_per_m2 || 0;
+    const areaCm2 = mat ? mat.width_cm * mat.length_cm : 0;
+    const watt = Math.round(wm2 * areaCm2 / 10000);
+    const rotDeg = mat ? Math.round(mat.rotation_deg || 0) : 0;
+    return `<span class="ctxbar-lbl">\u{1F7EB} Matte</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Matte'} \u2014 ${Math.round(mat.width_cm)}\u00d7${Math.round(mat.length_cm)} cm \u00b7 ${watt} W</span>
+      <button class="snap-chip" onclick="_matRotate90()" title="Roter 90\u00b0">\u21bb 90\u00b0</button>
+      <span style="font-size:11px;padding:0 2px;color:var(--dim)">${rotDeg}\u00b0</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="deleteMat(${ui.selectedMatId})" title="Slett matte">\u{1F5D1} Slett</button>`;
+  }
+
   // Hindring selected
   if (ui.selectedHindringId) {
     const hindDimOn = room?.dims?.some(d=>d.auto==='hindring');
@@ -12286,6 +12823,7 @@ function _buildSaveData() {
     strips   : S.strips.map(s=>({...s})),
     cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     zones    : S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
+    mats     : S.mats.map(m=>({...m})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -12373,17 +12911,21 @@ function _restoreProject(data) {
   S.strips    = data.strips    || [];
   S.cables    = data.cables    || [];
   S.zones     = data.zones     || [];
+  S.mats      = data.mats      || [];
   S.counters  = data.counters  || S.counters;
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   if (!S.counters.nextCableId) S.counters.nextCableId = 1;
   if (!S.counters.nextZoneId) S.counters.nextZoneId = 1;
+  if (!S.counters.nextMatId) S.counters.nextMatId = 1;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
   if (data.varmekabel) Object.assign(S.varmekabel, data.varmekabel);
   S.ui.selectedStripId = null;
   S.ui.selectedCableId = null;
+  S.ui.selectedMatId = null;
   _invalidateCableCache();
+  _invalidateMatCache();
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; if(r.wallThicknessCm==null) r.wallThicknessCm=0; if(r.stripDimSnap==null) r.stripDimSnap=false;
     if(r.walls) r.walls.forEach(w=>{ if(w.thicknessCm==null) w.thicknessCm=r.wallThicknessCm||0; if(!w.side) w.side='out'; });
   });
@@ -12593,9 +13135,11 @@ async function initSupabase() {
     }
     console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
     _ensureCableTestProducts();
+    _ensureMatTestProducts();
   } catch(err) {
     console.warn('Supabase ikke tilgjengelig, fortsetter uten produktdata:', err.message);
     _ensureCableTestProducts();
+    _ensureMatTestProducts();
   }
 }
 initSupabase().then(() => {
@@ -12634,6 +13178,38 @@ function _ensureCableTestProducts() {
     min_gap_mm: 10, min_wall_margin_mm: 50
   });
   console.log('Romtegner: injiserte test-kabelprodukter (ingen cable-produkter i DB)');
+}
+
+/** Inject test mat products if no mat products exist in Supabase yet */
+function _ensureMatTestProducts() {
+  const matCats = PRODUCT_CATEGORIES.filter(c => c.module_type === 'mat');
+  const hasMatProds = matCats.some(cat =>
+    HEATING_PRODUCTS.some(p => p.category_id === cat.id && p.active !== false));
+  if (hasMatProds) return;
+  const testCatId = matCats.length > 0 ? matCats[0].id : 9800;
+  if (matCats.length === 0) {
+    PRODUCT_CATEGORIES.push({
+      id: testCatId, name: 'Varmematte', module_type: 'mat',
+      sort_order: 200, active: true
+    });
+  }
+  HEATING_PRODUCTS.push({
+    id: 98001, category_id: testCatId, name: 'TestMatte 50cm',
+    product_family: 'TestMatte', active: true, sort_order: 1,
+    mat_width_mm: 500, mat_min_length_mm: 1000, mat_max_length_mm: 10000,
+    mat_length_step_mm: 500,
+    watt_per_m2: 100,
+    min_gap_mm: 50, min_wall_margin_mm: 50
+  });
+  HEATING_PRODUCTS.push({
+    id: 98002, category_id: testCatId, name: 'TestMatte 80cm',
+    product_family: 'TestMatte', active: true, sort_order: 2,
+    mat_width_mm: 800, mat_min_length_mm: 1000, mat_max_length_mm: 8000,
+    mat_length_step_mm: 500,
+    watt_per_m2: 150,
+    min_gap_mm: 50, min_wall_margin_mm: 50
+  });
+  console.log('Romtegner: injiserte test-matteprodukter (ingen mat-produkter i DB)');
 }
 
 /** Module type for a product category: 'foil' | 'cable' | 'mat' | 'plate' */
