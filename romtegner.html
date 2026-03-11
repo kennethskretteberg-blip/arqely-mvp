@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <style>
 :root {
   --bg:#0d0e10; --surface:#141517; --surface2:#1b1d21; --border:#252830;
@@ -468,6 +469,7 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
     <span class="tc-sep"></span>
     <button class="file-btn" id="btn-save" onclick="saveProject()" title="Lagre prosjekt (Ctrl+S)">💾 Lagre</button>
     <button class="file-btn" onclick="openProject()" title="Åpne tidligere lagret prosjekt">📂 Åpne</button>
+    <button class="file-btn" onclick="exportPDF()" title="Eksporter prosjekt som PDF">📄 PDF</button>
     <button class="file-btn" id="btn-import-products" onclick="openExcelModal()" title="Importer produkter fra Excel" style="display:none">📊 + Produkter</button>
     <button class="file-btn" id="btn-bg-import" onclick="openBgImportPanel()" title="Importer bakgrunnstegning (JPG/PNG/PDF)">🗺 Bakgrunn</button>
     <button class="file-btn" onclick="showQuitDialog()" title="Avslutt / lukk prosjekt" style="color:#ff7a7a">🚪 Avslutt</button>
@@ -1038,6 +1040,7 @@ const S = {
   cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm,multiCableIndex?,multiCableGroup?,leadRun?}]
   zones    : [],   // [{id,roomId,type:'forbidden'|'preferred',purpose,points:[{x,y}],label}]
   mats     : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,rotation_deg}]
+  plates   : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,direction}]
   groups   : [],   // [{id,name,stripIds:[]}]
   ui : {
     selectedRoomId  : null,
@@ -1066,6 +1069,9 @@ const S = {
     selectedCableId: null,       // selected cable id
     selectedZoneId: null,        // selected zone id
     selectedMatId: null,         // selected mat id
+    selectedPlateId: null,       // selected plate id
+    platePlaceMode: false,       // plate placement click mode active
+    platePlaceProductId: null,   // product id for plate placement
     zoneDrawMode: false,         // zone polygon drawing active
     zoneType: 'shower',          // current zone type being placed
     zoneKind: 'forbidden',       // 'forbidden' or 'preferred'
@@ -1122,7 +1128,7 @@ const S = {
     outerWallLiveSide: 'out'
   },
   snap     : { grid:false, a90:true, a45:false },
-  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1 },
+  counters : { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextPlateId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   varmekabel: { targetWm2: 130, screedThicknessCm: 4 },
@@ -1139,6 +1145,44 @@ function activeBg() {
   if (!S.bgs[k]) S.bgs[k] = _newBgObj();
   return S.bgs[k];
 }
+
+// ─── USER PREFERENCES (localStorage) ─────────────────────────
+const PREFS_KEY = 'arqely_prefs';
+function _loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch(e) { return {}; }
+}
+function _savePrefs() {
+  try {
+    const prefs = {
+      theme:       S.ui.theme,
+      snap:        { ...S.snap },
+      gapCm:       S.varmefolie.gapCm,
+      showLabels:  S.ui.showStripLabels
+    };
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch(e) { /* quota or private browsing */ }
+}
+function _applyPrefs() {
+  const p = _loadPrefs();
+  if (p.theme)      S.ui.theme = p.theme;
+  if (p.snap)       Object.assign(S.snap, p.snap);
+  if (p.gapCm != null) S.varmefolie.gapCm = p.gapCm;
+  if (p.showLabels != null) S.ui.showStripLabels = p.showLabels;
+}
+_applyPrefs();
+// Apply saved preferences to DOM (body already exists)
+document.body.classList.toggle('light-theme', S.ui.theme === 'light');
+// Sync snap chips
+document.getElementById('chip-grid')?.classList.toggle('on', S.snap.grid);
+document.getElementById('chip-90')?.classList.toggle('on', S.snap.a90);
+document.getElementById('chip-45')?.classList.toggle('on', S.snap.a45);
+// Sync theme chip
+const _tc = document.getElementById('chip-theme');
+if (_tc) _tc.textContent = S.ui.theme === 'light' ? '🌙' : '☀️';
 
 // ─── CANVAS ──────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
@@ -1316,6 +1360,7 @@ function render() {
   drawStrips();
   drawCables();
   drawMats();
+  drawPlates();
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
   drawAllDimAnnotations();
@@ -1331,6 +1376,8 @@ function render() {
     else drawStripGizmo();
   } else if (S.ui.selectedMatId) {
     drawMatMoveGizmo();
+  } else if (S.ui.selectedPlateId) {
+    drawPlateMoveGizmo();
   } else if (S.ui.selectedHindringId) {
     drawHindringMoveGizmo();
     if (S.ui.selectedHindringWallIdx !== null) drawHindringWallArrows();
@@ -1458,8 +1505,16 @@ function _computeRoomStats(room) {
     matAreaM2 += areaM2;
     matW += (mp?.watt_per_m2 || 0) * areaM2;
   }
-  const totalW = Math.round(foilW + cableW + matW);
-  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM, matW: Math.round(matW), matAreaM2 };
+  let plateW = 0, plateAreaM2 = 0, plateCount = 0;
+  for (const plate of _platesForRoom(room.id)) {
+    const pp = HEATING_PRODUCTS.find(pr => pr.id === plate.productId);
+    const areaM2 = (plate.width_cm * plate.length_cm) / 10000;
+    plateAreaM2 += areaM2;
+    plateW += (pp?.watt_per_m2 || 0) * areaM2;
+    plateCount++;
+  }
+  const totalW = Math.round(foilW + cableW + matW + plateW);
+  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM, matW: Math.round(matW), matAreaM2, plateW: Math.round(plateW), plateAreaM2, plateCount };
 }
 
 function _computeStripGaps(room) {
@@ -1531,6 +1586,9 @@ function drawRoomCard(room) {
   }
   if (stats.matAreaM2 > 0) {
     rows.push(['Matte-areal', stats.matAreaM2.toFixed(2) + ' m\u00b2']);
+  }
+  if (stats.plateCount > 0) {
+    rows.push(['Plater', stats.plateCount + ' stk (' + stats.plateAreaM2.toFixed(2) + ' m\u00b2)']);
   }
   rows.push(['Installert effekt', stats.totalW + ' W']);
   const H = HHEAD + PAD + rows.length * HROW + PAD;
@@ -2083,6 +2141,8 @@ function openPlacementMenu(e, familyName, categoryId) {
     showCablePlacePanel(familyName, categoryId);
   } else if (modType === 'mat') {
     showMatPlacePanel(familyName, categoryId);
+  } else if (modType === 'plate') {
+    showPlatePlacePanel(familyName, categoryId);
   } else {
     showVfPlacePanel(familyName, categoryId);
   }
@@ -2227,6 +2287,108 @@ function showVfPlacePanel(familyName, categoryId) {
 function hideVfPlacePanel() {
   const s = document.getElementById('rwp-product-actions');
   if (s) s.style.display = 'none';
+}
+
+// ── Plate placement panel ──
+function showPlatePlacePanel(familyName, categoryId) {
+  S.ui.manualFamilyName = familyName;
+  S.ui.manualCategoryId = categoryId;
+  const prods = HEATING_PRODUCTS.filter(p => p.category_id === categoryId && p.active !== false);
+  const box = document.getElementById('rwp-product-actions');
+  if (!box) return;
+  let html = `<div style="padding:8px 10px;max-width:340px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">Platesystem — ${esc(familyName)}</div>`;
+
+  for (const prod of prods) {
+    const wCm = (prod.plate_width_mm || 600) / 10;
+    const lCm = (prod.plate_length_mm || 1200) / 10;
+    const wm2 = prod.watt_per_m2 || 0;
+    const areaM2 = (wCm * lCm) / 10000;
+    const watt = Math.round(wm2 * areaM2);
+    html += `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px">${esc(prod.name)}</div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:6px">${wCm}\u00d7${lCm} cm \u00b7 ${wm2} W/m\u00b2 \u00b7 ${watt} W/plate</div>
+      <div style="display:flex;gap:6px">
+        <button class="floor-choice-btn" style="flex:1;font-size:11px;padding:4px 8px" onclick="_startPlatePlacement(${prod.id})">Plasser plate</button>
+        <button class="floor-choice-btn" style="flex:1;font-size:11px;padding:4px 8px" onclick="_autoFillPlates(${prod.id})">Fyll rom</button>
+      </div>
+    </div>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+  box.style.display = 'block';
+}
+
+function _startPlatePlacement(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  S.ui.platePlaceMode = true;
+  S.ui.platePlaceProductId = productId;
+  canvas.style.cursor = 'crosshair';
+  const box = document.getElementById('rwp-product-actions');
+  if (box) box.style.display = 'none';
+}
+
+function _autoFillPlates(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room || !room.points || room.points.length < 3) return;
+  pushUndo();
+
+  const wCm = (prod.plate_width_mm || 600) / 10;
+  const lCm = (prod.plate_length_mm || 1200) / 10;
+  const margin = (prod.min_wall_margin_mm || 50) / 10;
+
+  // Room bounding box
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs) + margin, rMaxX = Math.max(...xs) - margin;
+  const rMinY = Math.min(...ys) + margin, rMaxY = Math.max(...ys) - margin;
+
+  // Determine best direction: try both orientations, pick the one with more plates
+  const fills = [];
+  for (const flip of [false, true]) {
+    const pw = flip ? lCm : wCm;
+    const pl = flip ? wCm : lCm;
+    const cols = Math.floor((rMaxX - rMinX) / pw);
+    const rows = Math.floor((rMaxY - rMinY) / pl);
+    if (cols > 0 && rows > 0) {
+      fills.push({ flip, pw, pl, cols, rows, count: cols * rows });
+    }
+  }
+  if (fills.length === 0) return;
+  fills.sort((a, b) => b.count - a.count);
+  const best = fills[0];
+
+  // Center the grid in the room
+  const totalW = best.cols * best.pw;
+  const totalH = best.rows * best.pl;
+  const startX = rMinX + (rMaxX - rMinX - totalW) / 2;
+  const startY = rMinY + (rMaxY - rMinY - totalH) / 2;
+
+  for (let row = 0; row < best.rows; row++) {
+    for (let col = 0; col < best.cols; col++) {
+      const px = startX + col * best.pw;
+      const py = startY + row * best.pl;
+      // Check that center of plate is inside room polygon
+      const cx = px + best.pw / 2, cy = py + best.pl / 2;
+      if (!ptInPoly(cx, cy, room.points)) continue;
+      S.plates.push({
+        id: S.counters.nextPlateId++,
+        roomId: room.id,
+        productId: productId,
+        x_cm: px,
+        y_cm: py,
+        width_cm: best.pw,
+        length_cm: best.pl,
+        direction: best.flip ? 'h' : 'v'
+      });
+    }
+  }
+  _invalidatePlateCache();
+  const box = document.getElementById('rwp-product-actions');
+  if (box) box.style.display = 'none';
+  renderSidebar(); updateCtxBar(); render();
 }
 
 function showCablePlacePanel(familyName, categoryId) {
@@ -3516,6 +3678,7 @@ function hideGapPanel() {
 function setRoomGap(roomId, gapMm, skipUndo) {
   const gapCm = Math.max(0, gapMm) / 10;
   S.varmefolie.gapCm = gapCm;
+  _savePrefs();
 
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) { updateCtxBar(); return; }
@@ -4729,6 +4892,195 @@ function drawMatMoveGizmo() {
   ctx.restore();
 }
 
+// ─── PLATES (plate systems with cable grooves) ──────────────
+let _hoveredPlateId = null;
+
+function drawPlates() {
+  for (const plate of S.plates) {
+    if (!_roomIdOnActiveFloor(plate.roomId)) continue;
+    const isSel = S.ui.selectedPlateId === plate.id;
+    const isHov = !isSel && _hoveredPlateId === plate.id;
+    const isOtherRoom = plate.roomId !== S.ui.selectedRoomId;
+
+    ctx.save();
+    const sc = S.view.zoom * BASE_SCALE;
+    const sp = w2s(plate.x_cm, plate.y_cm);
+    const pw = plate.width_cm * sc;
+    const pl = plate.length_cm * sc;
+
+    // Fill
+    if (isOtherRoom) {
+      ctx.fillStyle = _lc('rgba(160, 140, 100, 0.08)', 'rgba(180, 160, 120, 0.06)');
+    } else {
+      ctx.fillStyle = isSel
+        ? _lc('rgba(160, 140, 100, 0.25)', 'rgba(200, 180, 130, 0.3)')
+        : isHov
+          ? _lc('rgba(160, 140, 100, 0.18)', 'rgba(200, 180, 130, 0.22)')
+          : _lc('rgba(160, 140, 100, 0.14)', 'rgba(200, 180, 130, 0.16)');
+    }
+    ctx.fillRect(sp.x, sp.y, pw, pl);
+
+    // Border
+    ctx.strokeStyle = isSel
+      ? _lc('rgba(140, 110, 50, 1)', 'rgba(210, 180, 100, 1)')
+      : isHov
+        ? _lc('rgba(140, 110, 50, 0.7)', 'rgba(210, 180, 100, 0.7)')
+        : isOtherRoom
+          ? _lc('rgba(140, 110, 50, 0.3)', 'rgba(210, 180, 100, 0.2)')
+          : _lc('rgba(140, 110, 50, 0.55)', 'rgba(210, 180, 100, 0.5)');
+    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.strokeRect(sp.x, sp.y, pw, pl);
+
+    // Groove lines (cable channels) — draw wavy lines inside plate
+    if (S.view.zoom > 0.25 && !isOtherRoom) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === plate.productId);
+      const grooveSpCm = (prod?.groove_spacing_mm || 80) / 10;
+      const grooveSpPx = grooveSpCm * sc;
+      ctx.strokeStyle = isSel
+        ? _lc('rgba(200, 60, 30, 0.5)', 'rgba(255, 100, 60, 0.5)')
+        : _lc('rgba(200, 60, 30, 0.25)', 'rgba(255, 100, 60, 0.2)');
+      ctx.lineWidth = Math.max(0.5, sc * 0.3);
+      // Horizontal grooves (cable runs)
+      const nGrooves = Math.floor(plate.length_cm / grooveSpCm);
+      const startOff = (plate.length_cm - (nGrooves - 1) * grooveSpCm) / 2;
+      for (let i = 0; i < nGrooves; i++) {
+        const gy = sp.y + (startOff + i * grooveSpCm) * sc;
+        ctx.beginPath();
+        ctx.moveTo(sp.x + 2, gy);
+        ctx.lineTo(sp.x + pw - 2, gy);
+        ctx.stroke();
+      }
+      // U-turn arcs at alternating ends
+      if (nGrooves > 1) {
+        ctx.lineWidth = Math.max(0.4, sc * 0.2);
+        for (let i = 0; i < nGrooves - 1; i++) {
+          const gy1 = sp.y + (startOff + i * grooveSpCm) * sc;
+          const gy2 = sp.y + (startOff + (i + 1) * grooveSpCm) * sc;
+          const r = (gy2 - gy1) / 2;
+          const cx = (i % 2 === 0) ? sp.x + pw - 2 : sp.x + 2;
+          ctx.beginPath();
+          if (i % 2 === 0) {
+            ctx.arc(cx, gy1 + r, r, -Math.PI/2, Math.PI/2);
+          } else {
+            ctx.arc(cx, gy1 + r, r, Math.PI/2, -Math.PI/2, true);
+          }
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Label
+    if (S.view.zoom > 0.35 && !isOtherRoom) {
+      const prod = HEATING_PRODUCTS.find(p => p.id === plate.productId);
+      const label = prod ? prod.name : 'Plate';
+      const dims = `${Math.round(plate.width_cm)}\u00d7${Math.round(plate.length_cm)} cm`;
+      ctx.fillStyle = _lc('rgba(100, 80, 30, 0.7)', 'rgba(210, 190, 130, 0.7)');
+      ctx.font = "9px 'DM Sans',sans-serif";
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const cx = sp.x + pw / 2, cy = sp.y + pl / 2;
+      ctx.fillText(label, cx, cy - 5);
+      ctx.fillText(dims, cx, cy + 5);
+    }
+
+    ctx.restore();
+  }
+
+  // Ghost preview during placement mode
+  if (S.ui.platePlaceMode && S.ui.platePlaceProductId && S.drawing.mousePos) {
+    const prod = HEATING_PRODUCTS.find(p => p.id === S.ui.platePlaceProductId);
+    if (prod) {
+      const wCm = (prod.plate_width_mm || 600) / 10;
+      const lCm = (prod.plate_length_mm || 1200) / 10;
+      const mx = S.drawing.mousePos.x - wCm / 2, my = S.drawing.mousePos.y - lCm / 2;
+      const sp = w2s(mx, my);
+      const sc = S.view.zoom * BASE_SCALE;
+      const pw = wCm * sc, pl = lCm * sc;
+      ctx.save();
+      ctx.fillStyle = 'rgba(160, 140, 100, 0.15)';
+      ctx.strokeStyle = 'rgba(160, 140, 100, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.fillRect(sp.x, sp.y, pw, pl);
+      ctx.strokeRect(sp.x, sp.y, pw, pl);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+}
+
+// ── Plate gizmo rendering ──
+function drawPlateMoveGizmo() {
+  if (!S.ui.selectedPlateId) return;
+  const plate = S.plates.find(p => p.id === S.ui.selectedPlateId);
+  if (!plate) return;
+  const gx = plate.x_cm, gy = plate.y_cm + plate.length_cm;
+  const gp = w2s(gx - 2, gy + 2);
+  ctx.save();
+  // X arrow (red)
+  drawGizmoArrow(gp.x + 18, gp.y, gp.x + 72, gp.y, 'rgba(255,75,75,0.9)');
+  // Y arrow (green)
+  drawGizmoArrow(gp.x, gp.y - 18, gp.x, gp.y - 72, 'rgba(75,210,100,0.9)');
+  // Center dot
+  ctx.beginPath(); ctx.arc(gp.x, gp.y, 13, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(34,211,238,0.1)'; ctx.strokeStyle = 'rgba(34,211,238,0.85)';
+  ctx.lineWidth = 1.5; ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(gp.x - 9, gp.y); ctx.lineTo(gp.x + 9, gp.y);
+  ctx.moveTo(gp.x, gp.y - 9); ctx.lineTo(gp.x, gp.y + 9);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── Plate selection, deletion and helpers ──
+function selectPlate(id) {
+  S.ui.selectedPlateId = id;
+  S.ui.selectedStripId = null;
+  S.ui.selectedStripIds = new Set();
+  S.ui.selectedCableId = null;
+  S.ui.selectedMatId = null;
+  S.ui.selectedZoneId = null;
+  S.ui.selectedHindringId = null;
+  S.ui.selectedHindringWallIdx = null;
+  S.ui.selectedWallId = null;
+  S.ui.selectedVertexIdx = null;
+  const plate = S.plates.find(p => p.id === id);
+  if (plate) S.ui.selectedRoomId = plate.roomId;
+  updateCtxBar(); updateObjInfo(); render();
+}
+
+function deletePlate(id) {
+  const plate = S.plates.find(p => p.id === id);
+  const roomId = plate?.roomId;
+  const prod = plate ? HEATING_PRODUCTS.find(p => p.id === plate.productId) : null;
+  pushUndo();
+  S.plates = S.plates.filter(p => p.id !== id); _invalidatePlateCache();
+  S.ui.selectedPlateId = null;
+  if (roomId) {
+    S.ui.selectedRoomId = roomId;
+    _showPostDeleteActions(roomId, prod);
+  }
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function deleteAllPlatesInRoom(roomId) {
+  const roomPlates = _platesForRoom(roomId);
+  if (roomPlates.length === 0) return;
+  pushUndo();
+  S.plates = S.plates.filter(p => p.roomId !== roomId); _invalidatePlateCache();
+  S.ui.selectedPlateId = null;
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function _clampPlateToRoom(plate, room) {
+  if (!room || !room.points) return;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  plate.x_cm = Math.max(rMinX, Math.min(rMaxX - plate.width_cm, plate.x_cm));
+  plate.y_cm = Math.max(rMinY, Math.min(rMaxY - plate.length_cm, plate.y_cm));
+}
+
 // ─── ZONES (forbidden / preferred) ──────────────────────────
 function drawZones() {
   for (const zone of S.zones) {
@@ -4866,6 +5218,7 @@ function selectZone(id) {
   S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null;
   S.ui.selectedMatId = null;
+  S.ui.selectedPlateId = null;
   S.ui.selectedHindringId = null;
   S.ui.selectedHindringWallIdx = null;
   S.ui.selectedWallId = null;
@@ -4893,6 +5246,7 @@ function deleteZone(id) {
 // ── Mat selection, deletion and helpers ──
 function selectMat(id) {
   S.ui.selectedMatId = id;
+  S.ui.selectedPlateId = null;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null;
@@ -5139,6 +5493,7 @@ function selectCable(id) {
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
   S.ui.selectedMatId = null;
+  S.ui.selectedPlateId = null;
   S.ui.selectedZoneId = null;
   const cable = S.cables.find(c => c.id === id);
   if (cable) {
@@ -5207,6 +5562,19 @@ function _matsForRoom(roomId) {
   if (c && c.v === _matCacheVer) return c.d;
   const d = S.mats.filter(m => m.roomId === roomId);
   _matCacheStore[key] = { v: _matCacheVer, d };
+  return d;
+}
+
+// ── Plate cache (same pattern as mat cache) ──
+let _plateCacheVer = 0;
+const _plateCacheStore = {};
+function _invalidatePlateCache() { _plateCacheVer++; }
+function _platesForRoom(roomId) {
+  const key = 'r_' + roomId;
+  const c = _plateCacheStore[key];
+  if (c && c.v === _plateCacheVer) return c.d;
+  const d = S.plates.filter(p => p.roomId === roomId);
+  _plateCacheStore[key] = { v: _plateCacheVer, d };
   return d;
 }
 
@@ -5553,6 +5921,7 @@ function setTheme(t) {
   // Single toggle chip: shows the OPPOSITE option (what you'd switch to)
   const chip = document.getElementById('chip-theme');
   if (chip) chip.textContent = t === 'light' ? '🌙' : '☀️';
+  _savePrefs();
   render();
 }
 // ─── COLOR PALETTE ───────────────────────────────────────────
@@ -5616,6 +5985,7 @@ function selStrip(id, addToMulti) {
       S.ui.selectedHindringWallIdx = null;
       S.ui.selectedCableId = null;
       S.ui.selectedMatId = null;
+      S.ui.selectedPlateId = null;
       S.ui.selectedZoneId = null;
     }
   }
@@ -5653,6 +6023,8 @@ function _showPostDeleteActions(roomId, deletedProd) {
     showMatPlacePanel(familyName, categoryId);
   } else if (modType === 'cable') {
     showCablePlacePanel(familyName, categoryId);
+  } else if (modType === 'plate') {
+    showPlatePlacePanel(familyName, categoryId);
   } else {
     showVfPlacePanel(familyName, categoryId);
   }
@@ -8085,10 +8457,12 @@ function finishRoomWorkflow() {
   S.ui.selectedRoomId = null;
   S.ui.selectedStripId = null;
   S.ui.selectedMatId = null;
+  S.ui.selectedPlateId = null;
   S.ui.selectedWallId = null;
   S.ui.selectedHindringId = null;
   S.ui.manualPlaceMode = false;
   S.ui.matPlaceMode = false;
+  S.ui.platePlaceMode = false;
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
   updateCtxBar();
@@ -8670,6 +9044,23 @@ function roomItemHtml(room, indented) {
     </div>`;
   }).join('') : '';
 
+  // Plate items for this room
+  const roomPlates = _platesForRoom(room.id);
+  const platesHtml = exp ? roomPlates.map(p => {
+    const psel = S.ui.selectedPlateId === p.id ? ' sel' : '';
+    const pind = indented ? ' indented' : '';
+    const pp = HEATING_PRODUCTS.find(pr => pr.id === p.productId);
+    const pnm = pp ? esc(pp.name) : 'Plate';
+    const wm2 = pp?.watt_per_m2 || 0;
+    const watt = Math.round(wm2 * p.width_cm * p.length_cm / 10000);
+    return `<div class="strip-item${psel}${pind}"
+      onclick="selectPlate(${p.id});event.stopPropagation()">
+      <span class="strip-ico">\u25A6</span>
+      <span class="strip-nm">${pnm}</span>
+      <span class="strip-len">${Math.round(p.width_cm)}\u00d7${Math.round(p.length_cm)} cm \u00b7 ${watt}W</span>
+    </div>`;
+  }).join('') : '';
+
   // Zone items for this room
   const roomZones = S.zones.filter(z => z.roomId === room.id);
   const zonesHtml = exp ? roomZones.map(z => {
@@ -8699,7 +9090,7 @@ function roomItemHtml(room, indented) {
     </div>
     <button class="room-card-btn${room.cardVisible?' active':''}" onclick="toggleRoomCard(${room.id});event.stopPropagation()" title="${room.cardVisible?'Skjul':'Vis'} infokort">📋</button>
     ${(hasWalls || roomStripsItem.length || roomCables.length || roomMats.length || roomHindrings.length || roomGroups.length || roomZones.length) ? `<button class="room-expand" onclick="toggleRoomWalls(${room.id});event.stopPropagation()" title="${exp?'Skjul':'Vis'} detaljer">${exp?'▾':'▸'}</button>` : ''}
-  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${matsHtml}${zonesHtml}${hindringsHtml}`;
+  </div>${wallsHtml}${groupsHtml}${stripsHtml}${cablesHtml}${matsHtml}${platesHtml}${zonesHtml}${hindringsHtml}`;
 }
 
 function esc(s) {
@@ -8821,6 +9212,7 @@ function toggleFloor(id) {
           S.ui.selectedStripIds = new Set();
           S.ui.selectedCableId = null;
           S.ui.selectedMatId = null;
+          S.ui.selectedPlateId = null;
           S.ui.selectedHindringId = null;
           S.ui.selectedWallId = null;
         }
@@ -10405,6 +10797,46 @@ function hitMatRotHandle(sx, sy) {
   return Math.hypot(sx - (gp.x + 52), sy - (gp.y - 52)) < 13;
 }
 
+// ── Plate hit detection ──
+function hitPlate(wx, wy) {
+  for (let i = S.plates.length - 1; i >= 0; i--) {
+    const p = S.plates[i];
+    if (!_roomIdOnActiveFloor(p.roomId)) continue;
+    if (wx >= p.x_cm && wx <= p.x_cm + p.width_cm &&
+        wy >= p.y_cm && wy <= p.y_cm + p.length_cm) return p.id;
+  }
+  return null;
+}
+
+function _getPlateGizmoPos(plate) {
+  const gx = plate.x_cm, gy = plate.y_cm + plate.length_cm;
+  return w2s(gx - 2, gy + 2);
+}
+function hitPlateGizmoFree(sx, sy) {
+  if (!S.ui.selectedPlateId) return false;
+  const plate = S.plates.find(p => p.id === S.ui.selectedPlateId);
+  if (!plate) return false;
+  const gp = _getPlateGizmoPos(plate);
+  return Math.hypot(sx - gp.x, sy - gp.y) < 15 ? 'free' : false;
+}
+function hitPlateGizmoX(sx, sy) {
+  if (!S.ui.selectedPlateId) return false;
+  const plate = S.plates.find(p => p.id === S.ui.selectedPlateId);
+  if (!plate) return false;
+  const gp = _getPlateGizmoPos(plate);
+  return distSegPx(sx, sy, gp.x + 18, gp.y, gp.x + 72, gp.y) < 12 ? 'x' : false;
+}
+function hitPlateGizmoY(sx, sy) {
+  if (!S.ui.selectedPlateId) return false;
+  const plate = S.plates.find(p => p.id === S.ui.selectedPlateId);
+  if (!plate) return false;
+  const gp = _getPlateGizmoPos(plate);
+  return distSegPx(sx, sy, gp.x, gp.y - 18, gp.x, gp.y - 72) < 12 ? 'y' : false;
+}
+function hitPlateGizmo(sx, sy) {
+  return hitPlateGizmoFree(sx, sy) || hitPlateGizmoX(sx, sy) || hitPlateGizmoY(sx, sy) || false;
+}
+
 function drawHindringMoveGizmo() {
   if(!S.ui.selectedHindringId) return;
   const h=S.hindrings.find(h=>h.id===S.ui.selectedHindringId); if(!h||!h.points||h.points.length<3) return;
@@ -10592,6 +11024,9 @@ let _matDragging=false, _matDragId=-1, _matDragAxis='free';
 let _matDragOrigStart={x:0,y:0}, _matDragOrigPos={x:0,y:0};
 let _matRotating=false, _matRotId=-1, _matRotStart=0, _matRotOrigDeg=0;
 let _matRotCenter={x:0,y:0};
+// Plate drag
+let _plateDragging=false, _plateDragId=-1, _plateDragAxis='free';
+let _plateDragOrigStart={x:0,y:0}, _plateDragOrigPos={x:0,y:0};
 // Vertex drag (Edit 3+4)
 let _vdDragging=false, _vdPending=false, _vdRoomId=-1, _vdIdx=-1;
 let _vdOrigPt=null, _vdOrigStart={x:0,y:0}, _vdConstraint='free';
@@ -10623,12 +11058,14 @@ function pushUndo() {
     cables:    S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     zones:     S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     mats:      S.mats.map(m=>({...m})),
+    plates:    S.plates.map(p=>({...p})),
     groups:    S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     nextStripId: S.counters.nextStripId,
     nextGroupId: S.counters.nextGroupId,
     nextCableId: S.counters.nextCableId,
     nextZoneId: S.counters.nextZoneId,
     nextMatId: S.counters.nextMatId,
+    nextPlateId: S.counters.nextPlateId,
     gapCm: S.varmefolie.gapCm
   });
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
@@ -10659,6 +11096,10 @@ function undo() {
     S.mats = prev.mats; _invalidateMatCache();
     S.counters.nextMatId = prev.nextMatId;
   }
+  if (prev.plates !== undefined) {
+    S.plates = prev.plates; _invalidatePlateCache();
+    S.counters.nextPlateId = prev.nextPlateId;
+  }
   if (S.ui.selectedRoomId && !S.rooms.find(r=>r.id===S.ui.selectedRoomId)) {
     S.ui.selectedRoomId=null; S.ui.selectedWallId=null; S.ui.selectedVertexIdx=null;
   }
@@ -10676,6 +11117,9 @@ function undo() {
   }
   if (S.ui.selectedMatId !== null && !S.mats.find(m=>m.id===S.ui.selectedMatId)) {
     S.ui.selectedMatId = null;
+  }
+  if (S.ui.selectedPlateId !== null && !S.plates.find(p=>p.id===S.ui.selectedPlateId)) {
+    S.ui.selectedPlateId = null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
 }
@@ -11261,6 +11705,34 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
 
+    // ── Plate placement mode — click to place ──
+    if (S.ui.platePlaceMode && S.ui.platePlaceProductId) {
+      const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+      const prod = HEATING_PRODUCTS.find(p => p.id === S.ui.platePlaceProductId);
+      if (room && prod && ptInPoly(rawWp0.x, rawWp0.y, room.points)) {
+        const wCm = (prod.plate_width_mm || 600) / 10;
+        const lCm = (prod.plate_length_mm || 1200) / 10;
+        pushUndo();
+        const plate = {
+          id: S.counters.nextPlateId++,
+          roomId: room.id,
+          productId: S.ui.platePlaceProductId,
+          x_cm: rawWp0.x - wCm / 2,
+          y_cm: rawWp0.y - lCm / 2,
+          width_cm: wCm,
+          length_cm: lCm,
+          direction: 'v'
+        };
+        S.plates.push(plate); _invalidatePlateCache();
+        S.ui.platePlaceMode = false;
+        S.ui.platePlaceProductId = null;
+        S.ui.selectedPlateId = plate.id;
+        canvas.style.cursor = 'default';
+        renderSidebar(); updateCtxBar(); render();
+        return;
+      }
+    }
+
     // ── Mat gizmo (rotation + move) ──
     if (S.ui.selectedMatId) {
       if (hitMatRotHandle(sx0, sy0)) {
@@ -11284,6 +11756,22 @@ canvas.addEventListener('mousedown', e=>{
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         const mat = S.mats.find(m => m.id === _matDragId);
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
+    }
+
+    // ── Plate gizmo (move) ──
+    if (S.ui.selectedPlateId) {
+      const plateGizmoHit = hitPlateGizmo(sx0, sy0);
+      if (plateGizmoHit) {
+        pushUndo();
+        _plateDragging = true;
+        _plateDragId = S.ui.selectedPlateId;
+        _plateDragAxis = plateGizmoHit;
+        _plateDragOrigStart = { x: e.clientX, y: e.clientY };
+        const plate = S.plates.find(p => p.id === _plateDragId);
+        _plateDragOrigPos = { x: plate.x_cm, y: plate.y_cm };
         canvas.style.cursor = 'crosshair';
         return;
       }
@@ -11336,6 +11824,34 @@ canvas.addEventListener('mousedown', e=>{
         _matDragAxis = 'free';
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        canvas.style.cursor = 'crosshair';
+      }
+      return;
+    }
+
+    // ── Plate body click — select + start drag immediately ──
+    const hpid = hitPlate(rawWp0.x, rawWp0.y);
+    if (hpid !== null) {
+      const plate = S.plates.find(p => p.id === hpid);
+      S.ui.selectedPlateId = hpid;
+      S.ui.selectedStripId = null;
+      S.ui.selectedStripIds = new Set();
+      S.ui.selectedCableId = null;
+      S.ui.selectedMatId = null;
+      S.ui.selectedZoneId = null;
+      S.ui.selectedHindringId = null;
+      S.ui.selectedHindringWallIdx = null;
+      S.ui.selectedWallId = null;
+      S.ui.selectedVertexIdx = null;
+      if (plate) S.ui.selectedRoomId = plate.roomId;
+      renderSidebar(); updateObjInfo();
+      if (plate) {
+        pushUndo();
+        _plateDragging = true;
+        _plateDragId = hpid;
+        _plateDragAxis = 'free';
+        _plateDragOrigStart = { x: e.clientX, y: e.clientY };
+        _plateDragOrigPos = { x: plate.x_cm, y: plate.y_cm };
         canvas.style.cursor = 'crosshair';
       }
       return;
@@ -11571,6 +12087,28 @@ canvas.addEventListener('mousemove', e=>{
       mat.y_cm = _matDragOrigPos.y + totalDy;
       const room = S.rooms.find(r => r.id === mat.roomId);
       if (room) _clampMatToRoom(mat, room);
+    }
+    render(); return;
+  }
+  // ── Plate dragging ──
+  if (_plateDragging) {
+    const plate = S.plates.find(p => p.id === _plateDragId);
+    if (plate) {
+      const sc = S.view.zoom * BASE_SCALE;
+      let totalDx = (e.clientX - _plateDragOrigStart.x) / sc;
+      let totalDy = (e.clientY - _plateDragOrigStart.y) / sc;
+      if (_plateDragAxis === 'x') totalDy = 0;
+      if (_plateDragAxis === 'y') totalDx = 0;
+      if (S.snap.grid && !S.shiftHeld && _plateDragAxis === 'free') {
+        const nx = Math.round((_plateDragOrigPos.x + totalDx) / GRID) * GRID;
+        const ny = Math.round((_plateDragOrigPos.y + totalDy) / GRID) * GRID;
+        totalDx = nx - _plateDragOrigPos.x;
+        totalDy = ny - _plateDragOrigPos.y;
+      }
+      plate.x_cm = _plateDragOrigPos.x + totalDx;
+      plate.y_cm = _plateDragOrigPos.y + totalDy;
+      const room = S.rooms.find(r => r.id === plate.roomId);
+      if (room) _clampPlateToRoom(plate, room);
     }
     render(); return;
   }
@@ -12048,10 +12586,13 @@ canvas.addEventListener('mousemove', e=>{
       const _newHovCableId = _hovCableHit ? _hovCableHit.id : null;
       const _hovMatHit = hitMat(rawWp2.x, rawWp2.y);
       const _newHovMatId = _hovMatHit !== null ? _hovMatHit : null;
-      if (_newHovId !== _hoveredStripId || _newHovCableId !== _hoveredCableId || _newHovMatId !== _hoveredMatId) {
+      const _hovPlateHit = hitPlate(rawWp2.x, rawWp2.y);
+      const _newHovPlateId = _hovPlateHit !== null ? _hovPlateHit : null;
+      if (_newHovId !== _hoveredStripId || _newHovCableId !== _hoveredCableId || _newHovMatId !== _hoveredMatId || _newHovPlateId !== _hoveredPlateId) {
         _hoveredStripId = _newHovId;
         _hoveredCableId = _newHovCableId;
         _hoveredMatId = _newHovMatId;
+        _hoveredPlateId = _newHovPlateId;
         render();
       }
       if (hitRotCircle(sx2, sy2)) {
@@ -12092,6 +12633,12 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor='ns-resize';        // mat Y arrow
       } else if (hitMatGizmoFree(sx2,sy2)) {
         canvas.style.cursor='move';             // mat gizmo ⊕
+      } else if (hitPlateGizmoX(sx2,sy2)) {
+        canvas.style.cursor='ew-resize';        // plate X arrow
+      } else if (hitPlateGizmoY(sx2,sy2)) {
+        canvas.style.cursor='ns-resize';        // plate Y arrow
+      } else if (hitPlateGizmoFree(sx2,sy2)) {
+        canvas.style.cursor='move';             // plate gizmo ⊕
       } else if (hitHindringRotHandle(sx2,sy2)) {
         canvas.style.cursor='crosshair';        // hindring rotation handle
       } else if (hitHindringGizmoX(sx2,sy2)) {
@@ -12112,6 +12659,8 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor='pointer';          // selectable cable body
       } else if (hitMat(rawWp2.x, rawWp2.y) !== null) {
         canvas.style.cursor='pointer';          // selectable mat body
+      } else if (hitPlate(rawWp2.x, rawWp2.y) !== null) {
+        canvas.style.cursor='pointer';          // selectable plate body
       } else if (hitHindring(rawWp2.x, rawWp2.y) !== null) {
         canvas.style.cursor='pointer';          // selectable hindring body
       } else if (hitRoomCard(sx2, sy2)) {
@@ -12194,6 +12743,7 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_matRotating) { _matRotating=false; _matRotId=-1; canvas.style.cursor='default'; render(); return; }
   if (_matDragging) { _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return; }
+  if (_plateDragging) { _plateDragging=false; _plateDragId=-1; _plateDragAxis='free'; canvas.style.cursor='default'; render(); return; }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
   if (_dhDragging) { _dhDragging=false; _dhId=-1; _dhDragAxis='free'; canvas.style.cursor='default'; return; }
   if(_hwMoving){_hwMoving=false;_hwHindId=-1;_hwWallIdx=-1;canvas.style.cursor='default';return;}
@@ -12351,6 +12901,7 @@ document.addEventListener('keydown', e=>{
 
   if (e.key==='Escape') {
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
+    if (S.ui.platePlaceMode) { S.ui.platePlaceMode=false; S.ui.platePlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.zoneDrawMode) { cancelZoneDraw(); return; }
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
@@ -12395,6 +12946,7 @@ document.addEventListener('keydown', e=>{
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
   if (e.key==='Delete'&&S.ui.selectedMatId!==null) { deleteMat(S.ui.selectedMatId); return; }
+  if (e.key==='Delete'&&S.ui.selectedPlateId!==null) { deletePlate(S.ui.selectedPlateId); return; }
   // Edit 6: Arrow keys move selected strip (no modifier = 10cm step)
   if (S.ui.selectedStripId!==null && !S.ui.drawMode && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
@@ -12598,12 +13150,14 @@ function toggleSnap(type) {
   S.snap[type]=!S.snap[type];
   const ids={grid:'chip-grid',a90:'chip-90',a45:'chip-45'};
   const el=document.getElementById(ids[type]); if(el) el.classList.toggle('on',S.snap[type]);
+  _savePrefs();
   renderSnapWidget();
   _updWbwSnapHint();
 }
 
 function toggleStripLabels() {
   S.ui.showStripLabels = !S.ui.showStripLabels;
+  _savePrefs();
   updateCtxBar();
   render();
 }
@@ -12713,6 +13267,21 @@ function _ctxBarItems() {
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="_toggleZoneType()" title="Bytt mellom forbudt og foretrukket">↻ ${isForbid?'→ Foretrukket':'→ Forbudt'}</button>
       <button class="snap-chip" onclick="deleteZone(${ui.selectedZoneId})" title="Slett sone">🗑 Slett</button>`;
+  }
+
+  // Plate selected
+  if (ui.selectedPlateId) {
+    const plate = S.plates.find(p => p.id === ui.selectedPlateId);
+    const prod = plate ? HEATING_PRODUCTS.find(p => p.id === plate.productId) : null;
+    const wm2 = prod?.watt_per_m2 || 0;
+    const areaCm2 = plate ? plate.width_cm * plate.length_cm : 0;
+    const watt = Math.round(wm2 * areaCm2 / 10000);
+    const roomPlateCount = plate ? _platesForRoom(plate.roomId).length : 0;
+    return `<span class="ctxbar-lbl">\u25A6 Plate</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Plate'} \u2014 ${Math.round(plate.width_cm)}\u00d7${Math.round(plate.length_cm)} cm \u00b7 ${watt} W</span>
+      ${roomPlateCount > 1 ? `<button class="snap-chip" onclick="deleteAllPlatesInRoom(${plate.roomId})" title="Slett alle plater i rommet">\u{1F5D1} Slett alle (${roomPlateCount})</button>` : ''}
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="deletePlate(${ui.selectedPlateId})" title="Slett plate">\u{1F5D1} Slett</button>`;
   }
 
   // Mat selected
@@ -12872,6 +13441,7 @@ function _buildSaveData() {
     cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     zones    : S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     mats     : S.mats.map(m=>({...m})),
+    plates   : S.plates.map(p=>({...p})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -12960,11 +13530,13 @@ function _restoreProject(data) {
   S.cables    = data.cables    || [];
   S.zones     = data.zones     || [];
   S.mats      = data.mats      || [];
+  S.plates    = data.plates    || [];
   S.counters  = data.counters  || S.counters;
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   if (!S.counters.nextCableId) S.counters.nextCableId = 1;
   if (!S.counters.nextZoneId) S.counters.nextZoneId = 1;
   if (!S.counters.nextMatId) S.counters.nextMatId = 1;
+  if (!S.counters.nextPlateId) S.counters.nextPlateId = 1;
   S.snap      = data.snap      || S.snap;
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
@@ -12972,8 +13544,10 @@ function _restoreProject(data) {
   S.ui.selectedStripId = null;
   S.ui.selectedCableId = null;
   S.ui.selectedMatId = null;
+  S.ui.selectedPlateId = null;
   _invalidateCableCache();
   _invalidateMatCache();
+  _invalidatePlateCache();
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; if(r.wallThicknessCm==null) r.wallThicknessCm=0; if(r.stripDimSnap==null) r.stripDimSnap=false;
     if(r.walls) r.walls.forEach(w=>{ if(w.thicknessCm==null) w.thicknessCm=r.wallThicknessCm||0; if(!w.side) w.side='out'; });
   });
@@ -13009,6 +13583,488 @@ function _restoreProject(data) {
   hideBgPanel();
   // Show draw toolbar if floors exist
   if (S.floors && S.floors.length > 0) setTimeout(() => showDrawToolbar(), 100);
+}
+
+// ─── PDF EXPORT ──────────────────────────────────────────────
+async function exportPDF() {
+  if (!window.jspdf) { alert('PDF-bibliotek ikke lastet. Prøv igjen.'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const W = 210, H = 297; // A4 mm
+  const M = 15; // margin
+  const pw = W - 2 * M; // printable width
+  let y = M;
+
+  // ── Helper functions ──
+  const _addPage = () => { doc.addPage(); y = M; };
+  const _checkPage = (need) => { if (y + need > H - M) _addPage(); };
+  const _line = (y0) => { doc.setDrawColor(180); doc.setLineWidth(0.3); doc.line(M, y0, W - M, y0); };
+  const _date = () => new Date().toLocaleDateString('nb-NO', {year:'numeric',month:'long',day:'numeric'});
+
+  // ── Page 1: Cover ──
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(28);
+  doc.setTextColor(20, 40, 80);
+  doc.text('Varmeplan', M, y + 15);
+  y += 22;
+  doc.setFontSize(14);
+  doc.setTextColor(60, 70, 90);
+  doc.text(S.project.name || 'Prosjekt', M, y);
+  y += 7;
+  if (S.project.description) {
+    doc.setFontSize(10);
+    doc.setTextColor(100, 110, 130);
+    doc.text(S.project.description, M, y);
+    y += 6;
+  }
+  doc.setFontSize(9);
+  doc.setTextColor(120, 130, 150);
+  doc.text('Generert: ' + _date(), M, y);
+  y += 4;
+  doc.text('Arqely Romtegner \u2014 arqely.com', M, y);
+  y += 10;
+  _line(y); y += 8;
+
+  // ── Project summary ──
+  doc.setFontSize(14);
+  doc.setTextColor(20, 40, 80);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Prosjektoversikt', M, y); y += 8;
+
+  let totalProjectW = 0;
+  const floorSummaries = [];
+  for (const fl of [...S.floors].sort((a, b) => a.order - b.order)) {
+    const frooms = S.rooms.filter(r => r.floorId === fl.id);
+    let floorW = 0;
+    const roomSums = [];
+    for (const room of frooms) {
+      const stats = _computeRoomStats(room);
+      floorW += stats.totalW;
+      roomSums.push({ name: room.name || 'Rom', stats });
+    }
+    totalProjectW += floorW;
+    floorSummaries.push({ floor: fl, rooms: roomSums, totalW: floorW });
+  }
+  // Unassigned rooms
+  const unassigned = S.rooms.filter(r => r.floorId === null);
+  for (const room of unassigned) {
+    const stats = _computeRoomStats(room);
+    totalProjectW += stats.totalW;
+    floorSummaries.push({ floor: null, rooms: [{ name: room.name || 'Rom', stats }], totalW: stats.totalW });
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(40, 50, 70);
+  doc.text('Etasjer: ' + S.floors.length, M, y); y += 5;
+  doc.text('Rom: ' + S.rooms.length, M, y); y += 5;
+  doc.text('Total installert effekt: ' + totalProjectW + ' W', M, y); y += 10;
+  _line(y); y += 8;
+
+  // ── Per-floor / per-room tables ──
+  for (const fs of floorSummaries) {
+    _checkPage(30);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(20, 40, 80);
+    doc.text(fs.floor ? fs.floor.name : 'Uten etasje', M, y); y += 7;
+
+    // Table header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(80, 90, 110);
+    const cols = [M, M + 40, M + 70, M + 100, M + 130, M + 155];
+    doc.text('Rom', cols[0], y);
+    doc.text('Brutto m\u00b2', cols[1], y);
+    doc.text('Netto m\u00b2', cols[2], y);
+    doc.text('Produkter', cols[3], y);
+    doc.text('Effekt (W)', cols[4], y);
+    doc.text('W/m\u00b2', cols[5], y);
+    y += 3;
+    _line(y); y += 4;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(30, 40, 60);
+    for (const rs of fs.rooms) {
+      _checkPage(6);
+      const st = rs.stats;
+      // Count product types in room
+      const prodTypes = [];
+      if (_stripsForRoom(S.rooms.find(r=>r.name===rs.name)?.id || -1).length > 0) prodTypes.push('VF');
+      const rm = S.rooms.find(r => r.name === rs.name);
+      if (rm) {
+        if (_cablesForRoom(rm.id).length > 0) prodTypes.push('Kabel');
+        if (_matsForRoom(rm.id).length > 0) prodTypes.push('Matte');
+        if (_platesForRoom(rm.id).length > 0) prodTypes.push('Plate');
+      }
+      const wm2 = st.nettoM2 > 0 ? Math.round(st.totalW / st.nettoM2) : 0;
+      doc.text(rs.name, cols[0], y);
+      doc.text(st.bruttoM2.toFixed(1), cols[1], y);
+      doc.text(st.nettoM2.toFixed(1), cols[2], y);
+      doc.text(prodTypes.join(', ') || '\u2014', cols[3], y);
+      doc.text(String(st.totalW), cols[4], y);
+      doc.text(String(wm2), cols[5], y);
+      y += 5;
+    }
+    // Floor total
+    _checkPage(8);
+    _line(y); y += 3;
+    doc.setFont('helvetica', 'bold');
+    doc.text('Sum ' + (fs.floor ? fs.floor.name : ''), cols[0], y);
+    doc.text(String(fs.totalW) + ' W', cols[4], y);
+    y += 8;
+  }
+
+  // ── Room detail pages ──
+  for (const room of S.rooms) {
+    _addPage();
+    const stats = _computeRoomStats(room);
+
+    // Room header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(20, 40, 80);
+    doc.text(room.name || 'Rom', M, y); y += 7;
+    const floor = S.floors.find(f => f.id === room.floorId);
+    if (floor) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(100, 110, 130);
+      doc.text(floor.name, M, y); y += 5;
+    }
+    y += 3;
+    _line(y); y += 6;
+
+    // Room drawing (render room to offscreen canvas, then embed as image)
+    try {
+      const imgData = _renderRoomToImage(room);
+      if (imgData) {
+        const imgW = pw;
+        const imgH = imgW * 0.55; // aspect ratio
+        _checkPage(imgH + 5);
+        doc.addImage(imgData, 'PNG', M, y, imgW, imgH);
+        y += imgH + 5;
+      }
+    } catch(e) { console.warn('PDF room image failed:', e); }
+
+    // Room statistics
+    _checkPage(50);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(20, 40, 80);
+    doc.text('Romdata', M, y); y += 6;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(40, 50, 70);
+    const _row = (label, val) => {
+      doc.text(label, M + 2, y);
+      doc.text(val, M + 60, y);
+      y += 4.5;
+    };
+    _row('Brutto areal:', stats.bruttoM2.toFixed(2) + ' m\u00b2');
+    _row('Hindringer:', stats.hindM2.toFixed(2) + ' m\u00b2');
+    _row('Netto areal:', stats.nettoM2.toFixed(2) + ' m\u00b2');
+    if (stats.stripM2 > 0) _row('Varmefolie:', stats.stripM2.toFixed(2) + ' m\u00b2');
+    if (stats.cableLenM > 0) _row('Kabel:', stats.cableLenM.toFixed(1) + ' m (' + stats.cableW + ' W)');
+    if (stats.matAreaM2 > 0) _row('Matte:', stats.matAreaM2.toFixed(2) + ' m\u00b2 (' + stats.matW + ' W)');
+    if (stats.plateCount > 0) _row('Plater:', stats.plateCount + ' stk (' + stats.plateAreaM2.toFixed(2) + ' m\u00b2, ' + stats.plateW + ' W)');
+    _row('Installert effekt:', stats.totalW + ' W');
+    if (stats.nettoM2 > 0) _row('Effekttetthet:', Math.round(stats.totalW / stats.nettoM2) + ' W/m\u00b2');
+    y += 4;
+
+    // Product list for this room
+    _checkPage(20);
+    _line(y); y += 5;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(20, 40, 80);
+    doc.text('Produkter i rommet', M, y); y += 6;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(40, 50, 70);
+
+    // Foil strips
+    const roomStrips = _stripsForRoom(room.id);
+    if (roomStrips.length > 0) {
+      const byProd = {};
+      for (const s of roomStrips) {
+        const k = s.productId;
+        if (!byProd[k]) byProd[k] = { count: 0, totalLen: 0 };
+        byProd[k].count++;
+        byProd[k].totalLen += s.length_cm;
+      }
+      for (const [pid, info] of Object.entries(byProd)) {
+        const prod = HEATING_PRODUCTS.find(p => p.id === +pid);
+        _checkPage(5);
+        doc.text('\u2022 ' + (prod ? prod.name : 'Folie') + ' \u00d7 ' + info.count + ' (total ' + (info.totalLen / 100).toFixed(1) + ' m)', M + 2, y);
+        y += 4;
+      }
+    }
+    // Cables
+    for (const cab of _cablesForRoom(room.id)) {
+      const cp = HEATING_PRODUCTS.find(p => p.id === cab.productId);
+      _checkPage(5);
+      doc.text('\u2022 ' + (cp ? cp.name : 'Kabel') + ' \u2014 ' + (cab.totalLength_cm / 100).toFixed(1) + ' m, CC ' + Math.round(cab.spacing_cm * 10) + ' mm', M + 2, y);
+      y += 4;
+    }
+    // Mats
+    for (const mat of _matsForRoom(room.id)) {
+      const mp = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+      _checkPage(5);
+      doc.text('\u2022 ' + (mp ? mp.name : 'Matte') + ' \u2014 ' + Math.round(mat.width_cm) + '\u00d7' + Math.round(mat.length_cm) + ' cm', M + 2, y);
+      y += 4;
+    }
+    // Plates
+    const roomPlates = _platesForRoom(room.id);
+    if (roomPlates.length > 0) {
+      const byProd = {};
+      for (const p of roomPlates) {
+        const k = p.productId;
+        if (!byProd[k]) byProd[k] = { count: 0, areaM2: 0 };
+        byProd[k].count++;
+        byProd[k].areaM2 += (p.width_cm * p.length_cm) / 10000;
+      }
+      for (const [pid, info] of Object.entries(byProd)) {
+        const prod = HEATING_PRODUCTS.find(p => p.id === +pid);
+        _checkPage(5);
+        doc.text('\u2022 ' + (prod ? prod.name : 'Plate') + ' \u00d7 ' + info.count + ' (' + info.areaM2.toFixed(2) + ' m\u00b2)', M + 2, y);
+        y += 4;
+      }
+    }
+  }
+
+  // ── Material list (all rooms combined) ──
+  _addPage();
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(20, 40, 80);
+  doc.text('Materialliste', M, y); y += 8;
+
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(80, 90, 110);
+  const mcols = [M, M + 55, M + 80, M + 105, M + 130, M + 155];
+  doc.text('Produkt', mcols[0], y);
+  doc.text('Type', mcols[1], y);
+  doc.text('Antall/lengde', mcols[2], y);
+  doc.text('Areal', mcols[3], y);
+  doc.text('Effekt', mcols[4], y);
+  doc.text('Art.nr', mcols[5], y);
+  y += 3; _line(y); y += 4;
+
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(30, 40, 60);
+
+  // Aggregate all products
+  const matList = {};
+  for (const s of S.strips) {
+    const k = s.productId;
+    if (!matList[k]) matList[k] = { type: 'Folie', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+    const nc = _stripNettoCm(s);
+    matList[k].count++;
+    matList[k].totalLen += s.length_cm;
+    matList[k].areaM2 += nc * s.length_cm / 10000;
+    const p = HEATING_PRODUCTS.find(pr => pr.id === k);
+    if (p?.watt_per_lm) matList[k].watt += p.watt_per_lm * s.length_cm / 100;
+  }
+  for (const c of S.cables) {
+    const k = c.productId;
+    if (!matList[k]) matList[k] = { type: 'Kabel', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+    matList[k].count++;
+    matList[k].totalLen += c.totalLength_cm;
+    const p = HEATING_PRODUCTS.find(pr => pr.id === k);
+    if (p?.watt_per_m) matList[k].watt += p.watt_per_m * c.totalLength_cm / 100;
+  }
+  for (const m of S.mats) {
+    const k = m.productId;
+    if (!matList[k]) matList[k] = { type: 'Matte', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+    matList[k].count++;
+    matList[k].areaM2 += (m.width_cm * m.length_cm) / 10000;
+    const p = HEATING_PRODUCTS.find(pr => pr.id === k);
+    if (p?.watt_per_m2) matList[k].watt += p.watt_per_m2 * (m.width_cm * m.length_cm) / 10000;
+  }
+  for (const pl of S.plates) {
+    const k = pl.productId;
+    if (!matList[k]) matList[k] = { type: 'Plate', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+    matList[k].count++;
+    matList[k].areaM2 += (pl.width_cm * pl.length_cm) / 10000;
+    const p = HEATING_PRODUCTS.find(pr => pr.id === k);
+    if (p?.watt_per_m2) matList[k].watt += p.watt_per_m2 * (pl.width_cm * pl.length_cm) / 10000;
+  }
+
+  for (const [pid, info] of Object.entries(matList)) {
+    _checkPage(5);
+    const prod = HEATING_PRODUCTS.find(p => p.id === +pid);
+    const name = prod ? prod.name : 'Ukjent';
+    const artNo = prod?.article_no || '\u2014';
+    const qty = info.type === 'Kabel' ? (info.totalLen / 100).toFixed(1) + ' m' :
+                info.type === 'Folie' ? info.count + ' stk' :
+                info.count + ' stk';
+    doc.text(name.substring(0, 30), mcols[0], y);
+    doc.text(info.type, mcols[1], y);
+    doc.text(qty, mcols[2], y);
+    doc.text(info.areaM2.toFixed(2) + ' m\u00b2', mcols[3], y);
+    doc.text(Math.round(info.watt) + ' W', mcols[4], y);
+    doc.text(artNo, mcols[5], y);
+    y += 5;
+  }
+
+  // Total
+  _checkPage(10);
+  y += 2; _line(y); y += 5;
+  doc.setFont('helvetica', 'bold');
+  doc.text('Total installert effekt: ' + totalProjectW + ' W', M, y);
+
+  // ── Footer on all pages ──
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(150, 160, 180);
+    doc.text('Arqely Romtegner \u2014 arqely.com', M, H - 8);
+    doc.text(S.project.name || 'Prosjekt', W / 2, H - 8, { align: 'center' });
+    doc.text('Side ' + i + ' / ' + pageCount, W - M, H - 8, { align: 'right' });
+  }
+
+  // Save
+  const safeName = (S.project.name || 'varmeplan').replace(/[^a-zA-Z0-9\u00e6\u00f8\u00e5\u00c6\u00d8\u00c5_\- ]/g, '_');
+  doc.save(safeName + '.pdf');
+}
+
+/** Render a single room to an offscreen canvas and return base64 PNG */
+function _renderRoomToImage(room) {
+  const offW = 800, offH = 440;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = offW; offCanvas.height = offH;
+  const offCtx = offCanvas.getContext('2d');
+
+  // White background
+  offCtx.fillStyle = '#ffffff';
+  offCtx.fillRect(0, 0, offW, offH);
+
+  // Calculate room bounds and scale
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  const rW = rMaxX - rMinX, rH = rMaxY - rMinY;
+  const pad = 30;
+  const scale = Math.min((offW - 2 * pad) / rW, (offH - 2 * pad) / rH);
+  const ox = pad + ((offW - 2 * pad) - rW * scale) / 2;
+  const oy = pad + ((offH - 2 * pad) - rH * scale) / 2;
+  const tx = (wx) => ox + (wx - rMinX) * scale;
+  const ty = (wy) => oy + (wy - rMinY) * scale;
+
+  // Draw room polygon
+  offCtx.beginPath();
+  offCtx.moveTo(tx(room.points[0].x), ty(room.points[0].y));
+  for (let i = 1; i < room.points.length; i++) {
+    offCtx.lineTo(tx(room.points[i].x), ty(room.points[i].y));
+  }
+  offCtx.closePath();
+  offCtx.fillStyle = 'rgba(220, 235, 250, 0.5)';
+  offCtx.fill();
+  offCtx.strokeStyle = '#3366aa';
+  offCtx.lineWidth = 2;
+  offCtx.stroke();
+
+  // Draw hindrings in room
+  for (const h of S.hindrings.filter(hi => hi.roomId === room.id)) {
+    if (!h.points || h.points.length < 3) continue;
+    offCtx.beginPath();
+    offCtx.moveTo(tx(h.points[0].x), ty(h.points[0].y));
+    for (let i = 1; i < h.points.length; i++) offCtx.lineTo(tx(h.points[i].x), ty(h.points[i].y));
+    offCtx.closePath();
+    offCtx.fillStyle = 'rgba(200, 100, 80, 0.2)';
+    offCtx.fill();
+    offCtx.strokeStyle = 'rgba(200, 100, 80, 0.6)';
+    offCtx.lineWidth = 1;
+    offCtx.stroke();
+  }
+
+  // Draw strips
+  for (const s of _stripsForRoom(room.id)) {
+    const nc = _stripNettoCm(s);
+    if (s.direction === 'v') {
+      const sx = tx(s.pos_cm), sy = ty(s.start_cm);
+      const sw = nc * scale, sh = s.length_cm * scale;
+      offCtx.fillStyle = 'rgba(34, 211, 238, 0.25)';
+      offCtx.fillRect(sx, sy, sw, sh);
+      offCtx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
+      offCtx.lineWidth = 1;
+      offCtx.strokeRect(sx, sy, sw, sh);
+    } else {
+      const sx = tx(s.start_cm), sy = ty(s.pos_cm);
+      const sw = s.length_cm * scale, sh = nc * scale;
+      offCtx.fillStyle = 'rgba(34, 211, 238, 0.25)';
+      offCtx.fillRect(sx, sy, sw, sh);
+      offCtx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
+      offCtx.lineWidth = 1;
+      offCtx.strokeRect(sx, sy, sw, sh);
+    }
+  }
+
+  // Draw cables (simplified — just the runs)
+  for (const cab of _cablesForRoom(room.id)) {
+    if (!cab.runs) continue;
+    offCtx.strokeStyle = 'rgba(220, 50, 30, 0.5)';
+    offCtx.lineWidth = 1;
+    for (const run of cab.runs) {
+      if (!run.segments) continue;
+      for (const seg of run.segments) {
+        offCtx.beginPath();
+        offCtx.moveTo(tx(seg.x1), ty(seg.y1));
+        offCtx.lineTo(tx(seg.x2), ty(seg.y2));
+        offCtx.stroke();
+      }
+    }
+  }
+
+  // Draw mats
+  for (const mat of _matsForRoom(room.id)) {
+    const cx = mat.x_cm + mat.width_cm / 2;
+    const cy = mat.y_cm + mat.length_cm / 2;
+    offCtx.save();
+    offCtx.translate(tx(cx), ty(cy));
+    offCtx.rotate((mat.rotation_deg || 0) * Math.PI / 180);
+    const mw = mat.width_cm * scale / 2, mh = mat.length_cm * scale / 2;
+    offCtx.fillStyle = 'rgba(60, 130, 200, 0.2)';
+    offCtx.fillRect(-mw, -mh, mw * 2, mh * 2);
+    offCtx.strokeStyle = 'rgba(60, 130, 200, 0.6)';
+    offCtx.lineWidth = 1;
+    offCtx.strokeRect(-mw, -mh, mw * 2, mh * 2);
+    offCtx.restore();
+  }
+
+  // Draw plates
+  for (const plate of _platesForRoom(room.id)) {
+    const px = tx(plate.x_cm), py = ty(plate.y_cm);
+    const pw = plate.width_cm * scale, ph = plate.length_cm * scale;
+    offCtx.fillStyle = 'rgba(160, 140, 100, 0.2)';
+    offCtx.fillRect(px, py, pw, ph);
+    offCtx.strokeStyle = 'rgba(160, 140, 100, 0.6)';
+    offCtx.lineWidth = 1;
+    offCtx.strokeRect(px, py, pw, ph);
+  }
+
+  // Room name + dims
+  offCtx.fillStyle = '#1a2a50';
+  offCtx.font = 'bold 14px sans-serif';
+  offCtx.textAlign = 'center';
+  offCtx.fillText(room.name || 'Rom', offW / 2, offH - 12);
+  // Wall dimensions
+  offCtx.font = '10px sans-serif';
+  offCtx.fillStyle = '#4466aa';
+  for (let i = 0; i < room.points.length; i++) {
+    const p1 = room.points[i], p2 = room.points[(i + 1) % room.points.length];
+    const mx = (tx(p1.x) + tx(p2.x)) / 2, my = (ty(p1.y) + ty(p2.y)) / 2;
+    const len = Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
+    offCtx.fillText(len + ' cm', mx, my - 5);
+  }
+
+  return offCanvas.toDataURL('image/png');
 }
 
 // ─── MODAL KEYBOARD SHORTCUTS ─────────────────────────────────
@@ -13184,10 +14240,12 @@ async function initSupabase() {
     console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
     _ensureCableTestProducts();
     _ensureMatTestProducts();
+    _ensurePlateTestProducts();
   } catch(err) {
     console.warn('Supabase ikke tilgjengelig, fortsetter uten produktdata:', err.message);
     _ensureCableTestProducts();
     _ensureMatTestProducts();
+    _ensurePlateTestProducts();
   }
 }
 initSupabase().then(() => {
@@ -13258,6 +14316,38 @@ function _ensureMatTestProducts() {
     min_gap_mm: 50, min_wall_margin_mm: 50
   });
   console.log('Romtegner: injiserte test-matteprodukter (ingen mat-produkter i DB)');
+}
+
+/** Inject test plate products if no plate products exist in Supabase yet */
+function _ensurePlateTestProducts() {
+  const plateCats = PRODUCT_CATEGORIES.filter(c => c.module_type === 'plate');
+  const hasPlateProds = plateCats.some(cat =>
+    HEATING_PRODUCTS.some(p => p.category_id === cat.id && p.active !== false));
+  if (hasPlateProds) return;
+  const testCatId = plateCats.length > 0 ? plateCats[0].id : 9700;
+  if (plateCats.length === 0) {
+    PRODUCT_CATEGORIES.push({
+      id: testCatId, name: 'Platesystem', module_type: 'plate',
+      sort_order: 300, active: true
+    });
+  }
+  // Test plate 1: 600×1200mm plate with 60W/m² cable
+  HEATING_PRODUCTS.push({
+    id: 97001, category_id: testCatId, name: 'TestPlate 60×120cm 60W',
+    product_family: 'TestPlate', active: true, sort_order: 1,
+    plate_width_mm: 600, plate_length_mm: 1200,
+    watt_per_m2: 60, groove_spacing_mm: 80,
+    min_gap_mm: 0, min_wall_margin_mm: 50
+  });
+  // Test plate 2: 600×600mm square plate with 100W/m²
+  HEATING_PRODUCTS.push({
+    id: 97002, category_id: testCatId, name: 'TestPlate 60×60cm 100W',
+    product_family: 'TestPlate', active: true, sort_order: 2,
+    plate_width_mm: 600, plate_length_mm: 600,
+    watt_per_m2: 100, groove_spacing_mm: 60,
+    min_gap_mm: 0, min_wall_margin_mm: 50
+  });
+  console.log('Romtegner: injiserte test-plateprodukter (ingen plate-produkter i DB)');
 }
 
 /** Module type for a product category: 'foil' | 'cable' | 'mat' | 'plate' */
