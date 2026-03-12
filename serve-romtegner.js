@@ -12,14 +12,14 @@ http.createServer((req, res) => {
     const filePath = path.join(__dirname, decodeURIComponent(req.url));
     fs.readFile(filePath, (err, data) => {
       if (err) { res.writeHead(404); res.end('Not found'); return; }
-      res.writeHead(200, { 'Content-Type': MIME[ext] });
+      res.writeHead(200, { 'Content-Type': MIME[ext], 'Cache-Control': 'no-store' });
       res.end(data);
     });
     return;
   }
   fs.readFile(FILE, (err, data) => {
     if (err) { res.writeHead(500); res.end('Error: ' + err.message); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(data);
   });
 }).listen(PORT, () => console.log(`Romtegner → http://localhost:${PORT}`));
