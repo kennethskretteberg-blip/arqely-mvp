@@ -5,6 +5,14 @@ Built for electricians and heating professionals.
 
 ---
 
+# Git Workflow
+
+- **NEVER create worktrees.** Always work directly in the main repo on the `main` branch.
+- Do not create feature branches unless explicitly requested.
+- Commit and push only when the user asks.
+
+---
+
 # Current Codebase
 
 The entire application lives in a single HTML file:
@@ -13,6 +21,7 @@ The entire application lives in a single HTML file:
 - **Backend:** Supabase (product catalog, project storage)
 - **No build step.** No npm, no bundler. Pure HTML/JS/CSS.
 - **Launch config:** `.claude/launch.json` — start with preview server name `romtegner`
+- **Backup:** Claude config files are backed up in `docs/claude/` in the repo.
 
 When modifying code, respect that this is a single-file architecture.
 Do not split into multiple files unless explicitly requested.
