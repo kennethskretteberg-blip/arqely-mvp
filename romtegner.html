@@ -3181,6 +3181,198 @@ function cancelAutoFill() {
   render();
 }
 
+// ─── ZONE-BASED FILL (obstacle-aware) ────────────────────────
+
+/** Decompose room into free rectangular zones around hindrings.
+ *  Returns [{xMin, yMin, xMax, yMax}] — axis-aligned rects free of obstacles. */
+function _decomposeIntoZones(room, margin) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+
+  const hindrings = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  if (!hindrings.length) return [{ xMin: rMinX, yMin: rMinY, xMax: rMaxX, yMax: rMaxY }];
+
+  // Collect obstacle bounding boxes (expanded by margin)
+  const obsBBs = hindrings.map(h => {
+    const hxs = h.points.map(p => p.x), hys = h.points.map(p => p.y);
+    return {
+      xMin: Math.min(...hxs) - margin, yMin: Math.min(...hys) - margin,
+      xMax: Math.max(...hxs) + margin, yMax: Math.max(...hys) + margin
+    };
+  });
+
+  // Build grid lines from room edges + obstacle edges
+  const xCuts = [rMinX, rMaxX];
+  const yCuts = [rMinY, rMaxY];
+  for (const ob of obsBBs) {
+    xCuts.push(Math.max(rMinX, ob.xMin), Math.min(rMaxX, ob.xMax));
+    yCuts.push(Math.max(rMinY, ob.yMin), Math.min(rMaxY, ob.yMax));
+  }
+  const ux = [...new Set(xCuts)].sort((a, b) => a - b);
+  const uy = [...new Set(yCuts)].sort((a, b) => a - b);
+
+  // Generate cells from grid, keep only those not overlapping any obstacle
+  const zones = [];
+  for (let i = 0; i < ux.length - 1; i++) {
+    for (let j = 0; j < uy.length - 1; j++) {
+      const cell = { xMin: ux[i], yMin: uy[j], xMax: ux[i + 1], yMax: uy[j + 1] };
+      if (cell.xMax - cell.xMin < 1 || cell.yMax - cell.yMin < 1) continue; // dust
+      // Check overlap with any obstacle
+      const blocked = obsBBs.some(ob =>
+        cell.xMin < ob.xMax && cell.xMax > ob.xMin &&
+        cell.yMin < ob.yMax && cell.yMax > ob.yMin);
+      if (!blocked) zones.push(cell);
+    }
+  }
+
+  // Merge adjacent zones with same x-span (stack vertically)
+  const merged = _mergeAdjacentZones(zones);
+  return merged;
+}
+
+/** Merge zones that share exact x-span and are vertically adjacent (or vice versa). */
+function _mergeAdjacentZones(zones) {
+  let changed = true;
+  let list = zones.slice();
+  while (changed) {
+    changed = false;
+    const next = [];
+    const used = new Set();
+    for (let i = 0; i < list.length; i++) {
+      if (used.has(i)) continue;
+      let z = { ...list[i] };
+      for (let j = i + 1; j < list.length; j++) {
+        if (used.has(j)) continue;
+        const o = list[j];
+        // Same x-span, vertically adjacent
+        if (Math.abs(z.xMin - o.xMin) < 0.01 && Math.abs(z.xMax - o.xMax) < 0.01) {
+          if (Math.abs(z.yMax - o.yMin) < 0.01) { z.yMax = o.yMax; used.add(j); changed = true; }
+          else if (Math.abs(o.yMax - z.yMin) < 0.01) { z.yMin = o.yMin; used.add(j); changed = true; }
+        }
+        // Same y-span, horizontally adjacent
+        if (Math.abs(z.yMin - o.yMin) < 0.01 && Math.abs(z.yMax - o.yMax) < 0.01) {
+          if (Math.abs(z.xMax - o.xMin) < 0.01) { z.xMax = o.xMax; used.add(j); changed = true; }
+          else if (Math.abs(o.xMax - z.xMin) < 0.01) { z.xMin = o.xMin; used.add(j); changed = true; }
+        }
+      }
+      next.push(z);
+      used.add(i);
+    }
+    list = next;
+  }
+  return list;
+}
+
+/** Find the best product width so that N strips of equal width maximize coverage.
+ *  Returns { productId, count } or null if nothing fits. */
+function _bestEqualWidthFit(availableCm, sortedProds, gap) {
+  // sortedProds: widest-first array of products
+  const widths = sortedProds.map(p => ({ id: p.id, nc: (p.netto_width_mm || p.width_mm) / 10 }))
+    .filter(w => w.nc > 0);
+  if (!widths.length) return null;
+
+  let bestScore = 0, bestResult = null;
+  // Try N = 1..20 strips
+  for (let n = 1; n <= 20; n++) {
+    const maxWidthPerStrip = (availableCm - (n - 1) * gap) / n;
+    if (maxWidthPerStrip < widths[widths.length - 1].nc) break; // even narrowest doesn't fit
+    // Find widest product ≤ maxWidthPerStrip
+    const fit = widths.find(w => w.nc <= maxWidthPerStrip + 0.01);
+    if (!fit) continue;
+    const totalCoverage = fit.nc * n;
+    const waste = availableCm - totalCoverage - (n - 1) * gap;
+    // Score: coverage fraction with slight penalty for more strips
+    const score = totalCoverage / availableCm - n * 0.001;
+    if (score > bestScore) {
+      bestScore = score;
+      bestResult = { productId: fit.id, count: n, nc: fit.nc };
+    }
+  }
+  return bestResult;
+}
+
+/** Fill a rectangular zone with equal-width strips.
+ *  Returns strip definitions [{roomId, productId, direction, pos_cm, start_cm, length_cm}]. */
+function _fillZone(room, zone, sortedProds, direction, gap, margin) {
+  const across = direction === 'v'
+    ? zone.xMax - zone.xMin
+    : zone.yMax - zone.yMin;
+  const available = across - 2 * margin;
+  if (available < 1) return [];
+
+  const fit = _bestEqualWidthFit(available, sortedProds, gap);
+  if (!fit) return [];
+
+  // Distribute strips evenly within zone
+  const totalStrips = fit.nc * fit.count + (fit.count - 1) * gap;
+  const coldZone = (available - totalStrips) / 2;
+  const basePos = direction === 'v' ? zone.xMin : zone.yMin;
+  let cursor = basePos + margin + coldZone;
+
+  const defs = [];
+  const MIN_USEFUL_LEN = 30; // 30cm minimum useful length near obstacles
+  for (let i = 0; i < fit.count; i++) {
+    // Use computeClippedSegments to respect room polygon and obstacles properly
+    const segs = computeClippedSegments(room.id, direction, cursor, fit.productId);
+    // Filter segments to those within the zone's along-axis range
+    const alongMin = direction === 'v' ? zone.yMin : zone.xMin;
+    const alongMax = direction === 'v' ? zone.yMax : zone.xMax;
+    for (const seg of segs) {
+      // Clip segment to zone boundaries
+      const segEnd = seg.start_cm + seg.length_cm;
+      const clippedStart = Math.max(seg.start_cm, alongMin + margin);
+      const clippedEnd = Math.min(segEnd, alongMax - margin);
+      const clippedLen = clippedEnd - clippedStart;
+      if (clippedLen >= MIN_USEFUL_LEN) {
+        defs.push({
+          roomId: room.id, productId: fit.productId, direction,
+          pos_cm: cursor, start_cm: clippedStart, length_cm: clippedLen
+        });
+      }
+    }
+    cursor += fit.nc + gap;
+  }
+  return defs;
+}
+
+/** Zone-based fill: decompose room around obstacles, fill each zone independently. */
+function _zoneFillRoom(room, sortedProds, direction) {
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+
+  const zones = _decomposeIntoZones(room, MARGIN);
+  if (!zones.length) return [];
+
+  const allDefs = [];
+  for (const zone of zones) {
+    // Try both directions, pick best coverage
+    const defsH = _fillZone(room, zone, sortedProds, 'h', GAP, MARGIN);
+    const defsV = _fillZone(room, zone, sortedProds, 'v', GAP, MARGIN);
+    const scoreH = defsH.reduce((s, d) => {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      return s + ((p ? (p.netto_width_mm || p.width_mm) / 10 : 0) * d.length_cm);
+    }, 0);
+    const scoreV = defsV.reduce((s, d) => {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      return s + ((p ? (p.netto_width_mm || p.width_mm) / 10 : 0) * d.length_cm);
+    }, 0);
+
+    // Prefer user's chosen direction unless other is >10% better
+    const preferredDefs = direction === 'h' ? defsH : defsV;
+    const altDefs = direction === 'h' ? defsV : defsH;
+    const preferredScore = direction === 'h' ? scoreH : scoreV;
+    const altScore = direction === 'h' ? scoreV : scoreH;
+
+    if (altScore > preferredScore * 1.10 && altScore > 0) {
+      allDefs.push(...altDefs);
+    } else {
+      allDefs.push(...preferredDefs);
+    }
+  }
+  return allDefs;
+}
+
 // Center strip definitions symmetrically within room bounds
 function _centerStripDefs(defs, room, direction) {
   if (!defs.length) return defs;
@@ -3226,11 +3418,18 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
     const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
     return s + nc * st.length_cm;
   }, 0);
-  // Try user's chosen direction from both sides, pick the better one (greedy)
+
+  // Check if room has obstacles — if so, try zone-based fill
+  const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  let zoneDefs = [];
+  if (hasObstacles) {
+    zoneDefs = _zoneFillRoom(room, sortedProds, direction);
+  }
+
+  // Classic fill: greedy + beam search in both directions
   const a = _autoFillRoomOnce(room, sortedProds, direction, false);
   const b = _autoFillRoomOnce(room, sortedProds, direction, true);
   const bestGreedy = score(a) >= score(b) ? a : b;
-  // Try beam search for chosen direction (explores width combinations)
   const beamResult = _beamSearchFill(room, sortedProds, direction);
   const bestChosen = score(beamResult) > score(bestGreedy) ? beamResult : bestGreedy;
   // Try alternate orientation: greedy + beam search
@@ -3242,16 +3441,30 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
   const bestAlt = score(beamAlt) > score(bestAltGreedy) ? beamAlt : bestAltGreedy;
   // Only switch orientation if alt gives >10% more coverage
   const chosenScore = score(bestChosen), altScore = score(bestAlt);
-  let best;
+  let classicBest;
   if (altScore > chosenScore * 1.10 && altScore > 0) {
-    S.varmefolie.direction = altDir;
-    best = bestAlt;
+    classicBest = bestAlt;
   } else {
-    best = bestChosen;
+    classicBest = bestChosen;
   }
-  // Center strips symmetrically (equal cold zones on both sides)
-  const dir = best.length ? best[0].direction : direction;
-  return _centerStripDefs(best, room, dir);
+
+  // Pick winner: zone-based vs classic
+  const zoneScore = score(zoneDefs);
+  const classicScore = score(classicBest);
+  let best;
+  if (hasObstacles && zoneScore > classicScore * 0.95 && zoneScore > 0) {
+    // Zone-based wins (or is close enough — prefer it for cleaner layout)
+    best = zoneDefs;
+    // Update direction from zone defs if mixed
+    if (best.length) S.varmefolie.direction = best[0].direction;
+  } else {
+    best = classicBest;
+    const dir = best.length ? best[0].direction : direction;
+    if (altScore > chosenScore * 1.10 && altScore > 0) S.varmefolie.direction = altDir;
+    best = _centerStripDefs(best, room, dir);
+  }
+
+  return best;
 }
 
 // Core fill: single pass, single direction. Optional startCursor overrides default start position.
