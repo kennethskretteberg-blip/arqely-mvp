@@ -3383,7 +3383,7 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
   let cursor = basePos + margin + Math.max(0, coldZone);
 
   const defs = [];
-  const MIN_USEFUL_LEN = 30; // 30cm minimum useful length near obstacles
+  const MIN_USEFUL_LEN = 50; // 50cm minimum useful length near obstacles
   const alongMin = direction === 'v' ? zone.yMin : zone.xMin;
   const alongMax = direction === 'v' ? zone.yMax : zone.xMax;
 
@@ -3498,17 +3498,33 @@ function _centerStripDefs(defs, room, direction) {
 
 // Wrapper: tries both fill sides and both orientations, picks the best coverage.
 function autoFillRoom(room, sortedProds, direction, fromHigh) {
-  const score = defs => defs.reduce((s, st) => {
-    const p = HEATING_PRODUCTS.find(pp => pp.id === st.productId);
-    const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
-    return s + nc * st.length_cm;
-  }, 0);
+  // Multi-factor scoring: area, strip count, short strips, width uniformity
+  const score = defs => {
+    if (!defs.length) return 0;
+    let totalArea = 0;
+    const widthSet = new Set();
+    let shortPenalty = 0;
+    for (const st of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === st.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      totalArea += nc * st.length_cm;
+      widthSet.add(nc);
+      if (st.length_cm < 50) shortPenalty += (50 - st.length_cm) * nc * 0.5;
+    }
+    // Penalties: fewer strips = simpler installation, fewer widths = easier logistics
+    const stripCountPenalty = defs.length * 200; // 200 cm² penalty per strip
+    const widthDiversityPenalty = (widthSet.size - 1) * 500; // 500 cm² per extra width type
+    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.02 : 0;
+    return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
+  };
 
   // Check if room has obstacles — if so, try zone-based fill
   const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
   let zoneDefs = [];
   if (hasObstacles) {
     zoneDefs = _zoneFillRoom(room, sortedProds, direction);
+    // Filter out impractically short strips from zone fill
+    zoneDefs = zoneDefs.filter(d => d.length_cm >= 50);
   }
 
   // Classic fill: greedy + beam search in both directions
@@ -3533,14 +3549,12 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
     classicBest = bestChosen;
   }
 
-  // Pick winner: zone-based vs classic
+  // Pick winner: zone-based vs classic (classic wins if it has better practical score)
   const zoneScore = score(zoneDefs);
   const classicScore = score(classicBest);
   let best;
-  if (hasObstacles && zoneScore > classicScore * 0.95 && zoneScore > 0) {
-    // Zone-based wins (or is close enough — prefer it for cleaner layout)
+  if (hasObstacles && zoneScore > classicScore && zoneScore > 0) {
     best = zoneDefs;
-    // Update direction from zone defs if mixed
     if (best.length) S.varmefolie.direction = best[0].direction;
   } else {
     best = classicBest;
