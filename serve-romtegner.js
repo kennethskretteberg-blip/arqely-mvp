@@ -19,7 +19,7 @@ http.createServer((req, res) => {
   }
   fs.readFile(FILE, (err, data) => {
     if (err) { res.writeHead(500); res.end('Error: ' + err.message); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0' });
     res.end(data);
   });
 }).listen(PORT, () => console.log(`Romtegner → http://localhost:${PORT}`));
