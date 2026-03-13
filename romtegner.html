@@ -3281,18 +3281,90 @@ function _bestEqualWidthFit(availableCm, sortedProds, gap) {
     const fit = widths.find(w => w.nc <= maxWidthPerStrip + 0.01);
     if (!fit) continue;
     const totalCoverage = fit.nc * n;
-    const waste = availableCm - totalCoverage - (n - 1) * gap;
     // Score: coverage fraction with slight penalty for more strips
     const score = totalCoverage / availableCm - n * 0.001;
     if (score > bestScore) {
       bestScore = score;
-      bestResult = { productId: fit.id, count: n, nc: fit.nc };
+      bestResult = { productId: fit.id, count: n, nc: fit.nc, strips: Array(n).fill({ id: fit.id, nc: fit.nc }) };
     }
   }
   return bestResult;
 }
 
-/** Fill a rectangular zone with equal-width strips.
+/** Mixed-width strip combination: find best combo of different widths to fill available space.
+ *  E.g. 140+100+60 instead of 3x100 when it gives better coverage.
+ *  Uses greedy packing + gap-filler pass. Returns [{id, nc}] array of strips. */
+function _bestMixedWidthFit(availableCm, sortedProds, gap) {
+  const widths = sortedProds.map(p => ({ id: p.id, nc: (p.netto_width_mm || p.width_mm) / 10 }))
+    .filter(w => w.nc > 0);
+  if (!widths.length) return null;
+
+  // Strategy 1: Equal-width (baseline)
+  const equalFit = _bestEqualWidthFit(availableCm, widths.map(w => ({
+    id: w.id, netto_width_mm: w.nc * 10, width_mm: w.nc * 10
+  })), gap);
+  const equalScore = equalFit ? equalFit.nc * equalFit.count : 0;
+
+  // Strategy 2: Greedy widest-first packing
+  const greedyStrips = [];
+  let remaining = availableCm;
+  for (let iter = 0; iter < 20 && remaining > 0; iter++) {
+    const fit = widths.find(w => w.nc <= remaining + 0.01);
+    if (!fit) break;
+    greedyStrips.push({ id: fit.id, nc: fit.nc });
+    remaining -= fit.nc + gap;
+  }
+  const greedyCoverage = greedyStrips.reduce((s, w) => s + w.nc, 0);
+
+  // Strategy 3: Try to fill gap left by greedy with narrower product
+  // If greedy leaves >10cm waste, try replacing last strip with combo
+  const combo3Strips = greedyStrips.slice();
+  if (remaining > 10 && combo3Strips.length > 0) {
+    const last = combo3Strips.pop();
+    const spaceForTwo = last.nc + gap + remaining;
+    // Try two smaller strips instead
+    for (const w1 of widths) {
+      if (w1.nc > spaceForTwo) continue;
+      const leftover = spaceForTwo - w1.nc - gap;
+      if (leftover < 0) continue;
+      const w2 = widths.find(w => w.nc <= leftover + 0.01);
+      if (w2 && w1.nc + w2.nc > last.nc) {
+        combo3Strips.push({ id: w1.id, nc: w1.nc }, { id: w2.id, nc: w2.nc });
+        break;
+      }
+    }
+    if (combo3Strips.length === greedyStrips.length - 1) {
+      combo3Strips.push(last); // revert if no improvement
+    }
+  }
+  const combo3Coverage = combo3Strips.reduce((s, w) => s + w.nc, 0);
+
+  // Pick best strategy
+  const candidates = [
+    { strips: equalFit ? equalFit.strips : [], coverage: equalScore, label: 'equal' },
+    { strips: greedyStrips, coverage: greedyCoverage, label: 'greedy' },
+    { strips: combo3Strips, coverage: combo3Coverage, label: 'combo' }
+  ];
+
+  // Score: coverage / available - penalty for strip count variance (prefer uniform)
+  const best = candidates.reduce((best, c) => {
+    if (!c.strips.length) return best;
+    const widthSet = new Set(c.strips.map(s => s.nc));
+    const uniformBonus = widthSet.size === 1 ? 0.02 : 0; // slight preference for equal widths
+    const score = c.coverage / availableCm + uniformBonus - c.strips.length * 0.001;
+    return score > best.score ? { ...c, score } : best;
+  }, { strips: [], score: -1 });
+
+  if (!best.strips.length) return null;
+  return {
+    strips: best.strips,
+    count: best.strips.length,
+    coverage: best.coverage
+  };
+}
+
+/** Fill a rectangular zone with optimally chosen strip widths.
+ *  Uses mixed-width fitting for best coverage, falls back to equal-width.
  *  Returns strip definitions [{roomId, productId, direction, pos_cm, start_cm, length_cm}]. */
 function _fillZone(room, zone, sortedProds, direction, gap, margin) {
   const across = direction === 'v'
@@ -3301,42 +3373,59 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
   const available = across - 2 * margin;
   if (available < 1) return [];
 
-  const fit = _bestEqualWidthFit(available, sortedProds, gap);
-  if (!fit) return [];
+  const fit = _bestMixedWidthFit(available, sortedProds, gap);
+  if (!fit || !fit.strips.length) return [];
 
-  // Distribute strips evenly within zone
-  const totalStrips = fit.nc * fit.count + (fit.count - 1) * gap;
-  const coldZone = (available - totalStrips) / 2;
+  // Calculate total width occupied by strips + gaps
+  const totalWidth = fit.strips.reduce((s, w) => s + w.nc, 0) + (fit.strips.length - 1) * gap;
+  const coldZone = (available - totalWidth) / 2;
   const basePos = direction === 'v' ? zone.xMin : zone.yMin;
-  let cursor = basePos + margin + coldZone;
+  let cursor = basePos + margin + Math.max(0, coldZone);
 
   const defs = [];
   const MIN_USEFUL_LEN = 30; // 30cm minimum useful length near obstacles
-  for (let i = 0; i < fit.count; i++) {
-    // Use computeClippedSegments to respect room polygon and obstacles properly
-    const segs = computeClippedSegments(room.id, direction, cursor, fit.productId);
-    // Filter segments to those within the zone's along-axis range
-    const alongMin = direction === 'v' ? zone.yMin : zone.xMin;
-    const alongMax = direction === 'v' ? zone.yMax : zone.xMax;
+  const alongMin = direction === 'v' ? zone.yMin : zone.xMin;
+  const alongMax = direction === 'v' ? zone.yMax : zone.xMax;
+
+  for (const strip of fit.strips) {
+    const segs = computeClippedSegments(room.id, direction, cursor, strip.id);
     for (const seg of segs) {
-      // Clip segment to zone boundaries
       const segEnd = seg.start_cm + seg.length_cm;
       const clippedStart = Math.max(seg.start_cm, alongMin + margin);
       const clippedEnd = Math.min(segEnd, alongMax - margin);
       const clippedLen = clippedEnd - clippedStart;
       if (clippedLen >= MIN_USEFUL_LEN) {
         defs.push({
-          roomId: room.id, productId: fit.productId, direction,
+          roomId: room.id, productId: strip.id, direction,
           pos_cm: cursor, start_cm: clippedStart, length_cm: clippedLen
         });
       }
     }
-    cursor += fit.nc + gap;
+    cursor += strip.nc + gap;
   }
   return defs;
 }
 
-/** Zone-based fill: decompose room around obstacles, fill each zone independently. */
+/** Score a layout: higher is better. Balances coverage, strip count, waste, and uniformity. */
+function _scoreLayout(defs) {
+  if (!defs.length) return -1;
+  let totalArea = 0, totalStrips = 0;
+  const widthSet = new Set();
+  for (const d of defs) {
+    const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+    const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+    totalArea += nc * d.length_cm;
+    widthSet.add(nc);
+    totalStrips++;
+  }
+  // Uniformity bonus: fewer distinct widths = cleaner installation
+  const uniformity = 1 / widthSet.size;
+  // Score: area (primary) - strip penalty - diversity penalty
+  return totalArea * 1.0 - totalStrips * 5 + uniformity * 50;
+}
+
+/** Zone-based fill: decompose room around obstacles, fill each zone independently.
+ *  Tries both directions per zone, picks best by multi-factor score. */
 function _zoneFillRoom(room, sortedProds, direction) {
   const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
   const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
@@ -3346,28 +3435,24 @@ function _zoneFillRoom(room, sortedProds, direction) {
 
   const allDefs = [];
   for (const zone of zones) {
-    // Try both directions, pick best coverage
+    // Try both directions per zone
     const defsH = _fillZone(room, zone, sortedProds, 'h', GAP, MARGIN);
     const defsV = _fillZone(room, zone, sortedProds, 'v', GAP, MARGIN);
-    const scoreH = defsH.reduce((s, d) => {
-      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
-      return s + ((p ? (p.netto_width_mm || p.width_mm) / 10 : 0) * d.length_cm);
-    }, 0);
-    const scoreV = defsV.reduce((s, d) => {
-      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
-      return s + ((p ? (p.netto_width_mm || p.width_mm) / 10 : 0) * d.length_cm);
-    }, 0);
+    const scoreH = _scoreLayout(defsH);
+    const scoreV = _scoreLayout(defsV);
 
-    // Prefer user's chosen direction unless other is >10% better
-    const preferredDefs = direction === 'h' ? defsH : defsV;
-    const altDefs = direction === 'h' ? defsV : defsH;
+    // Prefer user's chosen direction unless other scores significantly better
     const preferredScore = direction === 'h' ? scoreH : scoreV;
     const altScore = direction === 'h' ? scoreV : scoreH;
+    const preferredDefs = direction === 'h' ? defsH : defsV;
+    const altDefs = direction === 'h' ? defsV : defsH;
 
     if (altScore > preferredScore * 1.10 && altScore > 0) {
       allDefs.push(...altDefs);
-    } else {
+    } else if (preferredDefs.length > 0) {
       allDefs.push(...preferredDefs);
+    } else {
+      allDefs.push(...altDefs); // fallback if preferred produces nothing
     }
   }
   return allDefs;
