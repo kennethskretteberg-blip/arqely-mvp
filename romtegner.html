@@ -2381,7 +2381,8 @@ function drawRooms() {
 
 // ─── DRAW HINDRINGS ──────────────────────────────────────────
 function drawHindrings() {
-  if (S.ui.drawMode && S.ui.drawMode!=='dim') return; // hide during room/shape drawing, but show in dim mode
+  // Show hindrings during hindring drawing and dim mode; hide during room/shape drawing
+  if (S.ui.drawMode && S.ui.drawMode!=='dim' && S.ui.drawMode!=='hindring' && S.ui.drawMode!=='hindring-polygon') return;
 
   // ── Pass 1: non-selected rooms' hindrings (dimmed) ──
   for (const h of S.hindrings) {
@@ -2898,10 +2899,9 @@ function showVfPlacePanel(familyName, categoryId) {
     section.innerHTML = `
       <div class="rwp-section-label">${esc(familyName)}</div>
       <div style="display:flex;flex-direction:column;gap:3px">
-        <div class="ctx-item vfp-btn" onclick="openWidthMenu(event,${sq(familyName)},${categoryId})">Automatisk ›</div>
-        <div class="ctx-item vfp-btn" onclick="startSemiAutoFill(${sq(familyName)},${categoryId});hideVfPlacePanel();">Halvautomatisk</div>
-        <div class="ctx-item vfp-btn" onclick="startManualPlace(${sq(familyName)},${categoryId});hideVfPlacePanel();">Manuelt</div>
-        <div class="ctx-item vfp-btn" onclick="_seedFromPanel(${sq(familyName)},${categoryId})">📍 Fra punkt</div>
+        <div class="ctx-item vfp-btn" onclick="showAutoFillComparison(${sq(familyName)},${categoryId},null);hideVfPlacePanel();">⚡ Automatisk</div>
+        <div class="ctx-item vfp-btn" onclick="showWidthPickerPanel(${sq(familyName)},${categoryId})">⚡ Velg bredder ›</div>
+        <div class="ctx-item vfp-btn" onclick="startManualPlace(${sq(familyName)},${categoryId});hideVfPlacePanel();">✋ Manuelt</div>
       </div>`;
     section.style.display = 'block';
   }
@@ -3957,6 +3957,96 @@ function _closeAutoFillPanel() {
   const panel = document.getElementById('autofill-compare');
   if (panel) panel.style.display = 'none';
   render();
+}
+
+// ── Width Picker Panel ─────────────────────────────────────────────
+function showWidthPickerPanel(familyName, categoryId) {
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
+    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  const seen = new Set();
+  const widths = [];
+  for (const p of prods) {
+    const mm = p.netto_width_mm || p.width_mm;
+    if (!seen.has(mm)) { seen.add(mm); widths.push({ mm, name: p.name }); }
+  }
+
+  const section = document.getElementById('rwp-product-actions');
+  if (!section) return;
+  const checkboxes = widths.map(w =>
+    `<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;font-size:12px">
+      <input type="checkbox" checked data-width-mm="${w.mm}" style="accent-color:var(--accent)">
+      ${esc(w.name)} (${Math.round(w.mm/10)} cm)
+    </label>`
+  ).join('');
+
+  section.innerHTML = `
+    <div class="rwp-section-label">Velg bredder</div>
+    <div id="width-picker-checks" style="padding:2px 0;max-height:200px;overflow-y:auto">${checkboxes}</div>
+    <div style="display:flex;gap:4px;margin-top:6px">
+      <div class="ctx-item vfp-btn" style="flex:1;text-align:center" onclick="_runWidthPickerAutoFill(${sq(familyName)},${categoryId})">⚡ Kjør automatisk</div>
+      <div class="ctx-item vfp-btn" style="text-align:center" onclick="showVfPlacePanel(${sq(familyName)},${categoryId})">← Tilbake</div>
+    </div>`;
+}
+
+function _runWidthPickerAutoFill(familyName, categoryId) {
+  const checks = document.querySelectorAll('#width-picker-checks input[type=checkbox]');
+  const selectedMm = new Set();
+  checks.forEach(cb => { if (cb.checked) selectedMm.add(Number(cb.dataset.widthMm)); });
+  if (!selectedMm.size) { _showToast('Velg minst én bredde', 'warn'); return; }
+
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)) &&
+      selectedMm.has(p.netto_width_mm || p.width_mm))
+    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+
+  hideVfPlacePanel();
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) { _showToast('Velg et rom først', 'warn'); return; }
+  if (!prods.length) { _showToast('Ingen produkter med valgte bredder', 'warn'); return; }
+
+  const results = _autoFillBothDirections(room, prods);
+  S.ui.autoFillCompare = results;
+  S.ui.autoFillCompareCategoryId = categoryId;
+  const better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
+  _renderAutoFillComparePanel(results, better);
+  _previewAutoFillOption(better);
+}
+
+// ── Strip Rotation ────────────────────────────────────────────────
+function _rotateSelectedStrip() {
+  const stripId = S.ui.selectedStripId || (S.ui.selectedStripIds && S.ui.selectedStripIds.size === 1 ? [...S.ui.selectedStripIds][0] : null);
+  if (!stripId) return;
+  const strip = S.strips.find(s => s.id === stripId);
+  if (!strip) return;
+
+  pushUndo();
+  // Swap direction
+  strip.direction = strip.direction === 'v' ? 'h' : 'v';
+  // Swap axes: pos_cm ↔ start_cm center
+  const prod = HEATING_PRODUCTS.find(p => p.id === strip.productId);
+  const nc = prod ? (prod.netto_width_mm || prod.width_mm) / 10 : 0;
+  // Keep the strip centered at same world position
+  const oldCenterAcross = strip.pos_cm + nc / 2;
+  const oldCenterAlong = strip.start_cm + strip.length_cm / 2;
+  strip.pos_cm = oldCenterAlong - nc / 2;
+  strip.start_cm = oldCenterAcross;
+
+  // Recompute clipped length at new position
+  const segs = computeClippedSegments(strip.roomId, strip.direction, strip.pos_cm, strip.productId);
+  if (segs.length > 0) {
+    strip.start_cm = segs[0].start_cm;
+    strip.length_cm = segs[0].length_cm;
+  }
+  _clampStripToRoom(strip, strip.pos_cm);
+  _invalidateStripCache();
+  render();
+  renderSidebar();
+  updateObjInfo();
+  _showToast('Folie rotert ' + (strip.direction === 'h' ? 'horisontalt' : 'vertikalt'), 'ok');
 }
 
 // Wrapper: tries both fill sides and both orientations, picks the best coverage.
@@ -12858,6 +12948,48 @@ function distSeg(px,py,x1,y1,x2,y2) {
   return Math.hypot(px-(x1+t*dx), py-(y1+t*dy));
 }
 
+// Project point onto nearest room wall. Returns { wallIdx, proj, dist } or null.
+function _projectToRoomWall(pt, room, threshold) {
+  if (!room || !room.points || room.points.length < 3) return null;
+  const pts = room.points;
+  let best = null;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    const ax = pts[i].x, ay = pts[i].y, bx = pts[j].x, by = pts[j].y;
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    if (l2 === 0) continue;
+    const t = Math.max(0, Math.min(1, ((pt.x - ax) * dx + (pt.y - ay) * dy) / l2));
+    const px = ax + t * dx, py = ay + t * dy;
+    const d = Math.hypot(pt.x - px, pt.y - py);
+    if (d <= threshold && (!best || d < best.dist)) {
+      best = { wallIdx: i, proj: { x: px, y: py }, dist: d, t };
+    }
+  }
+  return best;
+}
+
+// Trace room wall vertices from wallIdx/t at start to wallIdx/t at end (shortest path).
+// Returns array of intermediate points (room corners) between the two wall projections.
+function _traceWallPath(room, startWall, startT, endWall, endT) {
+  const n = room.points.length;
+  if (startWall === endWall) return []; // Same wall — direct close, no corners needed
+
+  // Forward path: startWall+1 → endWall (wrapping)
+  const fwd = [];
+  for (let i = (startWall + 1) % n; i !== (endWall + 1) % n; i = (i + 1) % n) {
+    fwd.push({ ...room.points[i] });
+    if (fwd.length > n) break;
+  }
+  // Backward path: startWall → endWall+1 (wrapping backward)
+  const bwd = [];
+  for (let i = startWall; i !== endWall; i = (i - 1 + n) % n) {
+    bwd.push({ ...room.points[i] });
+    if (bwd.length > n) break;
+  }
+
+  return fwd.length <= bwd.length ? fwd : bwd;
+}
+
 // ─── POLYGON STRIP CLIPPING ──────────────────────────────────
 
 // Merge gaps shorter than minGapCm between adjacent intervals.
@@ -13896,6 +14028,30 @@ canvas.addEventListener('mousedown', e=>{
         pushUndo(); createHindringFromPolygon([...S.drawing.points]); return;
       }
     }
+
+    // Wall auto-close: if new point and first point are both on room walls, auto-close along walls
+    const WALL_SNAP_CM = 5; // snap distance to wall in cm
+    if (S.drawing.points.length >= 2) {
+      const room = S.rooms.find(r => r.id === S.ui.hindringRoomId);
+      if (room) {
+        const newPtSnap = _projectToRoomWall(wp, room, WALL_SNAP_CM);
+        const firstPtSnap = _projectToRoomWall(S.drawing.points[0], room, WALL_SNAP_CM);
+        if (newPtSnap && firstPtSnap) {
+          // Both points are near walls — auto-close!
+          // Add the current point (snapped to wall)
+          const pts = [...S.drawing.points, { x: newPtSnap.proj.x, y: newPtSnap.proj.y }];
+          // Trace corners between the two wall contact points
+          const corners = _traceWallPath(room, newPtSnap.wallIdx, newPtSnap.t, firstPtSnap.wallIdx, firstPtSnap.t);
+          for (const c of corners) pts.push(c);
+          // Snap first point to wall too
+          pts[0] = { x: firstPtSnap.proj.x, y: firstPtSnap.proj.y };
+          pushUndo();
+          createHindringFromPolygon(pts);
+          return;
+        }
+      }
+    }
+
     S.drawing.points.push({x:wp.x,y:wp.y});
     updHint();
   } else if (mode==='dim') {
@@ -15574,6 +15730,10 @@ document.addEventListener('keydown', e=>{
   // Edit 6: Ctrl+R = rotate mode, Ctrl+F = move mode
   if ((e.ctrlKey||e.metaKey)&&e.key==='r') { e.preventDefault(); setTransformMode('rotate'); return; }
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
+  // R key: rotate selected strip 90° (without Ctrl — Ctrl+R is room rotate mode)
+  if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.selectedStripId!==null) { _rotateSelectedStrip(); e.preventDefault(); return; }
+  // R key during manual placement: toggle direction
+  if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.manualPlaceMode) { S.varmefolie.direction = S.varmefolie.direction === 'v' ? 'h' : 'v'; render(); e.preventDefault(); return; }
   if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
@@ -15886,6 +16046,7 @@ function _ctxBarItems() {
     const gapMm = Math.round((S.varmefolie.gapCm ?? 1) * 10);
     const stripRoomDimOn = stripRoom?.dims?.some(d=>d.auto==='room');
     return `<span class="ctxbar-lbl">Stripe</span>
+      <button class="snap-chip" onclick="_rotateSelectedStrip()" title="Roter folie 90° (R)">⟲ Roter</button>
       <button class="snap-chip${ui.showStripLabels?' on':''}" id="chip-label" onclick="toggleStripLabels()" title="Vis/skjul produktnavn og lengde">🏷 Label</button>
       ${hasStripsInRoom ? `<button class="snap-chip" onclick="centerRoomStrips(${stripRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
       ${hasStripsInRoom ? `<button class="snap-chip" onclick="openGapPanel(event,${stripRoomId})" title="Juster avstand mellom varmefolier">⟷ ${gapMm} mm</button>` : ''}

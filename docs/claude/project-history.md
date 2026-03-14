@@ -432,6 +432,38 @@
 - `_renderProjectList()` — tabell-basert rendering med sortering
 - `_toggleProjectSort()`, `_confirmDeleteProject()`, `_openCloudProject()`
 
+## 2026-03-14: Hindring-forbedringer + produktmeny redesign + strip-rotasjon
+
+### Hindring-synlighet under tegning
+- **Fix:** Hindringer forsvant mens man tegnet en ny hindring-polygon
+- `drawHindrings()` tillater nå `hindring` og `hindring-polygon` drawModes (ikke bare `dim`)
+- Alle eksisterende hindringer er alltid synlige under tegning av nye
+
+### Hindring vegg-autolukking
+- **Ny:** Når hindring-polygon starter ved en vegg og sluttpunktet er nær en vegg, lukkes polygon automatisk langs romveggene
+- `_projectToRoomWall(pt, room, threshold)` — projiserer punkt på nærmeste romvegg (5cm terskel)
+- `_traceWallPath(room, startWall, startT, endWall, endT)` — finner korteste sti mellom to veggpunkter via romhjørner
+- Eliminerer behov for å manuelt tegne tilbake langs veggen til startpunktet
+
+### Produktmeny redesign — 3 valg
+- **Før:** 4 valg (Automatisk → breddemeny, Halvautomatisk, Manuelt, Fra punkt)
+- **Etter:** 3 valg:
+  1. **⚡ Automatisk** — direkte til `showAutoFillComparison()`, ingen breddevelger
+  2. **⚡ Velg bredder ›** — `showWidthPickerPanel()` med avkrysningsbokser per bredde, "Kjør automatisk" + "Tilbake"
+  3. **✋ Manuelt** — eksisterende manuell modus med ny rotasjonsstøtte
+- Fjernet: Halvautomatisk og Fra punkt fra menyen
+
+### Width Picker Panel
+- `showWidthPickerPanel(familyName, categoryId)` — viser avkrysningsbokser for alle tilgjengelige bredder
+- `_runWidthPickerAutoFill()` — filtrerer produkter etter valgte bredder, kjører `_autoFillBothDirections()`
+- Alle bredder avkrysset som standard, bruker kan velge bort bredder
+
+### Strip-rotasjon
+- `_rotateSelectedStrip()` — roterer valgt folie 90° (h↔v) med senter-bevaring og auto-lengde
+- **R-tast:** Roterer valgt strip 90° (uten Ctrl — Ctrl+R er rom-rotasjon)
+- **R-tast under manuell plassering:** Bytter retning mellom H og V
+- **Ctxbar:** "⟲ Roter" chip-knapp som første element i strip-ctxbar
+
 ## 2026-03-14: UX redesign — 3-nivå sidebar, kompakte rom, detaljpanel
 - Commit: `e9cb8bd`
 
