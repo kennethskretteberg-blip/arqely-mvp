@@ -238,6 +238,18 @@ input,textarea{font-family:'DM Sans',sans-serif;color:var(--text)}
 /* ── CONTEXT BAR (floating over canvas) ── */
 #ctxbar{position:absolute;top:12px;left:50%;transform:translateX(-50%) scale(0.96);z-index:20;display:flex;align-items:center;gap:6px;padding:6px 12px;background:rgba(18,24,34,0.93);border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,0.5);backdrop-filter:blur(10px);opacity:0;pointer-events:none;transition:opacity .15s ease,transform .15s ease;white-space:nowrap}
 #ctxbar.show{opacity:1;pointer-events:auto;transform:translateX(-50%) scale(1)}
+.autofill-compare{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(20,22,28,0.96);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:20px 24px;z-index:50;color:var(--text);min-width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+.af-option{display:inline-block;width:48%;text-align:center;padding:12px 8px;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color .15s,background .15s;vertical-align:top}
+.af-option:hover,.af-option.selected{border-color:var(--accent);background:rgba(255,255,255,0.04)}
+.af-dir{font-weight:600;font-size:14px;margin-bottom:6px}
+.af-stat{font-size:12px;color:var(--dim);margin-top:3px;line-height:1.3}
+.af-actions{margin-top:16px;display:flex;gap:8px;justify-content:center}
+.af-actions button{padding:7px 16px;border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit}
+.af-btn-primary{background:var(--accent);color:#fff;border:none;font-weight:600}
+.af-btn-primary:hover{filter:brightness(1.1)}
+.af-btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+.af-btn-secondary:hover{border-color:var(--dim)}
+body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-color:rgba(0,0,0,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.15)}
 .ctxbar-lbl{font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.09em;padding-right:10px;border-right:1px solid var(--border);margin-right:2px;white-space:nowrap;flex-shrink:0}
 
 /* ── CONTENT ── */
@@ -3184,12 +3196,12 @@ function openWidthMenu(e, familyName, categoryId) {
     if (!seen.has(mm)) { seen.add(mm); widths.push({ mm, name: p.name }); }
   }
   const widthItems = widths.map(({ mm, name }) =>
-    `<div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId},${mm});hideProduktMenu()">${esc(name)}</div>`
+    `<div class="ctx-item" onclick="showAutoFillComparison(${sq(familyName)},${categoryId},${mm});hideProduktMenu()">${esc(name)}</div>`
   ).join('');
   const html = `
     <div style="padding:6px 12px 2px;font-size:11px;color:var(--dim)">Velg maks startbredde</div>
     <div class="ctx-sep"></div>
-    <div class="ctx-item" onclick="startAutoFill(${sq(familyName)},${categoryId},null);hideProduktMenu()">Alle bredder (bredeste først)</div>
+    <div class="ctx-item" onclick="showAutoFillComparison(${sq(familyName)},${categoryId},null);hideProduktMenu()">Alle bredder (bredeste først)</div>
     ${widthItems}`;
   showProduktDropdown(html, e.clientX, e.clientY);
 }
@@ -3480,9 +3492,28 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
 
   // Calculate total width occupied by strips + gaps
   const totalWidth = fit.strips.reduce((s, w) => s + w.nc, 0) + (fit.strips.length - 1) * gap;
-  const coldZone = (available - totalWidth) / 2;
   const basePos = direction === 'v' ? zone.xMin : zone.yMin;
-  let cursor = basePos + margin + Math.max(0, coldZone);
+  const baseMax = direction === 'v' ? zone.xMax : zone.yMax;
+
+  // Push cold zones toward walls — check if zone is near a room edge
+  const isV = direction === 'v';
+  const roomVals = room.points.map(p => isV ? p.x : p.y);
+  const roomMin = Math.min(...roomVals), roomMax = Math.max(...roomVals);
+  const nearLowWall = Math.abs(basePos - roomMin) < margin + 1;
+  const nearHighWall = Math.abs(baseMax - roomMax) < margin + 1;
+
+  let cursor;
+  if (nearLowWall && !nearHighWall) {
+    // Zone at low wall → push strips toward high end (obstacle), cold at wall
+    cursor = baseMax - margin - totalWidth;
+  } else if (nearHighWall && !nearLowWall) {
+    // Zone at high wall → push strips toward low end (obstacle), cold at wall
+    cursor = basePos + margin;
+  } else {
+    // Interior zone or both walls → center
+    const coldZone = (available - totalWidth) / 2;
+    cursor = basePos + margin + Math.max(0, coldZone);
+  }
 
   const defs = [];
   const MIN_USEFUL_LEN = 50; // 50cm minimum useful length near obstacles
@@ -3524,6 +3555,109 @@ function _scoreLayout(defs) {
   const uniformity = 1 / widthSet.size;
   // Score: area (primary) - strip penalty - diversity penalty
   return totalArea * 1.0 - totalStrips * 5 + uniformity * 50;
+}
+
+/** Obstacle-aware fill: projects obstacles onto placement axis, creates gap zones
+ *  and obstacle-spanning strips. Instead of avoiding obstacles entirely, this strategy
+ *  places strips that SPAN obstacles (their length gets clipped by computeClippedSegments)
+ *  while fitting appropriate widths in the gaps between walls and obstacles.
+ *  E.g. room 280cm wide with 76cm obstacle → 40cm (gap) + 80cm (spans obstacle) + 140cm (gap)
+ *  instead of ignoring obstacle boundaries and getting violations. */
+function _obstacleAwareFill(room, sortedProds, direction) {
+  const isV = direction === 'v';
+  const perpVals = room.points.map(p => isV ? p.x : p.y);
+  const roomMin = Math.min(...perpVals), roomMax = Math.max(...perpVals);
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+
+  const hindrings = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  if (!hindrings.length) return [];
+
+  // Available product widths (sorted widest first)
+  const widths = sortedProds
+    .map(p => ({ id: p.id, nc: (p.netto_width_mm || p.width_mm) / 10 }))
+    .filter(w => w.nc > 0)
+    .sort((a, b) => b.nc - a.nc);
+  if (!widths.length) return [];
+
+  // Project obstacles onto placement axis (perpendicular to strip direction)
+  const obsProjections = hindrings.map(h => {
+    const vals = h.points.map(p => isV ? p.x : p.y);
+    return { min: Math.min(...vals), max: Math.max(...vals) };
+  }).sort((a, b) => a.min - b.min);
+
+  // Merge overlapping/adjacent obstacle projections
+  const merged = [{ ...obsProjections[0] }];
+  for (let i = 1; i < obsProjections.length; i++) {
+    const last = merged[merged.length - 1];
+    if (obsProjections[i].min <= last.max + GAP) {
+      last.max = Math.max(last.max, obsProjections[i].max);
+    } else {
+      merged.push({ ...obsProjections[i] });
+    }
+  }
+
+  // Build sections: gaps (between wall/obstacle) and obstacle spans
+  const sections = [];
+  let cursor = roomMin + MARGIN;
+
+  for (const obs of merged) {
+    const gapEnd = obs.min - MARGIN; // keep margin from obstacle
+    if (gapEnd - cursor > 1) {
+      sections.push({ type: 'gap', from: cursor, to: gapEnd });
+    }
+    sections.push({ type: 'obs', from: obs.min, to: obs.max, obsWidth: obs.max - obs.min });
+    cursor = obs.max + MARGIN; // margin after obstacle
+  }
+  const wallEnd = roomMax - MARGIN;
+  if (wallEnd - cursor > 1) {
+    sections.push({ type: 'gap', from: cursor, to: wallEnd });
+  }
+
+  const defs = [];
+  const MIN_USEFUL_LEN = 20; // lower threshold for obstacle-spanning segments
+
+  for (const section of sections) {
+    if (section.type === 'gap') {
+      const available = section.to - section.from;
+      // Use mixed-width fit for optimal coverage in this gap
+      const fit = _bestMixedWidthFit(available, sortedProds, GAP);
+      if (!fit || !fit.strips.length) continue;
+
+      // Push strips tight against obstacles (cold zone toward nearest wall)
+      const totalWidth = fit.strips.reduce((s, w) => s + w.nc, 0) + (fit.strips.length - 1) * GAP;
+      // Determine if this gap is at the start (before obstacles) or end (after obstacles)
+      const isFirstGap = section.from <= roomMin + MARGIN + 0.01;
+      const isLastGap = section.to >= roomMax - MARGIN - 0.01;
+      let cur;
+      if (isFirstGap && !isLastGap) {
+        // Gap before obstacle → push strips toward obstacle (high end of gap)
+        cur = section.to - totalWidth;
+      } else if (isLastGap && !isFirstGap) {
+        // Gap after obstacle → push strips toward obstacle (low end of gap)
+        cur = section.from;
+      } else {
+        // Gap between two obstacles or only gap → center
+        const coldZone = (available - totalWidth) / 2;
+        cur = section.from + Math.max(0, coldZone);
+      }
+
+      for (const strip of fit.strips) {
+        const segs = computeClippedSegments(room.id, direction, cur, strip.id);
+        for (const seg of segs) {
+          if (seg.length_cm >= 50) {
+            defs.push({ roomId: room.id, productId: strip.id, direction,
+              pos_cm: cur, start_cm: seg.start_cm, length_cm: seg.length_cm });
+          }
+        }
+        cur += strip.nc + GAP;
+      }
+
+    }
+    // Skip obstacle zones — strips must never be placed over obstacles
+  }
+
+  return defs;
 }
 
 /** Zone-based fill: decompose room around obstacles, fill each zone independently.
@@ -3588,14 +3722,241 @@ function _centerStripDefs(defs, room, direction) {
   totalWidth += (cols.length - 1) * GAP;
 
   const available = across - 2 * MARGIN;
-  const coldEach = (available - totalWidth) / 2;
-  if (coldEach < 0.01) return defs; // no room to shift
+  const totalCold = available - totalWidth;
+  if (totalCold < 0.01) return defs; // no room to shift
 
-  // Compute shift: first column should start at basePos + MARGIN + coldEach
-  const shift = (basePos + MARGIN + coldEach) - cols[0];
-  if (Math.abs(shift) < 0.01) return defs; // already centered
+  // Determine shift: push cold zones toward walls when obstacles exist
+  const isV = direction === 'v';
+  const hindrings = (S.hindrings || []).filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  let shift;
+  if (hindrings.length > 0) {
+    // Find obstacle center of mass on the placement axis
+    const obsCenters = hindrings.map(h => {
+      const vals = h.points.map(p => isV ? p.x : p.y);
+      return (Math.min(...vals) + Math.max(...vals)) / 2;
+    });
+    const obsAvg = obsCenters.reduce((a, b) => a + b, 0) / obsCenters.length;
+    const roomCenter = (basePos + baseMax) / 2;
+
+    if (obsAvg > roomCenter) {
+      // Obstacles toward high end → push strips toward high end, cold zone at low end
+      shift = (baseMax - MARGIN - totalWidth) - cols[0];
+    } else {
+      // Obstacles toward low end → push strips toward low end, cold zone at high end
+      shift = (basePos + MARGIN) - cols[0];
+    }
+  } else {
+    // No obstacles — center as before
+    const coldEach = totalCold / 2;
+    shift = (basePos + MARGIN + coldEach) - cols[0];
+  }
+  if (Math.abs(shift) < 0.01) return defs; // already positioned
 
   return defs.map(d => ({ ...d, pos_cm: d.pos_cm + shift }));
+}
+
+// ── Auto-Fill Both Directions ──────────────────────────────────────
+// Returns { h: { defs, stats }, v: { defs, stats } } for comparison UI.
+function _autoFillBothDirections(room, sortedProds) {
+  const score = defs => {
+    if (!defs.length) return 0;
+    let totalArea = 0;
+    const widthSet = new Set();
+    let shortPenalty = 0;
+    for (const st of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === st.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      totalArea += nc * st.length_cm;
+      widthSet.add(nc);
+      if (st.length_cm < 50) shortPenalty += (50 - st.length_cm) * nc * 0.5;
+    }
+    const stripCountPenalty = defs.length * 200;
+    const widthDiversityPenalty = (widthSet.size - 1) * 500;
+    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.02 : 0;
+    return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
+  };
+
+  const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  const results = {};
+
+  for (const dir of ['h', 'v']) {
+    // Try all strategies for this direction
+    const a = _autoFillRoomOnce(room, sortedProds, dir, false);
+    const b = _autoFillRoomOnce(room, sortedProds, dir, true);
+    const bestGreedy = score(a) >= score(b) ? a : b;
+    const beam = _beamSearchFill(room, sortedProds, dir);
+    let best = score(beam) > score(bestGreedy) ? beam : bestGreedy;
+
+    if (hasObstacles) {
+      const zone = _zoneFillRoom(room, sortedProds, dir).filter(d => d.length_cm >= 50);
+      const obs = _obstacleAwareFill(room, sortedProds, dir).filter(d => d.length_cm >= 20);
+      if (score(zone) > score(best)) best = zone;
+      if (score(obs) > score(best)) best = obs;
+    }
+
+    // Apply cold-zone-to-walls shift
+    best = _centerStripDefs(best, room, dir);
+
+    // Calculate stats
+    const netArea = _calcNetArea(room);
+    let coveredArea = 0, totalW = 0;
+    const widthSet = new Set();
+    for (const d of best) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      if (!p) continue;
+      const nc = (p.netto_width_mm || p.width_mm) / 10;
+      coveredArea += nc * d.length_cm / 10000;
+      totalW += (p.watt_per_m2 || 60) * nc * d.length_cm / 10000;
+      widthSet.add(p.id);
+    }
+
+    results[dir] = {
+      defs: best,
+      stats: {
+        stripCount: best.length,
+        coveragePct: netArea > 0 ? Math.round(coveredArea / netArea * 100) : 0,
+        totalWatt: Math.round(totalW),
+        wattPerM2: netArea > 0 ? Math.round(totalW / netArea) : 0,
+        widthTypes: widthSet.size,
+        score: score(best)
+      }
+    };
+  }
+  return results;
+}
+
+// ── Comparison Panel UI ────────────────────────────────────────────
+function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) { _showToast('Velg et rom først', 'warn'); return; }
+
+  let prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false &&
+      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
+    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+  if (maxWidthMm != null) {
+    prods = prods.filter(p => (p.netto_width_mm || p.width_mm) <= maxWidthMm + 0.01);
+  }
+  if (!prods.length) { _showToast('Ingen produkter funnet for ' + familyName, 'warn'); return; }
+
+  const results = _autoFillBothDirections(room, prods);
+
+  S.ui.autoFillCompare = results;
+  S.ui.autoFillCompareCategoryId = categoryId;
+
+  const better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
+  _renderAutoFillComparePanel(results, better);
+  _previewAutoFillOption(better);
+}
+
+function _renderAutoFillComparePanel(results, selectedDir) {
+  let panel = document.getElementById('autofill-compare');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'autofill-compare';
+    panel.className = 'autofill-compare';
+    const wrap = document.getElementById('canvas-wrap');
+    if (wrap) wrap.appendChild(panel);
+  }
+
+  const hSt = results.h.stats, vSt = results.v.stats;
+  const hBetter = hSt.score >= vSt.score;
+  const hLabel = hBetter ? '★ Horisontal' : 'Horisontal';
+  const vLabel = !hBetter ? '★ Vertikal' : 'Vertikal';
+
+  // Build product width summary for each option
+  const _widthSummary = defs => {
+    const wMap = {};
+    for (const d of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      if (!p) continue;
+      const w = Math.round((p.netto_width_mm || p.width_mm) / 10);
+      wMap[w] = (wMap[w] || 0) + 1;
+    }
+    return Object.entries(wMap).sort((a,b) => b[0]-a[0]).map(([w,n]) => n + '× ' + w + 'cm').join(', ');
+  };
+
+  panel.innerHTML = `
+    <div style="font-weight:600;font-size:14px;margin-bottom:14px;text-align:center">Automatisk plassering</div>
+    <div style="display:flex;gap:10px">
+      <div class="af-option${selectedDir==='h'?' selected':''}" onclick="_selectAutoFillOption('h')" onmouseenter="_previewAutoFillOption('h')">
+        <div class="af-dir">${hLabel}</div>
+        <div class="af-stat">${hSt.stripCount} striper</div>
+        <div class="af-stat">${hSt.coveragePct}% dekning</div>
+        <div class="af-stat">${hSt.totalWatt} W (${hSt.wattPerM2} W/m²)</div>
+        <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.h.defs)}</div>
+      </div>
+      <div class="af-option${selectedDir==='v'?' selected':''}" onclick="_selectAutoFillOption('v')" onmouseenter="_previewAutoFillOption('v')">
+        <div class="af-dir">${vLabel}</div>
+        <div class="af-stat">${vSt.stripCount} striper</div>
+        <div class="af-stat">${vSt.coveragePct}% dekning</div>
+        <div class="af-stat">${vSt.totalWatt} W (${vSt.wattPerM2} W/m²)</div>
+        <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.v.defs)}</div>
+      </div>
+    </div>
+    <div class="af-actions">
+      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':'vertikal'}</button>
+      <button class="af-btn-secondary" onclick="_closeAutoFillPanel()">Avbryt</button>
+    </div>
+  `;
+  panel.style.display = '';
+}
+
+function _selectAutoFillOption(dir) {
+  const results = S.ui.autoFillCompare;
+  if (!results) return;
+  _renderAutoFillComparePanel(results, dir);
+  _previewAutoFillOption(dir);
+}
+
+function _previewAutoFillOption(dir) {
+  const results = S.ui.autoFillCompare;
+  if (!results || !results[dir]) return;
+  S.ui.autoFillPreviewDefs = results[dir].defs;
+  render();
+}
+
+function _applyAutoFillOption(dir) {
+  const results = S.ui.autoFillCompare;
+  if (!results || !results[dir]) return;
+  const categoryId = S.ui.autoFillCompareCategoryId;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) return;
+
+  pushUndo();
+  // Remove existing strips of same category in this room
+  S.strips = S.strips.filter(s => {
+    const sp = _stripProduct(s);
+    return !(s.roomId === room.id && sp && sp.category_id === categoryId);
+  });
+
+  // Add new strips
+  for (const def of results[dir].defs) {
+    S.strips.push({ ...def, id: S.counters.nextStripId++ });
+  }
+
+  // Update direction
+  S.varmefolie.direction = dir;
+
+  // Track product usage
+  const usedIds = new Set(results[dir].defs.map(d => d.productId));
+  usedIds.forEach(pid => _trackProductUsage(pid));
+
+  _closeAutoFillPanel();
+  _invalidateStripCache();
+  renderSidebar();
+  updateObjInfo();
+  render();
+  _showToast(`${results[dir].stats.stripCount} striper plassert (${results[dir].stats.coveragePct}% dekning)`, 'ok');
+}
+
+function _closeAutoFillPanel() {
+  S.ui.autoFillPreviewDefs = null;
+  S.ui.autoFillCompare = null;
+  S.ui.autoFillCompareCategoryId = null;
+  const panel = document.getElementById('autofill-compare');
+  if (panel) panel.style.display = 'none';
+  render();
 }
 
 // Wrapper: tries both fill sides and both orientations, picks the best coverage.
@@ -3620,13 +3981,18 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
     return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
   };
 
-  // Check if room has obstacles — if so, try zone-based fill
+  // Check if room has obstacles — if so, try zone-based and obstacle-aware fills
   const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
-  let zoneDefs = [];
+  let zoneDefs = [], obsAwareDefs = [];
   if (hasObstacles) {
     zoneDefs = _zoneFillRoom(room, sortedProds, direction);
-    // Filter out impractically short strips from zone fill
     zoneDefs = zoneDefs.filter(d => d.length_cm >= 50);
+    // Obstacle-aware: fits strips to gap zones + spans obstacles with covering widths
+    obsAwareDefs = _obstacleAwareFill(room, sortedProds, direction);
+    obsAwareDefs = obsAwareDefs.filter(d => d.length_cm >= 20);
+    // Try alternate direction for obstacle-aware fill too
+    const obsAwareAlt = _obstacleAwareFill(room, sortedProds, direction === 'v' ? 'h' : 'v');
+    if (score(obsAwareAlt) > score(obsAwareDefs)) obsAwareDefs = obsAwareAlt;
   }
 
   // Classic fill: greedy + beam search in both directions
@@ -3651,12 +4017,16 @@ function autoFillRoom(room, sortedProds, direction, fromHigh) {
     classicBest = bestChosen;
   }
 
-  // Pick winner: zone-based vs classic (classic wins if it has better practical score)
+  // Pick winner: obstacle-aware vs zone-based vs classic
   const zoneScore = score(zoneDefs);
+  const obsAwareScore = score(obsAwareDefs);
   const classicScore = score(classicBest);
   let best;
-  if (hasObstacles && zoneScore > classicScore && zoneScore > 0) {
-    best = zoneDefs;
+  // Obstacle-aware strategy gets priority when it produces valid results
+  const bestObstacleScore = Math.max(zoneScore, obsAwareScore);
+  const bestObstacleDefs = obsAwareScore >= zoneScore ? obsAwareDefs : zoneDefs;
+  if (hasObstacles && bestObstacleScore > classicScore && bestObstacleScore > 0) {
+    best = bestObstacleDefs;
     if (best.length) S.varmefolie.direction = best[0].direction;
   } else {
     best = classicBest;
@@ -5244,11 +5614,20 @@ function drawStrips() {
     const border = _stripBorderCm(strip);
 
     ctx.save();
-    // Clip to room polygon
+    // Clip to room polygon MINUS obstacle polygons (evenodd rule)
     const spts = room.points.map(p => w2s(p.x, p.y));
     ctx.beginPath(); ctx.moveTo(spts[0].x, spts[0].y);
     for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
-    ctx.closePath(); ctx.clip();
+    ctx.closePath();
+    // Cut out hindrings so strips never render over obstacles
+    const roomHinds = (S.hindrings || []).filter(h => h.roomId === strip.roomId && h.points && h.points.length >= 3);
+    for (const hind of roomHinds) {
+      const hpts = hind.points.map(p => w2s(p.x, p.y));
+      ctx.moveTo(hpts[0].x, hpts[0].y);
+      for (let j = 1; j < hpts.length; j++) ctx.lineTo(hpts[j].x, hpts[j].y);
+      ctx.closePath();
+    }
+    ctx.clip('evenodd');
 
     let bx, by, bw, bh, nx, ny, nw, nh;
     if (strip.direction === 'v') {
@@ -5414,6 +5793,54 @@ function drawStrips() {
       }
     }
     ctx.restore();
+  }
+
+  // ── Preview strips for auto-fill comparison ──
+  if (S.ui.autoFillPreviewDefs && S.ui.autoFillPreviewDefs.length) {
+    for (const def of S.ui.autoFillPreviewDefs) {
+      const room = S.rooms.find(r => r.id === def.roomId);
+      if (!room) continue;
+      const prod = HEATING_PRODUCTS.find(p => p.id === def.productId);
+      if (!prod) continue;
+      const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+
+      ctx.save();
+      // Clip to room polygon minus obstacles
+      const spts2 = room.points.map(p => w2s(p.x, p.y));
+      ctx.beginPath(); ctx.moveTo(spts2[0].x, spts2[0].y);
+      for (let i = 1; i < spts2.length; i++) ctx.lineTo(spts2[i].x, spts2[i].y);
+      ctx.closePath();
+      const roomHinds2 = (S.hindrings || []).filter(h => h.roomId === def.roomId && h.points && h.points.length >= 3);
+      for (const hind of roomHinds2) {
+        const hpts = hind.points.map(p => w2s(p.x, p.y));
+        ctx.moveTo(hpts[0].x, hpts[0].y);
+        for (let j = 1; j < hpts.length; j++) ctx.lineTo(hpts[j].x, hpts[j].y);
+        ctx.closePath();
+      }
+      ctx.clip('evenodd');
+
+      let px, py, pw, ph;
+      if (def.direction === 'v') {
+        const p1 = w2s(def.pos_cm, def.start_cm);
+        const p2 = w2s(def.pos_cm + nc, def.start_cm + def.length_cm);
+        px=p1.x; py=p1.y; pw=p2.x-p1.x; ph=p2.y-p1.y;
+      } else {
+        const p1 = w2s(def.start_cm, def.pos_cm);
+        const p2 = w2s(def.start_cm + def.length_cm, def.pos_cm + nc);
+        px=p1.x; py=p1.y; pw=p2.x-p1.x; ph=p2.y-p1.y;
+      }
+
+      // Preview fill: blue tint
+      ctx.fillStyle = _lc('rgba(59,130,246,0.15)','rgba(96,165,250,0.18)');
+      ctx.fillRect(px, py, pw, ph);
+      // Preview outline: blue dashed
+      ctx.strokeStyle = _lc('rgba(59,130,246,0.6)','rgba(96,165,250,0.7)');
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(px, py, pw, ph);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
   }
 }
 
