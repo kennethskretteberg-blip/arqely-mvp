@@ -1,5 +1,14 @@
 # Romtegner Project History
 
+## 2026-03-14: Auto-fill comparison UI + obstacle-aware strip placement
+- **Strip rendering clips around obstacles**: `drawStrips()` uses `evenodd` clip path to subtract obstacle polygons — strips never render visually over obstacles
+- **Cold zones pushed to walls**: `_centerStripDefs()` detects obstacle positions and pushes cold zones toward the farthest wall. `_obstacleAwareFill()` and `_fillZone()` also push strips tight against obstacles
+- **Both-direction auto-fill comparison**: New `_autoFillBothDirections()` runs all strategies (greedy, beam search, zone-fill, obstacle-aware) for both H and V directions
+- **Comparison panel UI**: Floating panel (`showAutoFillComparison()`) shows both options with stats (strip count, coverage %, watt, W/m²), ★ marks best option
+- **Preview rendering**: Blue dashed preview strips on canvas when hovering/selecting an option before applying
+- **UI wiring**: Product menu buttons now call `showAutoFillComparison` instead of `startAutoFill`
+- Commit: `efdcd77`
+
 ## 2026-03-08: Initial setup and migration
 - Renamed local branch `master` -> `main`
 - Connected local repo to GitHub remote `kennethskretteberg-blip/arqely-mvp`
