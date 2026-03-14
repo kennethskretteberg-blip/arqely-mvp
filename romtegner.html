@@ -6803,7 +6803,7 @@ function _drawStairPlan(stair) {
       ctx.fillStyle = _lc('#666','#999');
       ctx.font = `${Math.max(8, 10 * S.view.zoom)}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const label = surf.type === 'landing' ? 'Repos' : '' + surf.index;
+      const label = surf.type === 'landing' ? 'Repos' : '' + ((surf.stepIdx != null ? surf.stepIdx : surf.index) + 1);
       ctx.fillText(label, tl.x + sw/2, tl.y + sh/2);
     }
   }
@@ -6916,45 +6916,40 @@ function _drawStairSide(stair) {
   ctx.save();
 
   const ox = stair.x_cm, oy = stair.y_cm;
-  const n = stair.step_count;
-  const sd = stair.step_depth_cm, sh = stair.step_height_cm;
+  const surfs = stair.surfaces;
+  if (!surfs || !surfs.length) { ctx.restore(); return; }
 
-  // Calculate offsets for landings
-  let xStart = 0;
-  const hasTopLanding = (stair.landing_position === 'top' || stair.landing_position === 'both');
-  const hasBotLanding = (stair.landing_position === 'bottom' || stair.landing_position === 'both');
-
-  // Build stepped profile polygon (from left=top to right=bottom)
+  // Build stepped profile polygon from surfaces
+  // Surfaces are ordered bottom-to-top in the array (y_cm increasing = going down in plan)
+  // In side view: x = depth position, y = height (cumulative step heights)
   const pts = [];
   let cx = 0, cy = 0;
+  let cumulH = 0;
+  const surfSideCoords = [];
 
-  // Top landing surface
-  if (hasTopLanding) {
-    pts.push({x: cx, y: cy});
-    cx += stair.landing_depth_cm;
-    pts.push({x: cx, y: cy});
-  }
-
-  // Steps going down
-  for (let i = 0; i < n; i++) {
-    pts.push({x: cx, y: cy});         // tread start
-    cx += sd;
-    pts.push({x: cx, y: cy});         // tread end (nose)
-    cy += sh;                           // drop down riser
-    pts.push({x: cx, y: cy});         // riser bottom
-  }
-
-  // Bottom landing
-  if (hasBotLanding) {
-    cx += stair.landing_depth_cm;
-    pts.push({x: cx, y: cy});
+  for (const surf of surfs) {
+    if (surf.type === 'landing') {
+      pts.push({x: cx, y: cumulH});
+      surfSideCoords.push({ xStart: cx, yTop: cumulH, depth: surf.d_cm });
+      cx += surf.d_cm;
+      pts.push({x: cx, y: cumulH});
+    } else { // tread
+      const sh = surf.stepHeight_cm || stair.step_height_cm || 17;
+      pts.push({x: cx, y: cumulH});           // tread start
+      surfSideCoords.push({ xStart: cx, yTop: cumulH, depth: surf.d_cm });
+      cx += surf.d_cm;
+      pts.push({x: cx, y: cumulH});           // tread end (nose)
+      cumulH += sh;                             // drop down riser
+      pts.push({x: cx, y: cumulH});           // riser bottom
+    }
   }
 
   // Close the profile (go back along bottom)
   const totalW = cx;
-  const totalH = cy;
-  pts.push({x: cx, y: totalH + sh});  // bottom-right
-  pts.push({x: 0, y: totalH + sh});   // bottom-left
+  const totalH = cumulH;
+  const lastStepH = surfs[surfs.length - 1].stepHeight_cm || stair.step_height_cm || 17;
+  pts.push({x: cx, y: totalH + lastStepH}); // bottom-right
+  pts.push({x: 0, y: totalH + lastStepH}); // bottom-left
 
   // Draw filled profile
   ctx.beginPath();
@@ -6977,22 +6972,6 @@ function _drawStairSide(stair) {
     ctx.lineWidth = Math.max(1.5, 2 * S.view.zoom);
     ctx.lineCap = 'round';
 
-    // Map surface indices to side-view coordinates
-    let sideX = 0;
-    const surfSideCoords = [];
-    if (hasTopLanding) {
-      surfSideCoords.push({ xStart: 0, yTop: 0, depth: stair.landing_depth_cm });
-      sideX += stair.landing_depth_cm;
-    }
-    for (let i = n; i >= 1; i--) {
-      const stepIdx = n - i; // 0-based from top
-      surfSideCoords.push({ xStart: sideX, yTop: stepIdx * sh, depth: sd });
-      sideX += sd;
-    }
-    if (hasBotLanding) {
-      surfSideCoords.push({ xStart: sideX, yTop: n * sh, depth: stair.landing_depth_cm });
-    }
-
     // Group runs by surface
     const runsBySurf = {};
     for (const r of stair.runs) {
@@ -7003,13 +6982,10 @@ function _drawStairSide(stair) {
     for (const [si, surfRuns] of Object.entries(runsBySurf)) {
       const sc = surfSideCoords[+si];
       if (!sc) continue;
-      // In side view, show cable dots/lines on the tread surface
       const margin = stair.edgeMargin_cm || 3;
       for (const run of surfRuns) {
-        // Draw a small dot for each cable run position on tread
         const px = w2s(ox + sc.xStart + margin, oy + sc.yTop);
         const px2 = w2s(ox + sc.xStart + sc.depth - margin, oy + sc.yTop);
-        // Draw line on tread surface
         ctx.beginPath();
         ctx.moveTo(px.x, px.y);
         ctx.lineTo(px2.x, px2.y);
@@ -7022,7 +6998,7 @@ function _drawStairSide(stair) {
     for (let i = 0; i < surfSideCoords.length - 1; i++) {
       const sc = surfSideCoords[i];
       const scNext = surfSideCoords[i + 1];
-      const dropX = sc.xStart + sc.depth; // nose position
+      const dropX = sc.xStart + sc.depth;
       const a = w2s(ox + dropX, oy + sc.yTop);
       const b = w2s(ox + dropX, oy + scNext.yTop);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
@@ -7791,34 +7767,70 @@ let _stairCacheVer = 0;
 function _invalidateStairCache() { _stairCacheVer++; }
 
 // ── Stair geometry generation ──
-function _generateStairSurfaces(stair) {
-  const surfs = [];
-  let yOff = 0;
+
+/** Migrate legacy flat-field stair to segment-based model */
+function _migrateStairToSegments(stair) {
+  if (stair.segments && stair.segments.length) return; // already migrated
+  const segs = [];
+  const w = stair.width_cm || 120;
   if (stair.landing_position === 'top' || stair.landing_position === 'both') {
-    surfs.push({ type:'landing', index:0, x_cm:0, y_cm:yOff, w_cm:stair.width_cm, d_cm:stair.landing_depth_cm });
-    yOff += stair.landing_depth_cm;
+    segs.push({ type:'landing', width_cm: w, depth_cm: stair.landing_depth_cm || 120 });
   }
-  for (let i = stair.step_count; i >= 1; i--) {
-    surfs.push({ type:'tread', index:i, x_cm:0, y_cm:yOff, w_cm:stair.width_cm, d_cm:stair.step_depth_cm });
-    yOff += stair.step_depth_cm;
+  if (stair.step_count > 0) {
+    segs.push({ type:'steps', width_cm: w, stepDepth_cm: stair.step_depth_cm || 30,
+      stepHeight_cm: stair.step_height_cm || 17, stepCount: stair.step_count || 8 });
   }
   if (stair.landing_position === 'bottom' || stair.landing_position === 'both') {
-    surfs.push({ type:'landing', index:1, x_cm:0, y_cm:yOff, w_cm:stair.width_cm, d_cm:stair.landing_depth_cm });
-    yOff += stair.landing_depth_cm;
+    segs.push({ type:'landing', width_cm: w, depth_cm: stair.landing_depth_cm || 120 });
+  }
+  stair.segments = segs;
+  stair.buildDirection = stair.buildDirection || 'bottom';
+  stair.stairType = stair.stairType || 'straight';
+  stair.riserOffset_cm = stair.riserOffset_cm ?? 2;
+  stair.noseOffset_cm = stair.noseOffset_cm ?? 2;
+  stair.stepCC_cm = stair.stepCC_cm ?? (stair.cableSpacing_cm || 8);
+  stair.landingCC_cm = stair.landingCC_cm ?? (stair.cableSpacing_cm || 8);
+}
+
+/** Generate surfaces from segment-based model. Falls back to legacy if no segments. */
+function _generateStairSurfaces(stair) {
+  // Ensure segments exist (migrate if needed)
+  if (!stair.segments || !stair.segments.length) _migrateStairToSegments(stair);
+  const segs = stair.segments;
+  if (!segs || !segs.length) return [];
+
+  const surfs = [];
+  let yOff = 0;
+  let stepIdx = 0;
+  for (let si = 0; si < segs.length; si++) {
+    const seg = segs[si];
+    if (seg.type === 'landing') {
+      surfs.push({ type:'landing', segIdx:si, x_cm:0, y_cm:yOff, w_cm:seg.width_cm, d_cm:seg.depth_cm });
+      yOff += seg.depth_cm;
+    } else if (seg.type === 'steps') {
+      for (let i = 0; i < seg.stepCount; i++) {
+        surfs.push({ type:'tread', segIdx:si, stepIdx:stepIdx++, x_cm:0, y_cm:yOff,
+          w_cm:seg.width_cm, d_cm:seg.stepDepth_cm, stepHeight_cm:seg.stepHeight_cm });
+        yOff += seg.stepDepth_cm;
+      }
+    }
   }
   return surfs;
 }
 
 function _stairBounds(stair) {
   const surfs = stair.surfaces && stair.surfaces.length ? stair.surfaces : _generateStairSurfaces(stair);
+  const maxW = surfs.reduce((m, s) => Math.max(m, s.w_cm), stair.width_cm || 120);
   if (stair.viewMode === 'side') {
     const totalDepth = surfs.reduce((s,f) => s + f.d_cm, 0);
-    const totalHeight = stair.step_count * stair.step_height_cm;
-    return { x: stair.x_cm, y: stair.y_cm, w: totalDepth, h: totalHeight + stair.step_height_cm };
+    // Sum step heights from tread surfaces
+    let totalHeight = 0;
+    for (const s of surfs) if (s.type === 'tread') totalHeight += (s.stepHeight_cm || stair.step_height_cm || 17);
+    return { x: stair.x_cm, y: stair.y_cm, w: totalDepth, h: totalHeight + (surfs[0]?.stepHeight_cm || 17) };
   }
   let maxY = 0;
   for (const s of surfs) maxY = Math.max(maxY, s.y_cm + s.d_cm);
-  return { x: stair.x_cm, y: stair.y_cm, w: stair.width_cm, h: maxY };
+  return { x: stair.x_cm, y: stair.y_cm, w: maxW, h: maxY };
 }
 
 // ── Stair cable layout ──
@@ -7828,14 +7840,9 @@ const STAIR_MIN_DENSITY_WM2 = 300;
 function generateStairCable(stair) {
   const surfs = stair.surfaces;
   if (!surfs || !surfs.length) return { runs:[], connections:[], totalCableLength_cm:0 };
-  const cc = Math.min(stair.cableSpacing_cm || 8, STAIR_MAX_CC_CM);
-  const margin = stair.edgeMargin_cm || 3;
-  const availW = stair.width_cm - 2 * margin;
-  if (availW <= 0) return { runs:[], connections:[], totalCableLength_cm:0 };
-
-  const N = Math.max(1, Math.floor(availW / cc) + 1);
-  const actualCC = N > 1 ? availW / (N - 1) : 0;
-  const sideMargin = N > 1 ? (stair.width_cm - (N - 1) * actualCC) / 2 : stair.width_cm / 2;
+  const edgeMargin = stair.edgeMargin_cm || 3;
+  const riserOff = stair.riserOffset_cm ?? 2;
+  const noseOff = stair.noseOffset_cm ?? 2;
 
   const allRuns = [];
   const connections = [];
@@ -7844,9 +7851,23 @@ function generateStairCable(stair) {
 
   for (let si = 0; si < surfs.length; si++) {
     const surf = surfs[si];
-    const segStart = margin;
-    const segEnd = surf.d_cm - margin;
-    if (segEnd <= segStart) continue;
+    const isLanding = (surf.type === 'landing');
+    const cc = Math.min(isLanding ? (stair.landingCC_cm || stair.cableSpacing_cm || 8)
+                                  : (stair.stepCC_cm || stair.cableSpacing_cm || 8), STAIR_MAX_CC_CM);
+
+    // Usable depth: for treads apply riser/nose offset, for landings use edge margin
+    const segStart = isLanding ? edgeMargin : noseOff;
+    const segEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
+    if (segEnd <= segStart + 0.5) continue;
+
+    // Usable width for cable runs across the step/landing
+    const surfW = surf.w_cm || stair.width_cm || 120;
+    const availW = surfW - 2 * edgeMargin;
+    if (availW <= 0) continue;
+
+    const N = Math.max(1, Math.floor(availW / cc) + 1);
+    const actualCC = N > 1 ? availW / (N - 1) : 0;
+    const sideMargin = N > 1 ? (surfW - (N - 1) * actualCC) / 2 : surfW / 2;
 
     const startHigh = (si === 0) ? false : prevLastHigh;
 
@@ -7861,7 +7882,7 @@ function generateStairCable(stair) {
     prevLastHigh = startHigh ? lastEven : !lastEven;
 
     if (si < surfs.length - 1) {
-      const connLen = stair.step_height_cm || 17;
+      const connLen = surf.stepHeight_cm || stair.step_height_cm || 17;
       connections.push({ fromSurf: si, toSurf: si + 1, length_cm: connLen });
       totalLen += connLen;
     }
@@ -7870,23 +7891,352 @@ function generateStairCable(stair) {
   return { runs: allRuns, connections, totalCableLength_cm: Math.round(totalLen * 10) / 10 };
 }
 
+// ── Phase 2: Auto-Proposal Engine ──
+
+/**
+ * Calculate precise cable length for a given configuration.
+ * Returns total cable length in cm based on actual geometry.
+ */
+function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
+  const surfs = stair.surfaces;
+  if (!surfs || !surfs.length) return 0;
+  const riserOff = stair.riserOffset_cm ?? 2;
+  const noseOff = stair.noseOffset_cm ?? 2;
+  let totalLen = 0;
+
+  for (let si = 0; si < surfs.length; si++) {
+    const surf = surfs[si];
+    const isLanding = (surf.type === 'landing');
+    const cc = isLanding ? landingCC : stepCC;
+
+    const segStart = isLanding ? edgeMargin : noseOff;
+    const segEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
+    if (segEnd <= segStart + 0.5) continue;
+    const usableDepth = segEnd - segStart;
+
+    const surfW = surf.w_cm || stair.width_cm || 120;
+    const availW = surfW - 2 * edgeMargin;
+    if (availW <= 0) continue;
+
+    // For treads: use runsPerStep; for landings: compute runs from landingCC
+    let N;
+    if (!isLanding) {
+      N = runsPerStep;
+    } else {
+      N = Math.max(1, Math.floor(availW / cc) + 1);
+    }
+    const actualCC = N > 1 ? availW / (N - 1) : 0;
+
+    // Cable runs: N runs × usable depth
+    totalLen += N * usableDepth;
+    // U-turns: (N-1) half-circle turns
+    if (N > 1) totalLen += (N - 1) * Math.PI * actualCC / 2;
+
+    // Step-over connection to next surface
+    if (si < surfs.length - 1) {
+      totalLen += surf.stepHeight_cm || stair.step_height_cm || 17;
+    }
+  }
+  return totalLen;
+}
+
+/**
+ * Select the best cable product(s) for a given total cable length and target power density.
+ * Returns { products: [{id, name, length_m, watt}], waste_pct, power_wm2 }
+ */
+function _selectStairCableProducts(totalLength_cm, targetWm2, heatedArea_m2, products) {
+  const totalLength_m = totalLength_cm / 100;
+  if (!products || !products.length || totalLength_m <= 0) return null;
+
+  // Sort by cable length descending
+  const sorted = [...products].sort((a, b) => (b.cable_length_m || 0) - (a.cable_length_m || 0));
+
+  let bestFit = null;
+  let bestScore = -Infinity;
+
+  for (const p of sorted) {
+    const cableLen = p.cable_length_m || 0;
+    if (cableLen <= 0) continue;
+    const cableWatt = (p.watt_per_m || 0) * cableLen;
+
+    // Single cable: check if it's long enough
+    if (cableLen >= totalLength_m * 0.95 && cableLen <= totalLength_m * 1.15) {
+      const waste = (cableLen - totalLength_m) / cableLen * 100;
+      const wm2 = heatedArea_m2 > 0 ? cableWatt / heatedArea_m2 : 0;
+      const score = 100 - Math.abs(waste) * 2 - Math.abs(wm2 - targetWm2) * 0.5;
+      if (score > bestScore) {
+        bestScore = score;
+        bestFit = {
+          products: [{ id: p.id, name: p.name, length_m: cableLen, watt: cableWatt }],
+          waste_pct: Math.max(0, Math.round(waste * 10) / 10),
+          power_wm2: Math.round(wm2),
+          totalWatt: cableWatt,
+        };
+      }
+    }
+  }
+
+  // If no single cable fits, try smallest cable that's >= required length
+  if (!bestFit) {
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      const p = sorted[i];
+      const cableLen = p.cable_length_m || 0;
+      if (cableLen >= totalLength_m) {
+        const waste = (cableLen - totalLength_m) / cableLen * 100;
+        const cableWatt = (p.watt_per_m || 0) * cableLen;
+        const wm2 = heatedArea_m2 > 0 ? cableWatt / heatedArea_m2 : 0;
+        bestFit = {
+          products: [{ id: p.id, name: p.name, length_m: cableLen, watt: cableWatt }],
+          waste_pct: Math.max(0, Math.round(waste * 10) / 10),
+          power_wm2: Math.round(wm2),
+          totalWatt: cableWatt,
+        };
+        break;
+      }
+    }
+  }
+
+  return bestFit;
+}
+
+/**
+ * Score a proposal candidate. Higher = better.
+ */
+function _scoreStairProposal(p) {
+  let score = 0;
+  // CC within reasonable range (3-10cm)
+  if (p.stepCC >= 3 && p.stepCC <= STAIR_MAX_CC_CM) score += 100;
+  // Power density target (300 W/m² ideal)
+  if (p.power_wm2 >= STAIR_MIN_DENSITY_WM2) score += 50;
+  score -= 20 * Math.abs(p.power_wm2 - STAIR_MIN_DENSITY_WM2) / Math.max(STAIR_MIN_DENSITY_WM2, 1);
+  // Single cable bonus
+  if (p.cableCount === 1) score += 30;
+  // Low waste
+  score -= (p.waste_pct || 0) * 1.5;
+  // More runs per step = better coverage
+  if (p.runsPerStep >= 3) score += 15;
+  return Math.round(score * 10) / 10;
+}
+
+/**
+ * Generate 1-2 auto-proposals for a stair.
+ * Each proposal specifies: runsPerStep, stepCC, landingCC, cable product(s), stats.
+ */
+function _generateStairProposals(stair) {
+  if (!stair.surfaces || !stair.surfaces.length) return [];
+
+  // Get cable products
+  const cableProds = HEATING_PRODUCTS.filter(p => {
+    const cat = PRODUCT_CATEGORIES.find(c => c.id === p.category_id);
+    return cat && cat.module_type === 'cable' && p.active !== false && (p.cable_length_m || 0) > 0;
+  });
+  if (!cableProds.length) return [];
+
+  const edgeMargin = stair.edgeMargin_cm || 3;
+  const riserOff = stair.riserOffset_cm ?? 2;
+  const noseOff = stair.noseOffset_cm ?? 2;
+
+  // Calculate heated area (m²)
+  let heatedArea_cm2 = 0;
+  for (const surf of stair.surfaces) {
+    const isLanding = surf.type === 'landing';
+    const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
+    const usableD = isLanding ? surf.d_cm - 2 * edgeMargin : surf.d_cm - riserOff - noseOff;
+    if (usableW > 0 && usableD > 0) heatedArea_cm2 += usableW * usableD;
+  }
+  const heatedArea_m2 = heatedArea_cm2 / 10000;
+
+  // Find first tread to determine usable width
+  const firstTread = stair.surfaces.find(s => s.type === 'tread');
+  if (!firstTread) return [];
+  const treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
+  const treadD = firstTread.d_cm - riserOff - noseOff;
+  if (treadW <= 0 || treadD <= 0) return [];
+
+  const candidates = [];
+
+  // Try different CC values (target range: 4-10cm in 0.5cm steps)
+  // For each CC, compute runs per step = floor(availW / cc) + 1
+  const ccValues = [];
+  for (let cc = 4; cc <= STAIR_MAX_CC_CM; cc += 0.5) ccValues.push(cc);
+
+  for (const targetCC of ccValues) {
+    const runsPerStep = Math.max(2, Math.floor(treadW / targetCC) + 1);
+    const actualCC = runsPerStep > 1 ? treadW / (runsPerStep - 1) : treadW;
+    if (actualCC < 3 || actualCC > STAIR_MAX_CC_CM + 0.5) continue;
+
+    // Landing CC: same as step CC
+    const landingCC = Math.min(actualCC, STAIR_MAX_CC_CM);
+
+    // Calculate total cable length
+    const totalLen_cm = _stairCableLength(stair, runsPerStep, actualCC, landingCC, edgeMargin);
+    const totalLen_m = totalLen_cm / 100;
+
+    // Find best cable product for this length
+    const cableSel = _selectStairCableProducts(totalLen_cm, STAIR_MIN_DENSITY_WM2, heatedArea_m2, cableProds);
+    if (!cableSel) continue;
+
+    // Avoid duplicate runsPerStep entries — keep best CC for each k
+    const existingK = candidates.find(c => c.runsPerStep === runsPerStep);
+    const candidate = {
+      runsPerStep,
+      stepCC: Math.round(actualCC * 10) / 10,
+      landingCC: Math.round(landingCC * 10) / 10,
+      totalCableLength_m: Math.round(totalLen_m * 10) / 10,
+      cableCount: cableSel.products.length,
+      products: cableSel.products,
+      waste_pct: cableSel.waste_pct,
+      power_wm2: cableSel.power_wm2,
+      totalWatt: cableSel.totalWatt,
+      heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
+    };
+    candidate.score = _scoreStairProposal(candidate);
+    if (existingK) {
+      if (candidate.score > existingK.score) {
+        candidates[candidates.indexOf(existingK)] = candidate;
+      }
+    } else {
+      candidates.push(candidate);
+    }
+  }
+
+  if (!candidates.length) return [];
+
+  // Sort by score descending, return top 2
+  candidates.sort((a, b) => b.score - a.score);
+  const result = candidates.slice(0, 2);
+  result[0].recommended = true;
+  return result;
+}
+
+/**
+ * Apply a proposal to a stair: update its CC, runs per step, cable product, and regenerate layout.
+ */
+function _applyStairProposal(stair, proposal) {
+  pushUndo();
+  stair.stepCC_cm = proposal.stepCC;
+  stair.landingCC_cm = proposal.landingCC;
+  stair.cableSpacing_cm = proposal.stepCC;
+  if (proposal.products && proposal.products.length > 0) {
+    stair.cableProductId = proposal.products[0].id;
+  }
+  stair.selectedProposal = proposal;
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  renderSidebar(); updateCtxBar(); render();
+}
+
+/**
+ * Render the proposal comparison panel as a modal overlay.
+ */
+function _applyStairProposalByIdx(stairId, idx) {
+  const stair = S.stairs.find(s => s.id === stairId);
+  if (!stair || !stair.proposals || !stair.proposals[idx]) return;
+  _applyStairProposal(stair, stair.proposals[idx]);
+}
+
+function _renderStairProposalPanel(stair, proposals) {
+  // Remove existing
+  const ex = document.getElementById('stair-proposal-panel');
+  if (ex) ex.remove();
+
+  if (!proposals || !proposals.length) return;
+  // Store proposals on stair for reference by index
+  stair.proposals = proposals;
+
+  let cardsHtml = '';
+  for (let i = 0; i < proposals.length; i++) {
+    const p = proposals[i];
+    const prodName = p.products && p.products[0] ? p.products[0].name : 'Ukjent';
+    const prodLen = p.products && p.products[0] ? p.products[0].length_m : '?';
+    cardsHtml += `
+      <div style="flex:1;background:var(--surface2);border:1px solid ${p.recommended ? '#4ea8ff' : 'var(--brd)'};border-radius:10px;padding:14px;min-width:200px;position:relative">
+        ${p.recommended ? '<div style="position:absolute;top:-10px;left:12px;background:#4ea8ff;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">★ Anbefalt</div>' : ''}
+        <div style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:10px">Forslag ${i + 1}</div>
+        <div style="font-size:12px;color:var(--muted);display:grid;gap:4px">
+          <div>🔌 <b>${prodName}</b> (${prodLen}m)</div>
+          <div>↔ CC trinn: <b>${p.stepCC} cm</b></div>
+          <div>↔ CC repos: <b>${p.landingCC} cm</b></div>
+          <div>〰 ${p.runsPerStep} løp per trinn</div>
+          <div>📏 Kabellengde: <b>${p.totalCableLength_m} m</b></div>
+          <div>⚡ ${p.totalWatt || 0} W · <b>${p.power_wm2} W/m²</b></div>
+          <div>📐 Oppvarmet areal: ${p.heatedArea_m2} m²</div>
+          ${p.waste_pct > 0 ? `<div style="color:var(--warn)">♻ Kabelsvinn: ${p.waste_pct}%</div>` : ''}
+        </div>
+        <button onclick="_applyStairProposalByIdx(${stair.id},${i});document.getElementById('stair-proposal-panel').remove()"
+          style="margin-top:12px;width:100%;padding:8px;border-radius:6px;border:none;background:${p.recommended ? '#4ea8ff' : 'var(--bg)'};color:${p.recommended ? '#fff' : 'var(--text)'};cursor:pointer;font-size:13px;font-weight:600;border:1px solid ${p.recommended ? '#4ea8ff' : 'var(--brd)'}">
+          Bruk dette forslaget
+        </button>
+      </div>`;
+  }
+
+  const html = `<div id="stair-proposal-panel" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45)" onclick="if(event.target===this)this.remove()">
+    <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(560px,92vw);max-height:85vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
+      <h3 style="margin:0 0 16px;font-size:16px;color:var(--text)">⚡ Kabelforslag for ${esc(stair.name || 'Trapp')}</h3>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">${cardsHtml}</div>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+        <button onclick="document.getElementById('stair-proposal-panel').remove()" style="padding:8px 16px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:13px">Avbryt</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+/**
+ * Entry point: generate proposals and show comparison panel.
+ */
+function showStairProposals(stairId) {
+  const stair = S.stairs.find(s => s.id === stairId);
+  if (!stair) return;
+  // Ensure surfaces are generated
+  if (!stair.surfaces || !stair.surfaces.length) {
+    stair.surfaces = _generateStairSurfaces(stair);
+  }
+  const proposals = _generateStairProposals(stair);
+  if (!proposals.length) {
+    // Show inline toast instead of blocking alert
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);background:var(--warn,#e06030);color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.3)';
+    toast.textContent = 'Ingen kabelforslag tilgjengelig. Kabelprodukter matcher ikke trappens dimensjoner.';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
+    return;
+  }
+  _renderStairProposalPanel(stair, proposals);
+}
+
 function _createStairObj(params) {
   const stair = {
     id: S.counters.nextStairId++,
     name: params.name || 'Trapp',
     x_cm: params.x_cm || 0, y_cm: params.y_cm || 0,
+    // Legacy flat fields (kept for backward compat + save/restore)
     width_cm: params.width_cm || 120,
     step_depth_cm: params.step_depth_cm || 30,
     step_height_cm: params.step_height_cm || 17,
     step_count: params.step_count || 8,
     landing_depth_cm: params.landing_depth_cm || 120,
     landing_position: params.landing_position || 'none',
+    // Segment-based geometry
+    segments: params.segments || null,
+    buildDirection: params.buildDirection || 'bottom',
+    stairType: params.stairType || 'straight',
+    // Cable parameters
     cableProductId: params.cableProductId || null,
     cableSpacing_cm: Math.min(params.cableSpacing_cm || 8, STAIR_MAX_CC_CM),
+    riserOffset_cm: params.riserOffset_cm ?? 2,
+    noseOffset_cm: params.noseOffset_cm ?? 2,
+    stepCC_cm: params.stepCC_cm ?? (params.cableSpacing_cm || 8),
+    landingCC_cm: params.landingCC_cm ?? (params.cableSpacing_cm || 8),
     edgeMargin_cm: params.edgeMargin_cm || 3,
+    // View + computed
     viewMode: params.viewMode || 'plan',
     runs: [], connections: [], totalCableLength_cm: 0, surfaces: []
   };
+  // Ensure segments exist (migrate from flat if needed)
+  if (!stair.segments || !stair.segments.length) {
+    _migrateStairToSegments(stair);
+  }
   stair.surfaces = _generateStairSurfaces(stair);
   const layout = generateStairCable(stair);
   stair.runs = layout.runs;
@@ -11311,15 +11661,27 @@ function _renderStairPartContent(part) {
   const partStairs = S.stairs.filter(s=>s.partId===part.id);
   for (const st of partStairs) {
     const isSel = st.id === S.ui.selectedStairId;
-    const steps = st.step_count || 0;
-    const w = Math.round(st.width_cm || 0);
+    // Build segment summary from segments array
+    let segSummary = '';
+    if (st.segments && st.segments.length) {
+      const parts = [];
+      for (const seg of st.segments) {
+        if (seg.type === 'steps') parts.push(seg.stepCount + ' trinn');
+        else if (seg.type === 'landing') parts.push('Repos');
+      }
+      segSummary = parts.join(' → ');
+    } else {
+      const steps = st.step_count || 0;
+      segSummary = steps + ' trinn';
+    }
+    const w = Math.round((st.segments && st.segments.length ? st.segments[0].width_cm : st.width_cm) || 0);
     h += `<div class="room-item${isSel ? ' sel' : ''}" onclick="selectStair(${st.id});renderSidebar();event.stopPropagation()" style="padding-left:14px">
       <span class="room-type-ico">🪜</span>
       <span class="room-nm">${esc(st.name || 'Trapp')}</span>
-      <span class="room-area">${steps} trinn, ${w}cm</span>
+      <span class="room-area">${segSummary}, ${w}cm</span>
     </div>`;
   }
-  h += `<div style="padding:2px 8px 6px"><button class="floor-add" onclick="showAddStairModal()" style="width:100%;margin:0">＋ Legg til trapp</button></div>`;
+  h += `<div style="padding:2px 8px 6px"><button class="floor-add" onclick="showStairBuilderModal()" style="width:100%;margin:0">＋ Legg til trapp</button></div>`;
   return h;
 }
 
@@ -11350,12 +11712,22 @@ function _renderFlatSidebar() {
     h += `<div class="floor-grp"><div class="floor-hdr" style="cursor:default"><span class="floor-toggle">▼</span><span class="floor-name-txt">Trapper</span><span class="floor-badge">${S.stairs.length}</span></div><div class="floor-rooms">`;
     for (const st of S.stairs) {
       const isSel = st.id === S.ui.selectedStairId;
-      const steps = st.step_count || 0;
-      const w = Math.round(st.width_cm || 0);
+      let segSummary = '';
+      if (st.segments && st.segments.length) {
+        const parts = [];
+        for (const seg of st.segments) {
+          if (seg.type === 'steps') parts.push(seg.stepCount + ' trinn');
+          else if (seg.type === 'landing') parts.push('Repos');
+        }
+        segSummary = parts.join(' → ');
+      } else {
+        segSummary = (st.step_count || 0) + ' trinn';
+      }
+      const w = Math.round((st.segments && st.segments.length ? st.segments[0].width_cm : st.width_cm) || 0);
       h += `<div class="room-item${isSel ? ' sel' : ''}" onclick="selectStair(${st.id});renderSidebar();event.stopPropagation()" style="padding-left:18px">
         <span class="room-type-ico">🪜</span>
         <span class="room-nm">${esc(st.name || 'Trapp')}</span>
-        <span class="room-area">${steps} trinn, ${w}cm</span>
+        <span class="room-area">${segSummary}, ${w}cm</span>
       </div>`;
     }
     h += `</div></div>`;
@@ -11924,9 +12296,27 @@ function showAddRoomModal(floorId) {
   const ni = document.getElementById('ctxbar-room-name');
   if (ni) setTimeout(() => { ni.focus(); ni.select(); }, 60);
 }
-// ── Stair modal ──
-function showAddStairModal() {
-  // Get cable products for dropdown
+// ── Stair builder modal (segment-based) ──
+// Temp state for the builder wizard
+let _stairBuilderSegs = [];
+let _stairBuilderDir = 'bottom'; // 'bottom' = start from bottom, build up
+
+function showAddStairModal() { showStairBuilderModal(); } // alias for backward compat
+
+function showStairBuilderModal() {
+  _stairBuilderSegs = [
+    { type:'steps', width_cm:120, stepDepth_cm:30, stepHeight_cm:17, stepCount:8 }
+  ];
+  _stairBuilderDir = 'bottom';
+  _renderStairBuilderModal();
+}
+
+function _renderStairBuilderModal() {
+  // Remove existing modal if any
+  const existing = document.getElementById('stair-modal-bg');
+  if (existing) existing.remove();
+
+  // Cable products for dropdown
   const cableProds = HEATING_PRODUCTS.filter(p => {
     const cat = PRODUCT_CATEGORIES.find(c => c.id === p.category_id);
     return cat && cat.module_type === 'cable' && p.active !== false;
@@ -11934,47 +12324,232 @@ function showAddStairModal() {
   let prodOpts = '<option value="">Ingen (beregn manuelt)</option>';
   for (const p of cableProds) prodOpts += `<option value="${p.id}">${esc(p.name)} (${p.cable_length_m||'?'}m, ${p.watt_per_m||'?'}W/m)</option>`;
 
-  const html = `<div class="modal-backdrop" id="stair-modal-bg" onclick="if(event.target===this)this.remove()">
-    <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(420px,90vw);max-height:85vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
-      <h3 style="margin:0 0 14px;font-size:16px;color:var(--text)">\u{1FA9C} Legg til trapp</h3>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px">
+  // Build segment list HTML
+  let segListHtml = '';
+  const segs = _stairBuilderSegs;
+  // Display order: if buildDirection is 'top', show reversed (top segment first visually)
+  const displaySegs = _stairBuilderDir === 'top' ? [...segs].reverse() : segs;
+  const displayIdxs = _stairBuilderDir === 'top' ? displaySegs.map((_,i) => segs.length - 1 - i) : displaySegs.map((_,i) => i);
+
+  for (let di = 0; di < displaySegs.length; di++) {
+    const seg = displaySegs[di];
+    const realIdx = displayIdxs[di];
+    const isOnly = segs.length === 1;
+    if (seg.type === 'steps') {
+      segListHtml += `<div style="background:var(--surface2);border:1px solid var(--brd);border-radius:8px;padding:10px 12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-weight:600;font-size:13px;color:var(--text)">📐 Trinn</span>
+          ${isOnly ? '' : `<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>`}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
+          <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" onchange="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+          <label style="color:var(--muted)">Antall<br><input type="number" value="${seg.stepCount}" min="1" max="30" onchange="_stairBuilderUpd(${realIdx},'stepCount',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+          <label style="color:var(--muted)">Dybde (cm)<br><input type="number" value="${seg.stepDepth_cm}" min="15" max="60" onchange="_stairBuilderUpd(${realIdx},'stepDepth_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+          <label style="color:var(--muted)">Høyde (cm)<br><input type="number" value="${seg.stepHeight_cm}" min="10" max="30" onchange="_stairBuilderUpd(${realIdx},'stepHeight_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+        </div>
+      </div>`;
+    } else if (seg.type === 'landing') {
+      segListHtml += `<div style="background:var(--surface2);border:1px solid var(--brd);border-radius:8px;padding:10px 12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-weight:600;font-size:13px;color:var(--text)">⬜ Repos</span>
+          <button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
+          <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" onchange="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+          <label style="color:var(--muted)">Dybde (cm)<br><input type="number" value="${seg.depth_cm}" min="30" max="300" onchange="_stairBuilderUpd(${realIdx},'depth_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
+        </div>
+      </div>`;
+    }
+  }
+
+  // Side-view preview SVG
+  const previewSvg = _stairBuilderPreviewSVG();
+
+  // Summary stats
+  const stats = _stairBuilderStats();
+
+  const html = `<div class="modal-backdrop" id="stair-modal-bg" onclick="if(event.target===this)this.remove()" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45)">
+    <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(500px,92vw);max-height:88vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
+      <h3 style="margin:0 0 14px;font-size:16px;color:var(--text)">🪜 Bygg trapp</h3>
+
+      <!-- Name + direction row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px;margin-bottom:12px">
         <label style="color:var(--muted)">Navn<br><input id="stair-name" value="Trapp" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">Bredde (cm)<br><input id="stair-width" type="number" value="120" min="40" max="500" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">Trinndybde (cm)<br><input id="stair-depth" type="number" value="30" min="15" max="60" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">Trinnhøyde (cm)<br><input id="stair-height" type="number" value="17" min="10" max="30" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">Antall trinn<br><input id="stair-count" type="number" value="8" min="1" max="30" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">Repos<br><select id="stair-landing" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px">
-          <option value="none">Ingen</option><option value="top">Topp</option><option value="bottom">Bunn</option><option value="both">Begge</option>
+        <label style="color:var(--muted)">Byggeretning<br><select id="stair-build-dir" onchange="_stairBuilderDir=this.value;_renderStairBuilderModal()" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px">
+          <option value="bottom"${_stairBuilderDir==='bottom'?' selected':''}>Nedenfra og opp</option>
+          <option value="top"${_stairBuilderDir==='top'?' selected':''}>Ovenfra og ned</option>
         </select></label>
-        <label style="color:var(--muted)">Reposdybde (cm)<br><input id="stair-landing-depth" type="number" value="120" min="30" max="300" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">CC-avstand (cm)<br><input id="stair-cc" type="number" value="8" min="3" max="10" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
       </div>
-      <div style="margin-top:10px;font-size:13px">
+
+      <!-- Segment list -->
+      <div style="margin-bottom:8px;font-size:12px;color:var(--muted);font-weight:600">SEGMENTER${_stairBuilderDir==='top'?' (topp → bunn)':' (bunn → topp)'}</div>
+      <div id="stair-builder-segs" style="margin-bottom:8px">${segListHtml}</div>
+
+      <!-- Add segment buttons -->
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <button onclick="_stairBuilderAddSeg('steps')" style="flex:1;padding:7px;border-radius:6px;border:1px dashed var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">＋ Trinn</button>
+        <button onclick="_stairBuilderAddSeg('landing')" style="flex:1;padding:7px;border-radius:6px;border:1px dashed var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">＋ Repos</button>
+      </div>
+
+      <!-- Side-view preview -->
+      <div style="background:var(--surface2);border:1px solid var(--brd);border-radius:8px;padding:10px;margin-bottom:12px;text-align:center">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Sidevisning</div>
+        ${previewSvg}
+      </div>
+
+      <!-- Stats -->
+      <div style="display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:12px;justify-content:center">
+        <span>📐 ${stats.totalSteps} trinn</span>
+        <span>📏 ${stats.totalHeight} cm høyde</span>
+        <span>📐 ${stats.totalDepth} cm dybde</span>
+        ${stats.landings > 0 ? `<span>⬜ ${stats.landings} repos</span>` : ''}
+      </div>
+
+      <!-- Cable product -->
+      <div style="margin-bottom:12px;font-size:13px">
         <label style="color:var(--muted)">Kabelprodukt<br><select id="stair-product" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px">${prodOpts}</select></label>
       </div>
-      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+
+      <!-- CC settings row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px;margin-bottom:14px">
+        <label style="color:var(--muted)">CC trinn (cm)<br><input id="stair-step-cc" type="number" value="8" min="3" max="10" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
+        <label style="color:var(--muted)">CC repos (cm)<br><input id="stair-landing-cc" type="number" value="8" min="3" max="10" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
+      </div>
+
+      <!-- Action buttons -->
+      <div style="display:flex;gap:8px;justify-content:flex-end">
         <button onclick="document.getElementById('stair-modal-bg').remove()" style="padding:8px 16px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:13px">Avbryt</button>
-        <button onclick="_confirmAddStair()" style="padding:8px 16px;border-radius:6px;border:none;background:#4ea8ff;color:#fff;cursor:pointer;font-size:13px;font-weight:600">Plasser trapp</button>
+        <button onclick="_confirmAddStair()" style="padding:8px 16px;border-radius:6px;border:none;background:#4ea8ff;color:#fff;cursor:pointer;font-size:13px;font-weight:600" ${segs.length===0?'disabled':''}>Plasser trapp</button>
       </div>
     </div>
   </div>`;
   document.body.insertAdjacentHTML('beforeend', html);
-  setTimeout(() => document.getElementById('stair-name').focus(), 50);
+  // Apply positioning styles programmatically (insertAdjacentHTML may strip style attr)
+  const modalBg = document.getElementById('stair-modal-bg');
+  if (modalBg) {
+    Object.assign(modalBg.style, {
+      position:'fixed', inset:'0', zIndex:'9999',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      background:'rgba(0,0,0,0.45)'
+    });
+  }
+  // Restore name if re-rendering
+  const nameEl = document.getElementById('stair-name');
+  if (nameEl && !nameEl.value) setTimeout(() => nameEl.focus(), 50);
+}
+
+function _stairBuilderUpd(segIdx, key, val) {
+  if (_stairBuilderSegs[segIdx]) {
+    _stairBuilderSegs[segIdx][key] = val;
+    _renderStairBuilderModal();
+  }
+}
+
+function _stairBuilderAddSeg(type) {
+  const lastSeg = _stairBuilderSegs[_stairBuilderSegs.length - 1];
+  const w = lastSeg ? lastSeg.width_cm : 120;
+  if (type === 'steps') {
+    _stairBuilderSegs.push({ type:'steps', width_cm:w, stepDepth_cm:30, stepHeight_cm:17, stepCount:4 });
+  } else {
+    _stairBuilderSegs.push({ type:'landing', width_cm:w, depth_cm:120 });
+  }
+  _renderStairBuilderModal();
+}
+
+function _stairBuilderRemoveSeg(idx) {
+  if (_stairBuilderSegs.length <= 1) return;
+  _stairBuilderSegs.splice(idx, 1);
+  _renderStairBuilderModal();
+}
+
+function _stairBuilderStats() {
+  let totalSteps = 0, totalHeight = 0, totalDepth = 0, landings = 0;
+  for (const seg of _stairBuilderSegs) {
+    if (seg.type === 'steps') {
+      totalSteps += seg.stepCount;
+      totalHeight += seg.stepCount * seg.stepHeight_cm;
+      totalDepth += seg.stepCount * seg.stepDepth_cm;
+    } else if (seg.type === 'landing') {
+      landings++;
+      totalDepth += seg.depth_cm;
+    }
+  }
+  return { totalSteps, totalHeight: Math.round(totalHeight), totalDepth: Math.round(totalDepth), landings };
+}
+
+function _stairBuilderPreviewSVG() {
+  const segs = _stairBuilderSegs;
+  if (!segs.length) return '<div style="height:60px;color:var(--muted);font-size:11px;display:flex;align-items:center;justify-content:center">Ingen segmenter</div>';
+
+  // Calculate total dimensions
+  let totalDepth = 0, totalHeight = 0;
+  for (const seg of segs) {
+    if (seg.type === 'steps') {
+      totalDepth += seg.stepCount * seg.stepDepth_cm;
+      totalHeight += seg.stepCount * seg.stepHeight_cm;
+    } else {
+      totalDepth += seg.depth_cm;
+    }
+  }
+  if (totalDepth === 0) return '';
+
+  const svgW = 440, svgH = 120;
+  const pad = 10;
+  const scaleX = (svgW - 2*pad) / totalDepth;
+  const scaleY = (svgH - 2*pad) / Math.max(totalHeight, 20);
+  const sc = Math.min(scaleX, scaleY);
+
+  let pathD = '';
+  let x = pad, y = svgH - pad;
+  // Build bottom-up: x goes right (depth), y goes up (height)
+  for (const seg of segs) {
+    if (seg.type === 'steps') {
+      for (let i = 0; i < seg.stepCount; i++) {
+        const dx = seg.stepDepth_cm * sc;
+        const dy = seg.stepHeight_cm * sc;
+        pathD += (pathD ? ' ' : 'M' + x + ',' + y + ' ') + `L${x},${y-dy} L${x+dx},${y-dy}`;
+        y -= dy;
+        x += dx;
+      }
+    } else {
+      const dx = seg.depth_cm * sc;
+      pathD += (pathD ? ' ' : 'M' + x + ',' + y + ' ') + `L${x+dx},${y}`;
+      x += dx;
+    }
+  }
+
+  return `<svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}" style="max-width:100%">
+    <path d="${pathD}" fill="none" stroke="var(--accent,#4ea8ff)" stroke-width="2" stroke-linejoin="round"/>
+  </svg>`;
 }
 
 function _confirmAddStair() {
+  const nameEl = document.getElementById('stair-name');
+  const prodEl = document.getElementById('stair-product');
+  const stepCCEl = document.getElementById('stair-step-cc');
+  const landingCCEl = document.getElementById('stair-landing-cc');
+
   const params = {
-    name: document.getElementById('stair-name').value.trim() || 'Trapp',
-    width_cm: +document.getElementById('stair-width').value || 120,
-    step_depth_cm: +document.getElementById('stair-depth').value || 30,
-    step_height_cm: +document.getElementById('stair-height').value || 17,
-    step_count: +document.getElementById('stair-count').value || 8,
-    landing_position: document.getElementById('stair-landing').value || 'none',
-    landing_depth_cm: +document.getElementById('stair-landing-depth').value || 120,
-    cableSpacing_cm: +document.getElementById('stair-cc').value || 8,
-    cableProductId: +document.getElementById('stair-product').value || null,
+    name: (nameEl ? nameEl.value.trim() : '') || 'Trapp',
+    segments: JSON.parse(JSON.stringify(_stairBuilderSegs)),
+    buildDirection: _stairBuilderDir,
+    stairType: 'straight',
+    stepCC_cm: stepCCEl ? (+stepCCEl.value || 8) : 8,
+    landingCC_cm: landingCCEl ? (+landingCCEl.value || 8) : 8,
+    cableProductId: prodEl ? (+prodEl.value || null) : null,
   };
-  document.getElementById('stair-modal-bg').remove();
+
+  // Also set legacy flat fields from first steps segment for backward compat
+  const firstSteps = params.segments.find(s => s.type === 'steps');
+  if (firstSteps) {
+    params.width_cm = firstSteps.width_cm;
+    params.step_depth_cm = firstSteps.stepDepth_cm;
+    params.step_height_cm = firstSteps.stepHeight_cm;
+    params.step_count = firstSteps.stepCount;
+  }
+
+  const bg = document.getElementById('stair-modal-bg');
+  if (bg) bg.remove();
   S.ui.stairPlaceMode = true;
   S.ui.stairPlaceParams = params;
   updHint(); render();
@@ -11992,6 +12567,8 @@ function _placeStairAt(wx, wy) {
   S.ui.stairPlaceParams = null;
   S.ui.selectedStairId = stair.id;
   renderSidebar(); updateCtxBar(); render();
+  // Auto-show proposals if cable products are available
+  setTimeout(() => showStairProposals(stair.id), 300);
 }
 
 // hideDrawToolbar and startDrawFromBar replaced by ctxbar — see abStartDraw()
@@ -16211,6 +16788,7 @@ function _ctxBarItems() {
         <span style="font-size:11px;padding:0 2px">${ccMm} mm</span>
         <button class="snap-chip" onclick="_stairSpacingDelta(10)" title="St\u00f8rre CC">\u27F7 +</button>
         <span class="tc-sep"></span>
+        <button class="snap-chip" onclick="showStairProposals(${ui.selectedStairId})" title="Generer kabelforslag">\u26A1 Forslag</button>
         <button class="snap-chip" onclick="_toggleStairView()" title="Bytt visning">\u{1F441} ${viewLabel}</button>
         <button class="snap-chip" onclick="deleteStair(${ui.selectedStairId})" title="Slett trapp">\u{1F5D1} Slett</button>`;
     }
@@ -16555,7 +17133,7 @@ function _buildSaveData() {
     zones    : S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     mats     : S.mats.map(m=>({...m})),
     plates   : S.plates.map(p=>({...p})),
-    stairs   : S.stairs.map(s=>({...s, surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c}))})),
+    stairs   : S.stairs.map(s=>({...s, segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c}))})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -16731,6 +17309,8 @@ function _restoreProject(data) {
   S.mats      = data.mats      || [];
   S.plates    = data.plates    || [];
   S.stairs    = data.stairs    || [];
+  // Migrate legacy flat-field stairs to segment-based model
+  for (const st of S.stairs) _migrateStairToSegments(st);
   S.counters  = data.counters  || S.counters;
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   if (!S.counters.nextCableId) S.counters.nextCableId = 1;

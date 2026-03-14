@@ -1,5 +1,25 @@
 # Romtegner Project History
 
+## 2026-03-14: Stair module upgrade — segment builder + auto-proposals (Phase 1-2)
+- **Segment-based stair model:** Stairs now use `segments[]` array instead of flat fields. Supports arbitrary combinations of steps and landings (e.g., 8 trinn → Repos → 5 trinn)
+- **Stair builder modal:** New `showStairBuilderModal()` replaces old `showAddStairModal()`. Wizard-style UI with segment cards, live side-view SVG preview, stats summary, separate CC for steps/landings
+- **Migration function:** `_migrateStairToSegments(stair)` converts legacy flat-field stairs to segment arrays. Called automatically in `_restoreProject()` for backward compatibility
+- **Updated `_createStairObj`:** Accepts segment-based params, calls migration if needed, populates new fields (riserOffset, noseOffset, stepCC, landingCC)
+- **Updated `_generateStairSurfaces`:** Iterates `stair.segments[]` to build surface array with per-surface width/depth
+- **Updated `generateStairCable`:** Uses riserOffset/noseOffset for usable tread depth, separate stepCC/landingCC, per-surface width
+- **Updated `_drawStairSide`:** Now uses `stair.surfaces` instead of legacy flat fields. Correctly renders multi-segment stairs with landings
+- **Fixed step labels:** `_drawStairPlan` uses `surf.stepIdx` instead of `surf.index` (was showing "undefined")
+- **Updated sidebar:** Shows segment breakdown ("6 trinn → Repos → 5 trinn, 120cm")
+- **Updated `_buildSaveData`:** Deep-copies segments array for save/restore
+- **Auto-proposal engine:** `_generateStairProposals(stair)` generates 1-2 scored proposals
+  - `_stairCableLength()` — precise cable length calculation for given runs/CC
+  - `_selectStairCableProducts()` — finds best matching cable product
+  - `_scoreStairProposal()` — scoring based on CC range, power density, waste, cable count
+  - Tries CC values 4-10cm, finds optimal runs per step for each
+- **Proposal comparison panel:** `_renderStairProposalPanel()` shows side-by-side cards with stats, "★ Anbefalt" badge, "Bruk dette forslaget" buttons
+- **Auto-proposals on placement:** After placing a stair, proposals auto-show if cable products are available
+- **⚡ Forslag button:** Added to stair ctxbar for manual re-generation
+
 ## 2026-03-14: Auto-fill algoritme-forbedringer
 - **Bredere beam search:** Økt fra 5 til 12 kandidater for bedre utforsking av breddekombinasjoner
 - **Gap-packing post-pass:** Ny `_gapPackDefs()` — etter hovedfylling skannes restgap og fylles med ekstra smale striper
