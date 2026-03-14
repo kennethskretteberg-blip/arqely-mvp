@@ -3453,11 +3453,37 @@ function _bestMixedWidthFit(availableCm, sortedProds, gap) {
   }
   const combo3Coverage = combo3Strips.reduce((s, w) => s + w.nc, 0);
 
+  // Strategy 4: Exhaustive search for small strip counts (N=2..7)
+  // Tries all width combinations at each N, picks best total coverage
+  let exhaustBest = { strips: [], coverage: 0 };
+  const maxN = Math.min(7, Math.floor(availableCm / (widths[widths.length - 1].nc + gap)) + 1);
+  if (maxN >= 2 && widths.length >= 2) {
+    // Try all combinations for N=2..maxN using DFS with pruning
+    let _exIter = 0;
+    const _exSearch = (n, rem, chosen) => {
+      if (++_exIter > 50000) return; // safety limit
+      if (n === 0) {
+        const cov = chosen.reduce((s, w) => s + w.nc, 0);
+        if (cov > exhaustBest.coverage) exhaustBest = { strips: chosen.slice(), coverage: cov };
+        return;
+      }
+      for (const w of widths) {
+        if (w.nc > rem + 0.01) continue;
+        chosen.push({ id: w.id, nc: w.nc });
+        _exSearch(n - 1, rem - w.nc - gap, chosen);
+        chosen.pop();
+        if (_exIter > 50000) return;
+      }
+    };
+    for (let n = 2; n <= maxN && _exIter <= 50000; n++) _exSearch(n, availableCm, []);
+  }
+
   // Pick best strategy
   const candidates = [
     { strips: equalFit ? equalFit.strips : [], coverage: equalScore, label: 'equal' },
     { strips: greedyStrips, coverage: greedyCoverage, label: 'greedy' },
-    { strips: combo3Strips, coverage: combo3Coverage, label: 'combo' }
+    { strips: combo3Strips, coverage: combo3Coverage, label: 'combo' },
+    { strips: exhaustBest.strips, coverage: exhaustBest.coverage, label: 'exhaust' }
   ];
 
   // Score: coverage / available - penalty for strip count variance (prefer uniform)
@@ -3757,6 +3783,63 @@ function _centerStripDefs(defs, room, direction) {
 
 // ── Auto-Fill Both Directions ──────────────────────────────────────
 // Returns { h: { defs, stats }, v: { defs, stats } } for comparison UI.
+/** Gap-packing post-pass: find unused gaps in a layout and try to fit additional strips.
+ *  Scans for spaces between existing strips (and between strips and walls)
+ *  where a product could fit. Returns augmented defs array. */
+function _gapPackDefs(defs, room, sortedProds, direction) {
+  if (!defs.length || !sortedProds.length) return defs;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP    = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+  const basePos = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const baseMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+
+  // Get product widths, narrowest first for gap-packing
+  const prodWidths = sortedProds.map(p => ({
+    id: p.id, nc: (p.netto_width_mm || p.width_mm) / 10
+  })).filter(w => w.nc > 0).sort((a, b) => a.nc - b.nc);
+
+  // Sort existing strips by pos_cm
+  const strips = defs.slice().sort((a, b) => a.pos_cm - b.pos_cm);
+
+  // Build list of gaps (free regions along the across-axis)
+  const gaps = [];
+  let prev = basePos + MARGIN;
+  for (const s of strips) {
+    const p = HEATING_PRODUCTS.find(pp => pp.id === s.productId);
+    const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+    const stripStart = s.pos_cm;
+    const gapSize = stripStart - GAP - prev;
+    if (gapSize > 0) gaps.push({ from: prev, to: stripStart - GAP, size: gapSize });
+    prev = s.pos_cm + nc + GAP;
+  }
+  // Gap after last strip to wall
+  const lastGap = baseMax - MARGIN - prev;
+  if (lastGap > 0) gaps.push({ from: prev, to: baseMax - MARGIN, size: lastGap });
+
+  // Try to fit products in each gap (widest that fits)
+  const newDefs = defs.slice();
+  for (const gap of gaps) {
+    // Find widest product that fits in this gap
+    let bestProd = null;
+    for (let i = prodWidths.length - 1; i >= 0; i--) {
+      if (prodWidths[i].nc <= gap.size + 0.01) { bestProd = prodWidths[i]; break; }
+    }
+    if (!bestProd) continue;
+
+    // Center the strip in the gap
+    const pos = gap.from + (gap.size - bestProd.nc) / 2;
+    const segs = computeClippedSegments(room.id, direction, pos, bestProd.id);
+    for (const seg of segs) {
+      if (seg.length_cm >= 20) {
+        newDefs.push({ roomId: room.id, productId: bestProd.id, direction,
+          pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
+      }
+    }
+  }
+  return newDefs;
+}
+
 function _autoFillBothDirections(room, sortedProds) {
   const score = defs => {
     if (!defs.length) return 0;
@@ -3770,9 +3853,9 @@ function _autoFillBothDirections(room, sortedProds) {
       widthSet.add(nc);
       if (st.length_cm < 50) shortPenalty += (50 - st.length_cm) * nc * 0.5;
     }
-    const stripCountPenalty = defs.length * 200;
-    const widthDiversityPenalty = (widthSet.size - 1) * 500;
-    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.02 : 0;
+    const stripCountPenalty = defs.length * 50;
+    const widthDiversityPenalty = (widthSet.size - 1) * 100;
+    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.01 : 0;
     return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
   };
 
@@ -3793,6 +3876,10 @@ function _autoFillBothDirections(room, sortedProds) {
       if (score(zone) > score(best)) best = zone;
       if (score(obs) > score(best)) best = obs;
     }
+
+    // Gap-packing post-pass: try to fill remaining gaps with extra strips
+    const packed = _gapPackDefs(best, room, sortedProds, dir);
+    if (score(packed) > score(best)) best = packed;
 
     // Apply cold-zone-to-walls shift
     best = _centerStripDefs(best, room, dir);
@@ -4204,7 +4291,7 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) 
  *  Instead of greedy widest-first, keeps top-K partial layouts at each column
  *  and branches on each available product width. Returns best layout (defs[]). */
 function _beamSearchFill(room, sortedProds, direction, beamWidth) {
-  beamWidth = beamWidth || 5;
+  beamWidth = beamWidth || 12;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
   const GAP    = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
@@ -4226,11 +4313,11 @@ function _beamSearchFill(room, sortedProds, direction, beamWidth) {
   if (!prods.length) return [];
   const smallestNc = Math.min(...prods.map(p => p.nc));
 
-  // Score a beam: primary = coverage area, penalize strip count + width diversity
+  // Score a beam: maximize coverage, lightly penalize complexity
   function _scoreBeam(b) {
-    const widthPenalty = (b.widthCount > 1) ? (b.widthCount - 1) * 200 : 0;
-    const uniformBonus = (b.widthCount <= 1 && b.cols > 0) ? b.area * 0.02 : 0;
-    return b.area - b.cols * 5 - widthPenalty + uniformBonus;
+    const widthPenalty = (b.widthCount > 1) ? (b.widthCount - 1) * 50 : 0;
+    const uniformBonus = (b.widthCount <= 1 && b.cols > 0) ? b.area * 0.01 : 0;
+    return b.area - b.cols * 2 - widthPenalty + uniformBonus;
   }
 
   // Initial beam: cursor at left margin, no strips yet
@@ -5161,7 +5248,8 @@ function startManualPlace(familyName, categoryId) {
 function renderManualPalette() {
   const { manualFamilyName, manualCategoryId } = S.ui;
   const prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === manualCategoryId && p.active !== false && p.name.startsWith(manualFamilyName))
+    .filter(p => p.category_id === manualCategoryId && p.active !== false &&
+      (p.product_family ? p.product_family === manualFamilyName : p.name.startsWith(manualFamilyName)))
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
 
   const items = prods.map(p => {
@@ -5340,7 +5428,8 @@ function renderSemiAutoPalette() {
   const done = remaining < 2;
   const { manualFamilyName, manualCategoryId } = S.ui;
   const prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === manualCategoryId && p.active !== false && p.name.startsWith(manualFamilyName))
+    .filter(p => p.category_id === manualCategoryId && p.active !== false &&
+      (p.product_family ? p.product_family === manualFamilyName : p.name.startsWith(manualFamilyName)))
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
 
   const remTxt = done
