@@ -141,6 +141,15 @@ Creation methods:
 
 Room geometry uses room-local coordinates.
 
+**Fundamental rule — interior dimensions:**
+All rooms are drawn according to interior (innvendig) dimensions.
+`room.points` defines the **interior boundary** of the room.
+`room.area` IS the usable interior floor area.
+Wall thickness extends **outward** from `room.points`, never inward.
+`computeWallOutline()` builds walls outward using perpendicular normal vectors.
+`_calcNetArea(room)` returns interior area minus obstacle areas only — wall thickness is never subtracted.
+This rule must be respected by all current and future code that touches room geometry or area calculations.
+
 ---
 
 # Background Drawings

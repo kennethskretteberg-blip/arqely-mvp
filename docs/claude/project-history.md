@@ -422,3 +422,38 @@
 - `_fetchProjectList()` — JSONB-ekstraksjon for deler-antall via `data->project->parts`
 - `_renderProjectList()` — tabell-basert rendering med sortering
 - `_toggleProjectSort()`, `_confirmDeleteProject()`, `_openCloudProject()`
+
+## 2026-03-14: UX redesign — 3-nivå sidebar, kompakte rom, detaljpanel
+- Commit: `e9cb8bd`
+
+### Sidebar 3-nivå struktur
+- **Nivå 1:** Modulnavigasjon (Dashboard + planleggingsmoduler)
+- **Nivå 2:** Etasje/rom-tre med kompakte rom-elementer
+- **Nivå 3:** Detaljpanel for valgt rom (vegger, strips, kabler, hindringer)
+- Inline "+" knapper erstatter full-bredde blokkknapper
+- Romsøk synlig ved 5+ rom (`_filterSidebarRooms()`)
+
+### Kompakte rom-elementer
+- Én-linje rom med romtype-ikon, navn, areal og statusdot
+- `_roomStatus(room)` — beregner status (tom/delvis/ferdig/problem)
+- `_roomTypeIcon(room)` — emoji-ikon fra ROOM_TYPES
+- Detaljinnhold (vegger, strips, etc.) flyttet til detaljpanel
+
+### Detaljpanel
+- `_renderDetailPanel(roomId)` — komplett romoversikt
+- Kollapserbare seksjoner for vegger, varmeelementer, hindringer
+- Romhandlinger: romtype-dropdown, W/m²-input, dupliser, slett
+
+### Veggtykkelse — fundamental fix
+- **`computeWallOutline()` windFlip invertert:** `signedArea2 < 0 ? 1 : -1`
+- Vegger bygger nå UTOVER fra innvendig romgrense (ikke innover)
+- `_calcNetArea()` beregner innvendig areal minus hindringer — veggtykkelse trekkes aldri fra
+- **Grunnleggende regel:** `room.points` = innvendig grense, `room.area` = brukbart gulvareal
+- CLAUDE.md oppdatert med denne regelen
+
+### Beam search — foretrekker like bredder
+- `_scoreBeam()` penaliserer breddediversitet (200 cm² per ekstra bredde)
+- Uniform bredde-bonus (+2% av areal) når alle strips har lik bredde
+- Beam-state tracker `widths` (Set) og `widthCount` gjennom søket
+- Final sort bruker færrest unike bredder som tiebreaker
+- **Resultat:** 120+120 velges over 140+100 ved lik dekning
