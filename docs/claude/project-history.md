@@ -1,5 +1,29 @@
 # Romtegner Project History
 
+## 2026-03-14: InSnow outdoor cable products + cable direction fix
+
+### InSnow outdoor cable products added
+- **New product category:** "Varmekabel utendørs" (id: 5, module_type: cable) in Supabase
+- **104 InSnow products** inserted into Supabase `heating_products` table via service role key:
+  - InSnow 20T 230V: 17 variants (370W–3440W, 18.2m–170.9m)
+  - InSnow 30T 230V: 19 variants (150W–4200W, 5m–139.9m) — includes el_no
+  - InSnow 40T 230V: 17 variants (515W–4820W, 13.1m–121.9m)
+  - InSnow 20T 400V: 17 variants (640W–5960W, 31.9m–298.3m)
+  - InSnow 30T 400V: 17 variants (800W–7300W, 25.5m–243.5m)
+  - InSnow 40T 400V: 17 variants (900W–8300W, 22.7m–214.2m)
+- **Local fallback:** `_ensureOutdoorCableProducts()` injects same data when Supabase unavailable
+- **Supplier:** All products set to "Cenika AS"
+- **Source:** 6 PDF datasheets (CVA InSnow 20T/30T/40T × 230V/400V)
+
+### Stair cable direction fixed
+- **Bug:** Cable runs were going along depth (front-to-back on each step) — wrong direction
+- **Fix:** Cable now runs **side-to-side across stair width** (left edge → right edge)
+  - `generateStairCable()`: `pos_cm` = Y-position along depth, `segments` = X-range across width
+  - `_drawStairPlan()`: Rendering swapped to draw horizontal runs with U-turns at left/right edges
+  - `_stairCableLength()`: Run length = usable width, runs distributed along usable depth
+  - `_generateStairProposals()`: runsPerStep computed from `treadD` (depth) not `treadW` (width)
+  - Connection lines between surfaces drawn at correct exit side (left/right based on run count)
+
 ## 2026-03-14: Stair module upgrade — segment builder + auto-proposals (Phase 1-2)
 - **Segment-based stair model:** Stairs now use `segments[]` array instead of flat fields. Supports arbitrary combinations of steps and landings (e.g., 8 trinn → Repos → 5 trinn)
 - **Stair builder modal:** New `showStairBuilderModal()` replaces old `showAddStairModal()`. Wizard-style UI with segment cards, live side-view SVG preview, stats summary, separate CC for steps/landings

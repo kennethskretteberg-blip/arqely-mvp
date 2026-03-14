@@ -6827,24 +6827,27 @@ function _drawStairPlan(stair) {
       for (let ri = 0; ri < surfRuns.length; ri++) {
         const run = surfRuns[ri];
         for (const seg of run.segments) {
-          // Cable runs along depth (Y), position across width (X)
-          const a = w2s(ox + run.pos_cm, oy + surf.y_cm + seg.start_cm);
-          const b = w2s(ox + run.pos_cm, oy + surf.y_cm + seg.end_cm);
+          // Cable runs side-to-side (X), position along depth (Y)
+          const a = w2s(ox + surf.x_cm + seg.start_cm, oy + surf.y_cm + run.pos_cm);
+          const b = w2s(ox + surf.x_cm + seg.end_cm,   oy + surf.y_cm + run.pos_cm);
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
         }
-        // U-turn arc to next run
+        // U-turn arc to next run (at left or right edge, alternating)
         if (ri < surfRuns.length - 1) {
           const nextRun = surfRuns[ri + 1];
-          const isHigh = (ri % 2 === 0); // alternating ends
-          const yEnd = isHigh ? surf.y_cm + surf.d_cm - (stair.edgeMargin_cm || 3) : surf.y_cm + (stair.edgeMargin_cm || 3);
-          const cx1 = run.pos_cm, cx2 = nextRun.pos_cm;
-          const midX = (cx1 + cx2) / 2;
-          const radius = Math.abs(cx2 - cx1) / 2;
-          const ctr = w2s(ox + midX, oy + yEnd);
+          const atRight = (ri % 2 === 0); // first run enters left→right, U-turn at right edge
+          const xEdge = atRight
+            ? surf.x_cm + (surf.w_cm || stair.width_cm || 120) - (stair.edgeMargin_cm || 3)
+            : surf.x_cm + (stair.edgeMargin_cm || 3);
+          const cy1 = run.pos_cm, cy2 = nextRun.pos_cm;
+          const midY = (cy1 + cy2) / 2;
+          const radius = Math.abs(cy2 - cy1) / 2;
+          const ctr = w2s(ox + xEdge, oy + surf.y_cm + midY);
           const rPx = radius * S.view.zoom * BASE_SCALE;
           if (rPx > 0.5) {
             ctx.beginPath();
-            const startAngle = isHigh ? 0 : Math.PI;
+            // Arc at right edge: half-circle opening right; at left: opening left
+            const startAngle = atRight ? -Math.PI/2 : Math.PI/2;
             ctx.arc(ctr.x, ctr.y, rPx, startAngle, startAngle + Math.PI);
             ctx.stroke();
           }
@@ -6859,16 +6862,22 @@ function _drawStairPlan(stair) {
         const fromSurf = surfs[conn.fromSurf];
         const toSurf = surfs[conn.toSurf];
         if (!fromSurf || !toSurf) continue;
-        // Connection at the last run's end position
         const fromRuns = runsBySurf[conn.fromSurf] || [];
         const toRuns = runsBySurf[conn.toSurf] || [];
         if (fromRuns.length && toRuns.length) {
-          const lastRun = fromRuns[fromRuns.length - 1];
-          const firstRun = toRuns[0];
+          const lastFromRun = fromRuns[fromRuns.length - 1];
+          const firstToRun = toRuns[0];
+          // Exit side of last run on previous surface
+          const nFrom = fromRuns.length;
+          const exitRight = (nFrom % 2 === 1); // odd number of runs → exits right
+          const exitX = exitRight
+            ? fromSurf.x_cm + (fromSurf.w_cm || stair.width_cm || 120) - (stair.edgeMargin_cm || 3)
+            : fromSurf.x_cm + (stair.edgeMargin_cm || 3);
+          const entryX = exitX; // enters next surface on same side
           const fromY = fromSurf.y_cm + fromSurf.d_cm;
           const toY = toSurf.y_cm;
-          const a = w2s(ox + lastRun.pos_cm, oy + fromY);
-          const b = w2s(ox + firstRun.pos_cm, oy + toY);
+          const a = w2s(ox + exitX, oy + fromY);
+          const b = w2s(ox + entryX, oy + toY);
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
         }
       }
@@ -7838,6 +7847,11 @@ const STAIR_MAX_CC_CM = 10;
 const STAIR_MIN_DENSITY_WM2 = 300;
 
 function generateStairCable(stair) {
+  // Cable runs SIDE-TO-SIDE across stair width (X-axis).
+  // Multiple runs per tread are distributed along the depth (Y-axis) with CC spacing.
+  // run.pos_cm = Y-position along depth (from surface top edge)
+  // run.segments[].start_cm / end_cm = X-range across width (left→right)
+  // U-turns connect adjacent runs at left/right edges.
   const surfs = stair.surfaces;
   if (!surfs || !surfs.length) return { runs:[], connections:[], totalCableLength_cm:0 };
   const edgeMargin = stair.edgeMargin_cm || 3;
@@ -7847,7 +7861,7 @@ function generateStairCable(stair) {
   const allRuns = [];
   const connections = [];
   let totalLen = 0;
-  let prevLastHigh = false;
+  let prevExitRight = false; // track which side cable exits for connection to next surface
 
   for (let si = 0; si < surfs.length; si++) {
     const surf = surfs[si];
@@ -7855,37 +7869,39 @@ function generateStairCable(stair) {
     const cc = Math.min(isLanding ? (stair.landingCC_cm || stair.cableSpacing_cm || 8)
                                   : (stair.stepCC_cm || stair.cableSpacing_cm || 8), STAIR_MAX_CC_CM);
 
-    // Usable depth: for treads apply riser/nose offset, for landings use edge margin
-    const segStart = isLanding ? edgeMargin : noseOff;
-    const segEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
-    if (segEnd <= segStart + 0.5) continue;
+    // Usable depth (Y): for treads apply riser/nose offset, for landings use edge margin
+    const depthStart = isLanding ? edgeMargin : noseOff;
+    const depthEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
+    const usableDepth = depthEnd - depthStart;
+    if (usableDepth < 0.5) continue;
 
-    // Usable width for cable runs across the step/landing
+    // Usable width (X) for each cable run
     const surfW = surf.w_cm || stair.width_cm || 120;
-    const availW = surfW - 2 * edgeMargin;
-    if (availW <= 0) continue;
+    const xStart = edgeMargin;
+    const xEnd = surfW - edgeMargin;
+    const runLength = xEnd - xStart;
+    if (runLength <= 0) continue;
 
-    const N = Math.max(1, Math.floor(availW / cc) + 1);
-    const actualCC = N > 1 ? availW / (N - 1) : 0;
-    const sideMargin = N > 1 ? (surfW - (N - 1) * actualCC) / 2 : surfW / 2;
-
-    const startHigh = (si === 0) ? false : prevLastHigh;
+    // Number of runs along depth, spaced by CC
+    const N = Math.max(1, Math.floor(usableDepth / cc) + 1);
+    const actualCC = N > 1 ? usableDepth / (N - 1) : 0;
 
     for (let ri = 0; ri < N; ri++) {
-      const pos = sideMargin + ri * actualCC;
-      allRuns.push({ surfaceIdx: si, pos_cm: pos, segments: [{ start_cm: segStart, end_cm: segEnd }] });
-      totalLen += (segEnd - segStart);
-      if (ri < N - 1) totalLen += Math.PI * actualCC / 2;
+      const pos = depthStart + ri * actualCC;
+      allRuns.push({ surfaceIdx: si, pos_cm: pos, segments: [{ start_cm: xStart, end_cm: xEnd }] });
+      totalLen += runLength;
+      if (ri < N - 1) totalLen += Math.PI * actualCC / 2; // U-turn at edge
     }
 
-    const lastEven = ((N - 1) % 2 === 0);
-    prevLastHigh = startHigh ? lastEven : !lastEven;
+    // Track exit side: first run enters from left (or continues from prev), alternates per run
+    const exitRight = (N % 2 === 1) ? !prevExitRight : prevExitRight;
 
     if (si < surfs.length - 1) {
       const connLen = surf.stepHeight_cm || stair.step_height_cm || 17;
-      connections.push({ fromSurf: si, toSurf: si + 1, length_cm: connLen });
+      connections.push({ fromSurf: si, toSurf: si + 1, length_cm: connLen, exitRight });
       totalLen += connLen;
     }
+    prevExitRight = exitRight;
   }
 
   return { runs: allRuns, connections, totalCableLength_cm: Math.round(totalLen * 10) / 10 };
@@ -7898,6 +7914,7 @@ function generateStairCable(stair) {
  * Returns total cable length in cm based on actual geometry.
  */
 function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
+  // Cable runs side-to-side across width (X). Multiple runs distributed along depth (Y) with CC.
   const surfs = stair.surfaces;
   if (!surfs || !surfs.length) return 0;
   const riserOff = stair.riserOffset_cm ?? 2;
@@ -7909,27 +7926,28 @@ function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
     const isLanding = (surf.type === 'landing');
     const cc = isLanding ? landingCC : stepCC;
 
-    const segStart = isLanding ? edgeMargin : noseOff;
-    const segEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
-    if (segEnd <= segStart + 0.5) continue;
-    const usableDepth = segEnd - segStart;
+    // Usable depth (Y) — determines how many runs fit
+    const depthStart = isLanding ? edgeMargin : noseOff;
+    const depthEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
+    const usableDepth = depthEnd - depthStart;
+    if (usableDepth < 0.5) continue;
 
+    // Usable width (X) — each run spans this distance
     const surfW = surf.w_cm || stair.width_cm || 120;
-    const availW = surfW - 2 * edgeMargin;
-    if (availW <= 0) continue;
+    const runLength = surfW - 2 * edgeMargin;
+    if (runLength <= 0) continue;
 
-    // For treads: use runsPerStep; for landings: compute runs from landingCC
+    // Number of runs along depth, spaced by CC
     let N;
     if (!isLanding) {
       N = runsPerStep;
     } else {
-      N = Math.max(1, Math.floor(availW / cc) + 1);
+      N = Math.max(1, Math.floor(usableDepth / cc) + 1);
     }
-    const actualCC = N > 1 ? availW / (N - 1) : 0;
+    const actualCC = N > 1 ? usableDepth / (N - 1) : 0;
 
-    // Cable runs: N runs × usable depth
-    totalLen += N * usableDepth;
-    // U-turns: (N-1) half-circle turns
+    // Cable: N runs × width + (N-1) U-turns at edges
+    totalLen += N * runLength;
     if (N > 1) totalLen += (N - 1) * Math.PI * actualCC / 2;
 
     // Step-over connection to next surface
@@ -8056,13 +8074,14 @@ function _generateStairProposals(stair) {
   const candidates = [];
 
   // Try different CC values (target range: 4-10cm in 0.5cm steps)
-  // For each CC, compute runs per step = floor(availW / cc) + 1
+  // Runs distributed along depth (Y), CC = spacing between runs
+  // For each CC, compute runs per step = floor(usableDepth / cc) + 1
   const ccValues = [];
   for (let cc = 4; cc <= STAIR_MAX_CC_CM; cc += 0.5) ccValues.push(cc);
 
   for (const targetCC of ccValues) {
-    const runsPerStep = Math.max(2, Math.floor(treadW / targetCC) + 1);
-    const actualCC = runsPerStep > 1 ? treadW / (runsPerStep - 1) : treadW;
+    const runsPerStep = Math.max(2, Math.floor(treadD / targetCC) + 1);
+    const actualCC = runsPerStep > 1 ? treadD / (runsPerStep - 1) : treadD;
     if (actualCC < 3 || actualCC > STAIR_MAX_CC_CM + 0.5) continue;
 
     // Landing CC: same as step CC
@@ -18521,11 +18540,13 @@ async function initSupabase() {
     }
     console.log(`Romtegner: lastet ${HEATING_PRODUCTS.length} produkter, ${PRODUCT_CATEGORIES.length} kategorier fra Supabase`);
     _ensureCableTestProducts();
+    _ensureOutdoorCableProducts();
     _ensureMatTestProducts();
     _ensurePlateTestProducts();
   } catch(err) {
     console.warn('Supabase ikke tilgjengelig, fortsetter uten produktdata:', err.message);
     _ensureCableTestProducts();
+    _ensureOutdoorCableProducts();
     _ensureMatTestProducts();
     _ensurePlateTestProducts();
   }
@@ -19401,6 +19422,159 @@ function _ensureCableTestProducts() {
     min_gap_mm: 10, min_wall_margin_mm: 50
   });
   console.log('Romtegner: injiserte test-kabelprodukter (ingen cable-produkter i DB)');
+}
+
+/** Inject CVA InSnow outdoor heating cable products if not already in DB */
+function _ensureOutdoorCableProducts() {
+  // Check if outdoor category already exists
+  let outdoorCat = PRODUCT_CATEGORIES.find(c => c.name === 'Varmekabel utendørs');
+  if (!outdoorCat) {
+    // Check if any InSnow products already loaded from DB
+    const hasInSnow = HEATING_PRODUCTS.some(p => p.article_no && p.article_no.startsWith('CVA103'));
+    if (hasInSnow) return; // Already in DB
+    const catId = 9600;
+    PRODUCT_CATEGORIES.push({
+      id: catId, name: 'Varmekabel utendørs', module_type: 'cable',
+      sort_order: 150, active: true
+    });
+    outdoorCat = PRODUCT_CATEGORIES.find(c => c.id === catId);
+  } else {
+    // Category exists — check if products already loaded
+    const hasProds = HEATING_PRODUCTS.some(p => p.category_id === outdoorCat.id && p.active !== false);
+    if (hasProds) return;
+  }
+  const catId = outdoorCat.id;
+  let sortIdx = 0;
+  const add = (art, name, wpm, lengthM, effW, voltage, elNo) => {
+    HEATING_PRODUCTS.push({
+      id: 96000 + (++sortIdx), category_id: catId, article_no: art, name,
+      active: true, sort_order: sortIdx, supplier: 'Cenika AS',
+      product_family: name.split(' ').slice(0, 2).join(' '),
+      watt_per_m: wpm, cable_length_m: lengthM, total_effect_w: effW,
+      voltage: voltage,
+      min_spacing_mm: 60, max_spacing_mm: 200, recommended_spacing_mm: 100,
+      min_bend_radius_mm: 36, max_length_m: lengthM,
+      min_gap_mm: 10, min_wall_margin_mm: 50
+    });
+  };
+
+  // ── InSnow 20T 230V (20 W/m) ──
+  add('CVA10340', 'InSnow 20T 370W 18.2m',  20, 18.2,  370, 230, null);
+  add('CVA10341', 'InSnow 20T 490W 24.5m',  20, 24.5,  490, 230, null);
+  add('CVA10342', 'InSnow 20T 610W 30.8m',  20, 30.8,  610, 230, null);
+  add('CVA10343', 'InSnow 20T 735W 36.7m',  20, 36.7,  735, 230, null);
+  add('CVA10344', 'InSnow 20T 850W 43.2m',  20, 43.2,  850, 230, null);
+  add('CVA10345', 'InSnow 20T 980W 49.1m',  20, 49.1,  980, 230, null);
+  add('CVA10346', 'InSnow 20T 1100W 55.3m', 20, 55.3, 1100, 230, null);
+  add('CVA10347', 'InSnow 20T 1220W 61.1m', 20, 61.1, 1220, 230, null);
+  add('CVA10348', 'InSnow 20T 1350W 67.6m', 20, 67.6, 1350, 230, null);
+  add('CVA10349', 'InSnow 20T 1470W 73.4m', 20, 73.4, 1470, 230, null);
+  add('CVA10350', 'InSnow 20T 1710W 85.9m', 20, 85.9, 1710, 230, null);
+  add('CVA10351', 'InSnow 20T 1950W 96.9m', 20, 96.9, 1950, 230, null);
+  add('CVA10352', 'InSnow 20T 2200W 109.3m',20,109.3, 2200, 230, null);
+  add('CVA10353', 'InSnow 20T 2430W 120.9m',20,120.9, 2430, 230, null);
+  add('CVA10354', 'InSnow 20T 2660W 132.6m',20,132.6, 2660, 230, null);
+  add('CVA10355', 'InSnow 20T 3100W 155.1m',20,155.1, 3100, 230, null);
+  add('CVA10356', 'InSnow 20T 3440W 170.9m',20,170.9, 3440, 230, null);
+
+  // ── InSnow 30T 230V (30 W/m) ──
+  add('CVA10300', 'InSnow 30T 150W 5m',     30,   5,   150, 230, '1005753');
+  add('CVA10301', 'InSnow 30T 300W 10m',    30,  10,   300, 230, '1005754');
+  add('CVA10302', 'InSnow 30T 450W 15m',    30,  15,   450, 230, '1019133');
+  add('CVA10303', 'InSnow 30T 600W 20m',    30,  20,   600, 230, '1019134');
+  add('CVA10304', 'InSnow 30T 750W 25m',    30,  25,   750, 230, '1019135');
+  add('CVA10305', 'InSnow 30T 900W 30m',    30,  30,   900, 230, '1019136');
+  add('CVA10306', 'InSnow 30T 1050W 35m',   30,  35,  1050, 230, '1019137');
+  add('CVA10307', 'InSnow 30T 1200W 40.1m', 30, 40.1, 1200, 230, '1019138');
+  add('CVA10308', 'InSnow 30T 1350W 45m',   30,  45,  1350, 230, '1019139');
+  add('CVA10309', 'InSnow 30T 1490W 49.7m', 30, 49.7, 1490, 230, '1019140');
+  add('CVA10310', 'InSnow 30T 1660W 55.3m', 30, 55.3, 1660, 230, '1019141');
+  add('CVA10311', 'InSnow 30T 1800W 60m',   30,  60,  1800, 230, '1019142');
+  add('CVA10312', 'InSnow 30T 2100W 70m',   30,  70,  2100, 230, '1019143');
+  add('CVA10313', 'InSnow 30T 2360W 78.7m', 30, 78.7, 2360, 230, '1019144');
+  add('CVA10314', 'InSnow 30T 2675W 89.1m', 30, 89.1, 2675, 230, '1019145');
+  add('CVA10315', 'InSnow 30T 2940W 98m',   30,  98,  2940, 230, '1019146');
+  add('CVA10316', 'InSnow 30T 3210W 106.9m',30,106.9, 3210, 230, '1019147');
+  add('CVA10317', 'InSnow 30T 3850W 128.2m',30,128.2, 3850, 230, '1019148');
+  add('CVA10318', 'InSnow 30T 4200W 139.9m',30,139.9, 4200, 230, '1019149');
+
+  // ── InSnow 40T 230V (40 W/m) ──
+  add('CVA10720', 'InSnow 40T 515W 13.1m',  40, 13.1,  515, 230, null);
+  add('CVA10721', 'InSnow 40T 690W 17.4m',  40, 17.4,  690, 230, null);
+  add('CVA10722', 'InSnow 40T 860W 21.8m',  40, 21.8,  860, 230, null);
+  add('CVA10723', 'InSnow 40T 1030W 26.2m', 40, 26.2, 1030, 230, null);
+  add('CVA10724', 'InSnow 40T 1200W 30.6m', 40, 30.6, 1200, 230, null);
+  add('CVA10725', 'InSnow 40T 1380W 34.8m', 40, 34.8, 1380, 230, null);
+  add('CVA10726', 'InSnow 40T 1550W 39.2m', 40, 39.2, 1550, 230, null);
+  add('CVA10727', 'InSnow 40T 1710W 43.6m', 40, 43.6, 1710, 230, null);
+  add('CVA10728', 'InSnow 40T 1900W 48m',   40,  48,  1900, 230, null);
+  add('CVA10729', 'InSnow 40T 2060W 52.4m', 40, 52.4, 2060, 230, null);
+  add('CVA10730', 'InSnow 40T 2410W 61m',   40,  61,  2410, 230, null);
+  add('CVA10731', 'InSnow 40T 2730W 69.2m', 40, 69.2, 2730, 230, null);
+  add('CVA10732', 'InSnow 40T 3080W 78.1m', 40, 78.1, 3080, 230, null);
+  add('CVA10733', 'InSnow 40T 3400W 86.4m', 40, 86.4, 3400, 230, null);
+  add('CVA10734', 'InSnow 40T 3730W 94.5m', 40, 94.5, 3730, 230, null);
+  add('CVA10735', 'InSnow 40T 4350W 110.6m',40,110.6, 4350, 230, null);
+  add('CVA10736', 'InSnow 40T 4820W 121.9m',40,121.9, 4820, 230, null);
+
+  // ── InSnow 20T 400V (20 W/m) ──
+  add('CVA10361', 'InSnow 20T 640W 31.9m 400V',  20, 31.9,  640, 400, null);
+  add('CVA10362', 'InSnow 20T 855W 42.4m 400V',  20, 42.4,  855, 400, null);
+  add('CVA10363', 'InSnow 20T 1070W 53m 400V',   20,  53,  1070, 400, null);
+  add('CVA10364', 'InSnow 20T 1280W 63.8m 400V', 20, 63.8, 1280, 400, null);
+  add('CVA10365', 'InSnow 20T 1490W 74.6m 400V', 20, 74.6, 1490, 400, null);
+  add('CVA10366', 'InSnow 20T 1700W 85.6m 400V', 20, 85.6, 1700, 400, null);
+  add('CVA10367', 'InSnow 20T 1920W 95.8m 400V', 20, 95.8, 1920, 400, null);
+  add('CVA10368', 'InSnow 20T 2130W 105.8m 400V',20,105.8, 2130, 400, null);
+  add('CVA10369', 'InSnow 20T 2350W 117.4m 400V',20,117.4, 2350, 400, null);
+  add('CVA10370', 'InSnow 20T 2550W 128.1m 400V',20,128.1, 2550, 400, null);
+  add('CVA10371', 'InSnow 20T 2980W 149.1m 400V',20,149.1, 2980, 400, null);
+  add('CVA10372', 'InSnow 20T 3380W 169.1m 400V',20,169.1, 3380, 400, null);
+  add('CVA10373', 'InSnow 20T 3800W 191.4m 400V',20,191.4, 3800, 400, null);
+  add('CVA10374', 'InSnow 20T 4210W 211.1m 400V',20,211.1, 4210, 400, null);
+  add('CVA10375', 'InSnow 20T 4620W 230.9m 400V',20,230.9, 4620, 400, null);
+  add('CVA10376', 'InSnow 20T 5400W 269.4m 400V',20,269.4, 5400, 400, null);
+  add('CVA10377', 'InSnow 20T 5960W 298.3m 400V',20,298.3, 5960, 400, null);
+
+  // ── InSnow 30T 400V (30 W/m) ──
+  add('CVA10700', 'InSnow 30T 800W 25.5m 400V',  30, 25.5,  800, 400, null);
+  add('CVA10701', 'InSnow 30T 1050W 34.6m 400V', 30, 34.6, 1050, 400, null);
+  add('CVA10702', 'InSnow 30T 1310W 43.3m 400V', 30, 43.3, 1310, 400, null);
+  add('CVA10703', 'InSnow 30T 1570W 52m 400V',   30,  52,  1570, 400, null);
+  add('CVA10704', 'InSnow 30T 1830W 60.7m 400V', 30, 60.7, 1830, 400, null);
+  add('CVA10705', 'InSnow 30T 2100W 69.3m 400V', 30, 69.3, 2100, 400, null);
+  add('CVA10706', 'InSnow 30T 2350W 78.3m 400V', 30, 78.3, 2350, 400, null);
+  add('CVA10707', 'InSnow 30T 2600W 86.7m 400V', 30, 86.7, 2600, 400, null);
+  add('CVA10708', 'InSnow 30T 2900W 95.1m 400V', 30, 95.1, 2900, 400, null);
+  add('CVA10709', 'InSnow 30T 3150W 103.7m 400V',30,103.7, 3150, 400, null);
+  add('CVA10710', 'InSnow 30T 3700W 120.1m 400V',30,120.1, 3700, 400, null);
+  add('CVA10711', 'InSnow 30T 4200W 136.1m 400V',30,136.1, 4200, 400, null);
+  add('CVA10712', 'InSnow 30T 4700W 154.7m 400V',30,154.7, 4700, 400, null);
+  add('CVA10713', 'InSnow 30T 5200W 170.9m 400V',30,170.9, 5200, 400, null);
+  add('CVA10714', 'InSnow 30T 5700W 187.1m 400V',30,187.1, 5700, 400, null);
+  add('CVA10715', 'InSnow 30T 6600W 220.4m 400V',30,220.4, 6600, 400, null);
+  add('CVA10716', 'InSnow 30T 7300W 243.5m 400V',30,243.5, 7300, 400, null);
+
+  // ── InSnow 40T 400V (40 W/m) ──
+  add('CVA10740', 'InSnow 40T 900W 22.7m 400V',  40, 22.7,  900, 400, null);
+  add('CVA10741', 'InSnow 40T 1200W 30.2m 400V', 40, 30.2, 1200, 400, null);
+  add('CVA10742', 'InSnow 40T 1500W 37.8m 400V', 40, 37.8, 1500, 400, null);
+  add('CVA10743', 'InSnow 40T 1800W 45.4m 400V', 40, 45.4, 1800, 400, null);
+  add('CVA10744', 'InSnow 40T 2100W 52.9m 400V', 40, 52.9, 2100, 400, null);
+  add('CVA10745', 'InSnow 40T 2400W 60.6m 400V', 40, 60.6, 2400, 400, null);
+  add('CVA10746', 'InSnow 40T 2700W 68.1m 400V', 40, 68.1, 2700, 400, null);
+  add('CVA10747', 'InSnow 40T 3000W 75.1m 400V', 40, 75.1, 3000, 400, null);
+  add('CVA10748', 'InSnow 40T 3300W 83.6m 400V', 40, 83.6, 3300, 400, null);
+  add('CVA10749', 'InSnow 40T 3600W 90.7m 400V', 40, 90.7, 3600, 400, null);
+  add('CVA10750', 'InSnow 40T 4200W 105.8m 400V',40,105.8, 4200, 400, null);
+  add('CVA10751', 'InSnow 40T 4750W 120.3m 400V',40,120.3, 4750, 400, null);
+  add('CVA10752', 'InSnow 40T 5350W 135.9m 400V',40,135.9, 5350, 400, null);
+  add('CVA10753', 'InSnow 40T 5900W 150.7m 400V',40,150.7, 5900, 400, null);
+  add('CVA10754', 'InSnow 40T 6500W 164.1m 400V',40,164.1, 6500, 400, null);
+  add('CVA10755', 'InSnow 40T 7500W 193.9m 400V',40,193.9, 7500, 400, null);
+  add('CVA10756', 'InSnow 40T 8300W 214.2m 400V',40,214.2, 8300, 400, null);
+
+  console.log(`Romtegner: la til ${sortIdx} InSnow utendørs-kabelprodukter (6 serier: 20T/30T/40T × 230V/400V)`);
 }
 
 /** Inject test mat products if no mat products exist in Supabase yet */
