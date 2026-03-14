@@ -1,5 +1,14 @@
 # Romtegner Project History
 
+## 2026-03-14: Auto-fill algoritme-forbedringer
+- **Bredere beam search:** Økt fra 5 til 12 kandidater for bedre utforsking av breddekombinasjoner
+- **Gap-packing post-pass:** Ny `_gapPackDefs()` — etter hovedfylling skannes restgap og fylles med ekstra smale striper
+- **Uttømmende søk:** `_bestMixedWidthFit()` prøver nå alle breddekombinasjoner for N=2..7 (50K-iterasjon sikkerhet)
+- **Reduserte straffer:** Bredde-diversitet 500→100, stripe-antall 200→50 i scoring
+- **Fix `renderManualPalette`:** Produktfilter bruker nå `product_family`-felt (ikke bare navneprefix)
+- **Resultat:** Dekning forbedret fra ~89% til ~93% på testrom
+- Commit: `8d9f384`
+
 ## 2026-03-14: Auto-fill comparison UI + obstacle-aware strip placement
 - **Strip rendering clips around obstacles**: `drawStrips()` uses `evenodd` clip path to subtract obstacle polygons — strips never render visually over obstacles
 - **Cold zones pushed to walls**: `_centerStripDefs()` detects obstacle positions and pushes cold zones toward the farthest wall. `_obstacleAwareFill()` and `_fillZone()` also push strips tight against obstacles
