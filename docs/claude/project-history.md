@@ -1,5 +1,62 @@
 # Romtegner Project History
 
+## 2026-03-15: Stair cable settings panel + U-turn fix + edge margin
+
+### Kabelinnstillinger-panel (høyre side)
+- **`_renderStairSettingsPanel(stairId)`** — dedikert panel som erstatter spredte ctxbar-kontroller
+- **Kabelinfo:** Produkt, kabellengde brukt vs produkt (30.9m / 30m), fargekodede statuser
+- **`_stairCableFit(stair)`** — beregner match mellom beregnet og produktets kabellengde
+  - Grønn (±2%): "Passer"
+  - Gul (2-5%): "X cm til overs" / "X cm for kort"
+  - Rød (>5%): "X m til overs!" / "X m for kort!"
+- **Effektvisning:** Total W, W/m², per trinn W/m², løp per trinn, CC i trinn
+- **Justerbare innstillinger:** CC trinn/repos (+/− knapper), trappenese, opptrinn, kantavstand
+- **Produktfamilie-velger** flyttet fra ctxbar til panel
+- **Tilbakestill-knapp:** Resetter til sist valgte forslag (`_resetStairToProposal()`)
+- **Live-oppdatering:** Alle verdier rekalkuleres ved endring
+
+### Nye setter-funksjoner
+- `_setStairNoseOffset(val)` — avstand fra trappenese (0-10cm, default 2)
+- `_setStairRiserOffset(val)` — avstand fra opptrinn (0-10cm, default 2)
+- `_setStairStepCC(val)` — CC i trinn (3-max cm)
+- `_setStairLandingCC(val)` — CC i repos (3-max cm)
+- `_stairPerStepWm2(stair)` — beregner W/m² per individuelt trinn
+
+### U-sving fix (kabelretning)
+- **Buer kurver nå UTOVER** (korrekt for varmekabel-installasjon)
+- **Rette segmenter forkortes** på U-sving-siden slik at buen holder seg innenfor trinnet
+- Trimming beregnes per run basert på CC/2 radius
+- Arc center plasseres innover, arc kurver utover til kantlinjen
+
+### Kantavstand (edge margin)
+- **Default endret fra 3cm til 5cm** — mer realistisk for utendørs trapper
+- **Justerbar 1-20cm** via panel (var tidligere i ctxbar)
+- Alle fallback-verdier (`stair.edgeMargin_cm || 5`) oppdatert
+- Migrasjon for eldre prosjekter i `_restoreProject()`
+
+### InSnow 30T som standard
+- Nye trapper bruker InSnow 30T 230V som default produktfamilie
+- `preferredFamily`/`preferredVoltage` felter i stair-objektet
+- Forslagsmotor filtrerer etter valgt familie
+- Familie-velger dropdown med alle kabelfamilier
+
+### Dobbeltvisning (plan + side)
+- Plan og sidevisning vises samtidig side om side
+- Tre-stegs toggle: plan → side → begge → plan
+- "Plan"/"Side" labels over respektive visninger
+- `_stairPlanBounds()`/`_stairSideBounds()` hjelpere
+
+### Diverse forbedringer
+- **Repos nummerering:** "Repos 1", "Repos 2" etc. på tegningen
+- **Dimensjonslinjer:** Kantavstand, CC-mellomrom, nese/opptrinn-offset på valgt trapp
+- **CC-range:** Forslag genererer 6-12cm CC, scoring favoriserer 8-11cm med 3-4 løp
+- **Per-trinn W/m²:** Beregnes og vises i forslagspanel
+- **Tab-navigering:** Tab hopper til neste input i trappbygger-modal
+- **Auto-plassering:** Trapp dukker opp i viewport-sentrum etter "Plasser trapp"
+- **Min densitet:** Endret fra 300 til 250 W/m²
+- **A/B forslag:** Multi-kabel trapper får landing vs jevn split-strategi
+- **Forenklet ctxbar:** Kun trapp-info, visning-toggle og slett
+
 ## 2026-03-14: InSnow outdoor cable products + cable direction fix
 
 ### InSnow outdoor cable products added
