@@ -1,5 +1,38 @@
 # Romtegner Project History
 
+## 2026-03-15: Forenklet kabelinnstillinger + to-stegs produktvalg + visuell kabellengde
+
+### Forenklet innstillinger
+- **"Avstand foran/bak"** erstatter separate "Trappenese" og "Opptrinn" — setter begge likt
+- **"Avstand sider"** erstatter "Kantavstand"
+- **`_setStairFrontBackOffset(val)`** — ny funksjon som setter `noseOffset_cm` og `riserOffset_cm` likt
+- **CC i trinn oppdateres automatisk** når avstand foran/bak endres (beholder antall løp, justerer CC)
+- **CC i trinn viser faktisk beregnet CC** fra genererte runs (ikke bare target-verdi)
+
+### To-stegs produktvalg (familie → variant)
+- **Familie-dropdown** viser nå familie + spenning: "InSnow 30T 230V", "InSnow 20T 400V" osv.
+- **Ny variant-dropdown** under familie: velg spesifikk kabel (lengde · effekt)
+- **`_setStairCableProduct(productId)`** — ny funksjon for direkte produktvalg
+- **`_setStairFamily(famVoltKey)`** — oppdatert til å parse "InSnow 30T|400" nøkkel (familie + spenning)
+
+### Info-seksjon i Kabelinnstillinger
+- **"Beregnet behov"** og **"Valgt kabel"** vises nå som separate linjer
+- Tydelig forskjell mellom hva som trengs og hva som er valgt
+
+### Forslagspanel — manuelt valg + beregnet behov
+- **"Manuelt" kort** lagt til som tredje alternativ i forslagsdialogen
+- Viser beregnet behov for to løp-varianter (under/over 10cm CC)
+- F.eks.: "4 løp · CC 8.7 cm → 39.7 m" og "3 løp · CC 13 cm → 30.9 m"
+- **"Beregnet behov"** vist under kabelvalg på automatiske forslag (Forslag A/B)
+- **Svinn erstattet** med "X.X m til overs" / "X.X m for kort" med fargekoding
+
+### Visuell kabellengde-avkorting
+- **`_truncateStairCableToProduct(stair)`** — ny funksjon som kutter cable runs visuelt
+- Når kabel er for kort, viser tegningen nøyaktig hvor kabelen stopper
+- Funksjonen traverserer runs + connections i kabelrekkefølge og avkorter siste segment
+- Partielle segmenter vises korrekt (forkortet fra riktig ende basert på kabelretning)
+- Kalles automatisk fra `_regenerateStairCable()` etter layout-generering
+
 ## 2026-03-15: Stair cable settings panel + U-turn fix + edge margin
 
 ### Kabelinnstillinger-panel (høyre side)
@@ -10,16 +43,16 @@
   - Gul (2-5%): "X cm til overs" / "X cm for kort"
   - Rød (>5%): "X m til overs!" / "X m for kort!"
 - **Effektvisning:** Total W, W/m², per trinn W/m², løp per trinn, CC i trinn
-- **Justerbare innstillinger:** CC trinn/repos (+/− knapper), trappenese, opptrinn, kantavstand
+- **Justerbare innstillinger:** CC trinn/repos (+/− knapper), avstand foran/bak, avstand sider
 - **Produktfamilie-velger** flyttet fra ctxbar til panel
 - **Tilbakestill-knapp:** Resetter til sist valgte forslag (`_resetStairToProposal()`)
 - **Live-oppdatering:** Alle verdier rekalkuleres ved endring
 
 ### Nye setter-funksjoner
-- `_setStairNoseOffset(val)` — avstand fra trappenese (0-10cm, default 2)
-- `_setStairRiserOffset(val)` — avstand fra opptrinn (0-10cm, default 2)
+- `_setStairFrontBackOffset(val)` — avstand foran/bak (0-10cm, default 2), setter nese + opptrinn likt
 - `_setStairStepCC(val)` — CC i trinn (3-max cm)
 - `_setStairLandingCC(val)` — CC i repos (3-max cm)
+- `_setStairCableProduct(productId)` — velg spesifikk kabelvariant direkte
 - `_stairPerStepWm2(stair)` — beregner W/m² per individuelt trinn
 
 ### U-sving fix (kabelretning)

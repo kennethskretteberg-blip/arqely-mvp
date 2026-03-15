@@ -7282,16 +7282,34 @@ function _toggleStairView() {
   render(); updateCtxBar();
 }
 
-function _setStairFamily(family) {
+function _setStairFamily(famVoltKey) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
+  // Parse "InSnow 30T|400" → family="InSnow 30T", voltage=400
+  const parts = famVoltKey.split('|');
+  const family = parts[0];
+  const voltage = parseInt(parts[1]) || 230;
   pushUndo();
   stair.preferredFamily = family;
+  stair.preferredVoltage = voltage;
   stair.cables = [];
   stair.cableProductId = null;
   _regenerateStairCable(stair);
   _invalidateStairCache();
-  updateCtxBar(); render();
+  _updateStairSettingsPanel(); updateCtxBar(); render();
+}
+
+function _setStairCableProduct(productId) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair) return;
+  const pid = parseInt(productId) || null;
+  if (pid === stair.cableProductId) return;
+  pushUndo();
+  stair.cableProductId = pid;
+  stair.cables = [];
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  _updateStairSettingsPanel(); updateCtxBar(); render();
 }
 
 function _setStairEdgeMargin(val) {
@@ -7328,25 +7346,26 @@ function _stairCableFit(stair) {
   return { actualLength_m: actualLen, productLength_m: prodLen, diff_m: diff, diff_pct: pct, status, label };
 }
 
-function _setStairNoseOffset(val) {
+function _setStairFrontBackOffset(val) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
   const cm = Math.max(0, Math.min(10, parseFloat(val) || 2));
-  if (cm === stair.noseOffset_cm) return;
+  if (cm === stair.noseOffset_cm && cm === stair.riserOffset_cm) return;
   pushUndo();
   stair.noseOffset_cm = cm;
-  _regenerateStairCable(stair);
-  _invalidateStairCache();
-  _updateStairSettingsPanel(); updateCtxBar(); render();
-}
-
-function _setStairRiserOffset(val) {
-  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
-  if (!stair) return;
-  const cm = Math.max(0, Math.min(10, parseFloat(val) || 2));
-  if (cm === stair.riserOffset_cm) return;
-  pushUndo();
   stair.riserOffset_cm = cm;
+  // Recalculate step CC to match new usable depth
+  const firstTread = (stair.surfaces || []).find(s => s.type === 'tread');
+  if (firstTread) {
+    const usableDepth = firstTread.d_cm - cm - cm;
+    if (usableDepth > 0.5) {
+      const oldCC = stair.stepCC_cm || stair.cableSpacing_cm || 8;
+      const N = Math.max(1, Math.floor(usableDepth / oldCC) + 1);
+      const actualCC = N > 1 ? Math.round((usableDepth / (N - 1)) * 10) / 10 : oldCC;
+      stair.stepCC_cm = actualCC;
+      stair.cableSpacing_cm = actualCC;
+    }
+  }
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -7388,7 +7407,7 @@ function _resetStairToProposal() {
   stair.landingCC_cm = p.landingCC;
   stair.cableSpacing_cm = p.stepCC;
   stair.noseOffset_cm = 2;
-  stair.riserOffset_cm = 2;
+  stair.riserOffset_cm = 2;  // kept in sync (avstand foran/bak)
   stair.edgeMargin_cm = 5;
   _regenerateStairCable(stair);
   _invalidateStairCache();
@@ -7424,27 +7443,39 @@ function _renderStairSettingsPanel(stairId) {
   const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
   const stepWm2 = _stairPerStepWm2(stair);
   const firstTread = surfs.find(s => s.type === 'tread');
-  const treadRuns = firstTread ? (stair.runs || []).filter(r => r.surfaceIdx === surfs.indexOf(firstTread)).length : 0;
+  const firstTreadIdx = firstTread ? surfs.indexOf(firstTread) : -1;
+  const treadRunsList = firstTreadIdx >= 0 ? (stair.runs || []).filter(r => r.surfaceIdx === firstTreadIdx) : [];
+  const treadRuns = treadRunsList.length;
+  const actualStepCC = treadRuns > 1 ? Math.abs(treadRunsList[1].pos_cm - treadRunsList[0].pos_cm) : (stair.stepCC_cm || stair.cableSpacing_cm || 8);
 
   const fitColor = fit.status === 'error' ? '#ef4444' : fit.status === 'warn' ? '#f59e0b' : '#22c55e';
   const fitIcon = fit.status === 'error' ? '🔴' : fit.status === 'warn' ? '🟡' : '🟢';
 
-  // Product family dropdown
+  // Product family+voltage dropdown
   const allCable = HEATING_PRODUCTS.filter(p => { const c = PRODUCT_CATEGORIES.find(c2=>c2.id===p.category_id); return c && c.module_type==='cable' && p.active!==false && (p.cable_length_m||0)>0; });
-  const fams = [...new Set(allCable.map(p => p.product_family || p.name.split(' ').slice(0,2).join(' ')))].sort();
+  const famVoltSet = new Set();
+  allCable.forEach(p => { const fam = p.product_family || p.name.split(' ').slice(0,2).join(' '); famVoltSet.add(fam + '|' + (p.voltage||230)); });
+  const famVoltKeys = [...famVoltSet].sort();
   const curFam = stair.preferredFamily || 'InSnow 30T';
-  const famOpts = fams.map(f => `<option value="${esc(f)}"${f===curFam?' selected':''}>${esc(f)}</option>`).join('');
+  const curVolt = stair.preferredVoltage || 230;
+  const curKey = curFam + '|' + curVolt;
+  const famOpts = famVoltKeys.map(k => { const [f,v] = k.split('|'); const label = f + ' ' + v + 'V'; return `<option value="${esc(k)}"${k===curKey?' selected':''}>${esc(label)}</option>`; }).join('');
+  // Variant dropdown (products in selected family+voltage)
+  const famVariants = allCable.filter(p => { const fam = p.product_family || p.name.split(' ').slice(0,2).join(' '); return fam === curFam && (p.voltage||230) === curVolt; }).sort((a,b) => (a.cable_length_m||0) - (b.cable_length_m||0));
+  const variantOpts = famVariants.map(p => `<option value="${p.id}"${p.id===stair.cableProductId?' selected':''}>${(p.cable_length_m||0)}m · ${(p.total_effect_w||0)}W</option>`).join('');
+  const hasVariantSelected = stair.cableProductId && famVariants.some(p => p.id === stair.cableProductId);
 
   return `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">
     <div style="font-weight:600;font-size:13px;margin-bottom:8px">Kabelinnstillinger</div>
     <div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Kabel brukt</span><span style="font-weight:600">${fit.actualLength_m.toFixed(1)} m${fit.productLength_m ? ' / ' + fit.productLength_m + ' m' : ''}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Beregnet behov</span><span style="font-weight:600">${fit.actualLength_m.toFixed(1)} m</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Valgt kabel</span><span style="font-weight:600">${fit.productLength_m ? fit.productLength_m + ' m' : '—'}</span></div>
       ${fit.label ? `<div style="color:${fitColor};font-weight:600;font-size:11px">${fitIcon} ${fit.label}</div>` : ''}
       <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Effekt</span><span>${totalW} W · ${density} W/m²</span></div>
       <div style="display:flex;justify-content:space-between"><span>Per trinn</span><span style="font-weight:600;color:${stepWm2 < 250 ? '#f59e0b' : stepWm2 > 500 ? '#ef4444' : 'var(--text)'}">${stepWm2} W/m²</span></div>
       <div style="display:flex;justify-content:space-between"><span>Løp per trinn</span><span>${treadRuns}</span></div>
-      <div style="display:flex;justify-content:space-between"><span>CC i trinn</span><span>${(stair.stepCC_cm||stair.cableSpacing_cm||8).toFixed(1)} cm</span></div>
+      <div style="display:flex;justify-content:space-between"><span>CC i trinn</span><span>${actualStepCC.toFixed(1)} cm</span></div>
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
@@ -7466,21 +7497,14 @@ function _renderStairSettingsPanel(stairId) {
         </span>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
-        <span>Trappenese</span>
+        <span>Avstand foran/bak</span>
         <span style="display:flex;align-items:center;gap:3px">
-          <input type="number" min="0" max="10" step="0.5" value="${stair.noseOffset_cm ?? 2}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairNoseOffset(this.value)" onclick="event.stopPropagation()">
+          <input type="number" min="0" max="10" step="0.5" value="${stair.noseOffset_cm ?? 2}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairFrontBackOffset(this.value)" onclick="event.stopPropagation()">
           <span style="font-size:10px;color:var(--dim)">cm</span>
         </span>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
-        <span>Opptrinn</span>
-        <span style="display:flex;align-items:center;gap:3px">
-          <input type="number" min="0" max="10" step="0.5" value="${stair.riserOffset_cm ?? 2}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairRiserOffset(this.value)" onclick="event.stopPropagation()">
-          <span style="font-size:10px;color:var(--dim)">cm</span>
-        </span>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
-        <span>Kantavstand</span>
+        <span>Avstand sider</span>
         <span style="display:flex;align-items:center;gap:3px">
           <input type="number" min="1" max="20" step="0.5" value="${stair.edgeMargin_cm || 5}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairEdgeMargin(this.value)" onclick="event.stopPropagation()">
           <span style="font-size:10px;color:var(--dim)">cm</span>
@@ -7488,9 +7512,16 @@ function _renderStairSettingsPanel(stairId) {
       </div>
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
-      <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span>Familie</span>
-        <select onchange="_setStairFamily(this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:140px" onclick="event.stopPropagation()">${famOpts}</select>
+        <select onchange="_setStairFamily(this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:160px" onclick="event.stopPropagation()">${famOpts}</select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span>Kabel</span>
+        <select onchange="_setStairCableProduct(this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:160px" onclick="event.stopPropagation()">
+          <option value=""${hasVariantSelected?'':' selected'}>Velg kabel...</option>
+          ${variantOpts}
+        </select>
       </div>
     </div>
     <div style="display:flex;gap:6px">
@@ -8753,6 +8784,7 @@ function _renderStairProposalPanel(stair, proposals) {
 
     // Build cable details section
     let cableDetailsHtml = '';
+    const totalProductLen = p.products ? p.products.reduce((s,cp) => s + (cp.length_m||0), 0) : 0;
     if (isMulti && p.products) {
       for (let ci = 0; ci < p.products.length; ci++) {
         const cp = p.products[ci];
@@ -8764,6 +8796,10 @@ function _renderStairProposalPanel(stair, proposals) {
       const prodLen = p.products && p.products[0] ? p.products[0].length_m : '?';
       cableDetailsHtml = `<div>🔌 <b>${esc(prodName)}</b> (${prodLen}m)</div>`;
     }
+    // Difference: product length vs needed length
+    const diffM = Math.round((totalProductLen - p.totalCableLength_m) * 10) / 10;
+    const diffLabel = diffM > 0 ? `${diffM} m til overs` : diffM < 0 ? `${Math.abs(diffM)} m for kort` : 'Eksakt';
+    const diffColor = diffM < 0 ? '#ef4444' : diffM > 3 ? '#f59e0b' : '#22c55e';
 
     // Split strategy label for multi-cable
     const strategyBadge = p.splitLabel ? `<div style="display:inline-block;background:var(--surface);border:1px solid var(--brd);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px">${esc(p.splitLabel)}</div>` : '';
@@ -8775,15 +8811,15 @@ function _renderStairProposalPanel(stair, proposals) {
         ${strategyBadge}
         <div style="font-size:12px;color:var(--muted);display:grid;gap:4px">
           ${cableDetailsHtml}
+          <div style="font-size:11px;color:var(--dim)">Beregnet behov: <b>${p.totalCableLength_m} m</b></div>
+          <div style="color:${diffColor};font-weight:600;font-size:11px">${diffLabel}</div>
           <div style="border-top:1px solid var(--brd);margin:4px 0"></div>
           <div>↔ CC trinn: <b>${p.stepCC} cm</b></div>
           <div>↔ CC repos: <b>${p.landingCC} cm</b></div>
           <div>〰 ${p.runsPerStep} løp per trinn</div>
-          <div>📏 Total kabel: <b>${p.totalCableLength_m} m</b>${isMulti ? ` (${p.cableCount} kabler)` : ''}</div>
           <div>⚡ ${p.totalWatt || 0} W · <b>${p.power_wm2} W/m²</b> totalt</div>
           <div>🔥 <b>${p.stepWm2 || '?'} W/m²</b> per trinn</div>
           <div>📐 Oppvarmet areal: ${p.heatedArea_m2} m²</div>
-          ${p.waste_pct > 0 ? `<div style="color:var(--warn)">♻ Kabelsvinn: ${p.waste_pct}%</div>` : ''}
         </div>
         <button onclick="_applyStairProposalByIdx(${stair.id},${i});document.getElementById('stair-proposal-panel').remove()"
           style="margin-top:12px;width:100%;padding:8px;border-radius:6px;border:none;background:${p.recommended ? '#4ea8ff' : 'var(--bg)'};color:${p.recommended ? '#fff' : 'var(--text)'};cursor:pointer;font-size:13px;font-weight:600;border:1px solid ${p.recommended ? '#4ea8ff' : 'var(--brd)'}">
@@ -8792,8 +8828,44 @@ function _renderStairProposalPanel(stair, proposals) {
       </div>`;
   }
 
+  // Manual option card — show cable need for two run counts (under/over 10cm CC)
+  const manEdge = stair.edgeMargin_cm || 5;
+  const manRiserOff = stair.riserOffset_cm ?? 2;
+  const manNoseOff = stair.noseOffset_cm ?? 2;
+  const manFirstTread = (stair.surfaces || []).find(s => s.type === 'tread');
+  const manTreadD = manFirstTread ? manFirstTread.d_cm - manRiserOff - manNoseOff : 26;
+  // Two options: more runs (CC < 10cm) and fewer runs (CC > 10cm)
+  const manRunsHigh = Math.max(2, Math.floor(manTreadD / 10) + 1 + 1); // one extra run → CC < 10
+  const manRunsLow = Math.max(2, Math.floor(manTreadD / 10) + 1);      // base → CC >= 10
+  // Ensure they're actually different
+  const runsA = manRunsHigh > manRunsLow ? manRunsHigh : manRunsLow + 1;
+  const runsB = manRunsLow;
+  const ccA = runsA > 1 ? Math.round(manTreadD / (runsA - 1) * 10) / 10 : manTreadD;
+  const ccB = runsB > 1 ? Math.round(manTreadD / (runsB - 1) * 10) / 10 : manTreadD;
+  const lenA_cm = _stairCableLength(stair, runsA, ccA, ccA, manEdge);
+  const lenB_cm = _stairCableLength(stair, runsB, ccB, ccB, manEdge);
+  const lenA_m = Math.round(lenA_cm / 10) / 10;
+  const lenB_m = Math.round(lenB_cm / 10) / 10;
+  cardsHtml += `
+    <div style="flex:1;background:var(--surface2);border:1px solid var(--brd);border-radius:10px;padding:14px;min-width:200px;position:relative">
+      <div style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:6px">Manuelt</div>
+      <div style="font-size:12px;color:var(--muted);display:grid;gap:4px">
+        <div>Velg kabel selv fra innstillingspanelet.</div>
+        <div style="border-top:1px solid var(--brd);margin:4px 0"></div>
+        <div style="font-weight:600">${runsA} løp · CC ${ccA} cm</div>
+        <div>📏 Beregnet behov: <b>${lenA_m} m</b></div>
+        <div style="border-top:1px solid var(--brd);margin:4px 0"></div>
+        <div style="font-weight:600">${runsB} løp · CC ${ccB} cm</div>
+        <div>📏 Beregnet behov: <b>${lenB_m} m</b></div>
+      </div>
+      <button onclick="document.getElementById('stair-proposal-panel').remove()"
+        style="margin-top:12px;width:100%;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-weight:600">
+        Velg manuelt
+      </button>
+    </div>`;
+
   const html = `<div id="stair-proposal-panel" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45)" onclick="if(event.target===this)this.remove()">
-    <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(560px,92vw);max-height:85vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
+    <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(720px,94vw);max-height:85vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
       <h3 style="margin:0 0 16px;font-size:16px;color:var(--text)">⚡ Kabelforslag for ${esc(stair.name || 'Trapp')}</h3>
       <div style="display:flex;gap:12px;flex-wrap:wrap">${cardsHtml}</div>
       <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
@@ -8883,6 +8955,98 @@ function _regenerateStairCable(stair) {
   for (let i = 0; i < stair.cables.length; i++) {
     stair.cables[i].length_cm = (layout.cableLengths || [])[i] || 0;
   }
+  // Truncate cable visually if product is too short
+  _truncateStairCableToProduct(stair);
+}
+
+/**
+ * If the selected cable product(s) are shorter than required,
+ * truncate stair.runs so the drawing shows where the cable actually ends.
+ */
+function _truncateStairCableToProduct(stair) {
+  // Calculate total available cable from product(s)
+  const cables = stair.cables || [];
+  let totalAvail_cm = 0;
+  for (const c of cables) {
+    const prod = c.productId ? HEATING_PRODUCTS.find(p => p.id === c.productId) : null;
+    if (prod && prod.cable_length_m) totalAvail_cm += prod.cable_length_m * 100;
+  }
+  if (totalAvail_cm <= 0 || totalAvail_cm >= stair.totalCableLength_cm) return; // enough cable or no product
+
+  const surfs = stair.surfaces || [];
+  const runs = stair.runs || [];
+  if (!runs.length) return;
+
+  // Group runs by surface index, preserving order
+  const surfOrder = [];
+  const runsBySurf = {};
+  for (const r of runs) {
+    if (!runsBySurf[r.surfaceIdx]) { runsBySurf[r.surfaceIdx] = []; surfOrder.push(r.surfaceIdx); }
+    runsBySurf[r.surfaceIdx].push(r);
+  }
+
+  let remaining_cm = totalAvail_cm;
+  const keptRuns = [];
+  const keptConns = [];
+  let done = false;
+
+  for (let soi = 0; soi < surfOrder.length && !done; soi++) {
+    const si = surfOrder[soi];
+    const surfRuns = runsBySurf[si];
+
+    for (let ri = 0; ri < surfRuns.length && !done; ri++) {
+      const run = surfRuns[ri];
+      const seg = run.segments[0];
+      if (!seg) continue;
+      const runLen = seg.end_cm - seg.start_cm;
+
+      if (remaining_cm >= runLen) {
+        // Full run fits
+        keptRuns.push(run);
+        remaining_cm -= runLen;
+
+        // U-turn to next run on same surface
+        if (ri < surfRuns.length - 1) {
+          const nextRun = surfRuns[ri + 1];
+          const arcLen = Math.PI * Math.abs(nextRun.pos_cm - run.pos_cm) / 2;
+          remaining_cm -= arcLen;
+          if (remaining_cm < 0) {
+            // Cable runs out during U-turn — keep run but mark done
+            done = true;
+          }
+        }
+      } else {
+        // Partial run — truncate the segment
+        const isGoingRight = (ri % 2 === 0); // even runs go left→right
+        const partialRun = { ...run, segments: [{ ...seg }] };
+        if (isGoingRight) {
+          partialRun.segments[0].end_cm = seg.start_cm + remaining_cm;
+        } else {
+          partialRun.segments[0].start_cm = seg.end_cm - remaining_cm;
+        }
+        keptRuns.push(partialRun);
+        remaining_cm = 0;
+        done = true;
+      }
+    }
+
+    // Connection to next surface
+    if (!done && soi < surfOrder.length - 1) {
+      const conn = (stair.connections || []).find(c => c.fromSurf === si);
+      if (conn) {
+        const connLen = conn.length_cm || 17;
+        remaining_cm -= connLen;
+        if (remaining_cm < 0) {
+          done = true;
+        } else {
+          keptConns.push(conn);
+        }
+      }
+    }
+  }
+
+  stair.runs = keptRuns;
+  stair.connections = keptConns;
 }
 
 // ── Strip room-bounds clamping ──
