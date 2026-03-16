@@ -1,5 +1,41 @@
 # Romtegner Project History
 
+## 2026-03-16: Auth, brukerregistrering, godkjenningsflyt og admin-panel
+
+### Autentisering i romtegner.html
+- **Login/registrerings-skjerm** (`#auth-screen`) med tabs: "Logg inn" / "Registrer"
+- **Registreringsskjema:** Fullt navn, e-post, passord (min 8 tegn), firmanavn (valgfritt), melding til admin (valgfritt)
+- **Pending-sjekk:** Etter login hentes profil fra `profiles`-tabell og status sjekkes
+  - `active` → videre til dashboard
+  - `pending` → "Venter på godkjenning"-melding
+  - `rejected` → "Tilgang avvist"-melding
+  - Superadmin (`app_metadata.is_superadmin`) → alltid gjennom
+- **Graceful fallback:** Hvis `profiles`-tabell ikke finnes ennå, slippes brukeren gjennom
+- **Session-håndtering:** `getSession()` ved init, `onAuthStateChange` for logout-events
+- **Bruker-bar i topbar:** Navn + "Logg ut"-lenke (`_updateAuthUserBar()`)
+- **user_id på prosjekter:** `_saveToSupabase()` setter `user_id` ved insert/update (graceful fallback)
+- **Enter-tast:** Støtter Enter for både login og registrering
+
+### admin.html (ny fil)
+- **Selvstendig HTML-fil** med samme arkitektur (vanilla JS, Supabase CDN, ingen bundler)
+- **Tilgangskontroll:** Sjekker `app_metadata.is_superadmin === true`, viser "Ingen tilgang" ellers
+- **Mørkt tema** med samme fargepalett som romtegner.html
+- **3 seksjoner:**
+  1. **Oversikt:** Stat-kort (totale brukere, ventende, aktive, organisasjoner)
+  2. **Brukere:** Tabell med filtre (Alle/Venter/Aktive/Avviste), godkjenn/avvis/deaktiver
+  3. **Organisasjoner:** Opprett, se/administrer medlemmer, sett roller, produktkategori-tilgang
+
+### Supabase SQL-migrasjon (supabase-migration-auth.sql)
+- **profiles:** id, full_name, email, company_name, message, status, approved_at/by
+- **organizations:** id, name, slug
+- **organization_members:** org_id, user_id, role (owner/admin/member)
+- **organization_product_access:** org_id, category_slug
+- **Trigger:** `handle_new_user()` — auto-opprett profil ved registrering
+- **RLS-policies:** Profiler (egen + superadmin), prosjekter (egne + superadmin), produkter (autentiserte), org (medlemmer + superadmin)
+- **Hjelpefunksjoner:** `is_superadmin()`, `is_active_user()`
+- **Backfill:** Eksisterende bruker får profil med `status = 'active'`, prosjekter får `user_id`
+- **slug-kolonne** lagt til på `product_categories`, **user_id-kolonne** på `romtegner_projects`
+
 ## 2026-03-15: Forenklet kabelinnstillinger + to-stegs produktvalg + visuell kabellengde
 
 ### Forenklet innstillinger
