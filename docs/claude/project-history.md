@@ -1,5 +1,36 @@
 # Romtegner Project History
 
+## 2026-03-16: RLS-fiks for invitasjoner
+
+### Feil: "permission denied for table users"
+- **Årsak 1:** `org_invitations` superadmin-policy manglet eksplisitt `WITH CHECK` for INSERT
+- **Fix:** Gjenskapt policy med `USING (is_superadmin()) WITH CHECK (is_superadmin())`
+- **Årsak 2:** FK-constraint `invited_by REFERENCES auth.users(id)` — PostgreSQL sjekker FK ved INSERT, men `authenticated`-rollen har ikke SELECT på `auth.users`
+- **Fix:** Fjernet FK-constraint på `invited_by` (kolonnen beholdes, bare constraint fjernet)
+- **Årsak 3:** RLS-policy "Bruker ser egne invitasjoner" brukte `SELECT email FROM auth.users` i USING-klausul — trigget ved `.select().single()` etter INSERT
+- **Fix:** Erstattet med `auth.jwt() ->> 'email'` som leser direkte fra JWT-token
+
+### SQL kjørt manuelt i Supabase SQL Editor:
+```sql
+-- 1. Superadmin policy med WITH CHECK
+DROP POLICY IF EXISTS "Superadmin full tilgang invitations" ON org_invitations;
+CREATE POLICY "Superadmin full tilgang invitations" ON org_invitations
+  FOR ALL USING (is_superadmin()) WITH CHECK (is_superadmin());
+
+-- 2. Fjern FK på invited_by
+DO $$ DECLARE r RECORD; BEGIN
+  FOR r IN SELECT constraint_name FROM information_schema.table_constraints
+    WHERE table_name = 'org_invitations' AND constraint_type = 'FOREIGN KEY'
+    AND constraint_name LIKE '%invited_by%'
+  LOOP EXECUTE 'ALTER TABLE org_invitations DROP CONSTRAINT ' || r.constraint_name; END LOOP;
+END $$;
+
+-- 3. Erstatt auth.users-query med JWT-lesing
+DROP POLICY IF EXISTS "Bruker ser egne invitasjoner" ON org_invitations;
+CREATE POLICY "Bruker ser egne invitasjoner" ON org_invitations
+  FOR SELECT USING (lower(email) = lower(auth.jwt() ->> 'email'));
+```
+
 ## 2026-03-16: Org-typer, leverandørfiltrering og invitasjonsflyt
 
 ### Organisasjonstyper
