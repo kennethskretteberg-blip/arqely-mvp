@@ -1,5 +1,31 @@
 # Romtegner Project History
 
+## 2026-03-16: Org-typer, leverandørfiltrering og invitasjonsflyt
+
+### Organisasjonstyper
+- **`org_type`** på organizations: `'supplier'` (leverandør) eller `'installer'` (elektrikerfirma)
+- **`supplier_name`** på organizations: kobler leverandør-org til `heating_products.supplier`
+- **Produktfiltrering:** Leverandør-brukere ser kun egne produkter, elektrikerfirma ser alle
+- **`_loadUserOrg()`** + **`_filterProductsByOrg()`** i romtegner.html
+
+### Invitasjonsflyt
+- **`org_invitations`** tabell: email, token, role, status, expires_at (7 dager)
+- **Admin:** "Inviter ny bruker" per org — genererer unik lenke med token
+- **Registrering:** `?invite=TOKEN` i URL → auto-switch til registrer-tab, e-post forhåndsutfylt
+- **Auto-join:** `handle_invitation_on_signup()` trigger — ny bruker auto-kobles til org + auto-aktiveres
+- **Lenke kopieres** til utklippstavle ved invitasjon
+
+### Admin-panel oppdatert
+- **Opprett org:** Velg type (Elektrikerfirma/Leverandør) + leverandørnavn-dropdown
+- **Org-kort:** Viser type-ikon, leverandørbadge, antall invitasjoner
+- **Org-detalj:** Medlemmer, inviter bruker, ventende invitasjoner med kanseller
+- **Leverandør-info:** Viser hvilke produkter org-brukere ser
+- **Gruppert visning:** Leverandører og elektrikerfirma i separate seksjoner
+
+### RLS-policies oppdatert
+- **Produkter:** Leverandør-org ser kun egne, installer-org/superadmin ser alle
+- **Invitasjoner:** Org-admin kan opprette/se, bruker ser egne (by email)
+
 ## 2026-03-16: Auth, brukerregistrering, godkjenningsflyt og admin-panel
 
 ### Autentisering i romtegner.html
