@@ -1,5 +1,26 @@
 # Romtegner Project History
 
+## 2026-03-17: Brukerprofil, avatar-ikon, admin-panel og invitasjonssystem
+
+### Ny funksjonalitet
+- **Rundt avatar-ikon** øverst til høyre (topbar + dashboard) med brukerens initialer
+- **Dropdown-meny** fra avatar: navn, e-post, organisasjon, Innstillinger, Admin (superadmin), Logg ut
+- **Profilinnstillinger-modal**: Endre navn, firma, telefon + bytt passord
+- **Admin-panel** (superadmin): Se alle brukere med status, godkjenn/avvis pending-forespørsler
+- **Inviter bruker**: E-post + rolle, oppretter invitasjonslenke, sender e-post via Edge Function (fallback: manuell lenkedeling)
+- **Admin-varsling**: Når noen registrerer seg, sendes e-postvarsel til admin via Edge Function
+
+### Supabase Edge Functions (krever deploy)
+- `send-invite-email` — sender invitasjons-e-post via Resend API
+- `notify-admin-registration` — varsler admin om nye registreringer
+- Krever secrets: `RESEND_API_KEY`, `FROM_EMAIL`, `ADMIN_EMAIL`
+
+### Registreringsflyt
+1. Bruker fyller ut skjema → konto opprettes med status `pending`
+2. Admin mottar e-postvarsel (via Edge Function)
+3. Admin åpner Admin-panelet → godkjenner eller avviser
+4. Bruker logger inn → ser godkjent/avvist/venter-status
+
 ## 2026-03-17: Snøsmelting-modul — kabelvalg med forslag og innstillingspanel
 
 ### Ny funksjonalitet
