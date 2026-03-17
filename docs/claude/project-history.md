@@ -1,5 +1,23 @@
 # Romtegner Project History
 
+## 2026-03-17: Snøsmelting-modul — kabelvalg med forslag og innstillingspanel
+
+### Ny funksjonalitet
+- **Forslagspanel (modal overlay)**: Åpnes automatisk etter opprettelse av område. Viser beste kabelforslag med filterchips for effekt (20T/30T/40T) og spenning (230V/400V). Chips oppdaterer forslag live.
+- **Innstillingspanel (høyre side)**: Viser område-info, ønsket/installert effekt, W/m², CC, familie-/kabel-dropdown, "⚡ Forslag" og "Plasser kabel" knapper.
+- **Forhåndsvisning av kabel**: Kabel plasseres som preview — fjernes automatisk ved nytt valg. "✓ Godkjenn" gjør den permanent, "✕ Fjern" sletter den.
+- **300 W/m² standard** for snøsmelting (ignorerer global innstilling på 130 W/m²)
+- **5cm kantavstand** som standard ved auto-plassering, bruker kan overstyre uten varsel
+
+### Tekniske endringer
+- `showCablePlacePanel()`: Redirecter til snow-spesifikt UI når `_isSnowModule()`
+- `createRoom()`: Auto-trigger `showSnowProposals()` for snow-modulen
+- `selRoom()` + `renderSidebar()`: Kobler inn `_updateSnowSettingsPanel()`
+- `_roomTargetWm2()`: Sjekker modultype før global fallback
+- `_effectiveMarginCm()` / `_roomMaxMarginCm()`: Returnerer 5cm for snow
+- Preview-kabel-system: `_removeSnowPreviewCables()`, `_commitSnowCables()`, `_snowPreviewCableIds` tracking
+- Nye funksjoner: `showSnowProposals()`, `_snowFilteredProposals()`, `_renderSnowProposalPanel()`, `_snowSetFilter()`, `_renderSnowSettingsPanel()`, `_updateSnowSettingsPanel()`, `_applySnowProposal()`
+
 ## 2026-03-16: RLS-fiks for invitasjoner
 
 ### Feil: "permission denied for table users"
