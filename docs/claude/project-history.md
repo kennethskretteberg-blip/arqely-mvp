@@ -1,5 +1,27 @@
 # Romtegner Project History
 
+## 2026-03-18: Admin org-velger + superadmin-oppsett + Edge Function deploy
+
+### Konfigurasjon utført
+- **Resend API** konfigurert med API-nøkkel
+- **Supabase secrets** satt: `RESEND_API_KEY`, `FROM_EMAIL`, `ADMIN_EMAIL`
+- **Edge Functions deployet**: `notify-admin-registration`, `send-invite-email`
+- **Superadmin-status** satt for kenneth@arqely.com (`is_superadmin: true`, profil `active`)
+
+### Ny funksjonalitet: Org-velger i admin-panelet
+- **Org-dropdown i invitasjonsskjema**: Superadmin kan velge hvilken organisasjon brukeren inviteres til (f.eks. "Cenika AS (leverandør)")
+- **Org-dropdown ved godkjenning**: Pending-brukere vises med org-velger ved siden av Godkjenn/Avvis-knapper
+- **Smart pre-seleksjon**: Hvis brukerens `company_name` matcher en organisasjon, pre-selekteres den automatisk
+- **Org-tildeling ved godkjenning**: `_adminApprove()` setter nå `approved_at`, `approved_by`, og legger brukeren inn i `organization_members`
+- **Aktive brukere viser org**: 🏢-ikon med org-navn for allerede godkjente brukere
+
+### Filer endret
+- `romtegner.html` — admin-panel utvidet (~linje 20630-20755)
+
+### Databasefiks
+- `handle_new_user()` og `handle_invitation_on_signup()` triggers fikset med `SET search_path = public`
+- Supabase Site URL endret fra localhost til `https://arqely.com`
+
 ## 2026-03-17: Brukerprofil, avatar-ikon, admin-panel og invitasjonssystem
 
 ### Ny funksjonalitet
