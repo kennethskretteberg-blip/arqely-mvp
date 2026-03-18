@@ -1,5 +1,13 @@
 # Romtegner Project History
 
+## 2026-03-18: Produktimport søk/filter + support-modus advarsel
+- Produktimport: ny kolonne "Produktgruppe" (product_family), søkefelt, filter-dropdown
+- Support-modus: oransje banner "⚠️ Support-modus: Du ser på prosjekt for [firma]" med tilbake-knapp
+- Avatar viser 🛠️ badge med oransje kant når i support-modus
+- "← Tilbake til mine prosjekter"-knapp avslutter support og går til prosjektliste
+
+---
+
 ## 2026-03-18: Klokkeslett i prosjektliste + teknisk støtte-panel
 - Prosjektlisten viser nå dato + klokkeslett (f.eks. "18. mar 2026 kl. 14:32")
 - Ny "🛠️ Støtte"-seksjon i superadmin-panel for teknisk support
