@@ -1,5 +1,35 @@
 # Romtegner Project History
 
+## 2026-03-18: Org-sentrisk tilgangsmodell
+
+### Ny modell: Organisasjoner styrer tilgang
+- Første bruker som registrerer seg med firmanavn → org opprettes automatisk, bruker blir owner
+- Superadmin godkjenner nye organisasjoner → aktiverer org + owner-profil med 30 dager trial
+- Org-admin inviterer brukere til sin org (uten superadmin-godkjenning)
+- Login-sjekk: org-medlemskap + org-abonnement + profil-status
+- Inviterte brukere: auto-aktiv + lagt inn i org
+
+### Database (supabase-migration-org-centric.sql)
+- `profiles.org_id` + `romtegner_projects.org_id` (uuid FK)
+- Oppdatert `handle_new_user()` trigger: auto-oppretter org + membership
+- RLS: "Users see org projects"
+
+### Registrering
+- Firmanavn obligatorisk, nytt felt Org.nr, ny suksessmelding
+
+### Login-sjekk
+- Nye meldingsskjermer: ingen org, abonnement utløpt, org venter godkjenning
+
+### Org-admin panel
+- Avatar-meny "👥 Administrer" for org-admins
+- Oversikt, Medlemmer (inviter/fjern), Invitasjoner, Innstillinger (org-navn redigerbart)
+
+### Superadmin
+- Dashboard: "Ventende organisasjoner" med godkjenn-knapp
+- Avatar-meny: "🛡️ Systemadmin"
+
+---
+
 ## 2026-03-18: Fullverdig admin-panel + e-postsystem + DNS-oppsett
 
 ### Fullverdig Admin-panel (erstatter gammel 560px modal)

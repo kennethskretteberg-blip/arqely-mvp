@@ -804,12 +804,16 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
         <span class="auth-hint">Minimum 8 tegn</span>
       </div>
       <div class="auth-field">
-        <label>Firmanavn</label>
-        <input id="auth-reg-company" type="text" placeholder="Valgfritt">
+        <label>Firmanavn *</label>
+        <input id="auth-reg-company" type="text" placeholder="Ditt firma AS">
       </div>
       <div class="auth-field">
-        <label>Melding til administrator</label>
-        <textarea id="auth-reg-message" placeholder="Valgfritt — fortell kort hva du skal bruke verktøyet til"></textarea>
+        <label>Org.nr</label>
+        <input id="auth-reg-orgnr" type="text" placeholder="Valgfritt">
+      </div>
+      <div class="auth-field">
+        <label>Kort om din virksomhet</label>
+        <textarea id="auth-reg-message" placeholder="Valgfritt — fortell kort om din virksomhet"></textarea>
       </div>
       <button class="auth-btn" onclick="_authRegister()" id="auth-reg-btn">Opprett konto</button>
     </div>
@@ -818,7 +822,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
     <div id="auth-reg-success" style="display:none">
       <div class="auth-success">
         <h3>✅ Registrering fullført</h3>
-        <p>Takk for registreringen! Din konto er under behandling og du vil få tilgang når en administrator har godkjent forespørselen din.</p>
+        <p>Takk for registreringen! Din organisasjon er opprettet og venter på godkjenning fra systemadministrator. Du vil få tilgang så snart forespørselen er behandlet.</p>
       </div>
       <button class="auth-btn-ghost" onclick="_authSwitchTab('login')" style="margin-top:16px;width:100%;text-align:center">← Tilbake til innlogging</button>
     </div>
@@ -838,6 +842,33 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
       <div class="auth-rejected">
         <h3>❌ Tilgang avvist</h3>
         <p>Din forespørsel om tilgang er dessverre avvist. Ta kontakt med administrator for mer informasjon.</p>
+      </div>
+      <button class="auth-btn-ghost" onclick="_authLogout()" style="margin-top:16px;width:100%;text-align:center">Logg ut</button>
+    </div>
+
+    <!-- No org message -->
+    <div id="auth-no-org-msg" style="display:none">
+      <div class="auth-pending">
+        <h3>🏢 Ingen organisasjon</h3>
+        <p>Du er ikke tilknyttet noen organisasjon. Be din administrator om å invitere deg, eller registrer deg på nytt med et firmanavn.</p>
+      </div>
+      <button class="auth-btn-ghost" onclick="_authLogout()" style="margin-top:16px;width:100%;text-align:center">Logg ut</button>
+    </div>
+
+    <!-- Org suspended message -->
+    <div id="auth-org-suspended-msg" style="display:none">
+      <div class="auth-rejected">
+        <h3>⏸️ Abonnement utløpt</h3>
+        <p>Organisasjonens abonnement er utløpt eller suspendert. Kontakt systemadministrator for å fornye.</p>
+      </div>
+      <button class="auth-btn-ghost" onclick="_authLogout()" style="margin-top:16px;width:100%;text-align:center">Logg ut</button>
+    </div>
+
+    <!-- Org pending message -->
+    <div id="auth-org-pending-msg" style="display:none">
+      <div class="auth-pending">
+        <h3>🏢 Venter på godkjenning</h3>
+        <p>Din organisasjon er registrert og venter på godkjenning fra systemadministrator. Du vil få tilgang så snart organisasjonen er aktivert.</p>
       </div>
       <button class="auth-btn-ghost" onclick="_authLogout()" style="margin-top:16px;width:100%;text-align:center">Logg ut</button>
     </div>
@@ -20425,10 +20456,12 @@ async function _authRegister() {
   const email = document.getElementById('auth-reg-email').value.trim();
   const pass = document.getElementById('auth-reg-pass').value;
   const company = document.getElementById('auth-reg-company').value.trim();
+  const orgnr = document.getElementById('auth-reg-orgnr')?.value?.trim() || '';
   const message = document.getElementById('auth-reg-message').value.trim();
   if (!name) { _authShowError('Fyll inn fullt navn.'); return; }
   if (!email) { _authShowError('Fyll inn e-post.'); return; }
   if (pass.length < 8) { _authShowError('Passord må være minst 8 tegn.'); return; }
+  if (!company && !_inviteToken) { _authShowError('Fyll inn firmanavn.'); return; }
   const btn = document.getElementById('auth-reg-btn');
   btn.disabled = true; btn.textContent = 'Oppretter konto...';
   try {
@@ -20436,7 +20469,7 @@ async function _authRegister() {
       email,
       password: pass,
       options: {
-        data: { full_name: name, company_name: company, message }
+        data: { full_name: name, company_name: company, org_number: orgnr, message }
       }
     });
     if (error) throw error;
@@ -20481,32 +20514,68 @@ async function _authCheckProfileAndProceed() {
     await _initAfterAuth();
     return;
   }
-  // No profile row (e.g. profiles table doesn't exist yet, or old user) — let through gracefully
+  // No profile row — show no-org message
   if (!_currentProfile) {
-    _authHideScreen();
-    await _initAfterAuth();
+    _authShowMsg('auth-no-org-msg');
     return;
   }
-  // Check status
+  // Blocked/rejected
+  if (_currentProfile.status === 'rejected' || _currentProfile.status === 'blocked') {
+    _authShowMsg('auth-rejected-msg');
+    return;
+  }
+  // Check org membership
+  let userOrgData = null;
+  try {
+    const { data: memberships } = await _db.from('organization_members')
+      .select('org_id, role, organizations(id, name, org_type, supplier_name, subscription_status, trial_ends_at)')
+      .eq('user_id', _currentUser.id);
+    if (memberships && memberships.length > 0) {
+      userOrgData = memberships[0].organizations;
+      userOrgData._role = memberships[0].role;
+    }
+  } catch(e) {}
+  // No org membership
+  if (!userOrgData) {
+    if (_currentProfile.status === 'pending') {
+      _authShowMsg('auth-org-pending-msg');
+    } else {
+      _authShowMsg('auth-no-org-msg');
+    }
+    return;
+  }
+  // Org subscription check
+  const sub = userOrgData.subscription_status || 'trial';
+  if (sub === 'suspended' || sub === 'cancelled') {
+    _authShowMsg('auth-org-suspended-msg');
+    return;
+  }
+  if (sub === 'trial' && userOrgData.trial_ends_at && new Date(userOrgData.trial_ends_at) < new Date()) {
+    _authShowMsg('auth-org-suspended-msg');
+    return;
+  }
+  // Profile pending (org exists but waiting for superadmin to approve org)
+  if (_currentProfile.status === 'pending') {
+    _authShowMsg('auth-org-pending-msg');
+    return;
+  }
+  // Active — let in
   if (_currentProfile.status === 'active') {
     _authHideScreen();
     await _initAfterAuth();
     return;
   }
-  if (_currentProfile.status === 'rejected') {
-    document.getElementById('auth-login-form').style.display = 'none';
-    document.getElementById('auth-register-form').style.display = 'none';
-    document.getElementById('auth-tabs').style.display = 'none';
-    document.getElementById('auth-error').style.display = 'none';
-    document.getElementById('auth-rejected-msg').style.display = '';
-    return;
-  }
-  // Default: pending
-  document.getElementById('auth-login-form').style.display = 'none';
-  document.getElementById('auth-register-form').style.display = 'none';
-  document.getElementById('auth-tabs').style.display = 'none';
-  document.getElementById('auth-error').style.display = 'none';
-  document.getElementById('auth-pending-msg').style.display = '';
+  // Fallback: pending
+  _authShowMsg('auth-pending-msg');
+}
+
+function _authShowMsg(msgId) {
+  ['auth-login-form','auth-register-form','auth-tabs','auth-error','auth-pending-msg','auth-rejected-msg','auth-no-org-msg','auth-org-suspended-msg','auth-org-pending-msg','auth-reg-success'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  const msg = document.getElementById(msgId);
+  if (msg) msg.style.display = '';
 }
 
 async function _authLogout() {
@@ -20541,7 +20610,7 @@ function _avatarMenuHTML(id) {
       ${orgName ? `<div class="uam-org">🏢 ${_esc(orgName)}</div>` : ''}
     </div>
     <div class="uam-item" onclick="_openProfile()"><span class="uam-ico">⚙️</span>Innstillinger</div>
-    ${_currentUser.app_metadata?.is_superadmin ? '<div class="uam-item" onclick="_openAdminPanel()"><span class="uam-ico">🛡️</span>Admin</div>' : ''}
+    ${_currentUser.app_metadata?.is_superadmin ? '<div class="uam-item" onclick="_openAdminPanel()"><span class="uam-ico">🛡️</span>Systemadmin</div>' : (_userOrg && (_userOrg._role === 'owner' || _userOrg._role === 'admin') ? '<div class="uam-item" onclick="_openOrgAdminPanel()"><span class="uam-ico">👥</span>Administrer</div>' : '')}
     <div class="uam-sep"></div>
     <div class="uam-item danger" onclick="_authLogout()"><span class="uam-ico">🚪</span>Logg ut</div>
   `;
@@ -20773,16 +20842,39 @@ function _admRenderDashboard(el) {
   const orgs = _adminState.cache.orgs || [];
   const invs = (_adminState.cache.invitations || []).filter(i => i.status === 'pending');
   const pending = profiles.filter(p => p.status === 'pending');
-  const recent = profiles.slice(0, 5);
+  const recent = profiles.filter(p => p.status !== 'blocked').slice(0, 5);
+  // Find orgs with pending owners (newly registered, waiting for superadmin approval)
+  const pendingOrgs = orgs.filter(o => {
+    const ownerMember = (_adminState.cache.memberships||[]).find(m => m.org_id === o.id && m.role === 'owner');
+    if (!ownerMember) return false;
+    const ownerProfile = profiles.find(p => p.id === ownerMember.user_id);
+    return ownerProfile && ownerProfile.status === 'pending';
+  });
 
   el.innerHTML = `<h2>Oversikt</h2>
     <div class="adm-stats">
       <div class="adm-stat"><div class="num">${profiles.length}</div><div class="lbl">Brukere totalt</div></div>
       <div class="adm-stat" style="cursor:pointer" onclick="_admNav('users');document.getElementById('adm-filter-status').value='pending';_admApplyFilters()"><div class="num" style="color:#ff8c47">${pending.length}</div><div class="lbl">Venter godkjenning</div></div>
       <div class="adm-stat" style="cursor:pointer" onclick="_admNav('orgs')"><div class="num">${orgs.length}</div><div class="lbl">Organisasjoner</div></div>
-      <div class="adm-stat"><div class="num">${invs.length}</div><div class="lbl">Aktive invitasjoner</div></div>
+      <div class="adm-stat"><div class="num" style="color:${pendingOrgs.length?'#a855f7':'var(--text)'}">${pendingOrgs.length}</div><div class="lbl">Ventende organisasjoner</div></div>
     </div>
-    ${pending.length ? `<div class="adm-section" style="border-top:none;margin-top:0;padding-top:0"><h3>⏳ Ventende godkjenninger</h3>
+    ${pendingOrgs.length ? `<div class="adm-section" style="border-top:none;margin-top:0;padding-top:0"><h3>🏢 Nye organisasjoner (venter godkjenning)</h3>
+      ${pendingOrgs.map(o => {
+        const ownerMember = (_adminState.cache.memberships||[]).find(m => m.org_id === o.id && m.role === 'owner');
+        const ownerProfile = ownerMember ? (profiles.find(p => p.id === ownerMember.user_id)) : null;
+        return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+          <div>
+            <span style="font-weight:600;color:var(--text)">${_esc(o.name)}</span>
+            ${ownerProfile ? `<span style="font-size:12px;color:var(--muted);margin-left:8px">Eier: ${_esc(ownerProfile.full_name||ownerProfile.email||'')}</span>` : ''}
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="adm-btn sm primary" onclick="_admApproveOrg('${o.id}')">Godkjenn org</button>
+            <button class="adm-btn sm ghost" onclick="_adminState.section='orgs';_admShowDetail('${o.id}')">Detaljer</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+    ${pending.length ? `<div class="adm-section" style="border-top:none;margin-top:0;padding-top:0"><h3>⏳ Ventende brukergodkjenninger</h3>
       ${pending.map(p => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <div>
           <span style="font-weight:600;color:var(--text)">${_esc(p.full_name||'Ukjent')}</span>
@@ -21328,6 +21420,226 @@ function _admRenderImport(el) {
     </div>`;
 }
 
+// ─── ORG-ADMIN PANEL (for org owners/admins) ───
+
+let _orgAdmState = { section:'dashboard', cache:{ members:null, invitations:null } };
+
+function _openOrgAdminPanel() {
+  document.querySelectorAll('.user-avatar-menu').forEach(m => m.classList.remove('open'));
+  _activeAvatarMenu = null;
+  if (!_userOrg) return;
+  _orgAdmState = { section:'dashboard', cache:{ members:null, invitations:null } };
+  // Reuse the admin-screen but with org-admin sidebar
+  const sidebar = document.querySelector('.adm-sidebar .adm-nav');
+  sidebar.innerHTML = `
+    <div class="adm-nav-item active" data-section="dashboard" onclick="_orgAdmNav('dashboard')">📊 Oversikt</div>
+    <div class="adm-nav-item" data-section="members" onclick="_orgAdmNav('members')">👤 Medlemmer</div>
+    <div class="adm-nav-item" data-section="invitations" onclick="_orgAdmNav('invitations')">📩 Invitasjoner</div>
+    <div class="adm-nav-item" data-section="settings" onclick="_orgAdmNav('settings')">⚙️ Innstillinger</div>
+  `;
+  document.querySelector('.adm-sidebar-hdr').textContent = '👥 ' + (_userOrg.name || 'Admin');
+  document.getElementById('admin-screen').style.display = 'block';
+  _orgAdmRefresh();
+}
+
+function _orgAdmNav(section) {
+  _orgAdmState.section = section;
+  document.querySelectorAll('.adm-nav-item').forEach(n => n.classList.toggle('active', n.dataset.section === section));
+  _orgAdmRender();
+}
+
+async function _orgAdmRefresh() {
+  try {
+    const { data: members } = await _db.from('organization_members')
+      .select('user_id, role, profiles(id, full_name, email, phone, status, created_at)')
+      .eq('org_id', _userOrg.id);
+    _orgAdmState.cache.members = members || [];
+    const { data: invs } = await _db.from('org_invitations')
+      .select('*')
+      .eq('org_id', _userOrg.id)
+      .order('created_at', { ascending: false });
+    _orgAdmState.cache.invitations = invs || [];
+  } catch(e) { console.warn('Org admin load error:', e); }
+  _orgAdmRender();
+}
+
+function _orgAdmRender() {
+  const el = document.getElementById('adm-content');
+  if (!el) return;
+  switch(_orgAdmState.section) {
+    case 'dashboard': _orgAdmRenderDashboard(el); break;
+    case 'members': _orgAdmRenderMembers(el); break;
+    case 'invitations': _orgAdmRenderInvitations(el); break;
+    case 'settings': _orgAdmRenderSettings(el); break;
+  }
+}
+
+function _orgAdmRenderDashboard(el) {
+  const members = _orgAdmState.cache.members || [];
+  const invs = (_orgAdmState.cache.invitations || []).filter(i => i.status === 'pending');
+  const sub = _userOrg.subscription_status || 'trial';
+  const subLabel = { trial:'Prøveperiode', active:'Aktivt', suspended:'Suspendert', cancelled:'Kansellert' }[sub] || sub;
+  const planLabel = { free:'Gratis', standard:'Standard', professional:'Profesjonell' }[_userOrg.plan || 'free'] || _userOrg.plan;
+
+  el.innerHTML = `<h2>${_esc(_userOrg.name)}</h2>
+    <div class="adm-stats">
+      <div class="adm-stat"><div class="num">${members.length}</div><div class="lbl">Medlemmer</div></div>
+      <div class="adm-stat"><div class="num">${invs.length}</div><div class="lbl">Ventende invitasjoner</div></div>
+      <div class="adm-stat"><div class="num" style="font-size:18px">${subLabel}</div><div class="lbl">Abonnement</div></div>
+      <div class="adm-stat"><div class="num" style="font-size:18px">${planLabel}</div><div class="lbl">Plan</div></div>
+    </div>
+    <div class="adm-section" style="border-top:none;margin-top:0;padding-top:0"><h3>Medlemmer</h3>
+      <table class="adm-table">
+        <thead><tr><th>Navn</th><th>E-post</th><th>Rolle</th><th>Status</th></tr></thead>
+        <tbody>${members.map(m => {
+          const p = m.profiles;
+          return `<tr><td style="font-weight:500">${_esc(p?.full_name||'Ukjent')}</td><td>${_esc(p?.email||'')}</td><td>${m.role==='owner'?'Eier':m.role==='admin'?'Administrator':'Medlem'}</td><td>${_admStatusBadge(p?.status)}</td></tr>`;
+        }).join('') || '<tr><td colspan="4" class="adm-empty">Ingen medlemmer</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+function _orgAdmRenderMembers(el) {
+  const members = _orgAdmState.cache.members || [];
+  el.innerHTML = `<h2>Medlemmer <span style="font-size:14px;font-weight:400;color:var(--muted)">(${members.length})</span></h2>
+    <table class="adm-table">
+      <thead><tr><th>Navn</th><th>E-post</th><th>Telefon</th><th>Rolle</th><th>Registrert</th><th></th></tr></thead>
+      <tbody>${members.map(m => {
+        const p = m.profiles;
+        const isOwner = m.role === 'owner';
+        const isSelf = m.user_id === _currentUser.id;
+        return `<tr>
+          <td style="font-weight:500">${_esc(p?.full_name||'Ukjent')}</td>
+          <td>${_esc(p?.email||'')}</td>
+          <td>${_esc(p?.phone||'—')}</td>
+          <td>${m.role==='owner'?'Eier':m.role==='admin'?'Administrator':'Medlem'}</td>
+          <td style="color:var(--muted)">${_admDate(p?.created_at)}</td>
+          <td>${!isOwner && !isSelf ? `<button class="adm-btn sm danger" onclick="_orgAdmRemoveMember('${m.user_id}')">Fjern</button>` : ''}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="6" class="adm-empty">Ingen medlemmer</td></tr>'}</tbody>
+    </table>
+    <div class="adm-section"><h3>Inviter ny bruker</h3>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div class="pf-field" style="margin:0;flex:1;min-width:200px"><label>E-post</label><input id="orgadm-inv-email" type="email" placeholder="kollega@firma.no" class="adm-search"></div>
+        <div class="pf-field" style="margin:0"><label>Rolle</label>
+          <select id="orgadm-inv-role" class="adm-select"><option value="member">Medlem</option><option value="admin">Administrator</option></select></div>
+        <button class="adm-btn primary" id="orgadm-inv-btn" onclick="_orgAdmInviteUser()">Send invitasjon</button>
+      </div>
+      <div id="orgadm-inv-msg" class="adm-msg"></div>
+    </div>`;
+}
+
+async function _orgAdmInviteUser() {
+  const email = document.getElementById('orgadm-inv-email').value.trim().toLowerCase();
+  const role = document.getElementById('orgadm-inv-role').value;
+  const btn = document.getElementById('orgadm-inv-btn');
+  const msg = document.getElementById('orgadm-inv-msg');
+  if (!email || !email.includes('@')) { msg.style.display='block'; msg.style.background='rgba(255,60,60,.08)'; msg.style.color='#ff6b6b'; msg.textContent='Fyll inn en gyldig e-postadresse.'; return; }
+  btn.disabled = true; btn.textContent = 'Sender...';
+  try {
+    const token = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2)+Date.now().toString(36));
+    const { error } = await _db.from('org_invitations').insert({ email, org_id:_userOrg.id, role, token, status:'pending', invited_by:_currentUser.id }).select().single();
+    if (error) throw error;
+    const inviteUrl = window.location.origin + window.location.pathname + '?invite=' + token;
+    try {
+      const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
+        method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
+        body: JSON.stringify({ to:email, invite_url:inviteUrl, org_name:_userOrg.name, invited_by:_currentProfile?.full_name||_currentUser.email })
+      });
+      msg.style.display='block'; msg.style.background='rgba(34,211,238,.08)'; msg.style.color='var(--accent)';
+      msg.innerHTML = resp.ok ? `✓ Invitasjon sendt til ${_esc(email)}` : `✓ Invitasjon opprettet! Del lenken:<br><input value="${inviteUrl}" readonly onclick="this.select()" style="width:100%;margin-top:6px;padding:6px;font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text)">`;
+    } catch(_) {
+      msg.style.display='block'; msg.style.background='rgba(34,211,238,.08)'; msg.style.color='var(--accent)';
+      msg.innerHTML = `✓ Invitasjon opprettet! Del lenken:<br><input value="${inviteUrl}" readonly onclick="this.select()" style="width:100%;margin-top:6px;padding:6px;font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text)">`;
+    }
+    document.getElementById('orgadm-inv-email').value = '';
+    await _orgAdmRefresh();
+  } catch(e) {
+    msg.style.display='block'; msg.style.background='rgba(255,60,60,.08)'; msg.style.color='#ff6b6b'; msg.textContent='Feil: '+e.message;
+  } finally { btn.disabled=false; btn.textContent='Send invitasjon'; }
+}
+
+async function _orgAdmRemoveMember(userId) {
+  if (!confirm('Fjerne dette medlemmet fra organisasjonen?')) return;
+  try {
+    await _db.from('organization_members').delete().eq('org_id', _userOrg.id).eq('user_id', userId);
+    await _orgAdmRefresh();
+  } catch(e) { alert('Feil: '+e.message); }
+}
+
+function _orgAdmRenderInvitations(el) {
+  const invs = _orgAdmState.cache.invitations || [];
+  el.innerHTML = `<h2>Invitasjoner</h2>
+    <table class="adm-table">
+      <thead><tr><th>E-post</th><th>Rolle</th><th>Status</th><th>Sendt</th><th>Utløper</th><th></th></tr></thead>
+      <tbody>${invs.length ? invs.map(i => {
+        const sc = i.status==='pending'?'pending':i.status==='accepted'?'active':'blocked';
+        const sl = i.status==='pending'?'Venter':i.status==='accepted'?'Akseptert':'Utløpt';
+        return `<tr><td>${_esc(i.email)}</td><td>${i.role==='admin'?'Administrator':'Medlem'}</td><td><span class="adm-badge ${sc}">${sl}</span></td><td style="color:var(--muted)">${_admDate(i.created_at)}</td><td style="color:var(--muted)">${_admDate(i.expires_at)}</td><td>${i.status==='pending'?`<button class="adm-btn sm danger" onclick="_orgAdmCancelInvite('${i.id}')">Kanseller</button>`:''}</td></tr>`;
+      }).join('') : '<tr><td colspan="6" class="adm-empty">Ingen invitasjoner</td></tr>'}</tbody>
+    </table>`;
+}
+
+async function _orgAdmCancelInvite(invId) {
+  if (!confirm('Kansellere denne invitasjonen?')) return;
+  try {
+    await _db.from('org_invitations').update({ status:'expired' }).eq('id', invId);
+    await _orgAdmRefresh();
+  } catch(e) { alert('Feil: '+e.message); }
+}
+
+function _orgAdmRenderSettings(el) {
+  const o = _userOrg;
+  const sub = { trial:'Prøveperiode', active:'Aktivt abonnement', suspended:'Suspendert', cancelled:'Kansellert' }[o.subscription_status||'trial'] || o.subscription_status;
+  const plan = { free:'Gratis', standard:'Standard', professional:'Profesjonell' }[o.plan||'free'] || o.plan;
+  const typeLbl = o.org_type === 'supplier' ? 'Leverandør' : 'Installatør';
+
+  el.innerHTML = `<h2>Organisasjonsinnstillinger</h2>
+    <div class="adm-detail">
+      <div class="pf-field"><label>Organisasjonsnavn</label><input id="orgadm-name" value="${_esc(o.name||'')}"></div>
+      <div class="adm-row">
+        <div class="pf-field"><label>Type</label><input value="${typeLbl}" disabled style="opacity:.6"></div>
+        <div class="pf-field"><label>Abonnement</label><input value="${sub}" disabled style="opacity:.6"></div>
+      </div>
+      <div class="adm-row">
+        <div class="pf-field"><label>Plan</label><input value="${plan}" disabled style="opacity:.6"></div>
+        ${o.trial_ends_at ? `<div class="pf-field"><label>Prøveperiode utløper</label><input value="${_admDate(o.trial_ends_at)}" disabled style="opacity:.6"></div>` : ''}
+      </div>
+      <p style="font-size:12px;color:var(--dim);margin-top:8px">Type, abonnement og plan styres av systemadministrator.</p>
+      <div id="orgadm-settings-msg" class="adm-msg"></div>
+      <div class="adm-actions"><button class="adm-btn primary" onclick="_orgAdmSaveSettings()">Lagre endringer</button></div>
+    </div>`;
+}
+
+async function _orgAdmSaveSettings() {
+  const msg = document.getElementById('orgadm-settings-msg');
+  try {
+    const name = document.getElementById('orgadm-name').value.trim();
+    if (!name) throw new Error('Navn kan ikke være tomt');
+    await _db.from('organizations').update({ name }).eq('id', _userOrg.id);
+    _userOrg.name = name;
+    msg.style.display='block'; msg.style.background='rgba(34,211,238,.08)'; msg.style.color='var(--accent)'; msg.textContent='✓ Lagret';
+    setTimeout(() => { msg.style.display='none'; }, 3000);
+  } catch(e) { msg.style.display='block'; msg.style.background='rgba(255,60,60,.08)'; msg.style.color='#ff6b6b'; msg.textContent='Feil: '+e.message; }
+}
+
+// ─── SUPERADMIN: Org approval helpers ───
+async function _admApproveOrg(orgId) {
+  try {
+    // Activate org with trial
+    await _db.from('organizations').update({
+      subscription_status: 'trial',
+      trial_ends_at: new Date(Date.now() + 30*24*60*60*1000).toISOString()
+    }).eq('id', orgId);
+    // Activate owner profile
+    const ownerMember = (_adminState.cache.memberships||[]).find(m => m.org_id === orgId && m.role === 'owner');
+    if (ownerMember) {
+      await _db.from('profiles').update({ status:'active', approved_at:new Date().toISOString(), approved_by:_currentUser.id }).eq('id', ownerMember.user_id);
+    }
+    await _admRefreshAll();
+  } catch(e) { alert('Feil: '+e.message); }
+}
+
 // Add Enter key support for auth forms
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Enter') return;
@@ -21481,8 +21793,9 @@ async function _saveToSupabase() {
     description: S.project.description || '',
     data: saveData
   };
-  // Add user_id for RLS (graceful if column doesn't exist yet)
+  // Add user_id and org_id for RLS (graceful if column doesn't exist yet)
   if (_currentUser) row.user_id = _currentUser.id;
+  if (_userOrg) row.org_id = _userOrg.id;
   // Add optional columns (graceful if migration not run yet)
   if (_dbHasStatusCol) {
     row.status = S.project.status || 'active';
