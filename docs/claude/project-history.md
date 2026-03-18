@@ -1,5 +1,14 @@
 # Romtegner Project History
 
+## 2026-03-18: Sikkerhetsfix — customer_id + RLS-opprydding
+- **customer_id** lagres nå som DB-kolonne ved prosjektlagring (manglet, var kun i JSONB)
+- **Fjernet farlig "Public access" RLS-policy** på romtegner_projects (hadde `qual: true`)
+- **Oppgradert org-policy** fra SELECT-only til ALL (dekker INSERT/UPDATE/DELETE)
+- Verifisert: customers-tabell har korrekt org-basert RLS
+- Verifisert: prosjekter isolert per org — Firma A ser aldri Firma B sine data
+
+---
+
 ## 2026-03-18: Beregningsresultater, PDF-preview, CRM/kundekort, UI-forbedringer
 
 ### Beregningsresultat-panel i prosjekteringsmodul
