@@ -19970,10 +19970,35 @@ async function exportPDF(opts) {
     }
   }
 
+  // ── Stair detail pages ──
+  const _selectedStairs = opts.stairs && opts.stairs.length > 0 ? (S.stairs||[]).filter(s => opts.stairs.includes(s.id)) : (S.stairs||[]);
+  for (const stair of _selectedStairs) {
+    _addPage();
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(20, 40, 80);
+    doc.text('Trapp: ' + (stair.name || 'Trapp'), M, y); y += 8;
+    // Stair image
+    try {
+      const stairImg = _renderStairToImage(stair);
+      const imgW = pw, imgH = pw * 0.6;
+      doc.addImage(stairImg, 'PNG', M, y, imgW, imgH);
+      y += imgH + 6;
+    } catch(e) { y += 4; }
+    // Stair stats
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
+    doc.text('Trinn: ' + (stair.step_count || '—'), M, y); y += 4;
+    doc.text('Bredde: ' + Math.round(stair.width_cm || 0) + ' cm', M, y); y += 4;
+    doc.text('Total kabellengde: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m', M, y); y += 4;
+    const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+    if (prod) {
+      const totalW = prod.watt_per_m ? Math.round((stair.totalCableLength_cm||0)/100 * prod.watt_per_m) : 0;
+      doc.text('Produkt: ' + (prod.name||'—') + ' — ' + totalW + ' W', M, y); y += 4;
+      if (prod.el_no) { doc.text('El.nr: ' + prod.el_no + '  |  Art.nr: ' + (prod.article_no||'—'), M, y); y += 4; }
+    }
+    _addFooter();
+  }
+
   // ── Material list (all rooms combined) ──
-  // Always build matList (needed for pricing too), but only render if selected
   const matList = {};
-  // (matList aggregation code follows below)
   if (opts.materialList || opts.pricing) {
   _addPage();
   doc.setFont('helvetica', 'bold');
@@ -20419,6 +20444,126 @@ function _renderRoomToImage(room) {
     const len = Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
     offCtx.fillText(len + ' cm', mx, my - 5);
   }
+
+  return offCanvas.toDataURL('image/png');
+}
+
+function _renderStairToImage(stair) {
+  const offW = 800, offH = 500;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = offW; offCanvas.height = offH;
+  const c = offCanvas.getContext('2d');
+  c.fillStyle = '#ffffff';
+  c.fillRect(0, 0, offW, offH);
+
+  const surfs = stair.surfaces;
+  if (!surfs || !surfs.length) return offCanvas.toDataURL('image/png');
+
+  // Calculate bounds
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const sf of surfs) {
+    minX = Math.min(minX, sf.x_cm);
+    minY = Math.min(minY, sf.y_cm);
+    maxX = Math.max(maxX, sf.x_cm + sf.w_cm);
+    maxY = Math.max(maxY, sf.y_cm + sf.d_cm);
+  }
+  const sW = maxX - minX, sH = maxY - minY;
+  const pad = 40;
+  const scale = Math.min((offW - 2*pad) / sW, (offH - 2*pad) / sH);
+  const ox = pad + ((offW - 2*pad) - sW*scale) / 2;
+  const oy = pad + ((offH - 2*pad) - sH*scale) / 2;
+  const tx = wx => ox + (wx - minX) * scale;
+  const ty = wy => oy + (wy - minY) * scale;
+
+  // Draw surfaces
+  let _lNum = 0;
+  for (const sf of surfs) {
+    if (sf.type === 'landing') _lNum++;
+    const x1 = tx(sf.x_cm), y1 = ty(sf.y_cm);
+    const w = sf.w_cm * scale, h = sf.d_cm * scale;
+    c.fillStyle = sf.type === 'landing' ? 'rgba(160,175,195,0.35)' : 'rgba(180,180,180,0.30)';
+    c.fillRect(x1, y1, w, h);
+    c.strokeStyle = '#888'; c.lineWidth = 1;
+    c.strokeRect(x1, y1, w, h);
+    // Label
+    c.fillStyle = '#666'; c.font = '11px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    const lbl = sf.type === 'landing' ? 'Repos ' + _lNum : '' + ((sf.stepIdx != null ? sf.stepIdx : sf.index) + 1);
+    c.fillText(lbl, x1 + w/2, y1 + h/2);
+  }
+
+  // Draw cable runs
+  if (stair.runs && stair.runs.length > 0) {
+    const hasMulti = (stair.cables || []).length > 1;
+    const COLORS = ['#e06030', '#3080e0', '#30b050'];
+    c.lineWidth = 1.5; c.lineCap = 'round';
+    const runsBySurf = {};
+    for (const r of stair.runs) { if (!runsBySurf[r.surfaceIdx]) runsBySurf[r.surfaceIdx] = []; runsBySurf[r.surfaceIdx].push(r); }
+
+    for (const [si, surfRuns] of Object.entries(runsBySurf)) {
+      const sf = surfs[+si];
+      if (!sf) continue;
+      const surfW = sf.w_cm || stair.width_cm || 120;
+      const edgeMrg = stair.edgeMargin_cm || 5;
+      for (let ri = 0; ri < surfRuns.length; ri++) {
+        const run = surfRuns[ri];
+        c.strokeStyle = hasMulti ? (COLORS[run.cableIdx] || '#e06030') : '#e06030';
+        // Trim for arcs
+        let trimL = 0, trimR = 0;
+        if (ri < surfRuns.length-1) { const R=Math.abs(surfRuns[ri+1].pos_cm-run.pos_cm)/2; if(ri%2===0) trimR=R; else trimL=R; }
+        if (ri > 0) { const R=Math.abs(run.pos_cm-surfRuns[ri-1].pos_cm)/2; if((ri-1)%2===0) trimR=R; else trimL=R; }
+        for (const seg of run.segments) {
+          const a = { x: tx(sf.x_cm + seg.start_cm + trimL), y: ty(sf.y_cm + run.pos_cm) };
+          const b = { x: tx(sf.x_cm + seg.end_cm - trimR), y: ty(sf.y_cm + run.pos_cm) };
+          c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+        }
+        // U-turn arc
+        if (ri < surfRuns.length-1) {
+          const nextRun = surfRuns[ri+1];
+          const atRight = (ri%2===0);
+          const xEdge = atRight ? sf.x_cm+surfW-edgeMrg : sf.x_cm+edgeMrg;
+          const radius = Math.abs(nextRun.pos_cm - run.pos_cm)/2;
+          const midY = (run.pos_cm + nextRun.pos_cm)/2;
+          const arcCX = atRight ? xEdge-radius : xEdge+radius;
+          const rPx = radius * scale;
+          if (rPx > 1) {
+            c.beginPath();
+            const startAngle = atRight ? -Math.PI/2 : Math.PI/2;
+            c.arc(tx(arcCX), ty(sf.y_cm+midY), rPx, startAngle, startAngle+Math.PI);
+            c.stroke();
+          }
+        }
+      }
+    }
+    // Connections
+    if (stair.connections) {
+      c.setLineDash([4,4]);
+      for (const conn of stair.connections) {
+        c.strokeStyle = hasMulti ? (COLORS[conn.cableIdx]||'#e06030') : '#e06030';
+        const fromSurf = surfs[conn.fromSurf], toSurf = surfs[conn.toSurf];
+        if (!fromSurf || !toSurf) continue;
+        const fRuns = runsBySurf[conn.fromSurf]||[];
+        if (fRuns.length) {
+          const nF = fRuns.length;
+          const exitRight = (nF%2===1);
+          const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : fromSurf.x_cm+(stair.edgeMargin_cm||5);
+          const a = { x:tx(exitX), y:ty(fromSurf.y_cm+fromSurf.d_cm) };
+          const tRuns = runsBySurf[conn.toSurf]||[];
+          const entryRight = exitRight;
+          const entryX = entryRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
+          const b = { x:tx(entryX), y:ty(toSurf.y_cm) };
+          c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+        }
+      }
+      c.setLineDash([]);
+    }
+  }
+
+  // Stair name
+  c.fillStyle = '#333'; c.font = 'bold 14px sans-serif'; c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(stair.name || 'Trapp', 10, 10);
+  // Dimensions
+  c.fillStyle = '#888'; c.font = '11px sans-serif';
+  c.fillText(`${Math.round(sW)} × ${Math.round(sH)} cm`, 10, 28);
 
   return offCanvas.toDataURL('image/png');
 }
