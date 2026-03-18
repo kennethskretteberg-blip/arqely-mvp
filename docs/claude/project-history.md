@@ -1,5 +1,14 @@
 # Romtegner Project History
 
+## 2026-03-18: Produktimport kolonnefiltre + el.nr/lev.art.nr + PDF materialliste
+- Produktimport: to separate kolonner "El.nummer" og "Lev. art.nr" (erstatter "Artikkelnr")
+- Kolonnefiltre: klikk på "Produktgruppe ▾" eller "Leverandør ▾" for dropdown-filter direkte i tabellheader
+- Søk inkluderer nå også el.nr
+- PDF materialliste: ny kolonne "El.nr" + "Lev.art.nr" (begge vises på utskrift)
+- Leverandør-filter i tillegg til produktgruppe-filter
+
+---
+
 ## 2026-03-18: Produktimport søk/filter + support-modus advarsel
 - Produktimport: ny kolonne "Produktgruppe" (product_family), søkefelt, filter-dropdown
 - Support-modus: oransje banner "⚠️ Support-modus: Du ser på prosjekt for [firma]" med tilbake-knapp
