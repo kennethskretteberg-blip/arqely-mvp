@@ -1,5 +1,14 @@
 # Romtegner Project History
 
+## 2026-03-18: Klokkeslett i prosjektliste + teknisk støtte-panel
+- Prosjektlisten viser nå dato + klokkeslett (f.eks. "18. mar 2026 kl. 14:32")
+- Ny "🛠️ Støtte"-seksjon i superadmin-panel for teknisk support
+- Velg org → se alle prosjekter med eier, dato, antall rom
+- "Åpne"-knapp: superadmin kan åpne prosjekt direkte for feilsøking
+- Henter også prosjekter uten org_id (eldre prosjekter) basert på org-medlemskap
+
+---
+
 ## 2026-03-18: CC varmekabel — cm med én desimal
 - Alle CC-visninger endret fra mm (heltall) til cm med én desimal (f.eks. "CC: 8.5 cm")
 - Input-felt: "Ønsket CC cm" med steg 0.5 (fra mm med steg 10)

@@ -922,6 +922,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
         <div class="adm-nav-item" data-section="users" onclick="_admNav('users')">👤 Brukere</div>
         <div class="adm-nav-item" data-section="orgs" onclick="_admNav('orgs')">🏢 Organisasjoner</div>
         <div class="adm-nav-item" data-section="invitations" onclick="_admNav('invitations')">📩 Invitasjoner</div>
+        <div class="adm-nav-item" data-section="support" onclick="_admNav('support')">🛠️ Støtte</div>
         <div class="adm-nav-item" data-section="import" onclick="_admNav('import')">📊 Produktimport</div>
       </nav>
       <div class="adm-close" onclick="_admClosePanel()">✕ Lukk admin</div>
@@ -20831,6 +20832,7 @@ function _admRender() {
     case 'users': _adminState.view==='detail' ? _admRenderUserDetail(el) : _admRenderUserList(el); break;
     case 'orgs': _adminState.view==='detail' ? _admRenderOrgDetail(el) : _admRenderOrgList(el); break;
     case 'invitations': _admRenderInvitations(el); break;
+    case 'support': _admRenderSupport(el); break;
     case 'import': _admRenderImport(el); break;
   }
 }
@@ -21397,6 +21399,111 @@ async function _admCancelInvite(invId) {
 }
 
 // ─── PRODUCT IMPORT (moved from topbar to admin) ───
+// ─── SUPPORT / VIEW AS ORG ───
+async function _admRenderSupport(el) {
+  const orgs = _adminState.cache.orgs || [];
+  const profiles = _adminState.cache.profiles || [];
+  // Load projects count per org
+  let orgProjectCounts = {};
+  try {
+    const { data } = await _db.from('romtegner_projects').select('org_id');
+    (data || []).forEach(p => { if (p.org_id) orgProjectCounts[p.org_id] = (orgProjectCounts[p.org_id]||0) + 1; });
+  } catch(e) {}
+
+  el.innerHTML = `<h2>🛠️ Teknisk støtte</h2>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:24px">Se prosjekter og data for en organisasjon. Nyttig for feilsøking og support.</p>
+
+    <div class="adm-section" style="border-top:none;margin-top:0;padding-top:0">
+      <h3>Vis prosjekter for organisasjon</h3>
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px">
+        <div class="pf-field" style="margin:0;flex:1;min-width:200px">
+          <label>Velg organisasjon</label>
+          <select id="adm-support-org" class="adm-select" style="width:100%">
+            <option value="">— Velg —</option>
+            ${orgs.map(o => `<option value="${o.id}">${_esc(o.name)} (${o.org_type==='supplier'?'leverandør':'installatør'}) — ${orgProjectCounts[o.id]||0} prosjekter</option>`).join('')}
+          </select>
+        </div>
+        <button class="adm-btn primary" onclick="_admViewOrgProjects()">Vis prosjekter</button>
+      </div>
+      <div id="adm-support-results"></div>
+    </div>
+
+    <div class="adm-section">
+      <h3>Alle organisasjoner</h3>
+      <table class="adm-table">
+        <thead><tr><th>Organisasjon</th><th>Type</th><th>Medlemmer</th><th>Prosjekter</th><th>Abonnement</th><th></th></tr></thead>
+        <tbody>${orgs.map(o => {
+          const mc = _admOrgMembers(o.id).length;
+          return `<tr>
+            <td style="font-weight:600">${_esc(o.name)}</td>
+            <td>${_admOrgTypeBadge(o.org_type)}</td>
+            <td>${mc}</td>
+            <td>${orgProjectCounts[o.id]||0}</td>
+            <td>${_admSubBadge(o.subscription_status||'trial')}</td>
+            <td><button class="adm-btn sm ghost" onclick="document.getElementById('adm-support-org').value='${o.id}';_admViewOrgProjects()">Vis prosjekter</button></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+async function _admViewOrgProjects() {
+  const orgId = document.getElementById('adm-support-org').value;
+  const results = document.getElementById('adm-support-results');
+  if (!orgId) { results.innerHTML = '<div class="adm-empty">Velg en organisasjon</div>'; return; }
+
+  results.innerHTML = '<div style="color:var(--muted)">Laster prosjekter...</div>';
+  try {
+    const org = (_adminState.cache.orgs||[]).find(o => o.id === orgId);
+    const { data: projects } = await _db.from('romtegner_projects')
+      .select('id, name, description, created_at, updated_at, user_id, data')
+      .eq('org_id', orgId)
+      .order('updated_at', { ascending: false });
+
+    // Also get projects without org_id from org members
+    const orgMembers = _admOrgMembers(orgId);
+    const memberIds = orgMembers.map(m => m.user_id);
+    const { data: userProjects } = await _db.from('romtegner_projects')
+      .select('id, name, description, created_at, updated_at, user_id, data')
+      .in('user_id', memberIds)
+      .is('org_id', null);
+
+    const allProjects = [...(projects||[]), ...(userProjects||[])];
+    // Deduplicate
+    const seen = new Set();
+    const uniqueProjects = allProjects.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
+
+    // Map user_id to profile
+    const profileMap = {};
+    (_adminState.cache.profiles||[]).forEach(p => { profileMap[p.id] = p; });
+
+    if (!uniqueProjects.length) {
+      results.innerHTML = `<div class="adm-empty">Ingen prosjekter for ${_esc(org?.name||'')}</div>`;
+      return;
+    }
+
+    results.innerHTML = `<div style="font-weight:600;color:var(--text);margin-bottom:8px">${_esc(org?.name||'')} — ${uniqueProjects.length} prosjekter</div>
+      <table class="adm-table">
+        <thead><tr><th>Prosjektnavn</th><th>Opprettet av</th><th>Sist oppdatert</th><th>Rom</th><th></th></tr></thead>
+        <tbody>${uniqueProjects.map(p => {
+          const owner = profileMap[p.user_id];
+          const d = new Date(p.updated_at);
+          const dateStr = d.toLocaleDateString('nb-NO',{day:'numeric',month:'short',year:'numeric'}) + ' kl. ' + d.toLocaleTimeString('nb-NO',{hour:'2-digit',minute:'2-digit'});
+          const rooms = p.data?.rooms?.length || p.data?.state?.rooms?.length || 0;
+          return `<tr>
+            <td style="font-weight:500">${_esc(p.name||'Uten navn')}</td>
+            <td>${_esc(owner?.full_name||owner?.email||'Ukjent')}</td>
+            <td style="color:var(--muted)">${dateStr}</td>
+            <td>${rooms}</td>
+            <td><button class="adm-btn sm primary" onclick="_admClosePanel();_openCloudProject('${p.id}')">Åpne</button></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  } catch(e) {
+    results.innerHTML = `<div style="color:#ff6b6b">Feil: ${e.message}</div>`;
+  }
+}
+
 function _admRenderImport(el) {
   el.innerHTML = `<h2>Produktimport</h2>
     <p style="color:var(--muted);font-size:13px;margin-bottom:20px">Importer produkter fra Excel til Supabase-databasen. Eksisterende produkter oppdateres basert på artikkelnummer.</p>
@@ -22453,7 +22560,8 @@ async function _renderProjectList() {
   });
 
   tbody.innerHTML = projects.map(p => {
-    const date = new Date(p.updated_at).toLocaleDateString('nb-NO');
+    const _d = new Date(p.updated_at);
+    const date = _d.toLocaleDateString('nb-NO', {day:'numeric',month:'short',year:'numeric'}) + ' kl. ' + _d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
     const safeName = esc(p.name).replace(/'/g, '&#39;');
     const status = p._status || 'in_progress';
     const statusObj = PROJECT_STATUSES.find(s => s.id === status) || PROJECT_STATUSES[0];
