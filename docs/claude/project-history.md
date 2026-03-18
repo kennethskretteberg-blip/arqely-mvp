@@ -1,5 +1,34 @@
 # Romtegner Project History
 
+## 2026-03-18: PDF-popup, pris/tilbud, produktregistrering, leverandør-import
+
+### PDF-eksport dialog
+- Ny popup med checkboxer: forside, prosjektoversikt, romtegninger (per rom), trapper, materialliste, tilbudspris, dokumentasjon, signaturside
+- Tilleggstekst (fritekst) som legges til i PDF
+- Rabatt-% felt + vis/skjul DG/DB checkbox
+
+### Tilbud i PDF
+- Pristabell: Produkt, Antall, Veil.pris, Rabatt, Pris, Sum
+- Sum ekskl. mva, MVA 25%, Total inkl. mva
+- DG% og DB vises valgfritt (kun for internt bruk)
+
+### Manuell produktregistrering
+- Nytt skjema i Produktimport-seksjonen: El.nr, Art.nr, Navn, Produktgruppe, W/m², W/lm, Bredde, Veil.pris, Kostpris, Leverandør
+- Upsert på article_no (oppdaterer eksisterende, oppretter nye)
+- Leverandør-org: supplier settes automatisk
+
+### Leverandør-produktseksjon i org-admin
+- Ny "📊 Produkter"-seksjon i org-admin sidebar (kun for supplier-orgs)
+- Gjenbruker _admRenderImport() — leverandør ser kun egne produkter
+
+### Priskolonner
+- DB: price_list, cost_price, price_unit, currency på heating_products
+- COL_MAP utvidet: veilpris, kostpris, produktgruppe, leverandør, kabellengde, etc.
+- Produkttabell i admin: nye kolonner Veil.pris og Kostpris
+- Excel-eksport: Veil.pris og Kostpris kolonner lagt til
+
+---
+
 ## 2026-03-18: Feilfikser — trapp i Excel/PDF, avatar dropdown, plater i Excel
 - Excel-eksport: lagt til trappekabel + plater (manglet begge)
 - PDF materialliste: lagt til trappekabel (manglet)
