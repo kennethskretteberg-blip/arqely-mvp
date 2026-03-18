@@ -1,5 +1,31 @@
 # Romtegner Project History
 
+## 2026-03-18: Beregningsresultater, PDF-preview, CRM/kundekort, UI-forbedringer
+
+### Beregningsresultat-panel i prosjekteringsmodul
+- Fast panel (bottom-left) som vises når rom/trapp er valgt
+- Rom: produkt, el.nr, brutto/netto m², dekning%, strips, effekt, W/m², gap, margin
+- Trapp: produkt, trinn, meter pr trinn, total kabel, CC, kantavstand, flateeffekt, total W
+- Oppdateres automatisk via updateCtxBar()
+
+### PDF-eksport med fullskjerm forhåndsvisning
+- Split-layout dialog (85vw×80vh): valgpanel (venstre) + preview (høyre)
+- Klikk på rom/trapp → forhåndsvisning av tegning med stats
+- Alle checkboxer som før + tilleggstekst
+
+### CRM / Kundekort
+- Ny `customers`-tabell med RLS (org-basert tilgang)
+- Kundeopprettelse: navn, kontaktperson, e-post, telefon, adresse, postnr, sted, org.nr, notater
+- Live-søk i prosjekt-opprettelse: søk etter eksisterende kunde eller opprett ny
+- Kundekort-overlay: kundeinfo + liste over alle prosjekter for kunden
+- Prosjekter kobles til customer_id
+
+### UI-forbedringer
+- "Legg til produkt"-knapp flyttet opp ved siden av "Importer fra Excel"
+- Skjemaet toggles med knappen (was separat seksjon nederst)
+
+---
+
 ## 2026-03-18: PDF-popup, pris/tilbud, produktregistrering, leverandør-import
 
 ### PDF-eksport dialog
