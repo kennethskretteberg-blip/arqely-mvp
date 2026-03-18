@@ -1,6 +1,51 @@
 # Romtegner Project History
 
-## 2026-03-18: Admin org-velger + superadmin-oppsett + Edge Function deploy
+## 2026-03-18: Fullverdig admin-panel + e-postsystem + DNS-oppsett
+
+### Fullverdig Admin-panel (erstatter gammel 560px modal)
+- **Fullskjerm-layout** med sidebar-navigasjon (dashboard, brukere, organisasjoner, invitasjoner)
+- **Dashboard**: stat-kort (brukere, ventende, orgs, invitasjoner), hurtig-godkjenning, siste registreringer
+- **Brukere**: søk (navn/e-post/firma), filtrering (status, org-type, organisasjon), klikk-inn detalj-view
+- **Brukerdetalj**: rediger navn/telefon/firma/status/org/rolle, admin-notater, blokker/slett
+- **Organisasjoner**: liste med filtrering, opprett ny org, detalj med medlemsliste
+- **Org-detalj**: rediger type/leverandørnavn/abonnement/plan/prøveperiode, legg til/fjern medlemmer
+- **Invitasjoner**: send invitasjon med org/rolle, liste med kanseller-mulighet
+- **CSS**: `adm-*` prefix, ~100 linjer nye klasser
+- **JS**: `_adminState` objekt, `_admRender()` dispatcher, ~500 linjer ny kode
+
+### Database-endringer (supabase-migration-admin-panel.sql)
+- `profiles.admin_notes` (text) — interne admin-notater per bruker
+- `profiles.phone` (text) — telefonnummer
+- `organizations.subscription_status` (text, default 'trial') — trial/active/suspended/cancelled
+- `organizations.plan` (text, default 'free') — free/standard/professional
+- `organizations.trial_ends_at` (timestamptz) — prøveperiode-utløp
+- `organizations.admin_notes` (text) — interne admin-notater per org
+
+### E-postsystem oppsett
+- **Resend.com** konto opprettet med API-nøkkel
+- **DNS-verifisering**: `invite.arqely.com` subdomene verifisert i Resend via Domeneshop DNS (DKIM, MX, SPF)
+- **Supabase secrets**: `RESEND_API_KEY`, `FROM_EMAIL` (noreply@invite.arqely.com), `ADMIN_EMAIL`
+- **Edge Functions deployet**: `notify-admin-registration`, `send-invite-email`
+- **Supabase Site URL** endret fra localhost til `https://arqely.com`
+
+### Superadmin-oppsett
+- `kenneth@arqely.com` satt som superadmin (`is_superadmin: true` i auth.users.raw_app_meta_data)
+- Profil satt til `active` med `approved_at`
+
+### Database-feilretting (registrering)
+- Fjernet `role`-kolonne fra profiles (NOT NULL uten default blokkerte registrering)
+- Fikset `handle_new_user()` trigger — fjernet referanse til droppet kolonne
+- Fikset `search_path` på begge triggers (`handle_new_user`, `handle_invitation_on_signup`) — la til `SET search_path = public` og eksplisitte `public.`-prefiks
+
+### Filer endret
+- `romtegner.html` — fullverdig admin-panel (638 nye linjer, 179 fjernet)
+- `supabase-migration-admin-panel.sql` — ny migrasjon
+- `supabase/functions/notify-admin-registration/index.ts` — Edge Function
+- `supabase/functions/send-invite-email/index.ts` — Edge Function
+
+---
+
+## 2026-03-18 (tidlig): Admin org-velger + superadmin-oppsett + Edge Function deploy
 
 ### Konfigurasjon utført
 - **Resend API** konfigurert med API-nøkkel
