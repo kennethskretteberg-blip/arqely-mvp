@@ -1,5 +1,38 @@
 # Romtegner Project History
 
+## 2026-03-18: Feedback, PDF org-branding, logo-opplasting, Excel-eksport
+
+### Tilbakemeldingssystem
+- Fast 💬-knapp nede til høyre (alltid synlig, skjult i print)
+- Modal med type-velger (Feil/Forslag/Generelt) + tekstfelt
+- Lagres i ny `feedback`-tabell + e-post til admin via Edge Function `send-feedback`
+- Ny "💬 Tilbakemeldinger"-seksjon i superadmin-panel med liste over all feedback
+
+### PDF-mal med org-branding
+- Forside viser firmalogo (øverst), firmanavn, adresse, telefon, e-post, org.nr
+- Prosjektinfo: kunde, adresse, ansvarlig, beskrivelse
+- Footer på alle sider: firmanavn + telefon + sidenummer
+
+### Org-admin: Logo + utskriftsinnstillinger
+- Logo-opplasting (PNG/JPG, komprimeres til maks 300px, lagres som dataURL)
+- Utskriftsfelter: firmanavn, adresse, telefon, e-post, nettside, org.nr, bunntekst
+- Alt redigerbart i org-admin → Innstillinger
+
+### Excel-eksport av materialliste
+- Ny 📊-knapp i topbar ved siden av PDF-eksport
+- Genererer XLSX med kolonner: El.nr, Lev.art.nr, Produkt, Produktgruppe, Type, Rom, Antall, Areal, Effekt, W/m²
+- Totalrad nederst
+- Filnavn: "Materialliste - [Prosjektnavn].xlsx"
+
+### Database (supabase-migration-feedback-print.sql)
+- `feedback`-tabell med RLS
+- Org-kolonner: logo_dataurl, print_company_name, print_address, print_phone, print_email, print_website, print_org_nr, print_footer_text
+
+### Edge Functions
+- `send-feedback` deployet — sender formatert e-post til ADMIN_EMAIL
+
+---
+
 ## 2026-03-18: Produktimport kolonnefiltre + el.nr/lev.art.nr + PDF materialliste
 - Produktimport: to separate kolonner "El.nummer" og "Lev. art.nr" (erstatter "Artikkelnr")
 - Kolonnefiltre: klikk på "Produktgruppe ▾" eller "Leverandør ▾" for dropdown-filter direkte i tabellheader
