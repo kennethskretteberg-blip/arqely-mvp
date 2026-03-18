@@ -1,5 +1,13 @@
 # Romtegner Project History
 
+## 2026-03-18: CC varmekabel — cm med én desimal
+- Alle CC-visninger endret fra mm (heltall) til cm med én desimal (f.eks. "CC: 8.5 cm")
+- Input-felt: "Ønsket CC cm" med steg 0.5 (fra mm med steg 10)
+- Maks CC-advarsel: cm-format
+- Gjelder kabel-forslag, info-paneler, matte-CC, stair-modul
+
+---
+
 ## 2026-03-18: Org-sentrisk tilgangsmodell
 
 ### Ny modell: Organisasjoner styrer tilgang
