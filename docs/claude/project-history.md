@@ -1,5 +1,13 @@
 # Romtegner Project History
 
+## 2026-03-18: Feilfikser — trapp i Excel/PDF, avatar dropdown, plater i Excel
+- Excel-eksport: lagt til trappekabel + plater (manglet begge)
+- PDF materialliste: lagt til trappekabel (manglet)
+- Avatar dropdown: endret fra `position:absolute` til `position:fixed` med `z-index:9999` — vises nå alltid over produktkort og andre paneler
+- Plates lagt til i Excel-eksport
+
+---
+
 ## 2026-03-18: Feedback, PDF org-branding, logo-opplasting, Excel-eksport
 
 ### Tilbakemeldingssystem
