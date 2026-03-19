@@ -24399,9 +24399,9 @@ async function _renderProjectList() {
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
       <td class="pl-td pl-td-name">${esc(p.name)}${p._customer ? '<span class="pl-td-sub">'+esc(p._customer)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
-      <td class="pl-td pl-td-desc pl-td-resp">${customer}</td>
+      <td class="pl-td pl-td-desc pl-td-resp" onclick="event.stopPropagation();_quickSetCustomer('${p.id}')" style="cursor:pointer" title="Klikk for å endre kunde">${customer}</td>
       <td class="pl-td pl-td-type"><span class="pl-type-ico">${typeObj.ico}</span>${typeObj.label}</td>
-      <td class="pl-td"><span class="pl-status" style="background:${statusObj.color}22;color:${statusObj.color}">${statusObj.label}</span></td>
+      <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${PROJECT_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select></td>
       <td class="pl-td pl-td-date">${date}</td>
       <td class="pl-td pl-td-desc pl-td-resp">${responsible}</td>
       <td class="pl-td"><div class="pl-actions">
@@ -24411,6 +24411,71 @@ async function _renderProjectList() {
       </div></td>
     </tr>`;
   }).join('');
+}
+
+/** Quick status change from project list dropdown */
+async function _quickSetStatus(projectId, newStatus, selectEl) {
+  try {
+    const statusObj = PROJECT_STATUSES.find(s => s.id === newStatus) || PROJECT_STATUSES[0];
+    // Update Supabase: both the status column and inside the JSONB data
+    const { data: row } = await _db.from('romtegner_projects').select('data').eq('id', projectId).single();
+    if (row?.data?.project) row.data.project.status = newStatus;
+    const updates = { data: row?.data };
+    if (_dbHasStatusCol) updates.status = newStatus;
+    await _db.from('romtegner_projects').update(updates).eq('id', projectId);
+    // Update select styling
+    if (selectEl) {
+      selectEl.style.background = statusObj.color + '22';
+      selectEl.style.color = statusObj.color;
+      selectEl.style.borderColor = statusObj.color + '44';
+    }
+    _invalidateProjectCache();
+  } catch(e) { console.warn('Status update failed:', e.message); }
+}
+
+/** Quick customer assignment from project list */
+async function _quickSetCustomer(projectId) {
+  // Load customers
+  const customers = await _loadCustomers();
+  if (!customers || !customers.length) {
+    alert('Ingen kunder funnet. Opprett en kunde først.');
+    return;
+  }
+  // Build quick-pick overlay
+  let html = '<div style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)this.remove()" id="quick-customer-overlay">';
+  html += '<div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(400px,90vw);max-height:70vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">';
+  html += '<h3 style="margin:0 0 12px;font-size:15px;color:var(--text)">Velg kunde</h3>';
+  html += '<input id="quick-cust-search" type="text" placeholder="Søk..." style="width:100%;padding:8px 12px;border:1px solid var(--brd);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px;margin-bottom:10px;box-sizing:border-box" oninput="_filterQuickCustomers(this.value)">';
+  html += '<div id="quick-cust-list">';
+  html += '<div class="qc-item" style="padding:8px 12px;cursor:pointer;border-radius:6px;font-size:13px;color:var(--dim)" onclick="_applyQuickCustomer(\'' + projectId + '\',null,\'\')">— Ingen kunde —</div>';
+  for (const c of customers) {
+    html += `<div class="qc-item" style="padding:8px 12px;cursor:pointer;border-radius:6px;font-size:13px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="_applyQuickCustomer('${projectId}','${c.id}','${esc(c.name)}')">${esc(c.name)}${c.address ? '<span style="color:var(--dim);font-size:11px;margin-left:8px">' + esc(c.address) + '</span>' : ''}</div>`;
+  }
+  html += '</div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+  setTimeout(() => document.getElementById('quick-cust-search')?.focus(), 50);
+}
+
+function _filterQuickCustomers(query) {
+  const items = document.querySelectorAll('#quick-cust-list .qc-item');
+  const q = query.toLowerCase();
+  items.forEach(el => { el.style.display = el.textContent.toLowerCase().includes(q) || !q ? '' : 'none'; });
+}
+
+async function _applyQuickCustomer(projectId, customerId, customerName) {
+  document.getElementById('quick-customer-overlay')?.remove();
+  try {
+    const { data: row } = await _db.from('romtegner_projects').select('data').eq('id', projectId).single();
+    if (row?.data?.project) {
+      row.data.project.customer = customerName;
+      row.data.project.customer_id = customerId;
+    }
+    const updates = { data: row?.data };
+    if (customerId) updates.customer_id = customerId;
+    await _db.from('romtegner_projects').update(updates).eq('id', projectId);
+    _invalidateProjectCache();
+    _renderProjectList();
+  } catch(e) { console.warn('Customer update failed:', e.message); alert('Kunde-oppdatering feilet: ' + e.message); }
 }
 
 function _renderDashStats(projects) {
