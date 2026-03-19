@@ -1024,7 +1024,10 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
           </div>
           <div class="dash-create-field" style="position:relative">
             <label>Kunde</label>
-            <input id="dash-proj-customer" class="dash-create-input" type="text" placeholder="Søk eller skriv kundenavn..." oninput="_searchCustomers(this.value)" onfocus="_searchCustomers(this.value)" autocomplete="off">
+            <div style="display:flex;gap:6px;align-items:center">
+              <input id="dash-proj-customer" class="dash-create-input" type="text" placeholder="Søk eller skriv kundenavn..." oninput="_searchCustomers(this.value)" onfocus="_searchCustomers(this.value)" autocomplete="off" style="flex:1">
+              <button type="button" onclick="_showNewCustomerPopup()" title="Legg til ny kunde" style="width:36px;height:36px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,border-color .15s" onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--surface3)'" onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface2)'">＋</button>
+            </div>
             <div id="dash-customer-results" class="cust-search-results" style="display:none"></div>
           </div>
           <div class="dash-create-field">
@@ -7860,6 +7863,68 @@ function _drawStairPlan(stair) {
     }
   }
 
+  // Per-surface cable length labels (shown when selected + zoomed)
+  if (isSel && stair.runs && stair.runs.length > 0 && S.view.zoom > 0.2) {
+    const _edgeMrg = stair.edgeMargin_cm || 5;
+    const _rOff = stair.riserOffset_cm ?? 2;
+    const _nOff = stair.noseOffset_cm ?? 2;
+    // Calculate cable length per surface
+    const _surfLens = {};
+    for (let si = 0; si < surfs.length; si++) {
+      const surf = surfs[si];
+      const isLanding = surf.type === 'landing';
+      const sRuns = (stair.runs || []).filter(r => r.surfaceIdx === si);
+      if (!sRuns.length) continue;
+      const surfW = surf.w_cm || stair.width_cm || 120;
+      const runLen = surfW - 2 * _edgeMrg;
+      if (runLen <= 0) continue;
+      const N = sRuns.length;
+      let len = N * runLen; // straight runs
+      if (N > 1) { // U-turn arcs
+        sRuns.sort((a, b) => a.pos_cm - b.pos_cm);
+        for (let ri = 1; ri < N; ri++) {
+          len += Math.PI * Math.abs(sRuns[ri].pos_cm - sRuns[ri - 1].pos_cm) / 2;
+        }
+      }
+      _surfLens[si] = Math.round(len) / 100; // meters
+    }
+    // Check if all treads have same length (skip labels if uniform)
+    const treadLens = [];
+    for (let si = 0; si < surfs.length; si++) {
+      if (surfs[si].type === 'tread' && _surfLens[si] != null) treadLens.push(_surfLens[si]);
+    }
+    const allTreadsSame = treadLens.length > 0 && treadLens.every(l => Math.abs(l - treadLens[0]) < 0.05);
+    // Draw labels to the left of each surface
+    ctx.font = `${Math.max(7, 8 * S.view.zoom)}px sans-serif`;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (let si = 0; si < surfs.length; si++) {
+      if (_surfLens[si] == null) continue;
+      const surf = surfs[si];
+      const isLanding = surf.type === 'landing';
+      // For treads: only show if not all same, or if it's first tread (as reference)
+      if (!isLanding && allTreadsSame && si !== surfs.findIndex(s => s.type === 'tread')) continue;
+      const lenM = _surfLens[si].toFixed(1);
+      const lbl = lenM + ' m';
+      const midY = oy + surf.y_cm + surf.d_cm / 2;
+      const leftX = ox + surf.x_cm - 3;
+      const pt = w2s(leftX, midY);
+      ctx.fillStyle = isLanding ? _lc('#2090e0','#60b0ff') : _lc('#888','#aaa');
+      ctx.fillText(lbl, pt.x, pt.y);
+    }
+    // If all treads same, show "×N" note on the first tread label
+    if (allTreadsSame && treadLens.length > 1) {
+      const firstTreadIdx = surfs.findIndex(s => s.type === 'tread');
+      if (firstTreadIdx >= 0 && _surfLens[firstTreadIdx] != null) {
+        const surf = surfs[firstTreadIdx];
+        const pt = w2s(ox + surf.x_cm - 3, oy + surf.y_cm + surf.d_cm / 2);
+        ctx.fillStyle = _lc('#aaa','#777');
+        ctx.font = `${Math.max(6, 7 * S.view.zoom)}px sans-serif`;
+        ctx.textAlign = 'right';
+        ctx.fillText('(×' + treadLens.length + ' trinn)', pt.x, pt.y + Math.max(8, 10 * S.view.zoom));
+      }
+    }
+  }
+
   // Dimension lines for cable runs (shown when selected + zoomed)
   if (isSel && stair.runs && stair.runs.length > 0 && S.view.zoom > 0.25) {
     const edgeM = stair.edgeMargin_cm || 5;
@@ -7873,22 +7938,55 @@ function _drawStairPlan(stair) {
     ctx.lineWidth = 0.8;
     ctx.setLineDash([]);
 
-    // Show dims on first tread surface
-    const firstTreadIdx = surfs.findIndex(s => s.type === 'tread');
-    const firstTreadRuns = firstTreadIdx >= 0 ? (stair.runs.filter(r => r.surfaceIdx === firstTreadIdx)) : [];
-    if (firstTreadIdx >= 0 && firstTreadRuns.length > 0) {
-      const surf = surfs[firstTreadIdx];
+    // Helper: draw depth dims for a surface (along-depth: offsets + CC between runs)
+    function _drawSurfDepthDims(surf, surfRuns, isLanding) {
       const surfW = surf.w_cm || stair.width_cm || 120;
       const surfOx = ox + surf.x_cm;
       const surfOy = oy + surf.y_cm;
+      const dimXd = surfOx + surfW + 4;
 
-      // === Across-width dim (left edge margin + run width + right edge margin) ===
-      // Draw at top edge of the surface, offset above
-      const dimYw = surfOy - 4; // 4cm above surface
-      const leftEdge = surfOx;
-      const rightEdge = surfOx + surfW;
-      const runStart = surfOx + edgeM;
-      const runEnd = surfOx + surfW - edgeM;
+      surfRuns.sort((a, b) => a.pos_cm - b.pos_cm);
+
+      // Top offset (nose for treads, edge margin for landings)
+      const topOff = isLanding ? edgeM : noseOff;
+      const nA = w2s(dimXd, surfOy), nB = w2s(dimXd, surfOy + topOff);
+      ctx.beginPath(); ctx.moveTo(nA.x, nA.y); ctx.lineTo(nB.x, nB.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(nA.x - 3, nA.y); ctx.lineTo(nA.x + 3, nA.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(nB.x - 3, nB.y); ctx.lineTo(nB.x + 3, nB.y); ctx.stroke();
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(topOff + '', nA.x + 4, (nA.y + nB.y) / 2);
+
+      // CC between runs
+      for (let ri = 0; ri < surfRuns.length - 1; ri++) {
+        const y1 = surfOy + surfRuns[ri].pos_cm;
+        const y2 = surfOy + surfRuns[ri + 1].pos_cm;
+        const cc = Math.round((surfRuns[ri + 1].pos_cm - surfRuns[ri].pos_cm) * 10) / 10;
+        const cA = w2s(dimXd, y1), cB = w2s(dimXd, y2);
+        ctx.beginPath(); ctx.moveTo(cA.x, cA.y); ctx.lineTo(cB.x, cB.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cA.x - 3, cA.y); ctx.lineTo(cA.x + 3, cA.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cB.x - 3, cB.y); ctx.lineTo(cB.x + 3, cB.y); ctx.stroke();
+        ctx.fillText(cc + '', cA.x + 4, (cA.y + cB.y) / 2);
+      }
+
+      // Bottom offset (riser for treads, edge margin for landings)
+      const lastRunPos = surfRuns[surfRuns.length - 1].pos_cm;
+      const botOff = isLanding ? edgeM : riserOff;
+      const botDist = Math.round((surf.d_cm - lastRunPos) * 10) / 10;
+      const rsA = w2s(dimXd, surfOy + lastRunPos), rsB = w2s(dimXd, surfOy + surf.d_cm);
+      ctx.beginPath(); ctx.moveTo(rsA.x, rsA.y); ctx.lineTo(rsB.x, rsB.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rsA.x - 3, rsA.y); ctx.lineTo(rsA.x + 3, rsA.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rsB.x - 3, rsB.y); ctx.lineTo(rsB.x + 3, rsB.y); ctx.stroke();
+      ctx.fillText(botDist + '', rsA.x + 4, (rsA.y + rsB.y) / 2);
+    }
+
+    // Helper: draw width dims for a surface (across-width: edge margins)
+    function _drawSurfWidthDims(surf) {
+      const surfW = surf.w_cm || stair.width_cm || 120;
+      const surfOx = ox + surf.x_cm;
+      const surfOy = oy + surf.y_cm;
+      const dimYw = surfOy - 4;
+      const leftEdge = surfOx, rightEdge = surfOx + surfW;
+      const runStart = surfOx + edgeM, runEnd = surfOx + surfW - edgeM;
 
       // Left margin
       const lA = w2s(leftEdge, dimYw), lB = w2s(runStart, dimYw);
@@ -7904,42 +8002,36 @@ function _drawStairPlan(stair) {
       ctx.beginPath(); ctx.moveTo(rA.x, rA.y - 3); ctx.lineTo(rA.x, rA.y + 3); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(rB.x, rB.y - 3); ctx.lineTo(rB.x, rB.y + 3); ctx.stroke();
       ctx.fillText(edgeM + '', (rA.x + rB.x) / 2, rA.y - 2);
+    }
 
-      // === Along-depth dims (nose offset + CC spacing + riser offset) ===
-      // Draw at right edge of surface, offset to the right
-      const dimXd = surfOx + surfW + 4;
-      const topEdge = surfOy;
-
-      // Nose offset
-      const nA = w2s(dimXd, topEdge), nB = w2s(dimXd, surfOy + noseOff);
-      ctx.beginPath(); ctx.moveTo(nA.x, nA.y); ctx.lineTo(nB.x, nB.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(nA.x - 3, nA.y); ctx.lineTo(nA.x + 3, nA.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(nB.x - 3, nB.y); ctx.lineTo(nB.x + 3, nB.y); ctx.stroke();
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(noseOff + '', nA.x + 4, (nA.y + nB.y) / 2);
-
-      // CC between runs
-      firstTreadRuns.sort((a, b) => a.pos_cm - b.pos_cm);
-      for (let ri = 0; ri < firstTreadRuns.length - 1; ri++) {
-        const y1 = surfOy + firstTreadRuns[ri].pos_cm;
-        const y2 = surfOy + firstTreadRuns[ri + 1].pos_cm;
-        const cc = Math.round((firstTreadRuns[ri + 1].pos_cm - firstTreadRuns[ri].pos_cm) * 10) / 10;
-        const cA = w2s(dimXd, y1), cB = w2s(dimXd, y2);
-        ctx.beginPath(); ctx.moveTo(cA.x, cA.y); ctx.lineTo(cB.x, cB.y); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(cA.x - 3, cA.y); ctx.lineTo(cA.x + 3, cA.y); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(cB.x - 3, cB.y); ctx.lineTo(cB.x + 3, cB.y); ctx.stroke();
-        ctx.fillText(cc + '', cA.x + 4, (cA.y + cB.y) / 2);
+    // Collect surfaces to dimension: one tread per cable + all landings
+    const dimSurfaces = new Set();
+    const cables = stair.cables || [];
+    const nCables = Math.max(1, cables.length);
+    for (let ci = 0; ci < nCables; ci++) {
+      // First tread for this cable
+      const cableRuns = stair.runs.filter(r => (r.cableIdx || 0) === ci);
+      const firstTreadRun = cableRuns.find(r => surfs[r.surfaceIdx]?.type === 'tread');
+      if (firstTreadRun) dimSurfaces.add(firstTreadRun.surfaceIdx);
+    }
+    // All landings with runs
+    for (let si = 0; si < surfs.length; si++) {
+      if (surfs[si].type === 'landing' && stair.runs.some(r => r.surfaceIdx === si)) {
+        dimSurfaces.add(si);
       }
+    }
 
-      // Riser offset (from last run to bottom edge)
-      const lastRunPos = firstTreadRuns[firstTreadRuns.length - 1].pos_cm;
-      const botEdge = surfOy + surf.d_cm;
-      const riserDist = Math.round((surf.d_cm - lastRunPos) * 10) / 10;
-      const rsA = w2s(dimXd, surfOy + lastRunPos), rsB = w2s(dimXd, botEdge);
-      ctx.beginPath(); ctx.moveTo(rsA.x, rsA.y); ctx.lineTo(rsB.x, rsB.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(rsA.x - 3, rsA.y); ctx.lineTo(rsA.x + 3, rsA.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(rsB.x - 3, rsB.y); ctx.lineTo(rsB.x + 3, rsB.y); ctx.stroke();
-      ctx.fillText(riserDist + '', rsA.x + 4, (rsA.y + rsB.y) / 2);
+    for (const si of dimSurfaces) {
+      const surf = surfs[si];
+      const surfRuns = stair.runs.filter(r => r.surfaceIdx === si);
+      if (!surf || !surfRuns.length) continue;
+      const isLanding = surf.type === 'landing';
+
+      // Width dims only on first surface (avoid clutter)
+      if (si === [...dimSurfaces][0]) _drawSurfWidthDims(surf);
+
+      // Depth dims on all dimensioned surfaces
+      _drawSurfDepthDims(surf, surfRuns, isLanding);
     }
   }
 
@@ -8366,37 +8458,48 @@ function _renderStairSettingsPanel(stairId) {
   const variantOpts = famVariants.map(p => `<option value="${p.id}"${p.id===stair.cableProductId?' selected':''}>${(p.cable_length_m||0)}m · ${(p.total_effect_w||0)}W</option>`).join('');
   const hasVariantSelected = stair.cableProductId && famVariants.some(p => p.id === stair.cableProductId);
 
+  // Per-cable breakdown
+  const cableBreakdown = _stairCableLengthBreakdown(stair);
+  const isMultiCable = cableBreakdown.length > 1;
+  let cableBreakdownHtml = '';
+  if (cableBreakdown.length > 0) {
+    for (const cb of cableBreakdown) {
+      const fitCol = cb.fit.status === 'error' ? '#ef4444' : cb.fit.status === 'warn' ? '#f59e0b' : '#22c55e';
+      const fitIco = cb.fit.status === 'error' ? '🔴' : cb.fit.status === 'warn' ? '🟡' : '🟢';
+      cableBreakdownHtml += `<div style="padding:6px 0;${isMultiCable ? 'border-bottom:1px solid var(--brd);' : ''}">`;
+      if (isMultiCable) {
+        cableBreakdownHtml += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${cb.color}"></span><b>${cb.label}</b> <span style="color:var(--dim);font-size:10px">${cb.product ? esc(cb.product.name) : '?'}</span></div>`;
+      }
+      cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Trinn</span><span>${cb.stepsLength_m} m</span></div>`;
+      if (cb.reposLength_m > 0) {
+        cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Repos</span><span>${cb.reposLength_m} m</span></div>`;
+      }
+      if (cb.connectionLength_m > 0) {
+        cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Overganger</span><span>${cb.connectionLength_m} m</span></div>`;
+      }
+      cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;margin-bottom:1px"><span>Behov</span><span>${cb.totalNeeded_m} m</span></div>`;
+      if (cb.productLength_m > 0) {
+        cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span>Produkt</span><span>${cb.productLength_m} m</span></div>`;
+        cableBreakdownHtml += `<div style="color:${fitCol};font-weight:600;font-size:10px">${fitIco} ${cb.fit.label}</div>`;
+      }
+      cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px"><span>Effekt</span><span>${cb.watts} W</span></div>`;
+      cableBreakdownHtml += '</div>';
+    }
+  }
+
   return `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">
-    <div style="font-weight:600;font-size:13px;margin-bottom:8px">Kabelinnstillinger</div>
+    <div style="font-weight:600;font-size:13px;margin-bottom:8px">${isMultiCable ? 'Kabler' : 'Kabel'} — Resultat</div>
     <div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>
-    <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Beregnet behov</span><span style="font-weight:600">${fit.actualLength_m.toFixed(1)} m</span></div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Valgt kabel</span><span style="font-weight:600">${fit.productLength_m ? fit.productLength_m + ' m' : '—'}</span></div>
-      ${fit.label ? `<div style="color:${fitColor};font-weight:600;font-size:11px">${fitIcon} ${fit.label}</div>` : ''}
-      <div style="display:flex;justify-content:space-between;margin-top:4px"><span>Effekt</span><span>${totalW} W · ${density} W/m²</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Per trinn</span><span style="font-weight:600;color:${stepWm2 < 250 ? '#f59e0b' : stepWm2 > 500 ? '#ef4444' : 'var(--text)'}">${stepWm2} W/m²</span></div>
-      <div style="display:flex;justify-content:space-between"><span>Løp per trinn</span><span>${treadRuns}</span></div>
+    <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:6px">
+      ${cableBreakdownHtml}
+    </div>
+    <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px;font-weight:600"><span>Total effekt</span><span>${totalW} W · ${density} W/m²</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Per trinn</span><span style="font-weight:600;color:${stepWm2 < 250 ? '#f59e0b' : stepWm2 > 500 ? '#ef4444' : 'var(--text)'}">${stepWm2} W/m²</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Løp per trinn</span><span>${treadRuns}</span></div>
       <div style="display:flex;justify-content:space-between"><span>CC i trinn</span><span>${actualStepCC.toFixed(1)} cm</span></div>
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
-        <span>CC trinn</span>
-        <span style="display:flex;align-items:center;gap:3px">
-          <button onclick="_setStairStepCC(${(stair.stepCC_cm||8)-0.5})" style="width:22px;height:22px;border:1px solid var(--brd);border-radius:4px;background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;padding:0">−</button>
-          <input type="number" min="3" max="${STAIR_MAX_CC_CM}" step="0.5" value="${stair.stepCC_cm||8}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairStepCC(this.value)" onclick="event.stopPropagation()">
-          <button onclick="_setStairStepCC(${(stair.stepCC_cm||8)+0.5})" style="width:22px;height:22px;border:1px solid var(--brd);border-radius:4px;background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;padding:0">+</button>
-          <span style="font-size:10px;color:var(--dim)">cm</span>
-        </span>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
-        <span>CC repos</span>
-        <span style="display:flex;align-items:center;gap:3px">
-          <button onclick="_setStairLandingCC(${(stair.landingCC_cm||8)-0.5})" style="width:22px;height:22px;border:1px solid var(--brd);border-radius:4px;background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;padding:0">−</button>
-          <input type="number" min="3" max="${STAIR_MAX_CC_CM}" step="0.5" value="${stair.landingCC_cm||8}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setStairLandingCC(this.value)" onclick="event.stopPropagation()">
-          <button onclick="_setStairLandingCC(${(stair.landingCC_cm||8)+0.5})" style="width:22px;height:22px;border:1px solid var(--brd);border-radius:4px;background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;padding:0">+</button>
-          <span style="font-size:10px;color:var(--dim)">cm</span>
-        </span>
-      </div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span>Avstand foran/bak</span>
         <span style="display:flex;align-items:center;gap:3px">
@@ -9167,7 +9270,7 @@ function _stairBounds(stair) {
 }
 
 // ── Stair cable layout ──
-const STAIR_MAX_CC_CM = 10;
+const STAIR_MAX_CC_CM = 12;
 const STAIR_MIN_DENSITY_WM2 = 250;
 
 function generateStairCable(stair) {
@@ -9292,6 +9395,107 @@ function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
     }
   }
   return totalLen;
+}
+
+/**
+ * Per-cable length breakdown: steps vs repos, with fit status per cable.
+ * Returns array of { cableIdx, label, color, product, stepsLength_m, reposLength_m,
+ *   totalNeeded_m, productLength_m, watts, fit: {status, label} }
+ */
+function _stairCableLengthBreakdown(stair) {
+  if (!stair || !stair.surfaces || !stair.runs) return [];
+  const cables = stair.cables || [];
+  const nCables = Math.max(1, cables.length);
+  const surfs = stair.surfaces;
+  const edgeMargin = stair.edgeMargin_cm || 5;
+  const riserOff = stair.riserOffset_cm ?? 2;
+  const noseOff = stair.noseOffset_cm ?? 2;
+
+  // Group runs by cableIdx
+  const cableData = [];
+  for (let ci = 0; ci < nCables; ci++) {
+    cableData.push({ stepsLen: 0, reposLen: 0, connectionLen: 0 });
+  }
+
+  // Accumulate per-run cable lengths by surface type
+  for (const run of stair.runs) {
+    const ci = run.cableIdx || 0;
+    if (ci >= cableData.length) continue;
+    const surf = surfs[run.surfaceIdx];
+    if (!surf) continue;
+    const isLanding = surf.type === 'landing';
+
+    // Run length (single sweep across width)
+    const surfW = surf.w_cm || stair.width_cm || 120;
+    const runLen = surfW - 2 * edgeMargin;
+    if (runLen <= 0) continue;
+
+    if (isLanding) {
+      cableData[ci].reposLen += runLen;
+    } else {
+      cableData[ci].stepsLen += runLen;
+    }
+  }
+
+  // Add U-turn arcs: for each surface, consecutive runs on same surface have U-turns
+  for (let si = 0; si < surfs.length; si++) {
+    const surf = surfs[si];
+    const isLanding = surf.type === 'landing';
+    const surfRuns = stair.runs.filter(r => r.surfaceIdx === si);
+    if (surfRuns.length < 2) continue;
+    // Sort by position
+    surfRuns.sort((a, b) => a.pos_cm - b.pos_cm);
+    for (let ri = 1; ri < surfRuns.length; ri++) {
+      const gap = Math.abs(surfRuns[ri].pos_cm - surfRuns[ri - 1].pos_cm);
+      const arcLen = Math.PI * gap / 2;
+      const ci = surfRuns[ri].cableIdx || 0;
+      if (ci >= cableData.length) continue;
+      if (isLanding) cableData[ci].reposLen += arcLen;
+      else cableData[ci].stepsLen += arcLen;
+    }
+  }
+
+  // Add step-over connections (attribute to steps portion)
+  if (stair.connections) {
+    for (const conn of stair.connections) {
+      const ci = conn.cableIdx || 0;
+      if (ci < cableData.length) cableData[ci].connectionLen += (conn.length_cm || 0);
+    }
+  }
+
+  // Build result
+  const result = [];
+  for (let ci = 0; ci < nCables; ci++) {
+    const cd = cableData[ci];
+    const cableObj = cables[ci];
+    const prodId = cableObj ? cableObj.productId : stair.cableProductId;
+    const prod = prodId ? HEATING_PRODUCTS.find(p => p.id === prodId) : null;
+    const totalNeeded_cm = cd.stepsLen + cd.reposLen + cd.connectionLen;
+    const totalNeeded_m = Math.round(totalNeeded_cm / 100 * 10) / 10;
+    const productLength_m = prod?.cable_length_m || 0;
+    const diff_m = productLength_m - totalNeeded_m;
+    const diffPct = productLength_m > 0 ? Math.abs(diff_m / productLength_m * 100) : 0;
+    let fitStatus = 'ok', fitLabel = '';
+    if (diff_m < -0.5) { fitStatus = 'error'; fitLabel = Math.abs(diff_m).toFixed(1) + ' m for kort'; }
+    else if (diff_m > 3) { fitStatus = 'warn'; fitLabel = diff_m.toFixed(1) + ' m til overs'; }
+    else if (diff_m >= 0) { fitStatus = 'ok'; fitLabel = diff_m > 0.1 ? diff_m.toFixed(1) + ' m til overs' : 'Eksakt'; }
+    const watts = prod?.watt_per_m ? Math.round(totalNeeded_m * prod.watt_per_m) : 0;
+
+    result.push({
+      cableIdx: ci,
+      label: 'K' + (ci + 1),
+      color: STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0],
+      product: prod,
+      stepsLength_m: Math.round(cd.stepsLen / 100 * 10) / 10,
+      reposLength_m: Math.round(cd.reposLen / 100 * 10) / 10,
+      connectionLength_m: Math.round(cd.connectionLen / 100 * 10) / 10,
+      totalNeeded_m,
+      productLength_m,
+      watts,
+      fit: { status: fitStatus, label: fitLabel },
+    });
+  }
+  return result;
 }
 
 /**
@@ -9501,8 +9705,8 @@ function _scoreStairProposal(p) {
   // Low waste
   score -= (p.waste_pct || 0) * 1.5;
   // 3-4 runs per step is ideal
-  if (p.runsPerStep >= 3 && p.runsPerStep <= 4) score += 25;
-  if (p.runsPerStep > 5) score -= (p.runsPerStep - 5) * 15; // penalize too many runs
+  if (p.runsPerStep >= 3 && p.runsPerStep <= 4) score += 50;
+  if (p.runsPerStep > 4) score -= (p.runsPerStep - 4) * 40; // strongly penalize 5+ runs
   return Math.round(score * 10) / 10;
 }
 
@@ -9526,90 +9730,106 @@ function _generateStairProposals(stair) {
   if (!cableProds.length) return [];
 
   const edgeMargin = stair.edgeMargin_cm || 5;
-  const riserOff = stair.riserOffset_cm ?? 2;
-  const noseOff = stair.noseOffset_cm ?? 2;
-
-  // Calculate heated area (m²)
-  let heatedArea_cm2 = 0;
-  for (const surf of stair.surfaces) {
-    const isLanding = surf.type === 'landing';
-    const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
-    const usableD = isLanding ? surf.d_cm - 2 * edgeMargin : surf.d_cm - riserOff - noseOff;
-    if (usableW > 0 && usableD > 0) heatedArea_cm2 += usableW * usableD;
-  }
-  const heatedArea_m2 = heatedArea_cm2 / 10000;
+  const baseRiserOff = stair.riserOffset_cm ?? 2;
+  const baseNoseOff = stair.noseOffset_cm ?? 2;
 
   // Find first tread to determine usable width
   const firstTread = stair.surfaces.find(s => s.type === 'tread');
   if (!firstTread) return [];
   const treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
-  const treadD = firstTread.d_cm - riserOff - noseOff;
-  if (treadW <= 0 || treadD <= 0) return [];
-
-  const candidates = [];
+  if (treadW <= 0) return [];
 
   // Check if stair has landing surfaces (for repos-split strategy)
   const hasLandings = stair.surfaces.some(s => s.type === 'landing');
 
+  const candidates = [];
+
+  // Try margin variants: current margins AND 3cm (enables better CC for 3-run layouts)
+  const marginVariants = [{nose: baseNoseOff, riser: baseRiserOff}];
+  if (baseNoseOff !== 3 || baseRiserOff !== 3) marginVariants.push({nose: 3, riser: 3});
+
   // Try different CC values (target range: 6-12cm in 0.5cm steps)
-  // Typical stair: 3-4 runs per step, CC 8-11cm
   const ccValues = [];
   for (let cc = 6; cc <= 12; cc += 0.5) ccValues.push(cc);
 
-  for (const targetCC of ccValues) {
-    const runsPerStep = Math.max(2, Math.floor(treadD / targetCC) + 1);
-    const actualCC = runsPerStep > 1 ? treadD / (runsPerStep - 1) : treadD;
-    if (actualCC < 5 || actualCC > 13) continue;
+  for (const mv of marginVariants) {
+    const treadD = firstTread.d_cm - mv.riser - mv.nose;
+    if (treadD <= 0) continue;
 
-    // Landing CC: same as step CC
-    const landingCC = Math.min(actualCC, STAIR_MAX_CC_CM);
+    // Calculate heated area for this margin variant
+    let heatedArea_cm2 = 0;
+    for (const surf of stair.surfaces) {
+      const isLanding = surf.type === 'landing';
+      const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
+      const usableD = isLanding ? surf.d_cm - 2 * edgeMargin : surf.d_cm - mv.riser - mv.nose;
+      if (usableW > 0 && usableD > 0) heatedArea_cm2 += usableW * usableD;
+    }
+    const heatedArea_m2 = heatedArea_cm2 / 10000;
+    const isAdjustedMargin = mv.nose !== baseNoseOff || mv.riser !== baseRiserOff;
 
-    // Calculate total cable length
-    const totalLen_cm = _stairCableLength(stair, runsPerStep, actualCC, landingCC, edgeMargin);
-    const totalLen_m = totalLen_cm / 100;
+    for (const targetCC of ccValues) {
+      const runsPerStep = Math.max(2, Math.floor(treadD / targetCC) + 1);
+      // Skip 5+ runs — too dense for stairs
+      if (runsPerStep > 4) continue;
+      const actualCC = runsPerStep > 1 ? treadD / (runsPerStep - 1) : treadD;
+      if (actualCC < 5 || actualCC > 13) continue;
 
-    // Find best cable product for this length
-    const cableSel = _selectStairCableProducts(totalLen_cm, STAIR_MIN_DENSITY_WM2, heatedArea_m2, cableProds);
-    if (!cableSel) continue;
+      // Landing CC: same as step CC, capped at max
+      const landingCC = Math.min(actualCC, STAIR_MAX_CC_CM);
 
-    const isMultiCable = cableSel.products.length > 1;
+      // Calculate total cable length (temporarily override stair offsets for calculation)
+      const origNose = stair.noseOffset_cm; const origRiser = stair.riserOffset_cm;
+      stair.noseOffset_cm = mv.nose; stair.riserOffset_cm = mv.riser;
+      const totalLen_cm = _stairCableLength(stair, runsPerStep, actualCC, landingCC, edgeMargin);
+      stair.noseOffset_cm = origNose; stair.riserOffset_cm = origRiser;
+      const totalLen_m = totalLen_cm / 100;
 
-    // For multi-cable: generate A/B proposals with different split strategies
-    const strategies = (isMultiCable && hasLandings) ? ['landing', 'even'] : [isMultiCable ? 'even' : 'none'];
+      // Find best cable product for this length
+      const cableSel = _selectStairCableProducts(totalLen_cm, STAIR_MIN_DENSITY_WM2, heatedArea_m2, cableProds);
+      if (!cableSel) continue;
 
-    for (const strategy of strategies) {
-      // Avoid duplicate (runsPerStep + strategy) entries — keep best CC for each combo
-      const existingK = candidates.find(c => c.runsPerStep === runsPerStep && c.splitStrategy === strategy);
-      // Per-step W/m²: cable runs × run length × W/m / step area
-      const wpm = cableSel.products[0]?.watt_per_m || (cableSel.products[0]?.watt ? cableSel.products[0].watt / (cableSel.products[0].length_m || 1) : 0);
-      const stepCableLen_cm = runsPerStep * treadW + (runsPerStep > 1 ? (runsPerStep - 1) * Math.PI * actualCC / 2 : 0);
-      const stepArea_cm2 = treadW * treadD;
-      const stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
+      const isMultiCable = cableSel.products.length > 1;
 
-      const candidate = {
-        runsPerStep,
-        stepCC: Math.round(actualCC * 10) / 10,
-        landingCC: Math.round(landingCC * 10) / 10,
-        totalCableLength_m: Math.round(totalLen_m * 10) / 10,
-        cableCount: cableSel.products.length,
-        products: cableSel.products,
-        waste_pct: cableSel.waste_pct,
-        power_wm2: cableSel.power_wm2,
-        totalWatt: cableSel.totalWatt,
-        heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
-        stepWm2,
-        splitStrategy: strategy,
-        splitLabel: strategy === 'landing' ? 'Repos-split' : strategy === 'even' ? 'Jevn deling' : null,
-      };
-      candidate.score = _scoreStairProposal(candidate);
-      // Bonus for landing split (natural split is cleaner)
-      if (strategy === 'landing') candidate.score += 10;
-      if (existingK) {
-        if (candidate.score > existingK.score) {
-          candidates[candidates.indexOf(existingK)] = candidate;
+      // For multi-cable: generate A/B proposals with different split strategies
+      const strategies = (isMultiCable && hasLandings) ? ['landing', 'even'] : [isMultiCable ? 'even' : 'none'];
+
+      for (const strategy of strategies) {
+        // Avoid duplicate (runsPerStep + strategy + marginVariant) entries — keep best score
+        const existingK = candidates.find(c => c.runsPerStep === runsPerStep && c.splitStrategy === strategy && c.noseOffset_cm === mv.nose);
+        // Per-step W/m²
+        const wpm = cableSel.products[0]?.watt_per_m || (cableSel.products[0]?.watt ? cableSel.products[0].watt / (cableSel.products[0].length_m || 1) : 0);
+        const stepCableLen_cm = runsPerStep * treadW + (runsPerStep > 1 ? (runsPerStep - 1) * Math.PI * actualCC / 2 : 0);
+        const stepArea_cm2 = treadW * treadD;
+        const stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
+
+        const candidate = {
+          runsPerStep,
+          stepCC: Math.round(actualCC * 10) / 10,
+          landingCC: Math.round(landingCC * 10) / 10,
+          totalCableLength_m: Math.round(totalLen_m * 10) / 10,
+          cableCount: cableSel.products.length,
+          products: cableSel.products,
+          waste_pct: cableSel.waste_pct,
+          power_wm2: cableSel.power_wm2,
+          totalWatt: cableSel.totalWatt,
+          heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
+          stepWm2,
+          splitStrategy: strategy,
+          splitLabel: strategy === 'landing' ? 'Repos-split' : strategy === 'even' ? 'Jevn deling' : null,
+          noseOffset_cm: mv.nose,
+          riserOffset_cm: mv.riser,
+          adjustedMargin: isAdjustedMargin,
+        };
+        candidate.score = _scoreStairProposal(candidate);
+        // Bonus for landing split (natural split is cleaner)
+        if (strategy === 'landing') candidate.score += 10;
+        if (existingK) {
+          if (candidate.score > existingK.score) {
+            candidates[candidates.indexOf(existingK)] = candidate;
+          }
+        } else {
+          candidates.push(candidate);
         }
-      } else {
-        candidates.push(candidate);
       }
     }
   }
@@ -9641,6 +9861,9 @@ function _applyStairProposal(stair, proposal) {
   stair.stepCC_cm = proposal.stepCC;
   stair.landingCC_cm = proposal.landingCC;
   stair.cableSpacing_cm = proposal.stepCC;
+  // Apply margin overrides from proposal (e.g. adjusted from 2cm to 3cm for better CC)
+  if (proposal.noseOffset_cm != null) stair.noseOffset_cm = proposal.noseOffset_cm;
+  if (proposal.riserOffset_cm != null) stair.riserOffset_cm = proposal.riserOffset_cm;
   if (proposal.products && proposal.products.length > 0) {
     stair.cableProductId = proposal.products[0].id;
     // Build cables[] from proposal
@@ -9704,12 +9927,13 @@ function _renderStairProposalPanel(stair, proposals) {
 
     // Split strategy label for multi-cable
     const strategyBadge = p.splitLabel ? `<div style="display:inline-block;background:var(--surface);border:1px solid var(--brd);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px">${esc(p.splitLabel)}</div>` : '';
+    const marginBadge = p.adjustedMargin ? `<div style="display:inline-block;background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--accent);margin-bottom:4px">Margin ${p.noseOffset_cm} cm</div>` : '';
 
     cardsHtml += `
       <div style="flex:1;background:var(--surface2);border:1px solid ${p.recommended ? '#4ea8ff' : 'var(--brd)'};border-radius:10px;padding:14px;min-width:200px;position:relative">
         ${p.recommended ? '<div style="position:absolute;top:-10px;left:12px;background:#4ea8ff;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">★ Anbefalt</div>' : ''}
         <div style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:6px">Forslag ${String.fromCharCode(65 + i)}</div>
-        ${strategyBadge}
+        ${strategyBadge}${marginBadge}
         <div style="font-size:12px;color:var(--muted);display:grid;gap:4px">
           ${cableDetailsHtml}
           <div style="font-size:11px;color:var(--dim)">Beregnet behov: <b>${p.totalCableLength_m} m</b></div>
@@ -20056,16 +20280,76 @@ async function exportPDF(opts) {
       doc.addImage(stairImg, 'PNG', M, y, imgW, imgH);
       y += imgH + 6;
     } catch(e) { y += 4; }
-    // Stair stats
+    // Stair stats — general info
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
-    doc.text('Trinn: ' + (stair.step_count || '—'), M, y); y += 4;
-    doc.text('Bredde: ' + Math.round(stair.width_cm || 0) + ' cm', M, y); y += 4;
-    doc.text('Total kabellengde: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m', M, y); y += 4;
-    const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
-    if (prod) {
-      const totalW = prod.watt_per_m ? Math.round((stair.totalCableLength_cm||0)/100 * prod.watt_per_m) : 0;
-      doc.text('Produkt: ' + (prod.name||'—') + ' — ' + totalW + ' W', M, y); y += 4;
-      if (prod.el_no) { doc.text('El.nr: ' + prod.el_no + '  |  Art.nr: ' + (prod.article_no||'—'), M, y); y += 4; }
+    const _surfs = stair.surfaces || [];
+    const _firstTread = _surfs.find(s => s.type === 'tread');
+    const _firstTreadIdx = _firstTread ? _surfs.indexOf(_firstTread) : -1;
+    const _treadRunsList = _firstTreadIdx >= 0 ? (stair.runs || []).filter(r => r.surfaceIdx === _firstTreadIdx) : [];
+    const _treadRuns = _treadRunsList.length;
+    const _actualStepCC = _treadRuns > 1 ? Math.abs(_treadRunsList[1].pos_cm - _treadRunsList[0].pos_cm) : (stair.stepCC_cm || 8);
+    doc.text('Trinn: ' + (stair.step_count || '—') + '   |   Bredde: ' + Math.round(stair.width_cm || 0) + ' cm   |   CC trinn: ' + _actualStepCC.toFixed(1) + ' cm   |   ' + _treadRuns + ' løp per trinn', M, y); y += 5;
+
+    // Per-cable breakdown
+    const _cbk = _stairCableLengthBreakdown(stair);
+    const _isMulti = _cbk.length > 1;
+    if (_cbk.length > 0) {
+      // Table header
+      _checkPage(6 + _cbk.length * 5);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(80, 90, 110);
+      const _tc = [M, M + 50, M + 78, M + 100, M + 118, M + 138];
+      if (_isMulti) doc.text('Kabel', _tc[0], y);
+      doc.text('Produkt', _isMulti ? _tc[0] + 15 : _tc[0], y);
+      doc.text('Trinn', _tc[1], y); doc.text('Repos', _tc[2], y);
+      doc.text('Behov', _tc[3], y); doc.text('Produkt', _tc[4], y); doc.text('Effekt', _tc[5], y);
+      y += 1; doc.setDrawColor(180, 190, 200); doc.line(_tc[0], y, _tc[5] + 20, y); y += 3;
+
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(40, 50, 70);
+      let _totalW = 0;
+      for (const cb of _cbk) {
+        _totalW += cb.watts;
+        // Color indicator for multi-cable
+        if (_isMulti) {
+          const rgb = cb.color.match(/[0-9a-f]{2}/gi);
+          if (rgb && rgb.length === 3) {
+            doc.setFillColor(parseInt(rgb[0],16), parseInt(rgb[1],16), parseInt(rgb[2],16));
+            doc.rect(_tc[0], y - 2.5, 3, 3, 'F');
+          }
+          doc.text(cb.label, _tc[0] + 4, y);
+        }
+        const pName = cb.product ? (cb.product.name || '').substring(0, 22) : '—';
+        doc.text(pName, _isMulti ? _tc[0] + 15 : _tc[0], y);
+        doc.text(cb.stepsLength_m + ' m', _tc[1], y);
+        doc.text(cb.reposLength_m > 0 ? cb.reposLength_m + ' m' : '—', _tc[2], y);
+        doc.text(cb.totalNeeded_m + ' m', _tc[3], y);
+        doc.text(cb.productLength_m > 0 ? cb.productLength_m + ' m' : '—', _tc[4], y);
+        doc.text(cb.watts + ' W', _tc[5], y);
+        y += 4;
+        // Fit status + el.nr
+        if (cb.product?.el_no) {
+          doc.setFontSize(7); doc.setTextColor(100, 110, 130);
+          doc.text('El.nr: ' + cb.product.el_no + (cb.product.article_no ? '  |  Art.nr: ' + cb.product.article_no : '') + '  —  ' + cb.fit.label, _isMulti ? _tc[0] + 15 : _tc[0], y);
+          doc.setFontSize(8); doc.setTextColor(40, 50, 70);
+          y += 4;
+        }
+      }
+      // Summary line
+      y += 1; doc.setDrawColor(180, 190, 200); doc.line(_tc[0], y, _tc[5] + 20, y); y += 3;
+      const _areaCm2 = _surfs.reduce((s,f) => s + (f.w_cm||0) * (f.d_cm||0), 0);
+      const _areaM2 = _areaCm2 / 10000;
+      const _densityPdf = _areaM2 > 0 ? Math.round(_totalW / _areaM2) : 0;
+      doc.setFont('helvetica', 'bold');
+      doc.text('Totalt: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m   |   ' + _totalW + ' W   |   ' + _densityPdf + ' W/m\u00b2   |   Oppvarmet areal: ' + _areaM2.toFixed(2) + ' m\u00b2', _tc[0], y);
+      y += 6;
+    } else {
+      // Fallback for no breakdown data
+      const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+      doc.text('Total kabellengde: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m', M, y); y += 4;
+      if (prod) {
+        const totalW = prod.watt_per_m ? Math.round((stair.totalCableLength_cm||0)/100 * prod.watt_per_m) : 0;
+        doc.text('Produkt: ' + (prod.name||'—') + ' — ' + totalW + ' W', M, y); y += 4;
+        if (prod.el_no) { doc.text('El.nr: ' + prod.el_no + '  |  Art.nr: ' + (prod.article_no||'—'), M, y); y += 4; }
+      }
     }
     _addFooter();
   }
@@ -21048,11 +21332,11 @@ async function _authLogout() {
 }
 
 function _userInitials() {
-  const name = _currentProfile?.full_name || _currentUser?.user_metadata?.full_name || '';
+  const rawName = _currentProfile?.full_name || _currentUser?.user_metadata?.full_name || '';
+  const name = rawName.replace(/\s*\(.*?\)\s*/g, '').trim();
   if (name) {
-    const parts = name.trim().split(/\s+/);
+    const parts = name.split(/\s+/);
     if (parts.length >= 2) return (parts[0][0] + parts[parts.length-1][0]).toUpperCase();
-    // Only one name part — use first letter only, combined with first letter of email domain or second char
     return (parts[0][0] + (parts[0][1] || '')).toUpperCase();
   }
   const email = _currentUser?.email || '';
@@ -22500,7 +22784,7 @@ function _searchCustomers(query) {
   const matches = (_cachedCustomers || []).filter(c => (c.name||'').toLowerCase().includes(q) || (c.contact_person||'').toLowerCase().includes(q));
   if (!matches.length) {
     results.style.display = 'block';
-    results.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Ingen treff. <span style="color:var(--accent);cursor:pointer" onclick="_showNewCustomerInline()">Opprett ny kunde?</span></div>`;
+    results.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Ingen treff. <span style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="_showNewCustomerPopup()">+ Legg til kunde</span></div>`;
     return;
   }
   results.style.display = 'block';
@@ -22517,44 +22801,87 @@ function _selectCustomer(id, name) {
   if (results) { results.style.display='none'; results.innerHTML=''; }
 }
 
-function _showNewCustomerInline() {
+function _showNewCustomerPopup() {
+  // Pre-fill name from search field if user typed something
+  const searchVal = document.getElementById('dash-proj-customer')?.value?.trim() || '';
+  // Hide search results dropdown
   const results = document.getElementById('dash-customer-results');
-  if (!results) return;
-  results.innerHTML = `<div style="padding:12px">
-    <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px">Ny kunde</div>
-    <input id="new-cust-name" class="adm-search" placeholder="Kundenavn *" style="margin-bottom:6px">
-    <input id="new-cust-contact" class="adm-search" placeholder="Kontaktperson" style="margin-bottom:6px">
-    <input id="new-cust-phone" class="adm-search" placeholder="Telefon" style="margin-bottom:6px">
-    <input id="new-cust-email" class="adm-search" placeholder="E-post" style="margin-bottom:6px">
-    <input id="new-cust-addr" class="adm-search" placeholder="Adresse" style="margin-bottom:6px">
-    <div style="display:flex;gap:6px;margin-bottom:6px">
-      <input id="new-cust-zip" class="adm-search" placeholder="Postnr" style="width:80px">
-      <input id="new-cust-city" class="adm-search" placeholder="Sted" style="flex:1">
-    </div>
-    <button class="adm-btn sm primary" onclick="_createCustomerInline()">Opprett</button>
-    <div id="new-cust-msg" class="adm-msg"></div>
-  </div>`;
+  if (results) { results.style.display='none'; results.innerHTML=''; }
+  // Create or reuse overlay
+  let ov = document.getElementById('new-customer-popup-overlay');
+  if (!ov) { ov=document.createElement('div'); ov.id='new-customer-popup-overlay'; document.body.appendChild(ov); }
+  ov.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;animation:fadeIn .15s ease';
+  ov.onclick=e=>{if(e.target===ov)ov.style.display='none'};
+  ov.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;width:min(520px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 24px 64px rgba(0,0,0,.4);padding:32px 28px 24px" onclick="event.stopPropagation()">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+        <h2 style="margin:0;font-size:20px;font-weight:700;color:var(--text)">Ny kunde</h2>
+        <button onclick="document.getElementById('new-customer-popup-overlay').style.display='none'" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:4px 8px;border-radius:6px" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">&times;</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Kundenavn *</label>
+          <input id="ncp-name" type="text" value="${_esc(searchVal)}" placeholder="Firmanavn eller personnavn" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Kontaktperson</label>
+          <input id="ncp-contact" type="text" placeholder="Navn på kontaktperson" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+        </div>
+        <div style="display:flex;gap:12px">
+          <div style="flex:1">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Telefon</label>
+            <input id="ncp-phone" type="tel" placeholder="Telefonnummer" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+          </div>
+          <div style="flex:1">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">E-post</label>
+            <input id="ncp-email" type="email" placeholder="E-postadresse" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+          </div>
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Adresse</label>
+          <input id="ncp-addr" type="text" placeholder="Gateadresse" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+        </div>
+        <div style="display:flex;gap:12px">
+          <div style="width:120px">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Postnr</label>
+            <input id="ncp-zip" type="text" placeholder="0000" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+          </div>
+          <div style="flex:1">
+            <label style="display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Sted</label>
+            <input id="ncp-city" type="text" placeholder="By / sted" style="width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;outline:none;box-sizing:border-box" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+          </div>
+        </div>
+      </div>
+      <div id="ncp-msg" style="display:none;margin-top:12px;padding:8px 12px;border-radius:8px;background:rgba(239,68,68,.15);color:#f87171;font-size:13px"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:24px">
+        <button onclick="document.getElementById('new-customer-popup-overlay').style.display='none'" style="padding:10px 20px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:14px;cursor:pointer;font-weight:500">Avbryt</button>
+        <button onclick="_createCustomerFromPopup()" style="padding:10px 24px;border-radius:8px;border:none;background:var(--accent);color:#0d0e10;font-size:14px;cursor:pointer;font-weight:600">Opprett kunde</button>
+      </div>
+    </div>`;
+  // Auto-focus name field
+  setTimeout(()=>{const f=document.getElementById('ncp-name');if(f)f.focus();},50);
 }
 
-async function _createCustomerInline() {
-  const name = document.getElementById('new-cust-name').value.trim();
-  if (!name) return;
+async function _createCustomerFromPopup() {
+  const name = document.getElementById('ncp-name')?.value?.trim();
+  if (!name) { const m=document.getElementById('ncp-msg'); if(m){m.style.display='block';m.textContent='Kundenavn er påkrevd';} return; }
   try {
     const row = {
       org_id: _userOrg.id,
       name,
-      contact_person: document.getElementById('new-cust-contact')?.value?.trim() || null,
-      phone: document.getElementById('new-cust-phone')?.value?.trim() || null,
-      email: document.getElementById('new-cust-email')?.value?.trim() || null,
-      address: document.getElementById('new-cust-addr')?.value?.trim() || null,
-      postal_code: document.getElementById('new-cust-zip')?.value?.trim() || null,
-      city: document.getElementById('new-cust-city')?.value?.trim() || null
+      contact_person: document.getElementById('ncp-contact')?.value?.trim() || null,
+      phone: document.getElementById('ncp-phone')?.value?.trim() || null,
+      email: document.getElementById('ncp-email')?.value?.trim() || null,
+      address: document.getElementById('ncp-addr')?.value?.trim() || null,
+      postal_code: document.getElementById('ncp-zip')?.value?.trim() || null,
+      city: document.getElementById('ncp-city')?.value?.trim() || null
     };
     const { data, error } = await _db.from('customers').insert(row).select().single();
     if (error) throw error;
     _cachedCustomers = (_cachedCustomers||[]).concat([data]);
     _selectCustomer(data.id, data.name);
-  } catch(e) { const m=document.getElementById('new-cust-msg'); if(m){m.style.display='block';m.textContent='Feil: '+e.message;} }
+    document.getElementById('new-customer-popup-overlay').style.display='none';
+  } catch(e) { const m=document.getElementById('ncp-msg'); if(m){m.style.display='block';m.textContent='Feil: '+e.message;} }
 }
 
 function _openCustomerCard(customerId) {

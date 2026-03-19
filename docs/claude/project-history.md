@@ -1,5 +1,61 @@
 # Romtegner Project History
 
+## 2026-03-19: Trapp-kabel — forbedret forslag, resultatpanel, PDF
+
+### Kabel-splitting arkitektur (LÅST)
+- **To strategier** for splitting av kabler ved multi-kabel trapper:
+  - **Repos-split**: Deler ved repos-overflater (naturlig bruddpunkt). Får +10 score-bonus.
+  - **Jevn deling**: Deler overflater likt mellom kabler.
+- `_stairCableSplitPoints(stair, nCables, strategy)` håndterer begge strategier
+- Forslagspanelet viser alltid begge strategier som A/B-valg når trappen har repos
+- Denne arkitekturen er stabil og skal ikke endres uten eksplisitt forespørsel
+
+### Forslag-motor forbedret
+- `STAIR_MAX_CC_CM` økt fra 10 til 12 (muliggjør 3-løps forslag med ~11cm CC)
+- Scoring: 3-4 løp sterkt foretrukket (+50 bonus), 5+ løp sterkt straffet (-40 per ekstra løp)
+- **Margin-varianter**: Systemet prøver nå også justert margin (3cm vs standard 2cm) for å finne bedre CC-verdier
+- Forslags-kort viser "Margin X cm" badge når margin er justert fra standard
+- `_applyStairProposal()` oppdaterer nå også noseOffset/riserOffset fra valgt forslag
+
+### Per-kabel resultatpanel
+- Ny `_stairCableLengthBreakdown(stair)` hjelpefunksjon
+- Beregner per kabel: meter i trinn, meter i repos, overganger, totalt behov, fit-status
+- Innstillingspanelet viser nå full per-kabel oversikt med fargekoder, trinn/repos fordeling, effekt
+- Konsistent mellom innstillingspanel og PDF-utskrift
+
+### PDF trapp-seksjon forbedret
+- Per-kabel tabell: farge-indikator, produkt, trinn/repos/behov/produkt-lengde, effekt, el.nr
+- Oppsummeringslinje: total meter, watt, W/m², oppvarmet areal
+- CC, løp per trinn og generell info i header
+
+### Dimensjonslinjer utvidet
+- Målsetting vises nå på ett trinn per kabel (K1, K2) + alle repos-overflater
+- Repos viser kantavstand (edgeMargin) og CC mellom løp i stedet for nose/riser offset
+- Breddemål vises på første overflate
+
+### Kabellengde per trinn/repos i plantegning
+- Viser meter kabel per overflate til venstre for hvert trinn/repos når trapp er valgt
+- Like trinn: viser kun på første trinn med "(×N trinn)" notasjon
+- Forskjellige trinn: viser individuell lengde på hvert trinn
+- Repos vises alltid med blå farge
+
+### UI-opprydding innstillingspanel
+- Fjernet CC trinn og CC repos justeringskontroller (fungerte ikke pålitelig etter kabelvalg)
+- CC settes nå kun via forslagssystemet
+- Beholdt: avstand foran/bak og avstand sider (fungerer i sanntid)
+- CC-verdier vises fortsatt som read-only info i resultat-seksjonen
+
+### Ny kunde-popup
+- Erstattet inline kundeopprettelse med stor modal popup (520px)
+- "+" knapp ved kundefeltet i prosjektopprettelse
+- "Legg til kunde" link i søkeresultater ved ingen treff
+- Pre-fyller kundenavn fra søkefeltet
+
+### Initialer-fix
+- `_userInitials()` ignorerer nå tekst i parenteser — "Kenneth Skretteberg (test)" → "KS"
+
+---
+
 ## 2026-03-18: Sikkerhetsfix — customer_id + RLS-opprydding
 - **customer_id** lagres nå som DB-kolonne ved prosjektlagring (manglet, var kun i JSONB)
 - **Fjernet farlig "Public access" RLS-policy** på romtegner_projects (hadde `qual: true`)
