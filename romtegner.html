@@ -5513,19 +5513,28 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
   }
   const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
 
-  // ─── CENTERED LAYOUT ──────────────────────────────────────────
-  // Instead of starting from one wall and stepping until out-of-bounds,
-  // calculate N runs and center them symmetrically within the usable width.
+  // ─── CENTERED LAYOUT (with boundary-edge support for half-CC) ────
   const usableWidth = (perpMax - margin) - (perpMin + margin);
   if (usableWidth <= 0) return null;
 
-  // Number of runs that fit with this spacing
   const N = Math.max(1, Math.floor(usableWidth / spacing_cm) + 1);
-
-  // Center the N runs: equal distance from both margin boundaries
   const actualSpan = (N - 1) * spacing_cm;
-  const sideMargin = (usableWidth - actualSpan) / 2;
-  const firstPos = perpMin + margin + sideMargin;
+
+  let firstPos;
+  const boundaryEdge = zoneBounds?.boundaryEdge;
+  if (boundaryEdge === 'max') {
+    // Pin last run at half-CC from boundary (perpMax), wall margin on min side
+    const lastPos = perpMax - spacing_cm / 2;
+    firstPos = lastPos - actualSpan;
+    if (firstPos < perpMin + margin) firstPos = perpMin + margin;
+  } else if (boundaryEdge === 'min') {
+    // Pin first run at half-CC from boundary (perpMin), wall margin on max side
+    firstPos = perpMin + spacing_cm / 2;
+  } else {
+    // Default centered layout
+    const sideMargin = (usableWidth - actualSpan) / 2;
+    firstPos = perpMin + margin + sideMargin;
+  }
 
   const runs = [];
   const sweepAxis = direction === 'v' ? 'y' : 'x';
@@ -5545,6 +5554,15 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
       const hIntervals = clipScanlineToPolygon(sweepAxis, pos, h.points);
       const hExpanded = hIntervals.map(([lo, hi]) => [lo - margin, hi + margin]);
       intervals = subtractIntervalSets(intervals, hExpanded);
+    }
+    // Subtract corridor (virtual hindring for multi-cable routing)
+    if (zoneBounds?.corridor) {
+      const corr = zoneBounds.corridor;
+      const perpAxis = direction === 'v' ? 'x' : 'y';
+      // Corridor applies to runs within its perpendicular range
+      if (pos >= corr.perpMin && pos <= corr.perpMax) {
+        intervals = subtractIntervalSets(intervals, [[corr.sweepMin, corr.sweepMax]]);
+      }
     }
     if (intervals.length > 0) {
       runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
@@ -5866,6 +5884,8 @@ function _generateLeadRun(room, fromPos, toPerp, direction, margin) {
  * Cable 1: covers near-half, Cable 2: covers far-half with lead-run.
  * Returns array of 2 cable objects, or null if not possible.
  */
+const CABLE_CORRIDOR_CM = 5; // routing corridor width for multi-cable lead-run
+
 function autoFillMultiCable(roomId, productId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
@@ -5879,69 +5899,110 @@ function autoFillMultiCable(roomId, productId) {
   const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
   const mid = (perpMin + perpMax) / 2;
 
+  // Sweep axis bounds (for lead-run/corridor)
+  const sweepMin = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
+  const sweepMax = dir === 'v' ? Math.max(...ys) : Math.max(...xs);
+
+  // Common start point (both cables start here, near thermostat)
+  const commonStartPt = dir === 'v'
+    ? { x: perpMin + margin, y: sweepMin + margin }
+    : { x: sweepMin + margin, y: perpMin + margin };
+
+  // Lead-run for cable 2: from common start along wall to zone 2 entry
+  const leadRunLength = Math.abs(mid - perpMin);
+  // Also account for return path (lead-run is 2× distance: out and back at corridor edges)
+  const leadRunOneCm = leadRunLength; // one-way along wall
+
+  // Corridor: cable 2's lead-run occupies space along the wall inside zone 1
+  const corridorRect = {
+    sweepMin: sweepMin,
+    sweepMax: sweepMin + margin + CABLE_CORRIDOR_CM,
+    perpMin: perpMin,
+    perpMax: mid
+  };
+
   // Half area
   const areas = roomAreas(room);
   const halfAreaM2 = (areas.net / 10000) / 2;
   const minSp = (prod.min_spacing_mm || 50) / 10;
   const maxSp = (prod.max_spacing_mm || 200) / 10;
-
-  // CC for half area
   const spacing = Math.max(minSp, Math.min(maxSp, (halfAreaM2 / prod.cable_length_m) * 100));
 
-  // Cable 1: near-half (from start corner)
   const startCorner = 'bl';
-  const zone1 = { perpMin: perpMin, perpMax: mid };
-  const zone2 = { perpMin: mid, perpMax: perpMax };
 
-  const r1 = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone1);
+  // Zone 1: near-half, with corridor obstacle + boundary edge (half-CC at zone boundary)
+  const zone1 = { perpMin, perpMax: mid, boundaryEdge: 'max', corridor: corridorRect };
+  // Zone 2: far-half, boundary edge (half-CC at zone boundary)
+  const zone2 = { perpMin: mid, perpMax, boundaryEdge: 'min' };
+
+  // Cable 1: use _adjustSpacingForLength if product has fixed length
+  let r1, spacing1 = spacing;
+  if (prod.cable_length_m) {
+    const targetLen1 = prod.cable_length_m * 100;
+    const adj1 = _adjustSpacingForLength(roomId, productId, dir, startCorner, targetLen1, zone1);
+    if (adj1) {
+      r1 = adj1; spacing1 = adj1.spacing_cm;
+    }
+  }
+  if (!r1) {
+    const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone1);
+    if (raw) r1 = { runs: raw.runs, totalLength_cm: raw.totalLength_cm, spacing_cm: spacing };
+  }
   if (!r1 || r1.runs.length === 0) return null;
 
-  // Cable 2: far-half, starts offset by 1×CC from cable 1's start
-  // For 'bl' start corner: cable 1 starts at perpMin+margin, cable 2 starts at perpMin+margin+spacing
-  const r2 = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone2);
+  // Cable 2: subtract lead-run length from target
+  let r2, spacing2 = spacing;
+  if (prod.cable_length_m) {
+    const targetLen2 = prod.cable_length_m * 100 - leadRunOneCm;
+    const adj2 = _adjustSpacingForLength(roomId, productId, dir, startCorner, Math.max(100, targetLen2), zone2);
+    if (adj2) {
+      r2 = adj2; spacing2 = adj2.spacing_cm;
+    }
+  }
+  if (!r2) {
+    const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone2);
+    if (raw) r2 = { runs: raw.runs, totalLength_cm: raw.totalLength_cm, spacing_cm: spacing };
+  }
   if (!r2 || r2.runs.length === 0) return null;
-
-  // Calculate lead-run for cable 2 (from start corner along wall to zone 2)
-  // Lead-run: simple straight path along the nearest wall from start corner to the far half
-  const sweepAxis = dir === 'v' ? 'y' : 'x';
-  const sweepMin = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
-  const sweepMax = dir === 'v' ? Math.max(...ys) : Math.max(...xs);
-  const leadRunLength = Math.abs(mid - perpMin); // distance along wall from start to zone2 entry
-  // Add lead-run length to cable 2's total
-  const cable2TotalWithLead = r2.totalLength_cm + leadRunLength;
 
   const cable1 = {
     id: S.counters.nextCableId++,
     roomId, productId,
     direction: dir,
-    spacing_cm: spacing,
-    startCorner: startCorner,
+    spacing_cm: spacing1,
+    startCorner,
     runs: r1.runs,
-    totalLength_cm: r1.totalLength_cm,
-    multiCableIndex: 0,  // first cable
-    multiCableGroup: null // will be set after both created
+    totalLength_cm: prod.cable_length_m ? prod.cable_length_m * 100 : r1.totalLength_cm,
+    lockedEnd: !!prod.cable_length_m,
+    multiCableIndex: 0,
+    multiCableGroup: null,
+    commonStartPt,
+    zoneBounds: zone1
   };
 
+  const cable2Total = prod.cable_length_m ? prod.cable_length_m * 100 : (r2.totalLength_cm + leadRunOneCm);
   const cable2 = {
     id: S.counters.nextCableId++,
     roomId, productId,
     direction: dir,
-    spacing_cm: spacing,
-    startCorner: startCorner,
+    spacing_cm: spacing2,
+    startCorner,
     runs: r2.runs,
-    totalLength_cm: cable2TotalWithLead,
-    multiCableIndex: 1,  // second cable
+    totalLength_cm: cable2Total,
+    lockedEnd: !!prod.cable_length_m,
+    multiCableIndex: 1,
     multiCableGroup: null,
+    commonStartPt,
+    zoneBounds: zone2,
     leadRun: {
-      // Lead-run path from start corner to zone2 entry, along wall
       fromPerp: perpMin + margin,
       toPerp: mid,
-      wallPos: sweepMin + margin,  // along near wall
-      lengthCm: leadRunLength
+      wallPos: sweepMin + margin,
+      lengthCm: leadRunOneCm
     }
   };
 
-  // Link them
+  // Link group
   const groupId = cable1.id;
   cable1.multiCableGroup = groupId;
   cable2.multiCableGroup = groupId;
@@ -7101,6 +7162,23 @@ function drawCables() {
     // Draw margin zone (randsone) along all walls
     _drawCableMarginZone(cable, room);
 
+    // Draw corridor for multi-cable lead-run (zone 1 only)
+    if (cable.zoneBounds?.corridor) {
+      const corr = cable.zoneBounds.corridor;
+      const cs1 = w2s(cable.direction === 'v' ? corr.perpMin : corr.sweepMin,
+                       cable.direction === 'v' ? corr.sweepMin : corr.perpMin);
+      const cs2 = w2s(cable.direction === 'v' ? corr.perpMax : corr.sweepMax,
+                       cable.direction === 'v' ? corr.sweepMax : corr.perpMax);
+      ctx.save();
+      ctx.fillStyle = _lc('rgba(34,211,238,0.06)', 'rgba(34,211,238,0.04)');
+      ctx.strokeStyle = _lc('rgba(34,211,238,0.3)', 'rgba(34,211,238,0.2)');
+      ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      ctx.fillRect(cs1.x, cs1.y, cs2.x - cs1.x, cs2.y - cs1.y);
+      ctx.strokeRect(cs1.x, cs1.y, cs2.x - cs1.x, cs2.y - cs1.y);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     ctx.save();
     // Clip to room polygon
     const spts = room.points.map(p => w2s(p.x, p.y));
@@ -7274,6 +7352,23 @@ function drawCables() {
         ctx.fillText('E', eP.x, eP.y);
         ctx.restore();
       }
+    }
+
+    // Common start point marker (multi-cable thermostat location)
+    if (cable.commonStartPt && cable.multiCableIndex === 0) {
+      const sp = w2s(cable.commonStartPt.x, cable.commonStartPt.y);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 9, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(34,211,238,0.25)';
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 2;
+      ctx.fill(); ctx.stroke();
+      ctx.font = "bold 10px 'DM Sans',sans-serif";
+      ctx.fillStyle = '#22d3ee';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('T', sp.x, sp.y);
+      ctx.restore();
     }
 
     ctx.restore();
