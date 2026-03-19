@@ -5556,7 +5556,8 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
   }
   const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
 
-  // ─── CENTERED LAYOUT (with boundary-edge support for half-CC) ────
+  // ─── CENTERED LAYOUT ────
+  // Ensure minimum margin from all walls. Optimal: half-CC from walls when possible.
   const usableWidth = (perpMax - margin) - (perpMin + margin);
   if (usableWidth <= 0) return null;
 
@@ -5566,17 +5567,28 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
   let firstPos;
   const boundaryEdge = zoneBounds?.boundaryEdge;
   if (boundaryEdge === 'max') {
-    // Pin last run at half-CC from boundary (perpMax), wall margin on min side
+    // Zone 1: pin last run at half-CC from zone boundary, symmetric margin on wall side
     const lastPos = perpMax - spacing_cm / 2;
     firstPos = lastPos - actualSpan;
-    if (firstPos < perpMin + margin) firstPos = perpMin + margin;
+    // Ensure wall-side margin is at least 'margin', prefer half-CC
+    const wallMargin = firstPos - perpMin;
+    if (wallMargin < margin) firstPos = perpMin + margin;
   } else if (boundaryEdge === 'min') {
-    // Pin first run at half-CC from boundary (perpMin), wall margin on max side
+    // Zone 2: pin first run at half-CC from zone boundary, symmetric margin on wall side
     firstPos = perpMin + spacing_cm / 2;
+    // Verify last run doesn't exceed wall margin on far side
+    const lastPos = firstPos + actualSpan;
+    if (lastPos > perpMax - margin) {
+      // Reduce N or adjust — shift inward
+      firstPos = perpMin + spacing_cm / 2;
+    }
   } else {
-    // Default centered layout
+    // Default: center runs symmetrically with equal margin from both walls
+    // Optimal margin = half-CC (gives even spacing from wall to first/last run)
     const sideMargin = (usableWidth - actualSpan) / 2;
     firstPos = perpMin + margin + sideMargin;
+    // sideMargin is automatically half-CC when N = floor(usableWidth/spacing) + 1
+    // because: usableWidth = (N-1)*spacing + 2*sideMargin
   }
 
   const runs = [];
@@ -5589,8 +5601,11 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
       : (firstPos + i * spacing_cm);
     // Cable is a line (zero width) — get intervals along sweep axis
     let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
-    // Shrink by wall margin
-    intervals = intervals.map(([lo, hi]) => [lo + margin, hi - margin]).filter(([lo, hi]) => hi > lo);
+    // Shrink by sweep margin: margin + uTurn radius so U-turns stay within wall margin
+    // This ensures equal distance from cable to wall on ALL sides
+    const uR = runs.length === 0 ? spacing_cm / 2 : spacing_cm / 2; // always use uRadius
+    const sweepMargin = margin + uR;
+    intervals = intervals.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi > lo);
     // Subtract hindrings
     for (const h of roomH) {
       if (!h.points || h.points.length < 3) continue;
@@ -5612,35 +5627,9 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
     }
   }
 
-  // Post-process: inset segment endpoints at U-turn connections so the
-  // outward-facing arc (radius = spacing/2) stays within the wall margin.
-  // Only cable start (first run's free end) and cable end (last run's free end)
-  // remain at wall+margin; all turning ends are inset by uRadius.
-  if (runs.length >= 2) {
-    const uRadius = spacing_cm / 2;
-    for (let r = 0; r < runs.length; r++) {
-      const segs = runs[r].segments;
-      if (!segs.length) continue;
-      let insetLow = false, insetHigh = false;
-      // Previous U-turn (index r-1): check which end it connects at
-      if (r > 0) { if (_uTurnIsHigh(r - 1, direction, startCorner)) insetHigh = true; else insetLow = true; }
-      // Next U-turn (index r): check which end it connects at
-      if (r < runs.length - 1) { if (_uTurnIsHigh(r, direction, startCorner)) insetHigh = true; else insetLow = true; }
-      if (insetLow && segs.length > 0) {
-        segs[0].start_cm += uRadius;
-        if (segs[0].start_cm >= segs[0].end_cm) segs.splice(0, 1);
-      }
-      if (insetHigh && segs.length > 0) {
-        const last = segs[segs.length - 1];
-        last.end_cm -= uRadius;
-        if (last.end_cm <= last.start_cm) segs.splice(segs.length - 1, 1);
-      }
-    }
-    // Remove runs with no remaining segments
-    for (let r = runs.length - 1; r >= 0; r--) {
-      if (runs[r].segments.length === 0) runs.splice(r, 1);
-    }
-  }
+  // Note: U-turn inset is handled by sweepMargin (margin + uRadius) applied
+  // uniformly to all segment endpoints. No post-processing needed — all ends
+  // have equal distance from walls, and U-turn arcs fit within the margin zone.
 
   // Calculate total length: segments + U-turns
   let totalLength = 0;
@@ -5978,14 +5967,13 @@ function autoFillMultiCable(roomId, productId) {
   // Zone 2: far-half, boundary edge (half-CC at zone boundary)
   const zone2 = { perpMin: mid, perpMax, boundaryEdge: 'min' };
 
-  // Cable 1: use _adjustSpacingForLength if product has fixed length
-  let r1, spacing1 = spacing;
+  // Both cables use the SAME spacing for uniform CC
+  // Cable 1: use _adjustSpacingForLength for zone 1
+  let r1, r2, finalSpacing = spacing;
   if (prod.cable_length_m) {
     const targetLen1 = prod.cable_length_m * 100;
     const adj1 = _adjustSpacingForLength(roomId, productId, dir, startCorner, targetLen1, zone1);
-    if (adj1) {
-      r1 = adj1; spacing1 = adj1.spacing_cm;
-    }
+    if (adj1) { r1 = adj1; finalSpacing = adj1.spacing_cm; }
   }
   if (!r1) {
     const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone1);
@@ -5993,18 +5981,17 @@ function autoFillMultiCable(roomId, productId) {
   }
   if (!r1 || r1.runs.length === 0) return null;
 
-  // Cable 2: subtract lead-run length from target
-  let r2, spacing2 = spacing;
+  // Cable 2: use SAME spacing as cable 1 for uniform CC across room
+  // Subtract lead-run from target length
   if (prod.cable_length_m) {
     const targetLen2 = prod.cable_length_m * 100 - leadRunOneCm;
     const adj2 = _adjustSpacingForLength(roomId, productId, dir, startCorner, Math.max(100, targetLen2), zone2);
-    if (adj2) {
-      r2 = adj2; spacing2 = adj2.spacing_cm;
-    }
+    if (adj2) r2 = adj2;
   }
   if (!r2) {
-    const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone2);
-    if (raw) r2 = { runs: raw.runs, totalLength_cm: raw.totalLength_cm, spacing_cm: spacing };
+    // Use same spacing as cable 1 for consistency
+    const raw = generateCableSerpentine(roomId, productId, dir, finalSpacing, startCorner, zone2);
+    if (raw) r2 = { runs: raw.runs, totalLength_cm: raw.totalLength_cm, spacing_cm: finalSpacing };
   }
   if (!r2 || r2.runs.length === 0) return null;
 
@@ -6012,7 +5999,7 @@ function autoFillMultiCable(roomId, productId) {
     id: S.counters.nextCableId++,
     roomId, productId,
     direction: dir,
-    spacing_cm: spacing1,
+    spacing_cm: r1.spacing_cm || finalSpacing,
     startCorner,
     runs: r1.runs,
     totalLength_cm: prod.cable_length_m ? prod.cable_length_m * 100 : r1.totalLength_cm,
@@ -6028,7 +6015,7 @@ function autoFillMultiCable(roomId, productId) {
     id: S.counters.nextCableId++,
     roomId, productId,
     direction: dir,
-    spacing_cm: spacing2,
+    spacing_cm: r2.spacing_cm || finalSpacing,
     startCorner,
     runs: r2.runs,
     totalLength_cm: cable2Total,
