@@ -12000,6 +12000,7 @@ function drawAllDimAnnotations() {
     if (!_roomOnActiveFloor(room)) continue;
     if (room.dimSnap && room.walls && room.points) _drawDimAnnotationsForRoom(room);
     if (room.stripDimSnap && room.points) _drawStripDimChainForRoom(room);
+    if (room.cableDimSnap && room.points) _drawCableDimChainForRoom(room);
   }
 }
 function _drawDimAnnotationsForRoom(room) {
@@ -12292,6 +12293,171 @@ function _drawStripDimChainForRoom(room) {
   ctx.restore();
 }
 
+// ─── CABLE DIMENSION CHAIN (Målsett Kabel) ────────────────────
+function _drawCableDimChainForRoom(room) {
+  const cables = _cablesForRoom(room.id);
+  if (!cables.length) return;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const wMinX = Math.min(...xs), wMaxX = Math.max(...xs);
+  const wMinY = Math.min(...ys), wMaxY = Math.max(...ys);
+
+  // Determine dominant cable direction
+  const dirs = cables.map(c => c.direction);
+  const dir = dirs.filter(d => d === 'v').length >= dirs.filter(d => d === 'h').length ? 'v' : 'h';
+  const dirCables = cables.filter(c => c.direction === dir);
+  if (!dirCables.length) return;
+
+  // Collect all run positions and sweep extents
+  const allRuns = [];
+  for (const cable of dirCables) {
+    for (const run of cable.runs) {
+      let sweepMin = Infinity, sweepMax = -Infinity;
+      for (const seg of run.segments) {
+        if (seg.start_cm < sweepMin) sweepMin = seg.start_cm;
+        if (seg.end_cm > sweepMax) sweepMax = seg.end_cm;
+      }
+      allRuns.push({ pos: run.pos_cm, sweepMin, sweepMax, cableId: cable.id });
+    }
+  }
+  allRuns.sort((a, b) => a.pos - b.pos);
+  if (!allRuns.length) return;
+
+  ctx.save();
+  ctx.font = "10px 'DM Mono',monospace";
+  const COL = _lc('rgba(180,90,30,0.85)', 'rgba(255,150,60,0.75)');
+  const COL_BG = _lc('rgba(240,244,248,0.92)', 'rgba(13,14,16,0.8)');
+  const TICK = 8;
+  // Offset further out if strip dims are also active
+  const BASE_OFF = (room.stripDimSnap ? 78 : 38) + (room.dimSnap ? 38 : 0);
+
+  function _drawChainSeg(sx1, sy1, sx2, sy2, valueCm, perpNx, perpNy, isVertLabel) {
+    if (valueCm < 0.3) return;
+    const label = Math.round(valueCm * 10) / 10;
+    const labelStr = (label % 1 === 0 ? label.toFixed(0) : label.toFixed(1)) + ' cm';
+    ctx.strokeStyle = COL; ctx.lineWidth = 0.8; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(sx1 - perpNx * TICK / 2, sy1 - perpNy * TICK / 2);
+    ctx.lineTo(sx1 + perpNx * TICK / 2, sy1 + perpNy * TICK / 2);
+    ctx.moveTo(sx2 - perpNx * TICK / 2, sy2 - perpNy * TICK / 2);
+    ctx.lineTo(sx2 + perpNx * TICK / 2, sy2 + perpNy * TICK / 2);
+    ctx.stroke();
+    const mx = (sx1 + sx2) / 2, my = (sy1 + sy2) / 2;
+    const tw = ctx.measureText(labelStr).width;
+    ctx.save();
+    ctx.translate(mx, my);
+    if (isVertLabel) ctx.rotate(-Math.PI / 2);
+    ctx.translate(0, -12);
+    ctx.fillStyle = COL_BG;
+    ctx.fillRect(-tw / 2 - 3, -7, tw + 6, 14);
+    ctx.fillStyle = COL;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(labelStr, 0, 0);
+    ctx.restore();
+  }
+  function _drawExtLine(wallSx, wallSy, chainSx, chainSy) {
+    ctx.strokeStyle = COL; ctx.lineWidth = 0.5; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(wallSx, wallSy); ctx.lineTo(chainSx, chainSy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // --- Across-chain: wall → run positions → wall (shows CC + wall margins) ---
+  const acrossSegs = [];
+  let nearWall, farWall;
+  if (dir === 'v') { nearWall = wMinX; farWall = wMaxX; }
+  else              { nearWall = wMinY; farWall = wMaxY; }
+
+  let cursor = nearWall;
+  for (let i = 0; i < allRuns.length; i++) {
+    const runPos = allRuns[i].pos;
+    if (runPos > cursor + 0.1) {
+      acrossSegs.push({ from: cursor, to: runPos, type: i === 0 ? 'margin' : 'cc' });
+    }
+    cursor = runPos;
+  }
+  if (cursor < farWall - 0.1) {
+    acrossSegs.push({ from: cursor, to: farWall, type: 'margin' });
+  }
+
+  // --- Along-chain: wall → cable extent → wall ---
+  const alongSegs = [];
+  let nearWallA, farWallA;
+  if (dir === 'v') { nearWallA = wMinY; farWallA = wMaxY; }
+  else              { nearWallA = wMinX; farWallA = wMaxX; }
+
+  let minSweep = Infinity, maxSweep = -Infinity;
+  for (const r of allRuns) {
+    if (r.sweepMin < minSweep) minSweep = r.sweepMin;
+    if (r.sweepMax > maxSweep) maxSweep = r.sweepMax;
+  }
+  if (minSweep > nearWallA + 0.1) alongSegs.push({ from: nearWallA, to: minSweep, type: 'margin' });
+  alongSegs.push({ from: minSweep, to: maxSweep, type: 'cable' });
+  if (maxSweep < farWallA - 0.1) alongSegs.push({ from: maxSweep, to: farWallA, type: 'margin' });
+
+  // --- Render across-chain ---
+  if (dir === 'v') {
+    const wallY = wMaxY;
+    const sWall = w2s(0, wallY);
+    const chainScreenY = sWall.y + BASE_OFF;
+    const boundaries = new Set();
+    for (const seg of acrossSegs) { boundaries.add(seg.from); boundaries.add(seg.to); }
+    for (const bx of boundaries) {
+      const sw = w2s(bx, wallY);
+      _drawExtLine(sw.x, sw.y + 4, sw.x, chainScreenY);
+    }
+    for (const seg of acrossSegs) {
+      const s1 = w2s(seg.from, wallY), s2 = w2s(seg.to, wallY);
+      _drawChainSeg(s1.x, chainScreenY, s2.x, chainScreenY, seg.to - seg.from, 0, 1, false);
+    }
+  } else {
+    const wallX = wMaxX;
+    const sWall = w2s(wallX, 0);
+    const chainScreenX = sWall.x + BASE_OFF;
+    const boundaries = new Set();
+    for (const seg of acrossSegs) { boundaries.add(seg.from); boundaries.add(seg.to); }
+    for (const by of boundaries) {
+      const sw = w2s(wallX, by);
+      _drawExtLine(sw.x + 4, sw.y, chainScreenX, sw.y);
+    }
+    for (const seg of acrossSegs) {
+      const s1 = w2s(wallX, seg.from), s2 = w2s(wallX, seg.to);
+      _drawChainSeg(chainScreenX, s1.y, chainScreenX, s2.y, seg.to - seg.from, 1, 0, true);
+    }
+  }
+
+  // --- Render along-chain ---
+  if (dir === 'v') {
+    const wallX = wMinX;
+    const sWall = w2s(wallX, 0);
+    const chainScreenX = sWall.x - BASE_OFF;
+    const boundaries = new Set();
+    for (const seg of alongSegs) { boundaries.add(seg.from); boundaries.add(seg.to); }
+    for (const by of boundaries) {
+      const sw = w2s(wallX, by);
+      _drawExtLine(sw.x - 4, sw.y, chainScreenX, sw.y);
+    }
+    for (const seg of alongSegs) {
+      const s1 = w2s(wallX, seg.from), s2 = w2s(wallX, seg.to);
+      _drawChainSeg(chainScreenX, s1.y, chainScreenX, s2.y, seg.to - seg.from, 1, 0, true);
+    }
+  } else {
+    const wallY = wMinY;
+    const sWall = w2s(0, wallY);
+    const chainScreenY = sWall.y - BASE_OFF;
+    const boundaries = new Set();
+    for (const seg of alongSegs) { boundaries.add(seg.from); boundaries.add(seg.to); }
+    for (const bx of boundaries) {
+      const sw = w2s(bx, wallY);
+      _drawExtLine(sw.x, sw.y - 4, sw.x, chainScreenY);
+    }
+    for (const seg of alongSegs) {
+      const s1 = w2s(seg.from, wallY), s2 = w2s(seg.to, wallY);
+      _drawChainSeg(s1.x, chainScreenY, s2.x, chainScreenY, seg.to - seg.from, 0, 1, false);
+    }
+  }
+  ctx.restore();
+}
+
 // ─── ANNOTATION HIT TESTS ─────────────────────────────────────
 function hitAnnotation(sx,sy) {
   for (const room of S.rooms) {
@@ -12300,7 +12466,7 @@ function hitAnnotation(sx,sy) {
     const cxW=room.points.reduce((a,p)=>a+p.x,0)/room.points.length;
     const cyW=room.points.reduce((a,p)=>a+p.y,0)/room.points.length;
     for(const wl of room.walls){
-      const baseOff=(room.stripDimSnap?78:48)+(room.annotOffsets[wl.id]||0);
+      const baseOff=(room.stripDimSnap?78:48)+(room.cableDimSnap?40:0)+(room.annotOffsets[wl.id]||0);
       const s1=w2s(wl.x1,wl.y1),s2=w2s(wl.x2,wl.y2);
       const wAng=Math.atan2(s2.y-s1.y,s2.x-s1.x),pAng=wAng+Math.PI/2;
       const dotTest=((s1.x+s2.x)/2-w2s(cxW,cyW).x)*Math.cos(pAng)+((s1.y+s2.y)/2-w2s(cxW,cyW).y)*Math.sin(pAng);
@@ -13965,6 +14131,8 @@ function roomItemHtml(room, indented) {
   const dimOn = room.dimSnap;
   const stripDimOn = room.stripDimSnap;
   const hasStrips = _stripsForRoom(room.id).length > 0;
+  const hasCables = _cablesForRoom(room.id).length > 0;
+  const cableDimOn = room.cableDimSnap;
 
   return `<div class="room-item${sel?' sel':''}${indented?' indented':''}" data-room-id="${room.id}" data-room-name="${esc(room.name).toLowerCase()}"
     onclick="selRoom(${room.id})"
@@ -13978,7 +14146,8 @@ function roomItemHtml(room, indented) {
     <span style="display:flex;gap:2px;align-items:center;margin-left:auto;flex-shrink:0">
       <button onclick="event.stopPropagation();toggleRoomCard(${room.id})" title="Infokort" style="width:20px;height:20px;border:none;border-radius:3px;background:${room.cardVisible?'var(--accent)':'transparent'};color:${room.cardVisible?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center">📋</button>
       <button onclick="event.stopPropagation();_toggleRoomDimSnap(${room.id})" title="Målsett rom" style="width:20px;height:20px;border:none;border-radius:3px;background:${dimOn?'var(--accent)':'transparent'};color:${dimOn?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center">📐</button>${hasStrips ? `
-      <button onclick="event.stopPropagation();_toggleStripDimSnap(${room.id})" title="Målsett folie" style="width:20px;height:20px;border:none;border-radius:3px;background:${stripDimOn?'var(--accent)':'transparent'};color:${stripDimOn?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center">〰</button>` : ''}
+      <button onclick="event.stopPropagation();_toggleStripDimSnap(${room.id})" title="Målsett folie" style="width:20px;height:20px;border:none;border-radius:3px;background:${stripDimOn?'var(--accent)':'transparent'};color:${stripDimOn?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center">〰</button>` : ''}${hasCables ? `
+      <button onclick="event.stopPropagation();_toggleCableDimSnap(${room.id})" title="Målsett kabel" style="width:20px;height:20px;border:none;border-radius:3px;background:${cableDimOn?'var(--accent)':'transparent'};color:${cableDimOn?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center">📏</button>` : ''}
     </span>
     <span class="room-status" style="color:${st.color}" title="${st.title}">${st.dot}</span>
   </div>`;
@@ -14427,6 +14596,7 @@ function roomCtxMenu(e, id) {
   const removeFloor = room?.floorId!==null
     ? `<div class="ctx-item" onclick="mvRoom(${id},null);hideCtx()">↩ Fjern fra etasje</div>` : '';
   const _hasStrips = _stripsForRoom(id).length > 0;
+  const _hasCables = _cablesForRoom(id).length > 0;
   document.getElementById('ctx-menu').innerHTML=`
     <div class="ctx-item" onclick="trigRename(${id});hideCtx()">✎ Gi nytt navn</div>
     <div class="ctx-item" onclick="dupeRoom(${id});hideCtx()">⧉ Dupliser</div>
@@ -14435,6 +14605,7 @@ function roomCtxMenu(e, id) {
     <div class="ctx-sep"></div>
     <div class="ctx-item" onclick="_toggleRoomDimSnap(${id});hideCtx()">📐 ${room?.dimSnap?'Skjul':'Vis'} målsett rom</div>
     ${_hasStrips ? `<div class="ctx-item" onclick="_toggleStripDimSnap(${id});hideCtx()">〰 ${room?.stripDimSnap?'Skjul':'Vis'} målsett folie</div>` : ''}
+    ${_hasCables ? `<div class="ctx-item" onclick="_toggleCableDimSnap(${id});hideCtx()">📏 ${room?.cableDimSnap?'Skjul':'Vis'} målsett kabel</div>` : ''}
     ${flOpts ? '<div class="ctx-sep"></div><div class="ctx-sub-lbl">Flytt til etasje</div>'+flOpts : ''}
     ${removeFloor}
     <div class="ctx-sep"></div>
@@ -18910,6 +19081,14 @@ function _toggleStripDimSnap(roomId) {
   const rm = S.rooms.find(r => r.id === roomId);
   if (!rm) return;
   rm.stripDimSnap = !rm.stripDimSnap;
+  renderSidebar(); render();
+}
+
+// Toggle cable dimension snap by room ID
+function _toggleCableDimSnap(roomId) {
+  const rm = S.rooms.find(r => r.id === roomId);
+  if (!rm) return;
+  rm.cableDimSnap = !rm.cableDimSnap;
   renderSidebar(); render();
 }
 
