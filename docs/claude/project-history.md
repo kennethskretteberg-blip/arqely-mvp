@@ -1,5 +1,38 @@
 # Romtegner Project History
 
+## 2026-03-20: Varmematte multi-run, varmekabel UX, rom-interaksjon
+
+### Varmematte — serpentin-layout med faste produktlengder
+- Matte-produkter har nå `mat_total_length_mm` (fast rullelengde) og `cable_length_m`
+- Nytt felt `num_runs` på mat-objekter: én matte = én fysisk produkt som serpentiner i rommet
+- `_matTotalWidthCm(mat)` hjelpefunksjon for total bredde over alle runs inkl. gap
+- `drawMats()` tegner nå flere parallelle nett-rektangler per matte med 20mm gap + U-sving-buer
+- Kabelinnrykk: 20mm fra nettkant (kabelbredde 46cm i 50cm nett)
+- `autoFillMatSerpentine()` beregner num_runs fra produktets totallengde / kjørelengde
+- Overskuddsadvarsel (oransje toast) med meter matte + meter kabel
+- Kontekstlinje: brukt/total lengde, +/- runs-knapper, overskudd-ikon
+- Hit detection, gizmos, drag/clamping, romstatistikk oppdatert for multi-run
+- 3 faste testprodukter: 0.5×4m, 0.5×10m, 0.5×20m (min_gap_mm=20)
+
+### Varmekabel — forbedret UX
+- **Fjernet maks CC-advarsel** for innendørs kabel (beholdt for snø)
+- **Flyttbar kabellabel**: dra label til ønsket posisjon (cable.labelPos i world coords)
+- **Vis/skjul kabellabel**: høyreklikk i rom → "Vis/Skjul kabellabel"
+- **Forenklet kabelmålsett**: kun første CC, siste CC og veggavstander (like mellom-CC hoppes over)
+- **Større produktpanel** (210→340px) med romtype-velger og automatisk W/m²
+- **Flyttbart produktpanel**: dra i tittelbaren
+- Infokort viser art.nr, el.nr, leverandør; maks CC-rad skjult for indoor
+- `_showToast(msg, type)` støtter nå 'warning' (oransje) og 'error' (rød)
+
+### Rom-interaksjon
+- **Klikk romnavn i sidebar** starter inline-redigering (var dobbelt-klikk)
+- **Canvas-valg scroller sidebar** til valgt rom (`_scrollSidebarToRoom`)
+- **Canvas høyreklikk-meny** for rom: Sett inn produkt, Velg romtype, Endre romnavn, Tøm rommet, Slett rom
+- `_clearRoomProducts(roomId)` fjerner alle striper/kabler/matter/plater fra et rom
+
+### Prosjektliste — batch status chips
+- "Endre status" viser nå modal med klikkbare status-chips i stedet for prompt()
+
 ## 2026-03-19: Trapp-kabel — forbedret forslag, resultatpanel, PDF
 
 ### Kabel-splitting arkitektur (LÅST)
