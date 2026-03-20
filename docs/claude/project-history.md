@@ -1,6 +1,6 @@
 # Romtegner Project History
 
-## 2026-03-20: Varmematte multi-run, varmekabel UX, rom-interaksjon
+## 2026-03-20: Soner, minimap, RWP-panel, prosjekt-rename + varmematte/kabel
 
 ### Varmematte — serpentin-layout med faste produktlengder
 - Matte-produkter har nå `mat_total_length_mm` (fast rullelengde) og `cable_length_m`
@@ -30,8 +30,32 @@
 - **Canvas høyreklikk-meny** for rom: Sett inn produkt, Velg romtype, Endre romnavn, Tøm rommet, Slett rom
 - `_clearRoomProducts(roomId)` fjerner alle striper/kabler/matter/plater fra et rom
 
-### Prosjektliste — batch status chips
+### Prosjektliste — batch status chips + inline rename
 - "Endre status" viser nå modal med klikkbare status-chips i stedet for prompt()
+- Klikk på prosjektnavn i tabellen for inline-redigering (`_inlineRenameProject`)
+
+### Sone-tegning — polygon UX + termostat som knappenål
+- Sonetegning har nå lukke-indikator (sirkel + "Lukk"-tekst ved første punkt)
+- Fullfør/Avbryt-knapper i ctxbar under tegning med punktteller
+- **Termostat** er nå knappenål-plassering (enkelt-klikk) i stedet for polygon
+- Termostat-pin rendres som grønn dråpeform med 🌡️-ikon
+- Hit detection for pin-baserte soner (avstandssjekk)
+- Escape avbryter termostat-plassering
+
+### Minimap/oversiktskart forbedret
+- Større canvas (240×160px), viser romnavn i hvert rom
+- Viser kabler og matter i tillegg til foliestriper
+- Dra for å navigere, dobbelt-klikk for å velge rom
+- Auto-vises når 2+ rom finnes på aktiv etasje
+- Filtrerer på aktiv etasje
+
+### RWP-panel (retning/produkt)
+- Vises ikke lenger automatisk ved romvalg — kun ved aktiv produktinnsetting
+- Høyreklikk i rom fungerer nå uten blokkering fra panelet
+- "🧹 Tøm"-knapp i verktøylinjen for å fjerne alle produkter fra rom
+
+### Romtype
+- Lagt til "Vaskerom" (🧺, 130 W/m²) som romtype
 
 ## 2026-03-19: Trapp-kabel — forbedret forslag, resultatpanel, PDF
 

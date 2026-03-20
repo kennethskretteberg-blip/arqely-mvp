@@ -1688,12 +1688,12 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
   <div id="widget-scale-body" style="padding:8px 12px 10px"></div>
 </div>
 <!-- Minimap widget -->
-<div id="widget-minimap" class="widget-el" style="display:none;position:fixed;width:196px;z-index:150;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.4);user-select:none">
+<div id="widget-minimap" class="widget-el" style="display:none;position:fixed;width:256px;z-index:150;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.4);user-select:none">
   <div class="widget-hdr" id="wminimap-handle">
-    <span>🗺️ Minimap</span>
+    <span>🗺️ Oversikt</span>
     <button class="widget-close" onclick="hideWidget('widget-minimap');event.stopPropagation()">−</button>
   </div>
-  <canvas id="minimap-cv" width="180" height="120" style="display:block;cursor:crosshair;margin:6px auto"></canvas>
+  <canvas id="minimap-cv" width="240" height="160" style="display:block;cursor:crosshair;margin:4px auto 6px"></canvas>
 </div>
 
 <!-- EXCEL IMPORT MODAL -->
@@ -1860,6 +1860,7 @@ const ROOM_TYPES = [
   {id:'kitchen',   label:'Kjøkken',  icon:'🍳', targetWm2:100},
   {id:'living',    label:'Stue',     icon:'🛋️', targetWm2:80},
   {id:'bedroom',   label:'Soverom',  icon:'🛏️', targetWm2:80},
+  {id:'laundry',   label:'Vaskerom',  icon:'🧺', targetWm2:130},
   {id:'hallway',   label:'Gang',     icon:'🚪', targetWm2:100},
   {id:'office',    label:'Kontor',   icon:'💼', targetWm2:80},
   {id:'other',     label:'Annet',    icon:'📐', targetWm2:100},
@@ -1970,6 +1971,8 @@ const S = {
     zoneDrawMode: false,         // zone polygon drawing active
     zoneType: 'shower',          // current zone type being placed
     zoneKind: 'forbidden',       // 'forbidden' or 'preferred'
+    thermostatPlaceMode: false,  // thermostat pin placement active
+    thermostatRoomId: null,      // room for thermostat placement
     matPlaceMode: false,         // mat placement click mode active
     matPlaceProductId: null,     // product id for mat placement
     matPlaceWidthCm: null,       // width of mat being placed
@@ -9039,7 +9042,8 @@ function drawZones() {
     ctx.save();
     ctx.setLineDash([4, 3]);
     const isForbid = S.ui.zoneKind === 'forbidden';
-    ctx.strokeStyle = isForbid ? '#ef4444' : '#22c55e';
+    const zCol = isForbid ? '#ef4444' : '#22c55e';
+    ctx.strokeStyle = zCol;
     ctx.lineWidth = 2;
     ctx.beginPath();
     const fp = w2s(S.drawing.points[0].x, S.drawing.points[0].y);
@@ -9058,8 +9062,53 @@ function drawZones() {
     for (const pt of S.drawing.points) {
       const sp = w2s(pt.x, pt.y);
       ctx.beginPath(); ctx.arc(sp.x, sp.y, 4, 0, Math.PI*2);
-      ctx.fillStyle = isForbid ? '#ef4444' : '#22c55e';
+      ctx.fillStyle = zCol;
       ctx.fill();
+    }
+    // Close indicator — circle at first point (like polygon room drawing)
+    if (S.drawing.points.length >= 3 && S.drawing.mousePos) {
+      const mp = w2s(S.drawing.mousePos.x, S.drawing.mousePos.y);
+      const dist = Math.hypot(mp.x - fp.x, mp.y - fp.y);
+      const closeRadius = dist < 18 ? 10 : 7;
+      ctx.beginPath(); ctx.arc(fp.x, fp.y, closeRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = zCol; ctx.lineWidth = 2; ctx.stroke();
+      if (dist < 18) {
+        ctx.fillStyle = zCol + '44'; ctx.fill();
+        ctx.font = "bold 9px 'DM Sans',sans-serif";
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.fillStyle = zCol;
+        ctx.fillText('Lukk', fp.x, fp.y - 13);
+      }
+    }
+    ctx.restore();
+  }
+
+  // Thermostat pins (single-point placement)
+  for (const zone of S.zones) {
+    if (zone.purpose !== 'thermostat' || !zone.pinPos) continue;
+    if (!_roomIdOnActiveFloor(zone.roomId)) continue;
+    const isSel = zone.id === S.ui.selectedZoneId;
+    const sp = w2s(zone.pinPos.x, zone.pinPos.y);
+    ctx.save();
+    // Pin body (teardrop shape)
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y - 12, 8, Math.PI, 0);
+    ctx.lineTo(sp.x, sp.y);
+    ctx.closePath();
+    ctx.fillStyle = isSel ? '#22c55e' : 'rgba(34,197,94,0.7)';
+    ctx.fill();
+    ctx.strokeStyle = isSel ? '#fff' : 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1.5; ctx.stroke();
+    // Icon
+    ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('🌡️', sp.x, sp.y - 12);
+    // Label
+    if (S.view.zoom > 0.3) {
+      ctx.font = "9px 'DM Sans',sans-serif";
+      ctx.fillStyle = 'rgba(34,197,94,0.85)';
+      ctx.textBaseline = 'top';
+      ctx.fillText(zone.label || 'Termostat', sp.x, sp.y + 4);
     }
     ctx.restore();
   }
@@ -9075,6 +9124,12 @@ function hitZone(wx, wy) {
   for (let i = S.zones.length - 1; i >= 0; i--) {
     const z = S.zones[i];
     if (!_roomIdOnActiveFloor(z.roomId)) continue;
+    // Thermostat pin: check distance to pin position
+    if (z.pinPos) {
+      const dist = Math.hypot(wx - z.pinPos.x, wy - z.pinPos.y);
+      if (dist < 15 / (S.view.zoom * BASE_SCALE)) return z; // ~15px tolerance
+      continue;
+    }
     if (z.points && z.points.length >= 3 && ptInPoly(wx, wy, z.points)) {
       return z;
     }
@@ -9184,14 +9239,24 @@ function _clampMatToRoom(mat, room) {
 
 /** Start zone drawing mode for a given room */
 function startZoneDraw(roomId, purposeId, kind) {
+  // Thermostat: single-click pin placement instead of polygon
+  if (purposeId === 'thermostat') {
+    S.ui.thermostatPlaceMode = true;
+    S.ui.thermostatRoomId = roomId;
+    canvas.style.cursor = 'crosshair';
+    updateCtxBar();
+    render();
+    return;
+  }
   S.ui.zoneDrawMode = true;
   S.ui.zoneType = purposeId;
   S.ui.zoneKind = kind;
-  S.ui.hindringRoomId = roomId; // reuse hindring room context for drawing
+  S.ui.hindringRoomId = roomId;
   S.drawing.active = true;
   S.drawing.points = [];
   S.drawing.mousePos = null;
   canvas.style.cursor = 'crosshair';
+  updateCtxBar();
   render();
 }
 
@@ -9220,10 +9285,11 @@ function finishZoneDraw() {
 /** Cancel zone drawing */
 function cancelZoneDraw() {
   S.ui.zoneDrawMode = false;
+  S.ui.thermostatPlaceMode = false;
   S.drawing.active = false;
   S.drawing.points = [];
   canvas.style.cursor = 'default';
-  render();
+  updateCtxBar(); render();
 }
 
 // ─── AUTO ZONE SPLITTING ────────────────────────────────────
@@ -11698,6 +11764,7 @@ function updateScaleWidget() {
 
 // ─── MINIMAP WIDGET ───────────────────────────────────────────
 let _minimapCv = null;
+let _mmDragging = false;
 function initMinimapWidget() {
   if (!S.ui.widgetMinimapVisible) return;
   const w  = document.getElementById('widget-minimap'); if (!w) return;
@@ -11712,21 +11779,57 @@ function initMinimapWidget() {
   _initPaletteDrag(w, 'wminimap-handle', 'widgetMinimapPosX', 'widgetMinimapPosY');
   if (!cv._mmInit) {
     cv._mmInit = true;
-    cv.addEventListener('click', e => {
+    // Click or drag to navigate
+    function _mmNavTo(e) {
       const mm = _mmScale(); if (!mm) return;
       const r = cv.getBoundingClientRect();
       const mx = (e.clientX - r.left) * (cv.width / r.width);
       const my = (e.clientY - r.top)  * (cv.height / r.height);
-      const wx = mx / mm.scale + mm.minX - mm.offX / mm.scale;
-      const wy = my / mm.scale + mm.minY - mm.offY / mm.scale;
+      const worldX = mx / mm.scale + mm.minX - mm.offX / mm.scale;
+      const worldY = my / mm.scale + mm.minY - mm.offY / mm.scale;
       const cvEl = document.getElementById('canvas');
-      S.view.panX = cvEl.width/2  - wx * BASE_SCALE * S.view.zoom;
-      S.view.panY = cvEl.height/2 - wy * BASE_SCALE * S.view.zoom;
+      S.view.panX = cvEl.width/2  - worldX * BASE_SCALE * S.view.zoom;
+      S.view.panY = cvEl.height/2 - worldY * BASE_SCALE * S.view.zoom;
       render();
+    }
+    cv.addEventListener('mousedown', e => { _mmDragging = true; _mmNavTo(e); e.preventDefault(); });
+    cv.addEventListener('mousemove', e => { if (_mmDragging) _mmNavTo(e); });
+    cv.addEventListener('mouseup', () => { _mmDragging = false; });
+    cv.addEventListener('mouseleave', () => { _mmDragging = false; });
+    // Click on room name → select room
+    cv.addEventListener('dblclick', e => {
+      const mm = _mmScale(); if (!mm) return;
+      const r = cv.getBoundingClientRect();
+      const mx = (e.clientX - r.left) * (cv.width / r.width);
+      const my = (e.clientY - r.top)  * (cv.height / r.height);
+      const worldX = mx / mm.scale + mm.minX - mm.offX / mm.scale;
+      const worldY = my / mm.scale + mm.minY - mm.offY / mm.scale;
+      // Find room under click
+      for (const room of S.rooms) {
+        if (_ptInPoly(worldX, worldY, room.points)) { selRoom(room.id); return; }
+      }
     });
   }
   drawMinimap();
   document.getElementById('chip-widgets')?.classList.add('on');
+}
+
+/** Auto-show minimap when 2+ rooms exist on active floor */
+function _autoShowMinimap() {
+  const roomsOnFloor = S.rooms.filter(r => _roomIdOnActiveFloor(r.id));
+  if (roomsOnFloor.length >= 2 && !S.ui.widgetMinimapVisible) {
+    S.ui.widgetMinimapVisible = true;
+    initMinimapWidget();
+  }
+}
+// Helper — point in polygon (reuse existing ptInPoly if available)
+function _ptInPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
 }
 function _mmScale() {
   const cv = _minimapCv || document.getElementById('minimap-cv'); if (!cv) return null;
@@ -11753,32 +11856,73 @@ function drawMinimap() {
   const { scale, minX, minY, offX, offY } = mm;
   const wx = x => (x - minX) * scale + offX;
   const wy = y => (y - minY) * scale + offY;
-  // Rooms
+
+  // Rooms with fill, stroke, and labels
   for (const room of S.rooms) {
+    if (!_roomIdOnActiveFloor(room.id)) continue;
     const mmSel = room.id === S.ui.selectedRoomId;
     c.beginPath();
     room.points.forEach((p, i) => i===0 ? c.moveTo(wx(p.x),wy(p.y)) : c.lineTo(wx(p.x),wy(p.y)));
     c.closePath();
-    c.fillStyle   = mmSel ? 'rgba(34,211,238,0.18)' : 'rgba(50,100,200,0.10)';
+    c.fillStyle   = mmSel ? 'rgba(34,211,238,0.22)' : 'rgba(50,100,200,0.12)';
     c.strokeStyle = mmSel ? 'rgba(34,211,238,0.95)' : 'rgba(50,100,200,0.55)';
     c.lineWidth   = mmSel ? 2 : 1;
     c.fill(); c.stroke();
+
+    // Room name label
+    const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    c.font = mmSel ? 'bold 9px sans-serif' : '8px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = mmSel ? 'rgba(34,211,238,0.95)' : 'rgba(200,210,230,0.85)';
+    c.fillText(room.name || '', wx(cx), wy(cy));
   }
+
   // Strips
   for (const st of S.strips) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === st.productId); if (!p) continue;
     const nc = (p.netto_width_mm || p.width_mm) / 10;
-    c.fillStyle = 'rgba(255,120,0,0.4)';
+    c.fillStyle = 'rgba(255,120,0,0.35)';
     if (st.direction === 'v') c.fillRect(wx(st.pos_cm), wy(st.start_cm), nc*scale, st.length_cm*scale);
     else                      c.fillRect(wx(st.start_cm), wy(st.pos_cm), st.length_cm*scale, nc*scale);
   }
+
+  // Cables
+  for (const cable of S.cables) {
+    if (!cable.runs) continue;
+    c.strokeStyle = 'rgba(200,80,30,0.45)'; c.lineWidth = 1;
+    for (const run of cable.runs) {
+      for (const seg of run.segments) {
+        c.beginPath();
+        if (cable.direction === 'v') { c.moveTo(wx(run.pos_cm), wy(seg.start_cm)); c.lineTo(wx(run.pos_cm), wy(seg.end_cm)); }
+        else { c.moveTo(wx(seg.start_cm), wy(run.pos_cm)); c.lineTo(wx(seg.end_cm), wy(run.pos_cm)); }
+        c.stroke();
+      }
+    }
+  }
+
+  // Mats
+  for (const mat of S.mats) {
+    const n = mat.num_runs || 1;
+    const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+    const gapCm = (prod?.min_gap_mm || 20) / 10;
+    c.fillStyle = 'rgba(60,130,200,0.3)';
+    for (let r = 0; r < n; r++) {
+      const ox = r * (mat.width_cm + gapCm);
+      c.fillRect(wx(mat.x_cm + ox), wy(mat.y_cm), mat.width_cm * scale, mat.length_cm * scale);
+    }
+  }
+
   // Viewport box
   const cvEl = document.getElementById('canvas'); if (!cvEl) return;
   const vx1 = -S.view.panX / (BASE_SCALE * S.view.zoom);
   const vy1 = -S.view.panY / (BASE_SCALE * S.view.zoom);
   const vx2 = vx1 + cvEl.width  / (BASE_SCALE * S.view.zoom);
   const vy2 = vy1 + cvEl.height / (BASE_SCALE * S.view.zoom);
-  c.strokeStyle = 'rgba(34,211,238,0.75)'; c.lineWidth = 1.5;
+  c.fillStyle = 'rgba(34,211,238,0.06)';
+  c.fillRect(wx(vx1), wy(vy1), (vx2-vx1)*scale, (vy2-vy1)*scale);
+  c.strokeStyle = 'rgba(34,211,238,0.8)'; c.lineWidth = 1.5;
   c.setLineDash([3,2]);
   c.strokeRect(wx(vx1), wy(vy1), (vx2-vx1)*scale, (vy2-vy1)*scale);
   c.setLineDash([]);
@@ -13581,6 +13725,7 @@ function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=n
   if (!keepPosition) fitAll(); // don't jump view when room is drawn in place
   renderSidebar();
   updateWip();
+  _autoShowMinimap();
   // Snow module: auto-show proposal panel after creating an area
   if (_isSnowModule()) {
     setTimeout(() => showSnowProposals(room.id), 100);
@@ -13653,12 +13798,11 @@ function _showCalibWarningInCtxbar() {
   bar.classList.add('show');
 }
 function _updateVfDirVisibility() {
-  // Show/hide the room workflow panel based on room selection
-  if (S.ui.selectedRoomId) {
-    showRoomWorkflowPanel();
-  } else {
+  // Only show RWP when product actions are active, not on every room selection
+  if (!S.ui.selectedRoomId) {
     hideRoomWorkflowPanel();
   }
+  // Panel is shown explicitly by product selection flows (showVfPlacePanel, etc.)
 }
 
 // RWP panel drag
@@ -17429,7 +17573,28 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
     S.drawing.points.push({x: wp.x, y: wp.y});
+    updateCtxBar();
     render();
+    return;
+  }
+
+  // Thermostat pin placement — single click
+  if (S.ui.thermostatPlaceMode) {
+    pushUndo();
+    const zone = {
+      id: S.counters.nextZoneId++,
+      roomId: S.ui.thermostatRoomId,
+      type: 'preferred',
+      purpose: 'thermostat',
+      points: [{x: wp.x, y: wp.y}],
+      pinPos: {x: wp.x, y: wp.y},
+      label: 'Termostat'
+    };
+    S.zones.push(zone);
+    S.ui.thermostatPlaceMode = false;
+    canvas.style.cursor = 'default';
+    selectZone(zone.id);
+    renderSidebar(); updateCtxBar(); render();
     return;
   }
 
@@ -19302,6 +19467,7 @@ document.addEventListener('keydown', e=>{
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.stairPlaceMode) { S.ui.stairPlaceMode=false; S.ui.stairPlaceParams=null; canvas.style.cursor='default'; return; }
     if (S.ui.platePlaceMode) { S.ui.platePlaceMode=false; S.ui.platePlaceProductId=null; canvas.style.cursor='default'; return; }
+    if (S.ui.thermostatPlaceMode) { S.ui.thermostatPlaceMode=false; canvas.style.cursor='default'; updateCtxBar(); render(); return; }
     if (S.ui.zoneDrawMode) { cancelZoneDraw(); return; }
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
@@ -19662,6 +19828,26 @@ function _ctxBarItems() {
   const ui = S.ui;
   const moduleType = _activeModuleType();
 
+  // Thermostat pin placement mode
+  if (ui.thermostatPlaceMode) {
+    return `<span class="ctxbar-lbl">🌡️ Plasser termostat</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">Klikk i rommet for å plassere termostat</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="S.ui.thermostatPlaceMode=false;canvas.style.cursor='default';updateCtxBar();render()">✕ Avbryt</button>`;
+  }
+
+  // Zone drawing mode — show OK/Cancel bar
+  if (ui.zoneDrawMode) {
+    const nPts = S.drawing.points.length;
+    const canFinish = nPts >= 3;
+    const zType = ZONE_TYPES.find(t => t.id === ui.zoneType);
+    return `<span class="ctxbar-lbl">${zType?.ico || '📍'} Tegner sone: ${zType?.name || 'Sone'}</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${nPts} punkt${nPts !== 1 ? 'er' : ''} — Klikk for å legge til hjørner</span>
+      ${canFinish ? `<button class="snap-chip" onclick="finishZoneDraw()" style="background:var(--accent);color:#0d0e10;font-weight:600">✓ Fullfør</button>` : ''}
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="cancelZoneDraw()">✕ Avbryt</button>`;
+  }
+
   // Stair module: only show stair-specific ctxbar
   if (moduleType === 'stair') {
     if (ui.selectedStairId) {
@@ -19888,6 +20074,7 @@ function _ctxBarItems() {
       <button class="snap-chip" onclick="autoSplitRoom(${ui.selectedRoomId})" title="Automatisk oppdeling i soner basert på hindringer">🔲 Auto-soner</button>
       <button class="snap-chip" onclick="showDocPanel(${ui.selectedRoomId})" title="Installasjonsdokumentasjon for rommet">📋 Dokumentasjon</button>
       <button class="snap-chip" id="chip-produkt" onclick="openProduktMenu(event)" title="Velg og plasser varmeprodukt">+ Produkt</button>
+      ${(hasStrips || hasCables || _matsForRoom(ui.selectedRoomId).length > 0 || _platesForRoom(ui.selectedRoomId).length > 0) ? `<button class="snap-chip" onclick="_clearRoomProducts(${ui.selectedRoomId})" title="Fjern alle produkter fra rommet">🧹 Tøm</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="startSeedMode()" title="Klikk et punkt i rommet — folie fylles ut derfra">📍 Fra punkt</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="centerRoomStrips(${ui.selectedRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
       ${hasStrips ? `<button class="snap-chip" onclick="openGapPanel(event,${ui.selectedRoomId})" title="Juster avstand mellom varmefolier">⟷ ${gapMm} mm</button>` : ''}
@@ -25055,7 +25242,7 @@ async function _renderProjectList() {
     const checked = _selectedProjectIds.has(p.id) ? ' checked' : '';
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
-      <td class="pl-td pl-td-name">${esc(p.name)}${p._customer ? '<span class="pl-td-sub">'+esc(p._customer)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
+      <td class="pl-td pl-td-name"><span class="pl-proj-name" onclick="event.stopPropagation();_inlineRenameProject('${p.id}',this)" style="cursor:text" title="Klikk for å endre navn">${esc(p.name)}</span>${p._customer ? '<span class="pl-td-sub">'+esc(p._customer)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
       <td class="pl-td pl-td-desc pl-td-cust" onclick="event.stopPropagation();_quickSetCustomer('${p.id}')" style="cursor:pointer" title="Klikk for å endre kunde">${customer}</td>
       <td class="pl-td pl-td-type"><span class="pl-type-ico">${typeObj.ico}</span>${typeObj.label}</td>
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${PROJECT_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select></td>
@@ -25071,6 +25258,35 @@ async function _renderProjectList() {
 }
 
 /** Quick status change from project list dropdown */
+/** Inline rename project in dashboard table */
+function _inlineRenameProject(projectId, spanEl) {
+  const oldName = spanEl.textContent;
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.value = oldName;
+  inp.style.cssText = 'width:100%;font-size:inherit;font-weight:inherit;padding:2px 4px;border:1px solid var(--accent);border-radius:4px;background:var(--surface2);color:var(--text);outline:none';
+  spanEl.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  const commit = async () => {
+    const newName = inp.value.trim();
+    if (newName && newName !== oldName) {
+      try {
+        const { data: row } = await _db.from('romtegner_projects').select('data').eq('id', projectId).single();
+        if (row?.data?.project) row.data.project.name = newName;
+        await _db.from('romtegner_projects').update({ name: newName, data: row?.data }).eq('id', projectId);
+      } catch(e) { console.warn('Rename failed:', e); }
+    }
+    _invalidateProjectCache();
+    _renderProjectList();
+  };
+  inp.addEventListener('blur', commit);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') { inp.value = oldName; inp.blur(); }
+  });
+}
+
 async function _quickSetStatus(projectId, newStatus, selectEl) {
   try {
     const statusObj = PROJECT_STATUSES.find(s => s.id === newStatus) || PROJECT_STATUSES[0];
