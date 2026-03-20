@@ -54,6 +54,36 @@
 ### Initialer-fix
 - `_userInitials()` ignorerer nå tekst i parenteser — "Kenneth Skretteberg (test)" → "KS"
 
+### Gulvvarme-kabel: dimensjonslinjer og CC-regler
+- **Dimensjonslinjer måler nå til U-turn buene** — ikke kabelendepunktene
+  - `uRadius` (halv CC) legges til/trekkes fra sweep-extent
+  - Gir nøyaktig avstand fra innervegg til nærmeste del av kabelen (buen)
+- **Halv-CC ved sonegrense (LÅST)**
+  - Zone 1: siste streng pinnet ved `mid - halfCC`
+  - Zone 2: første streng pinnet ved `mid + halfCC`
+  - Mellom kablene = `halfCC + halfCC = full CC`
+  - CC mellom strenger innenfor hver kabel: identisk
+  - `boundaryEdge: 'max'/'min'` i soneobjektene styrer pinning
+- **Lik CC på begge kabler (LÅST)**
+  - `finalSpacing` beregnes én gang og brukes av begge kabler
+  - `_adjustSpacingForLength()` bruker `targetSpacing` som fast verdi
+  - Ingen individuell CC-justering per kabel
+
+### Romlabel/infokort og sidebar-ikoner
+- Ny sidebar-ikoner: 📐 (målsett rom) og 〰 (målsett folie) per rom
+- Tilgjengelig fra høyreklikk kontekstmeny på rom
+- `_toggleRoomDimSnap()` og `_toggleStripDimSnap()` aktiverer dimensjonslinjer per rom
+
+### Supabase RLS-fix: "permission denied for table user"
+- Fjernet feilaktig policy "Org members access projects" som refererte til `auth.users`
+- Policyen hadde triple-quoted `'''is_superadmin'''` som forårsaket feil
+- Erstattet med rene policies uten `auth.users`-referanse
+- Tilsvarende fix på `customers`-tabellen
+
+### CRM kundeliste
+- Nye policies: "Org-medlemmer CRUD kunder" og "Superadmin full tilgang kunder"
+- Kunde-modul planlagt som egen fane i dashboard med utvidet CRM-funksjonalitet
+
 ---
 
 ## 2026-03-18: Sikkerhetsfix — customer_id + RLS-opprydding
