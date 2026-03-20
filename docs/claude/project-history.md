@@ -34,13 +34,16 @@
 - "Endre status" viser nå modal med klikkbare status-chips i stedet for prompt()
 - Klikk på prosjektnavn i tabellen for inline-redigering (`_inlineRenameProject`)
 
-### Sone-tegning — polygon UX + termostat som knappenål
+### Sone-tegning — generisk pin-system + sluk
 - Sonetegning har nå lukke-indikator (sirkel + "Lukk"-tekst ved første punkt)
 - Fullfør/Avbryt-knapper i ctxbar under tegning med punktteller
-- **Termostat** er nå knappenål-plassering (enkelt-klikk) i stedet for polygon
-- Termostat-pin rendres som grønn dråpeform med 🌡️-ikon
-- Hit detection for pin-baserte soner (avstandssjekk)
-- Escape avbryter termostat-plassering
+- **Generisk pin-plassering**: `ZONE_TYPES` med `pin:true` bruker enkelt-klikk i stedet for polygon
+- **Termostat**: knappenål (dråpeform, grønn, 🌡️-ikon)
+- **Sluk (drain)**: 15×15cm kvadrat med `sizeCm:15`, forbidden-stil (rød, diagonale linjer)
+- Hit detection for pin-soner: avstandssjekk (termostat) eller bounding box (sluk)
+- `_cancelPinPlace()` erstatter thermostat-spesifikk cancel
+- `S.ui.pinPlaceMode/pinPlaceRoomId/pinPlaceType/pinPlaceKind` erstatter thermostat-spesifikke felter
+- Escape avbryter alle pin-plasseringer
 
 ### Minimap/oversiktskart forbedret
 - Større canvas (240×160px), viser romnavn i hvert rom
