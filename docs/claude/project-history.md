@@ -1,5 +1,32 @@
 # Romtegner Project History
 
+## 2026-03-20: Fix cable cache, dim lines, romkort power, remove calc-results box
+
+### _cablesForRoom() cache bug — root cause of 3 issues
+- `_cablesForRoom()` used a version-based cache (`_cableCacheStore`, `_cableCacheVer`) that returned stale empty arrays
+- Removed cache entirely — now does direct `S.cables.filter()` every time
+- This single fix resolved all three reported bugs below
+
+### Målsett Kabel (cable dimension lines) — fixed
+- Dimension lines were not appearing when "Målsett Kabel" was toggled on
+- Root cause: `_drawCableDimChainForRoomInner()` called `_cablesForRoom()` which returned empty from stale cache
+- Now works correctly — shows CC distances, wall margins, and cable run lengths
+
+### Romkort showing "Installert effekt 0 W" — fixed
+- Floating room info card on canvas showed 0 W even though cable label showed correct power
+- Root cause: `_computeRoomStats()` called `_cablesForRoom()` → stale cache → no cables → 0 W
+- Now shows correct installed power (e.g. 1632 W)
+
+### Calc-results info box removed
+- A fixed-position info box at bottom-left of sidebar (`#calc-results`) was showing redundant room stats
+- Previously hidden by a `gapCm` TypeError crash — became visible after that fix
+- User confirmed it duplicates the room label (romkort) functionality → removed entirely
+- Removed: CSS, HTML element, `_updateCalcResults()` function, and its call in `_refreshCtxbar()`
+
+### productId normalization in _restoreProject()
+- Added `productId` normalization (string→number) for strips, cables, mats, and plates
+- Prevents type mismatch bugs when loading projects from Supabase JSONB
+
 ## 2026-03-20: Samlet produktvalg-popup, soner, minimap, RWP-panel
 
 ### Samlet produktvalg-popup (indoor)

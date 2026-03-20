@@ -130,6 +130,34 @@ Rules may be overridden by the user, but the system must always show warnings.
 
 ---
 
+# Cable Layout Rules — LOCKED
+
+These rules are **permanent** and must not be changed without explicit user request.
+
+## U-turn arcs (LOCKED)
+- U-turns are always **half-circles** with radius = CC/2
+- U-turn length = `π × (spacing_cm / 2)`
+- Drawing: half-circle arc between adjacent run endpoints
+- **Never** change to hairpin, elliptical, or any other shape
+
+## Sweep margin (LOCKED)
+- `sweepMargin = margin + CC/2` (margin from product rules + U-turn radius)
+- The U-turn arc extends CC/2 beyond the segment endpoint toward the wall
+- **Never** use bend radius or any other value for sweep margin
+
+## Equal-length runs (LOCKED)
+- **All cable runs must be exactly the same length**
+- After generating runs, find the shortest common sweep range and clip all runs to match
+- When overshoot trimming (cable longer than target): shorten ALL runs equally by increasing sweep margin symmetrically from both ends — never trim only the last run
+- Cable must use exactly the specified product length (no more, no less)
+
+## W/m² sync with room type (LOCKED)
+- When user selects a room type, the W/m² field (Flateeffekt) must update to match the room type's default value
+- Product suggestions must recalculate based on the new W/m²
+- Priority: User override > Org override > Global default
+
+---
+
 # Rooms
 
 Rooms are the primary container for all objects.
