@@ -2462,12 +2462,16 @@ function _computeRoomStats(room) {
     if (p?.watt_per_lm) foilW += p.watt_per_lm * s.length_cm / 100;
     else foilW += _stripNettoCm(s) * s.length_cm / 10000 * 60; // fallback 60 W/m²
   }
-  let cableW = 0, cableLenM = 0;
-  for (const cab of _cablesForRoom(room.id)) {
+  let cableW = 0, cableLenM = 0, cableCount = 0, cableCcCm = 0, cableProductName = '';
+  const roomCables = _cablesForRoom(room.id);
+  for (const cab of roomCables) {
     const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId);
     const lenM = (cab.totalLength_cm || 0) / 100;
     cableLenM += lenM;
     cableW += (cp?.watt_per_m || 0) * lenM;
+    cableCount++;
+    if (!cableProductName && cp) cableProductName = cp.name || '';
+    if (!cableCcCm && cab.spacing_cm) cableCcCm = cab.spacing_cm;
   }
   let matW = 0, matAreaM2 = 0;
   for (const mat of _matsForRoom(room.id)) {
@@ -2486,7 +2490,7 @@ function _computeRoomStats(room) {
     plateCount++;
   }
   const totalW = Math.round(foilW + cableW + matW + plateW);
-  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM, matW: Math.round(matW), matAreaM2, plateW: Math.round(plateW), plateAreaM2, plateCount };
+  return { bruttoM2, hindM2, nettoM2, stripM2, uncoveredM2: Math.max(0, nettoM2 - stripM2), totalW, cableW: Math.round(cableW), cableLenM, cableCount, cableCcCm, cableProductName, matW: Math.round(matW), matAreaM2, plateW: Math.round(plateW), plateAreaM2, plateCount };
 }
 
 function _computeStripGaps(room) {
@@ -2559,7 +2563,10 @@ function drawRoomCard(room) {
     rows.push(['Avstand striper', _formatGaps(gaps)]);
   }
   if (stats.cableLenM > 0) {
+    if (stats.cableProductName) rows.push(['Kabel', stats.cableProductName]);
+    if (stats.cableCount > 1) rows.push(['Antall kabler', stats.cableCount + ' stk']);
     rows.push(['Kabellengde', stats.cableLenM.toFixed(1) + ' m']);
+    if (stats.cableCcCm > 0) rows.push(['CC', stats.cableCcCm.toFixed(1) + ' cm (' + Math.round(stats.cableCcCm * 10) + ' mm)']);
   }
   if (stats.matAreaM2 > 0) {
     rows.push(['Matte-areal', stats.matAreaM2.toFixed(2) + ' m\u00b2']);
@@ -6181,8 +6188,7 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
     // Cable is a line (zero width) — get intervals along sweep axis
     let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
     // Shrink by sweep margin: margin + uTurn radius so U-turns stay within wall margin
-    // This ensures equal distance from cable to wall on ALL sides
-    const uR = runs.length === 0 ? spacing_cm / 2 : spacing_cm / 2; // always use uRadius
+    const uR = spacing_cm / 2;
     const sweepMargin = margin + uR;
     intervals = intervals.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi > lo);
     // Subtract hindrings
@@ -6206,20 +6212,41 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
     }
   }
 
-  // Note: U-turn inset is handled by sweepMargin (margin + uRadius) applied
-  // uniformly to all segment endpoints. No post-processing needed — all ends
-  // have equal distance from walls, and U-turn arcs fit within the margin zone.
+  // Equalize all runs: find the shortest run and clip all others to match.
+  // This ensures uniform cable coverage — no run stops shorter than others.
+  if (runs.length > 1) {
+    // Find min sweep extent across all runs (smallest common range)
+    let commonLo = -Infinity, commonHi = Infinity;
+    for (const run of runs) {
+      if (run.segments.length === 0) continue;
+      const lo = run.segments[0].start_cm;
+      const hi = run.segments[run.segments.length - 1].end_cm;
+      if (lo > commonLo) commonLo = lo;
+      if (hi < commonHi) commonHi = hi;
+    }
+    if (commonHi > commonLo) {
+      // Clip all runs to the common range
+      for (const run of runs) {
+        run.segments = run.segments.map(seg => ({
+          start_cm: Math.max(seg.start_cm, commonLo),
+          end_cm: Math.min(seg.end_cm, commonHi)
+        })).filter(seg => seg.end_cm > seg.start_cm);
+      }
+    }
+  }
+  // Remove empty runs after equalization
+  const validRuns = runs.filter(r => r.segments.length > 0);
 
   // Calculate total length: segments + U-turns
   let totalLength = 0;
-  for (const run of runs) {
+  for (const run of validRuns) {
     for (const seg of run.segments) totalLength += Math.abs(seg.end_cm - seg.start_cm);
   }
   // U-turns: half-circle with radius = spacing/2
   const uTurnLength = Math.PI * (spacing_cm / 2);
-  if (runs.length > 1) totalLength += (runs.length - 1) * uTurnLength;
+  if (validRuns.length > 1) totalLength += (validRuns.length - 1) * uTurnLength;
 
-  return { runs, totalLength_cm: totalLength };
+  return { runs: validRuns, totalLength_cm: totalLength };
 }
 
 /**
@@ -6247,32 +6274,37 @@ function autoFillCable(roomId, productId) {
     spacing = Math.max(minSp, Math.min(maxSp, recSp));
   }
 
-  // Try both directions, pick best coverage
-  const dirV = _suggestDirection(room);
-  const dirAlt = dirV === 'v' ? 'h' : 'v';
-  const rV = generateCableSerpentine(roomId, productId, dirV, spacing, 'bl');
-  const rA = generateCableSerpentine(roomId, productId, dirAlt, spacing, 'bl');
-  const lenV = rV ? rV.totalLength_cm : 0;
+  // Use user-selected direction from picker, fallback to PCA suggestion
+  const userDir = S.varmefolie.direction;
+  const suggestedDir = _suggestDirection(room);
+  const primaryDir = userDir || suggestedDir;
+  const altDir = primaryDir === 'v' ? 'h' : 'v';
+  const rP = generateCableSerpentine(roomId, productId, primaryDir, spacing, 'bl');
+  const rA = generateCableSerpentine(roomId, productId, altDir, spacing, 'bl');
+  const lenP = rP ? rP.totalLength_cm : 0;
   const lenA = rA ? rA.totalLength_cm : 0;
 
   let best, bestDir;
-  if (lenA > lenV * 1.05) {
-    best = rA; bestDir = dirAlt;
+  // Respect user direction unless alt is significantly better (>5%)
+  if (!userDir && lenA > lenP * 1.05) {
+    best = rA; bestDir = altDir;
   } else {
-    best = rV || rA; bestDir = (rV ? dirV : dirAlt);
+    best = rP || rA; bestDir = (rP ? primaryDir : altDir);
   }
   if (!best || best.runs.length === 0) return null;
 
   // Auto-select start corner: try all 4 corners and pick the best.
   // With zones: avoid forbidden zones, prefer preferred zones.
-  // Without zones: pick corner that gives best cable length utilization.
-  let bestCorner = 'bl';
+  // Respects user's start corner from direction picker as default + bonus.
+  const userCorner = S.varmefolie.startCorner || null;
+  let bestCorner = userCorner || 'bl';
   const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
   const preferredZones = S.zones.filter(z => z.roomId === roomId && z.type === 'preferred' && z.points && z.points.length >= 3);
   {
     // Always try all corners for best result (not just when zones exist)
     const corners = ['bl', 'br', 'tl', 'tr'];
-    const dirs = [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    // If user explicitly chose direction, only try that; otherwise try both
+    const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
     // Try original spacing + slight adjustments (to get odd/even run count variations)
     const minSp = (prod.min_spacing_mm || 50) / 10;
     const maxSp = (prod.max_spacing_mm || 200) / 10;
@@ -6317,8 +6349,9 @@ function autoFillCable(roomId, productId) {
             const utilization = res.totalLength_cm / targetLen;
             score += utilization * 2;  // up to 2 points for 100% utilization
           }
-          // Small bonus for PCA-preferred direction and original spacing
-          if (dir === bestDir) score += 1;
+          // Bonus for user-preferred direction, corner, and original spacing
+          if (dir === primaryDir) score += 1;
+          if (userCorner && corner === userCorner) score += 3;
           if (sp === spacing) score += 0.5;
           if (score > bestScore) {
             bestScore = score;
@@ -8023,8 +8056,6 @@ function _drawCableUTurns(cable) {
     if (radius < 1) continue;
 
     const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
-    // Determine counterclockwise flag so arc bulges toward the wall:
-    // cross product of (pA→pB) × (wall direction) tells us which side the wall is on
     const dx = pB.x - pA.x, dy = pB.y - pA.y;
     let wallDirX = 0, wallDirY = 0;
     if (cable.direction === 'h') { wallDirX = connectHigh ? 1 : -1; }
@@ -11812,37 +11843,52 @@ function _adjustSpacingForLength(roomId, productId, direction, startCorner, targ
   }
   if (!best) return null;
 
-  // Phase 2: Fine-tune with binary search around best N for exact length match
+  // Phase 2: Fine-tune with binary search — try best N and neighbors
   if (bestDiff > 1) {
-    const N = best.runs.length;
-    // CC range that keeps exactly N centered runs:
-    // N = floor(usableWidth / cc) + 1  →  cc range is [usableWidth/N, usableWidth/(N-1)]
-    const ccLo = N > 1 ? usableWidth / N : minSp;
-    const ccHi = N > 1 ? usableWidth / (N - 1) : maxSp;
-    let lo = Math.max(minSp, ccLo), hi = Math.min(maxSp, ccHi);
-    for (let iter = 0; iter < 40; iter++) {
-      const mid = (lo + hi) / 2;
-      const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
-      if (!result || result.runs.length === 0) { hi = mid; continue; }
-      const diff = result.totalLength_cm - targetLengthCm;
-      if (Math.abs(diff) < bestDiff) {
-        bestDiff = Math.abs(diff);
-        best = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
+    const bestN = best.runs.length;
+    // Try binary search for bestN-1, bestN, bestN+1 to find closest match
+    for (const N of [bestN - 1, bestN, bestN + 1]) {
+      if (N < minN || N > maxN + 1) continue;  // allow one extra run beyond normal range
+      const ccLo = N > 1 ? usableWidth / N : minSp;
+      const ccHi = N > 1 ? usableWidth / (N - 1) : maxSp;
+      let lo = Math.max(minSp, ccLo), hi = Math.min(maxSp, ccHi);
+      if (lo > hi) continue;
+      for (let iter = 0; iter < 40; iter++) {
+        const mid = (lo + hi) / 2;
+        const result = generateCableSerpentine(roomId, productId, direction, mid, startCorner, zoneBounds);
+        if (!result || result.runs.length === 0) { hi = mid; continue; }
+        const diff = result.totalLength_cm - targetLengthCm;
+        if (Math.abs(diff) < bestDiff) {
+          bestDiff = Math.abs(diff);
+          best = { spacing_cm: mid, runs: result.runs, totalLength_cm: result.totalLength_cm };
+        }
+        if (Math.abs(diff) < 1) break;
+        if (diff > 0) hi = mid; else lo = mid;
       }
-      if (Math.abs(diff) < 1) break;  // within 1 cm — excellent
-      // Within fixed N: larger CC → longer total (π/2-1 > 0), so:
-      // diff > 0 (too long) → need smaller CC → hi = mid
-      // diff < 0 (too short) → need larger CC → lo = mid
-      if (diff > 0) hi = mid; else lo = mid;
+      if (bestDiff < 1) break;
     }
   }
 
-  // Prefer full runs (cable ends at corner). Only trim last run if overshooting.
-  if (best && best.totalLength_cm <= targetLengthCm + 1) {
+  // Undershoot: cable shorter than target — try one more run to overshoot, then trim
+  if (best && best.totalLength_cm < targetLengthCm - 1) {
+    const extraN = best.runs.length + 1;
+    // Compute spacing for extraN runs, allow going slightly below product min
+    const extraCc = extraN > 1 ? usableWidth / (extraN - 1) : usableWidth;
+    if (extraCc >= minSp - 0.5) {  // allow tiny tolerance below min
+      const extraResult = generateCableSerpentine(roomId, productId, direction, Math.max(extraCc, minSp), startCorner, zoneBounds);
+      if (extraResult && extraResult.runs.length > 0 && extraResult.totalLength_cm > targetLengthCm) {
+        // Use this overshoot layout — it will be trimmed below
+        best = { spacing_cm: Math.max(extraCc, minSp), runs: extraResult.runs, totalLength_cm: extraResult.totalLength_cm };
+      }
+    }
+  }
+
+  // Close enough — return as-is
+  if (best && Math.abs(best.totalLength_cm - targetLengthCm) <= 1) {
     return best;
   }
 
-  // Overshoot: total > target — must trim last run to fit exact cable length
+  // Overshoot: total > target — trim last run to fit exact cable length
   if (best && best.totalLength_cm > targetLengthCm + 1) {
     const runs = JSON.parse(JSON.stringify(best.runs));
     const excess = best.totalLength_cm - targetLengthCm;
