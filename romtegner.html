@@ -331,7 +331,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
 
 /* ── CANVAS ── */
 #canvas-wrap{position:relative;flex:1;overflow:hidden;background:var(--bg)}
-#room-workflow-panel{position:absolute;top:8px;left:8px;width:340px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:150;user-select:none;overflow:hidden}
+#room-workflow-panel{position:absolute;top:8px;left:8px;width:400px;max-height:85vh;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:150;user-select:none;overflow-y:auto;overflow-x:hidden}
 .rwp-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 6px;border-bottom:1px solid var(--border);cursor:grab}
 .rwp-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .rwp-done-btn{background:rgba(74,222,128,0.15);color:#4ade80;border:1px solid rgba(74,222,128,0.3);border-radius:6px;padding:3px 12px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:.04em}
@@ -3066,7 +3066,11 @@ function _filteredProductCategories() {
   return cats;
 }
 function openProduktMenuFrom(x, y) {
-  // Called from context menu — use stored coords
+  // Called from context menu — route to unified panel for indoor
+  if (!_isSnowModule() && S.ui.selectedRoomId) {
+    showUnifiedProductPanel();
+    return;
+  }
   const cats = _filteredProductCategories();
   const html = cats.length
     ? cats.map(c => `<div class="ctx-item" onclick="openFamilyMenu(event,${c.id})">${esc(c.name)} ›</div>`).join('')
@@ -3075,6 +3079,11 @@ function openProduktMenuFrom(x, y) {
 }
 function openProduktMenu(e) {
   e.stopPropagation();
+  // Indoor module: unified product panel in RWP
+  if (!_isSnowModule() && S.ui.selectedRoomId) {
+    showUnifiedProductPanel();
+    return;
+  }
   const cats = _filteredProductCategories();
   console.log('openProduktMenu: ' + cats.length + ' kategorier, ' + HEATING_PRODUCTS.length + ' produkter');
   if (!cats.length) {
@@ -3140,6 +3149,467 @@ function openPlacementMenu(e, familyName, categoryId) {
   } else {
     showVfPlacePanel(familyName, categoryId);
   }
+}
+
+// ── Unified Product Panel (indoor) ──
+// State for the unified product chooser
+let _upcState = { modType: null, categoryId: null, familyName: null };
+
+function showUnifiedProductPanel() {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { _showToast('Velg et rom først', 'warn'); return; }
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  hideProduktMenu();
+
+  // Detect what's currently placed in the room to pre-select
+  const hasCables = S.cables.some(c => c.roomId === roomId);
+  const hasMats = S.mats.some(m => m.roomId === roomId);
+  const hasStrips = S.strips.some(s => s.roomId === roomId);
+  const hasPlates = S.plates.some(p => p.roomId === roomId);
+
+  // Determine default product type
+  let defaultModType = 'cable';
+  let defaultCatId = null;
+  let defaultFamily = null;
+  if (hasCables) {
+    defaultModType = 'cable';
+    const c = S.cables.find(c2 => c2.roomId === roomId);
+    const p = c ? HEATING_PRODUCTS.find(pp => pp.id === c.productId) : null;
+    if (p) { defaultCatId = p.category_id; defaultFamily = p.product_family || p.name.split(' ')[0]; }
+  } else if (hasMats) {
+    defaultModType = 'mat';
+    const m = S.mats.find(m2 => m2.roomId === roomId);
+    const p = m ? HEATING_PRODUCTS.find(pp => pp.id === m.productId) : null;
+    if (p) { defaultCatId = p.category_id; defaultFamily = p.product_family || p.name.split(' ')[0]; }
+  } else if (hasStrips) {
+    defaultModType = 'foil';
+    const s = S.strips.find(s2 => s2.roomId === roomId);
+    const p = s ? HEATING_PRODUCTS.find(pp => pp.id === s.productId) : null;
+    if (p) { defaultCatId = p.category_id; defaultFamily = p.product_family || p.name.split(' ')[0]; }
+  } else if (hasPlates) {
+    defaultModType = 'plate';
+    const pl = S.plates.find(p2 => p2.roomId === roomId);
+    const p = pl ? HEATING_PRODUCTS.find(pp => pp.id === pl.productId) : null;
+    if (p) { defaultCatId = p.category_id; defaultFamily = p.product_family || p.name.split(' ')[0]; }
+  }
+
+  // Build product type options from available categories
+  const cats = _filteredProductCategories();
+  const modTypes = [];
+  const modTypeLabels = {cable:'🔌 Varmekabel', mat:'🟦 Varmematte', foil:'📄 Varmefolie', plate:'🔲 Varmeplate'};
+  const seenMod = new Set();
+  for (const c of cats) {
+    const mt = c.module_type || 'foil';
+    if (!seenMod.has(mt) && !c.name?.toLowerCase().includes('utendørs')) {
+      seenMod.add(mt);
+      modTypes.push({type: mt, label: modTypeLabels[mt] || mt});
+    }
+  }
+
+  // Room info
+  const areas = roomAreas(room);
+  const nettoM2 = areas ? (areas.net / 10000) : 0;
+  const curType = room.roomType || '';
+  const defaultWm2 = _roomTargetWm2(roomId);
+
+  const rtOptions = ROOM_TYPES.map(t =>
+    `<option value="${t.id}"${curType === t.id ? ' selected' : ''}>${t.icon} ${t.label} (${t.targetWm2} W/m²)</option>`
+  ).join('');
+
+  const modOptions = modTypes.map(m =>
+    `<option value="${m.type}"${m.type === defaultModType ? ' selected' : ''}>${m.label}</option>`
+  ).join('');
+
+  const section = document.getElementById('rwp-product-actions');
+  if (!section) return;
+
+  section.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:6px;padding:2px 2px 6px">
+      <div style="font-size:12px;color:var(--dim)">Rom: <b>${esc(room.name || 'Rom ' + room.id)}</b> — ${nettoM2.toFixed(1)} m² netto</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:11px;white-space:nowrap;min-width:55px">Romtype</label>
+        <select id="upc-room-type" style="flex:1;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg);color:var(--text)"
+          onchange="_upcRoomTypeChanged(this.value)">
+          <option value="">— Velg —</option>
+          ${rtOptions}
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:11px;white-space:nowrap;min-width:55px">Produkttype</label>
+        <select id="upc-product-type" style="flex:1;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg);color:var(--text)"
+          onchange="_upcProductTypeChanged(this.value)">
+          ${modOptions}
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:11px;white-space:nowrap;min-width:55px">Familie</label>
+        <select id="upc-family" style="flex:1;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg);color:var(--text)"
+          onchange="_upcFamilyChanged()">
+        </select>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:11px;white-space:nowrap;min-width:55px">W/m²</label>
+        <input type="number" id="upc-wm2" value="${defaultWm2}" min="50" max="500" step="10"
+          style="width:70px;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg);color:var(--text)"
+          onchange="_upcWm2Changed(parseInt(this.value)||130)">
+      </div>
+      <div id="upc-results" style="font-size:12px;max-height:350px;overflow-y:auto"></div>
+    </div>`;
+  section.style.display = 'block';
+
+  // Store state
+  _upcState.modType = defaultModType;
+  _upcState.categoryId = defaultCatId;
+  _upcState.familyName = defaultFamily;
+
+  showRoomWorkflowPanel();
+  // Populate family dropdown and results
+  _upcPopulateFamilies(defaultModType, defaultFamily);
+}
+
+function _upcRoomTypeChanged(typeId) {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) return;
+  setRoomType(room.id, typeId);
+  const defaults = _roomTypeDefaults(typeId);
+  const wm2Input = document.getElementById('upc-wm2');
+  if (wm2Input && defaults.targetWm2) {
+    wm2Input.value = defaults.targetWm2;
+    _setRoomOrGlobalWm2(defaults.targetWm2);
+  }
+  _upcRefreshResults();
+  renderSidebar(); render();
+}
+
+function _upcProductTypeChanged(modType) {
+  _upcState.modType = modType;
+  _upcState.categoryId = null;
+  _upcState.familyName = null;
+  _upcPopulateFamilies(modType, null);
+}
+
+function _upcPopulateFamilies(modType, preselect) {
+  const sel = document.getElementById('upc-family');
+  if (!sel) return;
+  // Find categories for this module type (indoor only)
+  const cats = _filteredProductCategories().filter(c =>
+    (c.module_type || 'foil') === modType && !c.name?.toLowerCase().includes('utendørs')
+  );
+  // Get all products in those categories, group by family
+  const catIds = new Set(cats.map(c => c.id));
+  const prods = HEATING_PRODUCTS.filter(p => catIds.has(p.category_id) && p.active !== false);
+  const hasFamily = prods.some(p => p.product_family);
+  let famKey;
+  if (hasFamily) {
+    famKey = p => p.product_family || p.name;
+  } else {
+    famKey = p => {
+      const parts = p.name.trim().split(/\s+/);
+      return parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0];
+    };
+  }
+  const seen = new Set();
+  const families = [];
+  for (const p of prods) {
+    const fam = famKey(p);
+    if (!seen.has(fam)) {
+      seen.add(fam);
+      // Find the category this family belongs to
+      const cat = cats.find(c => c.id === p.category_id);
+      families.push({name: fam, categoryId: p.category_id});
+    }
+  }
+  sel.innerHTML = families.map(f =>
+    `<option value="${esc(f.name)}" data-catid="${f.categoryId}"${preselect === f.name ? ' selected' : ''}>${esc(f.name)}</option>`
+  ).join('');
+
+  // Auto-select first or preselected
+  if (families.length > 0) {
+    const chosen = preselect && families.find(f => f.name === preselect) ? preselect : families[0].name;
+    const chosenFam = families.find(f => f.name === chosen) || families[0];
+    sel.value = chosenFam.name;
+    _upcState.familyName = chosenFam.name;
+    _upcState.categoryId = chosenFam.categoryId;
+    _upcRefreshResults();
+  } else {
+    sel.innerHTML = '<option>Ingen produkter</option>';
+    document.getElementById('upc-results').innerHTML = '';
+  }
+}
+
+function _upcFamilyChanged() {
+  const sel = document.getElementById('upc-family');
+  if (!sel) return;
+  const opt = sel.options[sel.selectedIndex];
+  _upcState.familyName = sel.value;
+  _upcState.categoryId = parseInt(opt?.dataset?.catid) || _upcState.categoryId;
+  _upcRefreshResults();
+}
+
+function _upcWm2Changed(val) {
+  _setRoomOrGlobalWm2(val);
+  _upcRefreshResults();
+}
+
+function _upcRefreshResults() {
+  const container = document.getElementById('upc-results');
+  if (!container) return;
+  const { modType, familyName, categoryId } = _upcState;
+  if (!familyName || !categoryId) { container.innerHTML = ''; return; }
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { container.innerHTML = '<div style="color:var(--dim)">Velg et rom først</div>'; return; }
+
+  if (modType === 'cable') {
+    _upcRenderCableResults(container, familyName, categoryId, roomId);
+  } else if (modType === 'mat') {
+    _upcRenderMatResults(container, familyName, categoryId, roomId);
+  } else if (modType === 'foil') {
+    _upcRenderFoilResults(container, familyName, categoryId, roomId);
+  } else if (modType === 'plate') {
+    _upcRenderPlateResults(container, familyName, categoryId, roomId);
+  }
+}
+
+function _upcRenderCableResults(container, familyName, categoryId, roomId) {
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false
+      && (p.product_family === familyName || p.name.startsWith(familyName)))
+    .sort((a, b) => (a.cable_length_m || 999) - (b.cable_length_m || 999));
+  if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen produkter</div>'; return; }
+
+  const _tw = _roomTargetWm2(roomId);
+  const result = selectCableByPower(roomId, prods, _tw);
+  if (!result) { container.innerHTML = '<div style="color:var(--warn)">Kan ikke beregne</div>'; return; }
+
+  const picks = [];
+  if (result.below.length > 0) picks.push({ ...result.below[0], tag: '▼ Under' });
+  if (result.above.length > 0) picks.push({ ...result.above[0], tag: '▲ Over' });
+  if (result.closest && !picks.find(p => p.product.id === result.closest.product.id)) {
+    picks.push({ ...result.closest, tag: '● Nærmest' });
+  }
+
+  const multiResult = selectMultiCables(roomId, prods, _tw);
+
+  if (picks.length === 0 && (!multiResult || multiResult.strategy === 'none')) {
+    container.innerHTML = `<div style="color:var(--warn)">Ingen kabel gir gyldig CC for ${_tw} W/m²</div>
+      <div class="ctx-item vfp-btn" style="margin-top:4px" onclick="_upcPlaceCable(null,'auto')">Automatisk (nærmeste)</div>`;
+    return;
+  }
+
+  let html = `<div style="color:var(--dim);margin-bottom:4px;font-size:11px">Ønsket: ${Math.round(result.desiredW)} W (${_tw} W/m²)</div>`;
+
+  if (picks.length > 0) {
+    html += '<div style="display:flex;flex-direction:column;gap:3px">';
+    for (const pick of picks) {
+      const p = pick.product;
+      const ccCm = pick.cc_cm.toFixed(1);
+      const isBest = pick === picks[0];
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:8px 12px;line-height:1.5;font-size:13px;${isBest?'border-left:3px solid var(--accent)':''}"
+        onclick="_upcPlaceCable(${p.id},'single')">
+        <span style="font-size:10px;color:var(--dim)">${pick.tag}</span><br>
+        <b>${esc(p.name)}</b>${p.article_no ? ' <span style="font-size:10px;color:var(--dim)">('+esc(p.article_no)+')</span>' : ''}<br>
+        ${Math.round(pick.productW)} W — ${Math.round(pick.wm2)} W/m² — CC: ${ccCm} cm
+        ${isBest ? ' <span style="color:var(--accent)">★ Anbefalt</span>' : ''}
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Multi-cable options
+  if (multiResult && multiResult.strategy === '2x' && multiResult.cables.length > 0) {
+    html += `<div style="color:var(--accent);margin-top:8px;font-weight:600;font-size:11px">⚡ 2× kabel (rommet deles i to)</div>`;
+    const shown2x = multiResult.cables.slice(0, 3);
+    for (const mc of shown2x) {
+      const ccCm = mc.cc_cm.toFixed(1);
+      const isBest = mc === multiResult.bestMulti;
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:6px 10px;line-height:1.4;${isBest?'border-left:3px solid var(--accent)':''}"
+        onclick="_upcPlaceCable(${mc.product.id},'multi')">
+        <b>2× ${esc(mc.product.name)}</b> — ${Math.round(mc.totalW)} W (${Math.round(mc.wm2)} W/m²)<br>
+        CC: ${ccCm} cm
+        ${isBest?'<span style="font-size:10px;color:var(--accent)"> ★ Anbefalt</span>':''}
+      </div>`;
+    }
+  }
+
+  // Extra valid options
+  const extras = result.allValid?.filter(c => !picks.find(p => p.product.id === c.product.id)).slice(0, 3) || [];
+  if (extras.length > 0) {
+    html += '<div style="color:var(--dim);margin-top:6px;font-size:10px">Andre gyldige:</div>';
+    for (const ex of extras) {
+      const ccCm = ex.cc_cm.toFixed(1);
+      html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:4px 10px;font-size:11px"
+        onclick="_upcPlaceCable(${ex.product.id},'single')">
+        ${esc(ex.product.name)} — ${Math.round(ex.productW)} W — CC: ${ccCm} cm
+      </div>`;
+    }
+  }
+
+  container.innerHTML = html;
+}
+
+function _upcPlaceCable(productId, mode) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  pushUndo();
+  // Clear existing products from room
+  S.cables = S.cables.filter(c => c.roomId !== roomId);
+  S.strips = S.strips.filter(s => s.roomId !== roomId);
+  S.mats = S.mats.filter(m => m.roomId !== roomId);
+  S.plates = S.plates.filter(p => p.roomId !== roomId);
+
+  if (mode === 'auto' || !productId) {
+    const { familyName, categoryId } = _upcState;
+    autoPlaceCable(familyName, categoryId);
+  } else if (mode === 'multi') {
+    const cables = autoFillMultiCable(roomId, productId);
+    if (cables && cables.length >= 2) {
+      S.cables.push(...cables);
+      S.ui.selectedCableId = cables[0].id;
+    }
+  } else {
+    const cable = autoFillCable(roomId, productId);
+    if (cable) {
+      S.cables.push(cable);
+      S.ui.selectedCableId = cable.id;
+    }
+  }
+  _invalidateMatCache();
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function _upcRenderMatResults(container, familyName, categoryId, roomId) {
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === categoryId && p.active !== false
+      && (p.product_family === familyName || p.name.startsWith(familyName)))
+    .sort((a, b) => (a.mat_total_length_mm || 0) - (b.mat_total_length_mm || 0));
+  if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen matter</div>'; return; }
+
+  const widthCm = Math.round((prods[0].mat_width_mm || 500) / 10);
+  const wm2 = prods[0].watt_per_m2 || 100;
+  let html = `<div style="color:var(--dim);margin-bottom:4px;font-size:11px">Bredde: ${widthCm} cm · ${wm2} W/m²</div>`;
+  html += '<div style="display:flex;flex-direction:column;gap:3px">';
+
+  // Auto-fill option
+  html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:8px 12px;font-size:13px;border-left:3px solid var(--accent)"
+    onclick="_upcPlaceMat(${prods[0].id},'auto')">
+    ⚡ Fyll rom automatisk <span style="color:var(--accent)">★ Anbefalt</span>
+  </div>`;
+
+  // Individual mat products
+  for (const p of prods) {
+    const lenM = p.mat_total_length_mm ? (p.mat_total_length_mm / 1000).toFixed(1) : '?';
+    const areaM2 = p.mat_area_m2 ? p.mat_area_m2.toFixed(1) : '?';
+    const watt = Math.round((p.watt_per_m2 || 0) * (p.mat_area_m2 || 0));
+    html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:6px 10px;font-size:12px"
+      onclick="_upcPlaceMat(${p.id},'single')">
+      <b>${esc(p.name)}</b>${p.article_no ? ' <span style="font-size:10px;color:var(--dim)">('+esc(p.article_no)+')</span>' : ''}<br>
+      ${lenM} m — ${areaM2} m² — ${watt} W
+    </div>`;
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function _upcPlaceMat(productId, mode) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  pushUndo();
+  // Clear existing products
+  S.cables = S.cables.filter(c => c.roomId !== roomId);
+  S.strips = S.strips.filter(s => s.roomId !== roomId);
+  S.mats = S.mats.filter(m => m.roomId !== roomId);
+  S.plates = S.plates.filter(p => p.roomId !== roomId);
+
+  if (mode === 'auto') {
+    autoFillMatSerpentine(productId);
+  } else {
+    // Place single mat via click mode
+    _startMatPlacementFromSelect(productId);
+    return; // Don't re-render yet, user needs to click
+  }
+  _invalidateMatCache();
+  renderSidebar(); updateCtxBar(); render();
+}
+
+function _upcRenderFoilResults(container, familyName, categoryId, roomId) {
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
+  let html = `<div style="display:flex;flex-direction:column;gap:3px">
+    <div class="ctx-item vfp-btn" style="padding:8px 12px;font-size:13px;border-left:3px solid var(--accent)"
+      onclick="_upcPlaceFoil('auto',${sq(familyName)},${categoryId})">⚡ Automatisk <span style="color:var(--accent)">★ Anbefalt</span></div>
+    <div class="ctx-item vfp-btn" style="padding:6px 10px;font-size:12px"
+      onclick="_upcPlaceFoil('widths',${sq(familyName)},${categoryId})">⚡ Velg bredder ›</div>
+    <div class="ctx-item vfp-btn" style="padding:6px 10px;font-size:12px"
+      onclick="_upcPlaceFoil('manual',${sq(familyName)},${categoryId})">✋ Manuelt</div>
+  </div>`;
+  container.innerHTML = html;
+}
+
+function _upcPlaceFoil(mode, familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  // Clear existing products
+  if (mode === 'auto') {
+    pushUndo();
+    S.cables = S.cables.filter(c => c.roomId !== roomId);
+    S.mats = S.mats.filter(m => m.roomId !== roomId);
+    S.plates = S.plates.filter(p => p.roomId !== roomId);
+    S.strips = S.strips.filter(s => s.roomId !== roomId);
+    showAutoFillComparison(familyName, categoryId, null);
+  } else if (mode === 'widths') {
+    S.ui.manualFamilyName = familyName;
+    S.ui.manualCategoryId = categoryId;
+    showWidthPickerPanel(familyName, categoryId);
+  } else {
+    S.ui.manualFamilyName = familyName;
+    S.ui.manualCategoryId = categoryId;
+    startManualPlace(familyName, categoryId);
+  }
+}
+
+function _upcRenderPlateResults(container, familyName, categoryId, roomId) {
+  const prods = HEATING_PRODUCTS.filter(p => p.category_id === categoryId && p.active !== false
+    && (p.product_family === familyName || p.name.startsWith(familyName)));
+  if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen plater</div>'; return; }
+
+  let html = '<div style="display:flex;flex-direction:column;gap:3px">';
+  for (const prod of prods) {
+    const wCm = (prod.plate_width_mm || 600) / 10;
+    const lCm = (prod.plate_length_mm || 1200) / 10;
+    const wm2 = prod.watt_per_m2 || 0;
+    const areaM2 = (wCm * lCm) / 10000;
+    const watt = Math.round(wm2 * areaM2);
+    html += `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:3px">
+      <div style="font-size:12px;font-weight:600">${esc(prod.name)}</div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:4px">${wCm}×${lCm} cm · ${wm2} W/m² · ${watt} W</div>
+      <div style="display:flex;gap:6px">
+        <div class="ctx-item vfp-btn" style="flex:1;font-size:11px;padding:4px 8px;text-align:center"
+          onclick="_upcPlacePlate(${prod.id},'single')">Plasser</div>
+        <div class="ctx-item vfp-btn" style="flex:1;font-size:11px;padding:4px 8px;text-align:center"
+          onclick="_upcPlacePlate(${prod.id},'auto')">Fyll rom</div>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function _upcPlacePlate(productId, mode) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) return;
+  pushUndo();
+  S.cables = S.cables.filter(c => c.roomId !== roomId);
+  S.strips = S.strips.filter(s => s.roomId !== roomId);
+  S.mats = S.mats.filter(m => m.roomId !== roomId);
+  S.plates = S.plates.filter(p => p.roomId !== roomId);
+
+  if (mode === 'auto') {
+    _autoFillPlates(productId);
+  } else {
+    _startPlatePlacement(productId);
+    return;
+  }
+  renderSidebar(); updateCtxBar(); render();
 }
 
 // ── Mat placement panel ──
@@ -13912,7 +14382,7 @@ function hideRoomWorkflowPanel() {
 
 function finishRoomWorkflow() {
   hideRoomWorkflowPanel();
-  S.ui.selectedRoomId = null;
+  // Keep selectedRoomId so user can reopen with +Produkt
   S.ui.selectedStripId = null;
   S.ui.selectedMatId = null;
   S.ui.selectedPlateId = null;

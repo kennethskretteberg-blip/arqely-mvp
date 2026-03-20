@@ -1,5 +1,20 @@
 # Romtegner Project History
 
+## 2026-03-20: Samlet produktvalg-popup, soner, minimap, RWP-panel
+
+### Samlet produktvalg-popup (indoor)
+- **Ny flyt**: +Produkt åpner nå ett samlet RWP-panel i stedet for nested dropdown-menyer
+- Panelet inneholder: Romtype, Produkttype (kabel/matte/folie/plate), Produktfamilie, W/m²
+- Produktforslag vises automatisk basert på valg — gjenbruker eksisterende beregninger
+- **Live preview**: Velg et produkt → det plasseres umiddelbart i rommet
+- **Bytte produkttype**: Bytt fra f.eks. kabel til folie — forrige produkt fjernes automatisk
+- **Gjenåpning**: FERDIG lukker panelet men beholder romvalg — klikk +Produkt igjen for å endre
+- `showUnifiedProductPanel()` med `_upcState` holder styr på valgt modType/categoryId/familyName
+- `_upcRefreshResults()` ruter til riktig forslagsmotor (kabel/matte/folie/plate)
+- `_upcPlaceCable()`, `_upcPlaceMat()`, `_upcPlaceFoil()`, `_upcPlacePlate()` — plasserer + fjerner gamle
+- Panel bredde økt til 400px med max-height 85vh og scroll
+- Snøsmelting beholder eksisterende dropdown-flyt (uendret)
+
 ## 2026-03-20: Soner, minimap, RWP-panel, prosjekt-rename + varmematte/kabel
 
 ### Varmematte — serpentin-layout med faste produktlengder
