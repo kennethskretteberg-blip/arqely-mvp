@@ -6853,22 +6853,21 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
     const rawRuns = _generatePolygonClippedRuns(roomId, productId, dir, pos, spacing, 0);
     if (rawRuns.length === 0) return null;
     const extents = rawRuns.map(r => r.segments.length === 0 ? 0 : r.segments[r.segments.length-1].end_cm - r.segments[0].start_cm);
-    const sorted = extents.filter(e => e > 0).sort((a, b) => a - b);
-    const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0;
-    const threshold = median * 0.7;
-    const kept = rawRuns.filter((r, i) => extents[i] >= threshold);
-    return { dir, rawCount: rawRuns.length, keptCount: kept.length, droppedPct: 1 - kept.length / rawRuns.length };
+    const valid = extents.filter(e => e > 0);
+    if (valid.length === 0) return null;
+    const min = Math.min(...valid), max = Math.max(...valid);
+    // Uniformity: how similar are the run heights? 1.0 = perfect, 0 = terrible
+    const uniformity = max > 0 ? min / max : 0;
+    return { dir, runCount: rawRuns.length, uniformity };
   }
 
-  // Try both directions, pick the one with fewer drops (better coverage)
+  // Try both directions, pick the one with most uniform run heights (best coverage)
   const tryV = _tryDirection('v');
   const tryH = _tryDirection('h');
-  let bestDir = direction; // default: user-specified direction
+  let bestDir = direction;
   if (tryV && tryH) {
-    // Prefer the direction that drops fewer runs
-    if (tryH.droppedPct < tryV.droppedPct - 0.01) bestDir = 'h';
-    else if (tryV.droppedPct < tryH.droppedPct - 0.01) bestDir = 'v';
-    // If equal, prefer the user-specified direction
+    if (tryH.uniformity > tryV.uniformity + 0.01) bestDir = 'h';
+    else if (tryV.uniformity > tryH.uniformity + 0.01) bestDir = 'v';
   } else if (tryH && !tryV) {
     bestDir = 'h';
   } else if (tryV && !tryH) {
@@ -6918,30 +6917,13 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
     return runs.filter((r, i) => extents[i] >= threshold);
   }
 
-  // Step 1: Generate polygon-clipped runs, then drop Y-split outliers
-  let runs = _dropYSplitRuns(_genRuns(positions, spacing, 0));
-  if (runs.length === 0) return null;
-
-  // Step 2: ALWAYS equalize remaining runs to common sweep range.
-  // This is MANDATORY to prevent Y-splits. Even small height differences
-  // between adjacent runs create visible branching at the U-turn.
-  // The equalization clips all runs to the range where ALL runs overlap.
-  if (runs.length > 1) {
-    let cLo = -Infinity, cHi = Infinity;
-    for (const r of runs) {
-      if (r.segments.length === 0) continue;
-      if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
-      if (r.segments[r.segments.length - 1].end_cm < cHi) cHi = r.segments[r.segments.length - 1].end_cm;
-    }
-    if (cHi > cLo) {
-      for (const r of runs) {
-        r.segments = r.segments.map(s => ({
-          start_cm: Math.max(s.start_cm, cLo), end_cm: Math.min(s.end_cm, cHi)
-        })).filter(s => s.end_cm > s.start_cm);
-      }
-    }
-    runs = runs.filter(r => r.segments.length > 0);
-  }
+  // Step 1: Generate polygon-clipped runs
+  // Each run follows the room polygon naturally — no equalization, no dropping.
+  // Runs may have different heights. This is OK as long as:
+  // - Each run maintains ≥ margin (5cm) from ALL walls (guaranteed by clipScanlineToPolygon)
+  // - The cable path is one continuous serpentine (no Y-splits)
+  // The U-turn rendering handles height transitions with extension lines at the common endpoint.
+  let runs = _genRuns(positions, spacing, 0);
   if (runs.length === 0) return null;
 
   // Step 3: Calculate total length
@@ -6974,10 +6956,7 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
         for (let i = 0; i < tryN; i++) {
           tryPos.push(startFromHigh ? (tryFirst + trySpan - i * mid) : (tryFirst + i * mid));
         }
-        let tryRuns = _dropYSplitRuns(_genRuns(tryPos, mid, 0));
-        if (tryRuns.length === 0) { lo = mid; continue; }
-        // Equalize to prevent Y-splits
-        if (tryRuns.length > 1) { let eL=-Infinity,eH=Infinity; for(const r of tryRuns){if(!r.segments.length)continue;if(r.segments[0].start_cm>eL)eL=r.segments[0].start_cm;if(r.segments[r.segments.length-1].end_cm<eH)eH=r.segments[r.segments.length-1].end_cm;} if(eH>eL){for(const r of tryRuns){r.segments=r.segments.map(s=>({start_cm:Math.max(s.start_cm,eL),end_cm:Math.min(s.end_cm,eH)})).filter(s=>s.end_cm>s.start_cm);}} tryRuns=tryRuns.filter(r=>r.segments.length>0); }
+        const tryRuns = _genRuns(tryPos, mid, 0);
         if (tryRuns.length === 0) { lo = mid; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, mid);
         const diff = tryLen - targetLen;
@@ -6995,10 +6974,7 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
       let loM = 0, hiM = 30; // extra sweep margin range (0 to 30cm)
       for (let iter = 0; iter < 25; iter++) {
         const midM = (loM + hiM) / 2;
-        let tryRuns = _dropYSplitRuns(_genRuns(positions, bestSp, midM));
-        if (tryRuns.length === 0) { hiM = midM; continue; }
-        // Equalize
-        if (tryRuns.length > 1) { let eL=-Infinity,eH=Infinity; for(const r of tryRuns){if(!r.segments.length)continue;if(r.segments[0].start_cm>eL)eL=r.segments[0].start_cm;if(r.segments[r.segments.length-1].end_cm<eH)eH=r.segments[r.segments.length-1].end_cm;} if(eH>eL){for(const r of tryRuns){r.segments=r.segments.map(s=>({start_cm:Math.max(s.start_cm,eL),end_cm:Math.min(s.end_cm,eH)})).filter(s=>s.end_cm>s.start_cm);}} tryRuns=tryRuns.filter(r=>r.segments.length>0); }
+        const tryRuns = _genRuns(positions, bestSp, midM);
         if (tryRuns.length === 0) { hiM = midM; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, bestSp);
         const diff = tryLen - targetLen;
