@@ -6421,6 +6421,240 @@ function generateCableSerpentine(roomId, productId, direction, spacing_cm, start
 }
 
 /**
+ * Length-driven cable layout generator.
+ * Primary constraint: cable length must match product cable_length_m exactly.
+ * Solves for n (runs) and margin to achieve target length.
+ * Falls back to null if product has no fixed cable length.
+ */
+function generateCableLayoutLengthDriven(roomId, productId, direction, startCorner, zoneBounds) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod || !prod.cable_length_m) return null;
+
+  const targetLen = prod.cable_length_m * 100; // cm
+  const minMargin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+  let perpMin = direction === 'v' ? minX : minY;
+  let perpMax = direction === 'v' ? maxX : maxY;
+  if (zoneBounds) {
+    if (zoneBounds.perpMin != null) perpMin = Math.max(perpMin, zoneBounds.perpMin);
+    if (zoneBounds.perpMax != null) perpMax = Math.min(perpMax, zoneBounds.perpMax);
+  }
+  const sweepMin = direction === 'v' ? minY : minX;
+  const sweepMax = direction === 'v' ? maxY : maxX;
+  const roomW = perpMax - perpMin;
+  const roomH = sweepMax - sweepMin;
+  if (roomW <= 0 || roomH <= 0) return null;
+
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+
+  // ─── Phase B: Closed-form solver for each candidate n ───
+  const nMin = Math.max(2, Math.floor((roomW - 2 * minMargin) / maxSp) + 1);
+  const nMax = Math.max(nMin, Math.floor((roomW - 2 * minMargin) / minSp) + 1);
+  const candidates = [];
+
+  for (let n = nMin; n <= nMax + 2; n++) {
+    // Closed form: margin = (T - n*R + k*W) / (2*(k - n))
+    // where k = n/(n-1) - π/2
+    const k = n / (n - 1) - Math.PI / 2;
+    const denom = 2 * (k - n);
+    if (Math.abs(denom) < 1e-9) continue;
+    const m = (targetLen - n * roomH + k * roomW) / denom;
+
+    if (m < minMargin - 0.01) continue; // margin too small
+    if (m > roomH / 2 - 1) continue;    // no room for runs
+
+    const cc = (roomW - 2 * m) / (n - 1);
+    if (cc < minSp - 0.01 || cc > maxSp + 0.01) continue;
+
+    const sweepMargin = m + cc / 2;
+    const H = roomH - 2 * sweepMargin;
+    if (H < 5) continue; // runs too short
+
+    const uTurnLen = Math.PI * (cc / 2);
+    const calcLen = n * H + (n - 1) * uTurnLen;
+    const diff = Math.abs(calcLen - targetLen);
+
+    // Score: prefer small margin, CC near center of range
+    const ccMid = (minSp + maxSp) / 2;
+    const score = -diff - Math.abs(cc - ccMid) * 0.1 - (m - minMargin) * 0.05;
+
+    candidates.push({ n, margin: m, cc, H, calcLen, diff, score });
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Select best candidate
+  candidates.sort((a, b) => b.score - a.score);
+  let best = candidates[0];
+
+  // ─── Phase E: Scanline refinement for non-rectangular rooms ───
+  // Generate actual runs using room polygon clipping, then refine margin if needed
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const roomH_arr = S.hindrings.filter(h => h.roomId === roomId);
+  const roomFZ = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
+
+  function _generateRunsAtMargin(m, n) {
+    const cc = (roomW - 2 * m) / (n - 1);
+    if (cc < minSp - 0.01 || cc > maxSp + 0.01) return null;
+    const sweepMarg = m + cc / 2;
+    const uR = cc / 2;
+
+    // Centered layout: firstPos with equal margin on both sides
+    const usableW = roomW - 2 * m;
+    const actualSpan = (n - 1) * cc;
+    const sideMargin = (usableW - actualSpan) / 2;
+    const firstPos = perpMin + m + sideMargin;
+
+    const runs = [];
+    for (let i = 0; i < n; i++) {
+      const pos = startFromHigh
+        ? (firstPos + actualSpan - i * cc)
+        : (firstPos + i * cc);
+
+      let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
+      intervals = intervals.map(([lo, hi]) => [lo + sweepMarg, hi - sweepMarg]).filter(([lo, hi]) => hi > lo);
+
+      // Subtract hindrings
+      for (const h of roomH_arr) {
+        if (!h.points || h.points.length < 3) continue;
+        const hI = clipScanlineToPolygon(sweepAxis, pos, h.points);
+        const hE = hI.map(([lo, hi]) => [lo - m, hi + m]);
+        intervals = subtractIntervalSets(intervals, hE);
+      }
+      // Subtract forbidden zones
+      for (const fz of roomFZ) {
+        const fzI = clipScanlineToPolygon(sweepAxis, pos, fz.points);
+        const fzE = fzI.map(([lo, hi]) => [lo - m, hi + m]);
+        intervals = subtractIntervalSets(intervals, fzE);
+      }
+      // Subtract corridor
+      if (zoneBounds?.corridor) {
+        const corr = zoneBounds.corridor;
+        const perpAxis = direction === 'v' ? 'x' : 'y';
+        if (pos >= corr.perpMin && pos <= corr.perpMax) {
+          intervals = subtractIntervalSets(intervals, [[corr.sweepMin, corr.sweepMax]]);
+        }
+      }
+
+      if (intervals.length > 0) {
+        runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
+      }
+    }
+
+    // Equalization: drop short outlier runs, then clip to common range
+    if (runs.length > 1) {
+      const extents = runs.map(r => r.segments.length === 0 ? 0 : r.segments[r.segments.length-1].end_cm - r.segments[0].start_cm);
+      const sorted = extents.filter(e => e > 0).sort((a,b) => a - b);
+      const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0;
+      if (median > 0) {
+        const thresh = median * 0.7;
+        for (let i = runs.length - 1; i >= 0; i--) {
+          if (extents[i] < thresh) runs.splice(i, 1);
+        }
+      }
+      let cLo = -Infinity, cHi = Infinity;
+      for (const r of runs) {
+        if (r.segments.length === 0) continue;
+        if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
+        if (r.segments[r.segments.length-1].end_cm < cHi) cHi = r.segments[r.segments.length-1].end_cm;
+      }
+      if (cHi > cLo) {
+        for (const r of runs) {
+          r.segments = r.segments.map(s => ({
+            start_cm: Math.max(s.start_cm, cLo),
+            end_cm: Math.min(s.end_cm, cHi)
+          })).filter(s => s.end_cm > s.start_cm);
+        }
+      }
+    }
+    const valid = runs.filter(r => r.segments.length > 0);
+    if (valid.length === 0) return null;
+
+    // Calculate total length
+    let totalLen = 0;
+    for (const r of valid) {
+      for (const s of r.segments) totalLen += Math.abs(s.end_cm - s.start_cm);
+    }
+    const uTurnLen = Math.PI * (cc / 2);
+    if (valid.length > 1) totalLen += (valid.length - 1) * uTurnLen;
+
+    return { runs: valid, totalLength_cm: totalLen, spacing_cm: cc, margin_cm: m, n: valid.length };
+  }
+
+  // ─── Phase E: Scanline refinement ───
+  // Try multiple n values (best ± range) with binary search on margin.
+  // Non-rectangular rooms, forbidden zones, and equalization can change effective length
+  // significantly vs the rectangular model, so we need to search broadly.
+  let result = null;
+  {
+    let bestResult = null, bestDiff = Infinity;
+    const nRange = Math.max(3, Math.ceil(nMax - nMin) / 2);
+    const tryNs = [];
+    for (let dn = -2; dn <= nRange + 2; dn++) tryNs.push(best.n + dn);
+    // Also add all candidates' n values
+    for (const c of candidates) { if (!tryNs.includes(c.n)) tryNs.push(c.n); }
+
+    for (const n of tryNs) {
+      if (n < 2) continue;
+      // Binary search on margin for this n
+      let lo = minMargin, hi = roomH / 2 - 1;
+      for (let iter = 0; iter < 25; iter++) {
+        const mid = (lo + hi) / 2;
+        const res = _generateRunsAtMargin(mid, n);
+        if (!res) { hi = mid; continue; }
+        const diff = res.totalLength_cm - targetLen;
+        if (Math.abs(diff) < bestDiff) {
+          bestDiff = Math.abs(diff);
+          bestResult = res;
+        }
+        if (Math.abs(diff) < 0.5) break;
+        if (diff > 0) lo = mid; // too long → increase margin
+        else hi = mid;          // too short → decrease margin
+      }
+      if (bestDiff < 1) break; // good enough
+    }
+    result = bestResult;
+  }
+
+  if (!result || result.runs.length === 0) return null;
+
+  // Final fine-tuning: if still off by >1cm, trim symmetrically (same as existing logic)
+  if (Math.abs(result.totalLength_cm - targetLen) > 1) {
+    const nRuns = result.runs.length;
+    const uTurnLen = Math.PI * (result.spacing_cm / 2);
+    const totalUturns = (nRuns > 1 ? nRuns - 1 : 0) * uTurnLen;
+    const targetRunTotal = targetLen - totalUturns;
+    if (targetRunTotal > 0 && nRuns > 0) {
+      const targetPerRun = targetRunTotal / nRuns;
+      const curPerRun = result.runs[0].segments.reduce((a, s) => a + (s.end_cm - s.start_cm), 0);
+      const trimPerRun = curPerRun - targetPerRun;
+      if (trimPerRun > 0 && trimPerRun < curPerRun * 0.5) {
+        const trimPerEnd = trimPerRun / 2;
+        for (const run of result.runs) {
+          if (run.segments.length === 0) continue;
+          run.segments[0].start_cm += trimPerEnd;
+          run.segments[run.segments.length - 1].end_cm -= trimPerEnd;
+          run.segments = run.segments.filter(s => s.end_cm > s.start_cm);
+        }
+        result.totalLength_cm = targetLen;
+      }
+    }
+  }
+
+  console.log(`[CableLengthDriven] target=${targetLen.toFixed(0)}cm, n=${result.n}, margin=${result.margin_cm?.toFixed(1)}cm, CC=${result.spacing_cm?.toFixed(1)}cm, actual=${result.totalLength_cm.toFixed(1)}cm, diff=${(result.totalLength_cm - targetLen).toFixed(1)}cm`);
+
+  return result;
+}
+
+/**
  * Auto-fill cable: picks optimal direction & spacing, returns cable object ready for insertion.
  */
 function autoFillCable(roomId, productId) {
@@ -6536,8 +6770,55 @@ function autoFillCable(roomId, productId) {
     }
   }
 
-  // Edit 4: Always auto-adjust CC to use full cable length when product has fixed length
+  // For fixed-length products: use length-driven generator for exact match
   if (prod.cable_length_m) {
+    // Try length-driven generator for all corner/direction combos, pick best
+    const corners = ['bl', 'br', 'tl', 'tr'];
+    const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    let ldBest = null, ldBestScore = -Infinity, ldBestCorner = bestCorner, ldBestDir = bestDir;
+    for (const dir of dirs) {
+      for (const corner of corners) {
+        const res = generateCableLayoutLengthDriven(roomId, productId, dir, corner, null);
+        if (!res || res.runs.length === 0) continue;
+        const tmpCable = { roomId, direction: dir, runs: res.runs };
+        const ep = _cableEndpoints(tmpCable);
+        let score = 0;
+        if (ep) {
+          for (const fz of forbiddenZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
+            if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
+          }
+          for (const pz of preferredZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+          }
+        }
+        // Reward exact length match
+        const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
+        score += Math.max(0, 10 - diff * 0.1);
+        if (dir === primaryDir) score += 1;
+        if (userCorner && corner === userCorner) score += 3;
+        if (score > ldBestScore) {
+          ldBestScore = score;
+          ldBest = res;
+          ldBestCorner = corner;
+          ldBestDir = dir;
+        }
+      }
+    }
+    if (ldBest && ldBest.runs.length > 0) {
+      return {
+        id: S.counters.nextCableId++,
+        roomId, productId,
+        direction: ldBestDir,
+        spacing_cm: ldBest.spacing_cm,
+        startCorner: ldBestCorner,
+        runs: ldBest.runs,
+        totalLength_cm: ldBest.totalLength_cm,
+        lockedEnd: true,
+        lockedStart: false
+      };
+    }
+    // Fallback: use CC-driven with _adjustSpacingForLength
     const targetLen = prod.cable_length_m * 100;
     const adjusted = _adjustSpacingForLength(roomId, productId, bestDir, bestCorner, targetLen, null);
     if (adjusted && adjusted.runs.length > 0) {
@@ -6555,7 +6836,7 @@ function autoFillCable(roomId, productId) {
     startCorner: bestCorner,
     runs: best.runs,
     totalLength_cm: best.totalLength_cm,
-    lockedEnd: !!prod.cable_length_m,    // auto-lock: cable has fixed length
+    lockedEnd: !!prod.cable_length_m,
     lockedStart: false
   };
 }
@@ -11896,16 +12177,16 @@ function _cableFlipDirection() {
   pushUndo();
   const newDir = cable.direction === 'v' ? 'h' : 'v';
   let spacing = cable.spacing_cm;
-  // If end is locked, auto-adjust CC for new direction to match product cable length
+  // If end is locked, use length-driven generator for new direction
   if (cable.lockedEnd) {
     const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
     if (prod && prod.cable_length_m) {
-      const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, newDir, cable.startCorner, prod.cable_length_m * 100, cable.zoneBounds);
-      if (adjusted) {
+      const ld = generateCableLayoutLengthDriven(cable.roomId, cable.productId, newDir, cable.startCorner, cable.zoneBounds);
+      if (ld && ld.runs.length > 0) {
         cable.direction = newDir;
-        cable.spacing_cm = adjusted.spacing_cm;
-        cable.runs = adjusted.runs;
-        cable.totalLength_cm = adjusted.totalLength_cm;
+        cable.spacing_cm = ld.spacing_cm;
+        cable.runs = ld.runs;
+        cable.totalLength_cm = ld.totalLength_cm;
         _cableViolationsDirty = true;
         renderSidebar(); updateCtxBar(); render();
         return;
@@ -11939,16 +12220,15 @@ function _toggleCableLock(which) {
     cable.lockedStart = !cable.lockedStart;
   } else if (which === 'end') {
     cable.lockedEnd = !cable.lockedEnd;
-    // When locking end, auto-adjust CC so cable path matches product cable length
+    // When locking end, use length-driven generator for exact product length match
     if (cable.lockedEnd) {
       const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
       if (prod && prod.cable_length_m) {
-        const targetLenCm = prod.cable_length_m * 100;
-        const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, cable.direction, cable.startCorner, targetLenCm, cable.zoneBounds);
-        if (adjusted) {
-          cable.spacing_cm = adjusted.spacing_cm;
-          cable.runs = adjusted.runs;
-          cable.totalLength_cm = adjusted.totalLength_cm;
+        const ld = generateCableLayoutLengthDriven(cable.roomId, cable.productId, cable.direction, cable.startCorner, cable.zoneBounds);
+        if (ld && ld.runs.length > 0) {
+          cable.spacing_cm = ld.spacing_cm;
+          cable.runs = ld.runs;
+          cable.totalLength_cm = ld.totalLength_cm;
         }
       }
     }
@@ -19438,16 +19718,16 @@ canvas.addEventListener('mousemove', e=>{
       else if (wx < midX && wy >= midY) newCorner = 'bl';
       else newCorner = 'br';
       if (newCorner !== cable.startCorner) {
-        // If end is locked, auto-adjust CC to match product cable length
+        // If end is locked, use length-driven generator for exact product length match
         if (cable.lockedEnd) {
           const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
           if (prod && prod.cable_length_m) {
-            const adjusted = _adjustSpacingForLength(cable.roomId, cable.productId, cable.direction, newCorner, prod.cable_length_m * 100, cable.zoneBounds);
-            if (adjusted && adjusted.runs.length > 0) {
+            const ld = generateCableLayoutLengthDriven(cable.roomId, cable.productId, cable.direction, newCorner, cable.zoneBounds);
+            if (ld && ld.runs.length > 0) {
               cable.startCorner = newCorner;
-              cable.spacing_cm = adjusted.spacing_cm;
-              cable.runs = adjusted.runs;
-              cable.totalLength_cm = adjusted.totalLength_cm;
+              cable.spacing_cm = ld.spacing_cm;
+              cable.runs = ld.runs;
+              cable.totalLength_cm = ld.totalLength_cm;
               _cableViolationsDirty = true;
               updateObjInfo(); updateCtxBar();
             }
