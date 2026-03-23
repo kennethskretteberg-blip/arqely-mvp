@@ -6678,13 +6678,13 @@ function generateCableLayoutLengthDriven(roomId, productId, direction, startCorn
  * Each run is independently clipped to the room polygon, obstacles, and zones.
  * Returns runs with their natural polygon-clipped heights (NOT equalized).
  */
-function _generatePolygonClippedRuns(roomId, productId, direction, runPositions, spacing_cm) {
+function _generatePolygonClippedRuns(roomId, productId, direction, runPositions, spacing_cm, extraSweepMargin) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return [];
   const margin = _effectiveMarginCm(productId);
   const sweepAxis = direction === 'v' ? 'y' : 'x';
   const uR = spacing_cm / 2;
-  const sweepMargin = margin + uR;
+  const sweepMargin = margin + uR + (extraSweepMargin || 0);
   const roomH = S.hindrings.filter(h => h.roomId === roomId);
   const roomFZ = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
 
@@ -6852,50 +6852,40 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
       : (firstPos + i * spacing));
   }
 
-  // Step 1: Generate polygon-clipped runs
-  let runs = _generatePolygonClippedRuns(roomId, productId, direction, positions, spacing);
-  if (runs.length === 0) return null;
+  // ─── TRUE BOUSTROPHEDON: each run follows the room polygon naturally ───
+  // No run dropping. No equalization. Each run is its polygon-clipped height.
+  // Like a robot vacuum: back and forth, following walls exactly.
 
-  // Step 1b: Remove runs that are too short compared to the majority.
-  // Narrow protrusions (<70% of median height) break the serpentine pattern.
-  // These runs must be dropped to maintain a clean sinusoidal cable path.
-  if (runs.length > 2) {
-    const extents = runs.map(r => r.segments.length === 0 ? 0 : r.segments[r.segments.length-1].end_cm - r.segments[0].start_cm);
-    const sorted = extents.filter(e => e > 0).sort((a, b) => a - b);
-    const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0;
-    if (median > 0) {
-      const threshold = median * 0.7;
-      for (let i = runs.length - 1; i >= 0; i--) {
-        if (extents[i] < threshold) runs.splice(i, 1);
-      }
-    }
+  // Helper: generate runs at given positions with given extra sweep margin
+  function _genRuns(positions, sp, extraSweepMargin) {
+    return _generatePolygonClippedRuns(roomId, productId, direction, positions, sp, extraSweepMargin);
   }
+
+  // Step 1: Generate polygon-clipped runs (no dropping, no equalization)
+  let runs = _genRuns(positions, spacing, 0);
   if (runs.length === 0) return null;
 
-  // Step 2: Group and equalize (per-group, not global)
-  runs = _groupAndEqualizeRuns(runs);
-  if (runs.length === 0) return null;
-
-  // Step 3: Calculate total length
+  // Step 2: Calculate total length
   let totalLength = _calcTotalCableLength(runs, spacing);
 
-  // Step 4: Length optimization for fixed-length products
+  // Step 3: Length optimization for fixed-length products
+  // Strategy: keep CC constant, adjust sweep margin (distance from walls)
+  // to make runs shorter/longer. This changes total cable length without
+  // changing the number of runs or their spacing.
   if (prod.cable_length_m) {
     const targetLen = prod.cable_length_m * 100;
-
-    // Multi-N + binary search on CC to match target cable length
-    let bestRuns = runs, bestLen = totalLength, bestSp = spacing;
+    let bestRuns = runs, bestLen = totalLength, bestSp = spacing, bestExtra = 0;
     let bestDiff = Math.abs(totalLength - targetLen);
 
-    // Try each candidate N (number of runs), then binary search CC within that N
+    // Phase 1: Try different N values with CC adjustment
     const nMin = Math.max(2, Math.floor(usableWidth / maxSp) + 1);
     const nMax = Math.max(nMin, Math.floor(usableWidth / minSp) + 1);
     for (let tryN = nMin; tryN <= nMax + 1; tryN++) {
-      // CC range for this N
       const ccLo = tryN > 1 ? Math.max(minSp, usableWidth / tryN) : minSp;
       const ccHi = tryN > 1 ? Math.min(maxSp, usableWidth / (tryN - 1)) : maxSp;
+      // Binary search on CC
       let lo = ccLo, hi = ccHi;
-      for (let iter = 0; iter < 25; iter++) {
+      for (let iter = 0; iter < 20; iter++) {
         const mid = (lo + hi) / 2;
         const trySpan = (tryN - 1) * mid;
         const trySide = (usableWidth - trySpan) / 2;
@@ -6905,35 +6895,42 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
         for (let i = 0; i < tryN; i++) {
           tryPos.push(startFromHigh ? (tryFirst + trySpan - i * mid) : (tryFirst + i * mid));
         }
-        let tryRuns = _generatePolygonClippedRuns(roomId, productId, direction, tryPos, mid);
-        // Drop short outlier runs (same as Step 1b)
-        if (tryRuns.length > 2) {
-          const ext = tryRuns.map(r => r.segments.length === 0 ? 0 : r.segments[r.segments.length-1].end_cm - r.segments[0].start_cm);
-          const srt = ext.filter(e => e > 0).sort((a,b) => a - b);
-          const med = srt.length > 0 ? srt[Math.floor(srt.length / 2)] : 0;
-          if (med > 0) { const thr = med * 0.7; for (let j = tryRuns.length-1; j >= 0; j--) { if (ext[j] < thr) tryRuns.splice(j, 1); } }
-        }
-        tryRuns = _groupAndEqualizeRuns(tryRuns);
+        const tryRuns = _genRuns(tryPos, mid, 0);
         if (tryRuns.length === 0) { lo = mid; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, mid);
         const diff = tryLen - targetLen;
         if (Math.abs(diff) < bestDiff) {
-          bestDiff = Math.abs(diff);
-          bestRuns = tryRuns;
-          bestLen = tryLen;
-          bestSp = mid;
+          bestDiff = Math.abs(diff); bestRuns = tryRuns; bestLen = tryLen; bestSp = mid;
         }
         if (Math.abs(diff) < 0.5) break;
-        if (diff > 0) hi = mid;
-        else lo = mid;
+        if (diff > 0) hi = mid; else lo = mid;
       }
       if (bestDiff < 1) break;
     }
+
+    // Phase 2: Fine-tune with sweep margin adjustment (keeps CC fixed, adjusts run heights)
+    if (bestDiff > 1) {
+      let loM = 0, hiM = 30; // extra sweep margin range (0 to 30cm)
+      for (let iter = 0; iter < 25; iter++) {
+        const midM = (loM + hiM) / 2;
+        const tryRuns = _genRuns(positions, bestSp, midM);
+        if (tryRuns.length === 0) { hiM = midM; continue; }
+        const tryLen = _calcTotalCableLength(tryRuns, bestSp);
+        const diff = tryLen - targetLen;
+        if (Math.abs(diff) < bestDiff) {
+          bestDiff = Math.abs(diff); bestRuns = tryRuns; bestLen = tryLen; bestExtra = midM;
+        }
+        if (Math.abs(diff) < 0.5) break;
+        if (diff > 0) loM = midM; // too long → more margin → shorter runs
+        else hiM = midM;
+      }
+    }
+
     runs = bestRuns;
     totalLength = bestLen;
     spacing = bestSp;
 
-    // Final trim if still off
+    // Phase 3: Final symmetric trim if still off
     if (Math.abs(totalLength - targetLen) > 1 && totalLength > targetLen) {
       const overshoot = totalLength - targetLen;
       const trimPerRun = overshoot / runs.length;
