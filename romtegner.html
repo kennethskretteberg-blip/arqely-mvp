@@ -6820,12 +6820,6 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
   const margin = _effectiveMarginCm(productId);
   const minSp = (prod.min_spacing_mm || 50) / 10;
   const maxSp = (prod.max_spacing_mm || 200) / 10;
-  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
-
-  // Room bounds on perpendicular axis
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const perpMin = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
-  const perpMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
 
   // Calculate initial spacing
   let spacing;
@@ -6837,7 +6831,55 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
     spacing = Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
   }
 
-  // Generate run positions across the FULL room width
+  // ─── OPTIMAL DIRECTION SELECTION ───
+  // For irregular rooms, the direction that produces the most uniform run lengths
+  // gives the best coverage (no Y-split dropping). Try both directions and pick
+  // the one that drops the fewest runs.
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+
+  function _tryDirection(dir) {
+    const pMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
+    const pMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
+    const uw = (pMax - margin) - (pMin + margin);
+    if (uw <= 0) return null;
+    const n = Math.max(1, Math.floor(uw / spacing) + 1);
+    const span = (n - 1) * spacing;
+    const side = (uw - span) / 2;
+    const first = pMin + margin + side;
+    const sfh = (startCorner === 'br' || startCorner === 'tr');
+    const pos = [];
+    for (let i = 0; i < n; i++) pos.push(sfh ? (first + span - i * spacing) : (first + i * spacing));
+
+    const rawRuns = _generatePolygonClippedRuns(roomId, productId, dir, pos, spacing, 0);
+    if (rawRuns.length === 0) return null;
+    const extents = rawRuns.map(r => r.segments.length === 0 ? 0 : r.segments[r.segments.length-1].end_cm - r.segments[0].start_cm);
+    const sorted = extents.filter(e => e > 0).sort((a, b) => a - b);
+    const median = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0;
+    const threshold = median * 0.7;
+    const kept = rawRuns.filter((r, i) => extents[i] >= threshold);
+    return { dir, rawCount: rawRuns.length, keptCount: kept.length, droppedPct: 1 - kept.length / rawRuns.length };
+  }
+
+  // Try both directions, pick the one with fewer drops (better coverage)
+  const tryV = _tryDirection('v');
+  const tryH = _tryDirection('h');
+  let bestDir = direction; // default: user-specified direction
+  if (tryV && tryH) {
+    // Prefer the direction that drops fewer runs
+    if (tryH.droppedPct < tryV.droppedPct - 0.01) bestDir = 'h';
+    else if (tryV.droppedPct < tryH.droppedPct - 0.01) bestDir = 'v';
+    // If equal, prefer the user-specified direction
+  } else if (tryH && !tryV) {
+    bestDir = 'h';
+  } else if (tryV && !tryH) {
+    bestDir = 'v';
+  }
+
+  // Use the selected direction
+  direction = bestDir;
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+  const perpMin = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const perpMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
   const usableWidth = (perpMax - margin) - (perpMin + margin);
   if (usableWidth <= 0) return null;
   const N = Math.max(1, Math.floor(usableWidth / spacing) + 1);
@@ -6880,23 +6922,10 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
   let runs = _dropYSplitRuns(_genRuns(positions, spacing, 0));
   if (runs.length === 0) return null;
 
-  // Step 2: Equalize remaining runs to common sweep range (prevents small Y-splits)
-  if (runs.length > 1) {
-    let cLo = -Infinity, cHi = Infinity;
-    for (const r of runs) {
-      if (r.segments.length === 0) continue;
-      if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
-      if (r.segments[r.segments.length - 1].end_cm < cHi) cHi = r.segments[r.segments.length - 1].end_cm;
-    }
-    if (cHi > cLo) {
-      for (const r of runs) {
-        r.segments = r.segments.map(s => ({
-          start_cm: Math.max(s.start_cm, cLo), end_cm: Math.min(s.end_cm, cHi)
-        })).filter(s => s.end_cm > s.start_cm);
-      }
-    }
-    runs = runs.filter(r => r.segments.length > 0);
-  }
+  // Step 2: No global equalization — runs keep their natural polygon-clipped heights.
+  // Y-split outliers were already removed in Step 1. Remaining variation is small
+  // and acceptable (the room polygon naturally varies the run length).
+  // U-turns handle small height differences with extension lines at the common endpoint.
   if (runs.length === 0) return null;
 
   // Step 3: Calculate total length
@@ -6931,14 +6960,6 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
         }
         let tryRuns = _dropYSplitRuns(_genRuns(tryPos, mid, 0));
         if (tryRuns.length === 0) { lo = mid; continue; }
-        // Equalize to prevent Y-splits
-        if (tryRuns.length > 1) {
-          let eqLo = -Infinity, eqHi = Infinity;
-          for (const r of tryRuns) { if (r.segments.length === 0) continue; if (r.segments[0].start_cm > eqLo) eqLo = r.segments[0].start_cm; if (r.segments[r.segments.length-1].end_cm < eqHi) eqHi = r.segments[r.segments.length-1].end_cm; }
-          if (eqHi > eqLo) { for (const r of tryRuns) { r.segments = r.segments.map(s => ({ start_cm: Math.max(s.start_cm, eqLo), end_cm: Math.min(s.end_cm, eqHi) })).filter(s => s.end_cm > s.start_cm); } }
-          tryRuns = tryRuns.filter(r => r.segments.length > 0);
-        }
-        if (tryRuns.length === 0) { lo = mid; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, mid);
         const diff = tryLen - targetLen;
         if (Math.abs(diff) < bestDiff) {
@@ -6956,14 +6977,6 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
       for (let iter = 0; iter < 25; iter++) {
         const midM = (loM + hiM) / 2;
         let tryRuns = _dropYSplitRuns(_genRuns(positions, bestSp, midM));
-        if (tryRuns.length === 0) { hiM = midM; continue; }
-        // Equalize
-        if (tryRuns.length > 1) {
-          let eqLo = -Infinity, eqHi = Infinity;
-          for (const r of tryRuns) { if (r.segments.length === 0) continue; if (r.segments[0].start_cm > eqLo) eqLo = r.segments[0].start_cm; if (r.segments[r.segments.length-1].end_cm < eqHi) eqHi = r.segments[r.segments.length-1].end_cm; }
-          if (eqHi > eqLo) { for (const r of tryRuns) { r.segments = r.segments.map(s => ({ start_cm: Math.max(s.start_cm, eqLo), end_cm: Math.min(s.end_cm, eqHi) })).filter(s => s.end_cm > s.start_cm); } }
-          tryRuns = tryRuns.filter(r => r.segments.length > 0);
-        }
         if (tryRuns.length === 0) { hiM = midM; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, bestSp);
         const diff = tryLen - targetLen;
@@ -7001,7 +7014,7 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
 
   console.log(`[CablePolygonV2] runs=${runs.length}, spacing=${spacing.toFixed(1)}cm, total=${(totalLength/100).toFixed(1)}m${prod.cable_length_m ? ', target=' + prod.cable_length_m + 'm, diff=' + ((totalLength - prod.cable_length_m*100)/100).toFixed(2) + 'm' : ''}`);
 
-  return { runs, totalLength_cm: totalLength, spacing_cm: spacing, cells, connections: [] };
+  return { runs, totalLength_cm: totalLength, spacing_cm: spacing, direction, cells, connections: [] };
 }
 
 /** Build cell info from runs for debug overlay. Groups consecutive runs by sweep range. */
@@ -7730,7 +7743,7 @@ function autoFillCable(roomId, productId) {
       return {
         id: S.counters.nextCableId++,
         roomId, productId,
-        direction: paBestDir,
+        direction: paBest.direction || paBestDir,
         spacing_cm: paBest.spacing_cm,
         startCorner: paBestCorner,
         runs: paBest.runs,
