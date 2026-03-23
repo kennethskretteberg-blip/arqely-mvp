@@ -1,2 +1,3 @@
 - [project_stair_module.md](project_stair_module.md) — Stair module current state and architecture
 - [feedback_docs.md](feedback_docs.md) — User expects project-history.md updates on every commit
+- [reference_dev_auth.md](reference_dev_auth.md) — Dev auto-login: use ?dev=1 on localhost for testing

@@ -130,6 +130,46 @@ Rules may be overridden by the user, but the system must always show warnings.
 
 ---
 
+# Cable Layout Rules — LOCKED
+
+These rules are **permanent** and must not be changed without explicit user request.
+
+## U-turn arcs (LOCKED)
+- U-turns are always **half-circles** with radius = CC/2
+- U-turn length = `π × (spacing_cm / 2)`
+- Drawing: half-circle arc between adjacent run endpoints
+- **Never** change to hairpin, elliptical, or any other shape
+
+## Sweep margin (LOCKED)
+- `sweepMargin = margin + CC/2` (margin from product rules + U-turn radius)
+- The U-turn arc extends CC/2 beyond the segment endpoint toward the wall
+- **Never** use bend radius or any other value for sweep margin
+
+## Equal-length runs (LOCKED)
+- **All cable runs must be exactly the same length (MANDATORY equalization)**
+- After generating polygon-clipped runs, find the shortest common sweep range and clip ALL runs to match
+- This equalization is NEVER optional — it prevents Y-splits
+- When overshoot trimming (cable longer than target): shorten ALL runs equally by increasing sweep margin symmetrically from both ends — never trim only the last run
+- Cable must use exactly the specified product length (no more, no less)
+- For irregular rooms (L/T-shapes), equalization means some areas won't be covered — this is acceptable
+- The auto-direction selector picks the direction that maximizes the common sweep range (best coverage)
+
+## No Y-splits (LOCKED)
+- **Y-splits (branching/forking) are absolutely forbidden**
+- A cable has exactly ONE start and ONE end — no branches, no T-junctions
+- The cable path must be a clean sinusoidal (serpentine) pattern from start to end
+- **Extension lines between runs of different heights ARE Y-splits** — this is NOT allowed
+- ALL runs must have identical sweep range after equalization
+- **Never** draw extension lines between runs of different heights — this creates visual branches
+- The ONLY way to avoid Y-splits is mandatory equalization of all runs to the common overlap range
+
+## W/m² sync with room type (LOCKED)
+- When user selects a room type, the W/m² field (Flateeffekt) must update to match the room type's default value
+- Product suggestions must recalculate based on the new W/m²
+- Priority: User override > Org override > Global default
+
+---
+
 # Rooms
 
 Rooms are the primary container for all objects.
