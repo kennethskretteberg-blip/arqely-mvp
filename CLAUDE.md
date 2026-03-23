@@ -146,19 +146,22 @@ These rules are **permanent** and must not be changed without explicit user requ
 - **Never** use bend radius or any other value for sweep margin
 
 ## Equal-length runs (LOCKED)
-- **All cable runs must be exactly the same length**
-- After generating runs, find the shortest common sweep range and clip all runs to match
+- **All cable runs must be exactly the same length (MANDATORY equalization)**
+- After generating polygon-clipped runs, find the shortest common sweep range and clip ALL runs to match
+- This equalization is NEVER optional — it prevents Y-splits
 - When overshoot trimming (cable longer than target): shorten ALL runs equally by increasing sweep margin symmetrically from both ends — never trim only the last run
 - Cable must use exactly the specified product length (no more, no less)
-- Runs that are too short (<70% of median) in narrow protrusions must be dropped
+- For irregular rooms (L/T-shapes), equalization means some areas won't be covered — this is acceptable
+- The auto-direction selector picks the direction that maximizes the common sweep range (best coverage)
 
 ## No Y-splits (LOCKED)
 - **Y-splits (branching/forking) are absolutely forbidden**
 - A cable has exactly ONE start and ONE end — no branches, no T-junctions
 - The cable path must be a clean sinusoidal (serpentine) pattern from start to end
-- Adjacent runs with different sweep heights create visual Y-splits at the height transition — this is NOT allowed
-- If a room has a narrow protrusion that would create runs of different heights, those short runs must be dropped rather than creating a Y-split
+- **Extension lines between runs of different heights ARE Y-splits** — this is NOT allowed
+- ALL runs must have identical sweep range after equalization
 - **Never** draw extension lines between runs of different heights — this creates visual branches
+- The ONLY way to avoid Y-splits is mandatory equalization of all runs to the common overlap range
 
 ## W/m² sync with room type (LOCKED)
 - When user selects a room type, the W/m² field (Flateeffekt) must update to match the room type's default value

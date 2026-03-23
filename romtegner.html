@@ -6905,6 +6905,41 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
     return _generatePolygonClippedRuns(roomId, productId, direction, positions, sp, extraSweepMargin);
   }
 
+  // Helper: equalize runs — find largest overlapping group, clip to common range.
+  // Returns equalized runs (all same height, no Y-splits).
+  function _equalizeRuns(runs) {
+    if (runs.length <= 1) return runs;
+    // Find the largest group of consecutive runs with common overlap
+    let bestStart = 0, bestEnd = runs.length, bestSize = 0;
+    for (let start = 0; start < runs.length; start++) {
+      let gLo = -Infinity, gHi = Infinity;
+      for (let end = start; end < runs.length; end++) {
+        const r = runs[end];
+        if (r.segments.length === 0) continue;
+        gLo = Math.max(gLo, r.segments[0].start_cm);
+        gHi = Math.min(gHi, r.segments[r.segments.length - 1].end_cm);
+        if (gHi <= gLo) break;
+        if (end - start + 1 > bestSize) { bestSize = end - start + 1; bestStart = start; bestEnd = end + 1; }
+      }
+    }
+    if (bestSize > 0 && bestSize < runs.length) runs = runs.slice(bestStart, bestEnd);
+    // Clip all to common range
+    let cLo = -Infinity, cHi = Infinity;
+    for (const r of runs) {
+      if (r.segments.length === 0) continue;
+      if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
+      if (r.segments[r.segments.length - 1].end_cm < cHi) cHi = r.segments[r.segments.length - 1].end_cm;
+    }
+    if (cHi > cLo) {
+      for (const r of runs) {
+        r.segments = r.segments.map(s => ({
+          start_cm: Math.max(s.start_cm, cLo), end_cm: Math.min(s.end_cm, cHi)
+        })).filter(s => s.end_cm > s.start_cm);
+      }
+    }
+    return runs.filter(r => r.segments.length > 0);
+  }
+
   // Helper: drop runs that would create Y-splits (too short vs neighbors)
   function _dropYSplitRuns(runs) {
     if (runs.length <= 2) return runs;
@@ -6918,12 +6953,12 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
   }
 
   // Step 1: Generate polygon-clipped runs
-  // Each run follows the room polygon naturally — no equalization, no dropping.
-  // Runs may have different heights. This is OK as long as:
-  // - Each run maintains ≥ margin (5cm) from ALL walls (guaranteed by clipScanlineToPolygon)
-  // - The cable path is one continuous serpentine (no Y-splits)
-  // The U-turn rendering handles height transitions with extension lines at the common endpoint.
   let runs = _genRuns(positions, spacing, 0);
+  if (runs.length === 0) return null;
+
+  // Step 2: MANDATORY equalization — ALL runs MUST have identical sweep range.
+  // Extension lines between runs of different heights ARE Y-splits (FORBIDDEN).
+  runs = _equalizeRuns(runs);
   if (runs.length === 0) return null;
 
   // Step 3: Calculate total length
@@ -6956,7 +6991,7 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
         for (let i = 0; i < tryN; i++) {
           tryPos.push(startFromHigh ? (tryFirst + trySpan - i * mid) : (tryFirst + i * mid));
         }
-        const tryRuns = _genRuns(tryPos, mid, 0);
+        let tryRuns = _equalizeRuns(_genRuns(tryPos, mid, 0));
         if (tryRuns.length === 0) { lo = mid; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, mid);
         const diff = tryLen - targetLen;
@@ -6974,7 +7009,7 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
       let loM = 0, hiM = 30; // extra sweep margin range (0 to 30cm)
       for (let iter = 0; iter < 25; iter++) {
         const midM = (loM + hiM) / 2;
-        const tryRuns = _genRuns(positions, bestSp, midM);
+        let tryRuns = _equalizeRuns(_genRuns(positions, bestSp, midM));
         if (tryRuns.length === 0) { hiM = midM; continue; }
         const tryLen = _calcTotalCableLength(tryRuns, bestSp);
         const diff = tryLen - targetLen;
@@ -9489,40 +9524,25 @@ function _drawCableUTurns(cable) {
     const endA = connectHigh ? segA.end_cm : segA.start_cm;
     const endB = connectHigh ? segB.end_cm : segB.start_cm;
 
-    // For runs of different heights: draw extension line + arc at common endpoint
-    const commonEnd = connectHigh ? Math.min(endA, endB) : Math.max(endA, endB);
-
-    // Extension line from runA to common arc level (if heights differ)
-    if (Math.abs(endA - commonEnd) > 0.5) {
-      const pF = dir === 'v' ? w2s(runA.pos_cm, endA) : w2s(endA, runA.pos_cm);
-      const pT = dir === 'v' ? w2s(runA.pos_cm, commonEnd) : w2s(commonEnd, runA.pos_cm);
-      ctx.beginPath(); ctx.moveTo(pF.x, pF.y); ctx.lineTo(pT.x, pT.y); ctx.stroke();
-    }
-
-    // Half-circle arc at common endpoint level
-    const pA = dir === 'v' ? w2s(runA.pos_cm, commonEnd) : w2s(commonEnd, runA.pos_cm);
-    const pB = dir === 'v' ? w2s(runB.pos_cm, commonEnd) : w2s(commonEnd, runB.pos_cm);
+    // Simple half-circle arc between the two run endpoints (no extension lines)
+    // All runs are equalized so endA ≈ endB — arc connects directly
+    let pA, pB;
+    if (dir === 'v') { pA = w2s(runA.pos_cm, endA); pB = w2s(runB.pos_cm, endB); }
+    else { pA = w2s(endA, runA.pos_cm); pB = w2s(endB, runB.pos_cm); }
 
     const midX = (pA.x + pB.x) / 2, midY = (pA.y + pB.y) / 2;
     const radius = Math.hypot(pB.x - pA.x, pB.y - pA.y) / 2;
-    if (radius >= 1) {
-      const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
-      const dx = pB.x - pA.x, dy = pB.y - pA.y;
-      let wallDirX = 0, wallDirY = 0;
-      if (dir === 'h') { wallDirX = connectHigh ? 1 : -1; }
-      else { wallDirY = connectHigh ? 1 : -1; }
-      const rightDot = dy * wallDirX + (-dx) * wallDirY;
-      ctx.beginPath();
-      ctx.arc(midX, midY, radius, angle + Math.PI, angle, rightDot < 0);
-      ctx.stroke();
-    }
+    if (radius < 1) continue;
 
-    // Extension line from common arc level to runB (if heights differ)
-    if (Math.abs(endB - commonEnd) > 0.5) {
-      const pF = dir === 'v' ? w2s(runB.pos_cm, commonEnd) : w2s(commonEnd, runB.pos_cm);
-      const pT = dir === 'v' ? w2s(runB.pos_cm, endB) : w2s(endB, runB.pos_cm);
-      ctx.beginPath(); ctx.moveTo(pF.x, pF.y); ctx.lineTo(pT.x, pT.y); ctx.stroke();
-    }
+    const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+    const dx = pB.x - pA.x, dy = pB.y - pA.y;
+    let wallDirX = 0, wallDirY = 0;
+    if (dir === 'h') { wallDirX = connectHigh ? 1 : -1; }
+    else { wallDirY = connectHigh ? 1 : -1; }
+    const rightDot = dy * wallDirX + (-dx) * wallDirY;
+    ctx.beginPath();
+    ctx.arc(midX, midY, radius, angle + Math.PI, angle, rightDot < 0);
+    ctx.stroke();
   }
 }
 
