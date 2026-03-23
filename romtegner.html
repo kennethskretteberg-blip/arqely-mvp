@@ -6656,34 +6656,43 @@ function generateCableLayoutLengthDriven(roomId, productId, direction, startCorn
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ██ POLYGON-AWARE CABLE COVERAGE ENGINE
+// ██ POLYGON-AWARE CABLE COVERAGE ENGINE v2
 // ═══════════════════════════════════════════════════════════════
+//
+// Architecture: ONE continuous serpentine where each run is clipped
+// to the actual room polygon at its position. Runs in narrow parts
+// are shorter, runs in wide parts are full height. U-turns between
+// runs of different heights use extension lines + arcs.
+//
+// This is NOT a global bounding-box sweep. Each run position is
+// independently clipped against the room polygon, obstacles, and
+// forbidden zones. The result naturally fills recesses and L-shapes.
+//
+// Cell decomposition is used ONLY for equalization grouping:
+// runs within the same "cell" (similar sweep range) are equalized
+// together, but runs in different cells keep their natural heights.
+//
 
 /**
- * Phase 1: Compute the valid heatable area as a scanline map.
- * Returns scanlines at 1cm resolution with valid intervals after
- * insetting room polygon by margin and subtracting obstacles/zones.
+ * Step 1: Generate polygon-clipped runs at given positions.
+ * Each run is independently clipped to the room polygon, obstacles, and zones.
+ * Returns runs with their natural polygon-clipped heights (NOT equalized).
  */
-function _computeHeatableArea(roomId, productId, direction) {
+function _generatePolygonClippedRuns(roomId, productId, direction, runPositions, spacing_cm) {
   const room = S.rooms.find(r => r.id === roomId);
-  if (!room || !room.points || room.points.length < 3) return null;
+  if (!room || !room.points || room.points.length < 3) return [];
   const margin = _effectiveMarginCm(productId);
   const sweepAxis = direction === 'v' ? 'y' : 'x';
-  const perpAxis = direction === 'v' ? 'x' : 'y';
-
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const perpMin = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
-  const perpMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
-
+  const uR = spacing_cm / 2;
+  const sweepMargin = margin + uR;
   const roomH = S.hindrings.filter(h => h.roomId === roomId);
   const roomFZ = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
 
-  const scanlines = [];
-  const step = 1; // 1cm resolution
-  for (let pos = perpMin + step; pos < perpMax - step; pos += step) {
+  const runs = [];
+  for (const pos of runPositions) {
+    // Clip to room polygon
     let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
-    // Shrink by margin
-    intervals = intervals.map(([lo, hi]) => [lo + margin, hi - margin]).filter(([lo, hi]) => hi > lo);
+    intervals = intervals.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi > lo);
     // Subtract obstacles
     for (const h of roomH) {
       if (!h.points || h.points.length < 3) continue;
@@ -6698,14 +6707,315 @@ function _computeHeatableArea(roomId, productId, direction) {
       intervals = subtractIntervalSets(intervals, fzE);
     }
     if (intervals.length > 0) {
-      scanlines.push({ pos, intervals });
+      runs.push({ pos_cm: pos, segments: intervals.map(([s, e]) => ({ start_cm: s, end_cm: e })) });
     }
   }
-  return { sweepAxis, perpAxis, perpMin, perpMax, margin, scanlines };
+  return runs;
 }
 
 /**
- * Phase 2: Decompose the heatable area scanline map into rectangular cells.
+ * Step 2: Group runs into cells by sweep range similarity.
+ * Runs with similar sweep extent (>80% overlap) are in the same cell.
+ * Within each cell, equalize runs to their common range.
+ * Between cells, runs keep their natural heights.
+ */
+function _groupAndEqualizeRuns(runs) {
+  if (runs.length === 0) return runs;
+
+  // Calculate sweep extent per run
+  function _runExtent(r) {
+    if (r.segments.length === 0) return { lo: 0, hi: 0, len: 0 };
+    const lo = r.segments[0].start_cm;
+    const hi = r.segments[r.segments.length - 1].end_cm;
+    return { lo, hi, len: hi - lo };
+  }
+
+  // Group consecutive runs with similar sweep ranges
+  const groups = [];
+  let groupStart = 0;
+  for (let i = 1; i <= runs.length; i++) {
+    const atEnd = i === runs.length;
+    if (!atEnd) {
+      const extA = _runExtent(runs[groupStart]);
+      const extB = _runExtent(runs[i]);
+      const interLo = Math.max(extA.lo, extB.lo);
+      const interHi = Math.min(extA.hi, extB.hi);
+      const inter = Math.max(0, interHi - interLo);
+      const uni = Math.max(extA.len, extB.len);
+      if (uni > 0 && inter / uni > 0.75) continue; // compatible, keep grouping
+    }
+    // Close group
+    groups.push({ start: groupStart, end: i });
+    groupStart = i;
+  }
+
+  // Equalize runs within each group
+  for (const g of groups) {
+    const groupRuns = runs.slice(g.start, g.end);
+    if (groupRuns.length <= 1) continue;
+    let cLo = -Infinity, cHi = Infinity;
+    for (const r of groupRuns) {
+      if (r.segments.length === 0) continue;
+      if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
+      if (r.segments[r.segments.length - 1].end_cm < cHi) cHi = r.segments[r.segments.length - 1].end_cm;
+    }
+    if (cHi > cLo) {
+      for (const r of groupRuns) {
+        r.segments = r.segments.map(s => ({
+          start_cm: Math.max(s.start_cm, cLo),
+          end_cm: Math.min(s.end_cm, cHi)
+        })).filter(s => s.end_cm > s.start_cm);
+      }
+    }
+  }
+
+  return runs.filter(r => r.segments.length > 0);
+}
+
+/**
+ * Step 3: Calculate total cable length including U-turns and height transitions.
+ * U-turns between equal-height runs: half-circle (π × CC/2).
+ * U-turns between different-height runs: arc + straight extension.
+ */
+function _calcTotalCableLength(runs, spacing_cm) {
+  let total = 0;
+  // Run segments
+  for (const r of runs) {
+    for (const s of r.segments) total += Math.abs(s.end_cm - s.start_cm);
+  }
+  // U-turns + extensions between adjacent runs
+  const uR = spacing_cm / 2;
+  const arcLen = Math.PI * uR;
+  for (let i = 0; i < runs.length - 1; i++) {
+    const rA = runs[i], rB = runs[i + 1];
+    if (!rA.segments.length || !rB.segments.length) continue;
+    // Arc length (half-circle at common endpoint)
+    total += arcLen;
+    // Extension lines for height transitions
+    const extA = { lo: rA.segments[0].start_cm, hi: rA.segments[rA.segments.length - 1].end_cm };
+    const extB = { lo: rB.segments[0].start_cm, hi: rB.segments[rB.segments.length - 1].end_cm };
+    // At the connection end (alternates high/low), the shorter run needs an extension
+    // to reach the longer run's endpoint. This is physical cable length.
+    const diffLo = Math.abs(extA.lo - extB.lo);
+    const diffHi = Math.abs(extA.hi - extB.hi);
+    // The U-turn alternates: one side has the height difference
+    // Simplified: add the max height difference as extension length
+    total += Math.max(diffLo, diffHi);
+  }
+  return total;
+}
+
+/**
+ * Top-level polygon-aware cable generator v2.
+ * Generates ONE continuous serpentine where each run follows the room polygon.
+ * Runs in narrow parts are shorter, runs in wide parts are full height.
+ * Groups runs by sweep range similarity for per-group equalization.
+ */
+function generateCablePolygonAware(roomId, productId, direction, startCorner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  const margin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+
+  // Room bounds on perpendicular axis
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const perpMin = direction === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const perpMax = direction === 'v' ? Math.max(...xs) : Math.max(...ys);
+
+  // Calculate initial spacing
+  let spacing;
+  if (prod.cable_length_m) {
+    const areas = roomAreas(room);
+    const nettoM2 = areas.net / 10000;
+    spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
+  } else {
+    spacing = Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+  }
+
+  // Generate run positions across the FULL room width
+  const usableWidth = (perpMax - margin) - (perpMin + margin);
+  if (usableWidth <= 0) return null;
+  const N = Math.max(1, Math.floor(usableWidth / spacing) + 1);
+  const actualSpan = (N - 1) * spacing;
+  const sideMargin = (usableWidth - actualSpan) / 2;
+  const firstPos = perpMin + margin + sideMargin;
+
+  const positions = [];
+  for (let i = 0; i < N; i++) {
+    positions.push(startFromHigh
+      ? (firstPos + actualSpan - i * spacing)
+      : (firstPos + i * spacing));
+  }
+
+  // Step 1: Generate polygon-clipped runs
+  let runs = _generatePolygonClippedRuns(roomId, productId, direction, positions, spacing);
+  if (runs.length === 0) return null;
+
+  // Step 2: Group and equalize (per-group, not global)
+  runs = _groupAndEqualizeRuns(runs);
+  if (runs.length === 0) return null;
+
+  // Step 3: Calculate total length
+  let totalLength = _calcTotalCableLength(runs, spacing);
+
+  // Step 4: Length optimization for fixed-length products
+  if (prod.cable_length_m) {
+    const targetLen = prod.cable_length_m * 100;
+
+    // Multi-N + binary search on CC to match target cable length
+    let bestRuns = runs, bestLen = totalLength, bestSp = spacing;
+    let bestDiff = Math.abs(totalLength - targetLen);
+
+    // Try each candidate N (number of runs), then binary search CC within that N
+    const nMin = Math.max(2, Math.floor(usableWidth / maxSp) + 1);
+    const nMax = Math.max(nMin, Math.floor(usableWidth / minSp) + 1);
+    for (let tryN = nMin; tryN <= nMax + 1; tryN++) {
+      // CC range for this N
+      const ccLo = tryN > 1 ? Math.max(minSp, usableWidth / tryN) : minSp;
+      const ccHi = tryN > 1 ? Math.min(maxSp, usableWidth / (tryN - 1)) : maxSp;
+      let lo = ccLo, hi = ccHi;
+      for (let iter = 0; iter < 25; iter++) {
+        const mid = (lo + hi) / 2;
+        const trySpan = (tryN - 1) * mid;
+        const trySide = (usableWidth - trySpan) / 2;
+        if (trySide < 0) { lo = mid; continue; }
+        const tryFirst = perpMin + margin + trySide;
+        const tryPos = [];
+        for (let i = 0; i < tryN; i++) {
+          tryPos.push(startFromHigh ? (tryFirst + trySpan - i * mid) : (tryFirst + i * mid));
+        }
+        let tryRuns = _generatePolygonClippedRuns(roomId, productId, direction, tryPos, mid);
+        tryRuns = _groupAndEqualizeRuns(tryRuns);
+        if (tryRuns.length === 0) { lo = mid; continue; }
+        const tryLen = _calcTotalCableLength(tryRuns, mid);
+        const diff = tryLen - targetLen;
+        if (Math.abs(diff) < bestDiff) {
+          bestDiff = Math.abs(diff);
+          bestRuns = tryRuns;
+          bestLen = tryLen;
+          bestSp = mid;
+        }
+        if (Math.abs(diff) < 0.5) break;
+        if (diff > 0) hi = mid;
+        else lo = mid;
+      }
+      if (bestDiff < 1) break;
+    }
+    runs = bestRuns;
+    totalLength = bestLen;
+    spacing = bestSp;
+
+    // Final trim if still off
+    if (Math.abs(totalLength - targetLen) > 1 && totalLength > targetLen) {
+      const overshoot = totalLength - targetLen;
+      const trimPerRun = overshoot / runs.length;
+      const trimPerEnd = trimPerRun / 2;
+      for (const run of runs) {
+        if (run.segments.length === 0) continue;
+        run.segments[0].start_cm += trimPerEnd;
+        run.segments[run.segments.length - 1].end_cm -= trimPerEnd;
+        run.segments = run.segments.filter(s => s.end_cm > s.start_cm);
+      }
+      runs = runs.filter(r => r.segments.length > 0);
+      totalLength = targetLen;
+    }
+  }
+
+  // Build cell info for debug overlay
+  const cells = _buildCellInfo(runs, direction, spacing);
+
+  console.log(`[CablePolygonV2] runs=${runs.length}, spacing=${spacing.toFixed(1)}cm, total=${(totalLength/100).toFixed(1)}m${prod.cable_length_m ? ', target=' + prod.cable_length_m + 'm, diff=' + ((totalLength - prod.cable_length_m*100)/100).toFixed(2) + 'm' : ''}`);
+
+  return { runs, totalLength_cm: totalLength, spacing_cm: spacing, cells, connections: [] };
+}
+
+/** Build cell info from runs for debug overlay. Groups consecutive runs by sweep range. */
+function _buildCellInfo(runs, direction, spacing_cm) {
+  if (runs.length === 0) return [];
+  const cells = [];
+  let groupStart = 0;
+  for (let i = 1; i <= runs.length; i++) {
+    const atEnd = i === runs.length;
+    if (!atEnd) {
+      const eA = runs[groupStart].segments;
+      const eB = runs[i].segments;
+      if (eA.length && eB.length) {
+        const aLo = eA[0].start_cm, aHi = eA[eA.length-1].end_cm;
+        const bLo = eB[0].start_cm, bHi = eB[eB.length-1].end_cm;
+        if (Math.abs(aLo - bLo) < 1 && Math.abs(aHi - bHi) < 1) continue;
+      }
+    }
+    const groupRuns = runs.slice(groupStart, i);
+    const segs = groupRuns.flatMap(r => r.segments);
+    cells.push({
+      id: cells.length,
+      direction,
+      spacing_cm,
+      runs: groupRuns,
+      bounds: {
+        xMin: Math.min(...groupRuns.map(r => r.pos_cm)),
+        xMax: Math.max(...groupRuns.map(r => r.pos_cm)),
+        yMin: Math.min(...segs.map(s => s.start_cm)),
+        yMax: Math.max(...segs.map(s => s.end_cm))
+      }
+    });
+    groupStart = i;
+  }
+  return cells;
+}
+
+// ── Debug overlay for polygon-aware cable engine v2 ──────────
+function _drawDebugCableCells() {
+  if (!S.ui._debugCableCells) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) return;
+  const cable = S.cables.find(c => c.roomId === room.id);
+  if (!cable || !cable.cells) return;
+
+  const colors = ['rgba(255,100,100,0.15)', 'rgba(100,255,100,0.15)', 'rgba(100,100,255,0.15)', 'rgba(255,255,100,0.15)'];
+  ctx.save();
+  for (let i = 0; i < cable.cells.length; i++) {
+    const cell = cable.cells[i];
+    if (!cell.bounds) continue;
+    const b = cell.bounds;
+    const tl = cable.direction === 'v' ? w2s(b.xMin, b.yMin) : w2s(b.yMin, b.xMin);
+    const br = cable.direction === 'v' ? w2s(b.xMax, b.yMax) : w2s(b.yMax, b.xMax);
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.strokeStyle = colors[i % colors.length].replace('0.15', '0.6');
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.font = "bold 11px 'DM Sans',sans-serif";
+    ctx.textAlign = 'center';
+    ctx.fillText(`Cell ${i} (${cell.runs.length} runs)`, (tl.x + br.x) / 2, tl.y + 14);
+  }
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ██ END POLYGON-AWARE CABLE COVERAGE ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * REMOVED — old cell-based engine replaced by polygon-clipped serpentine v2 above.
+ * Keeping function stubs that may be referenced elsewhere.
+ */
+// function _computeHeatableArea — removed (replaced by _generatePolygonClippedRuns)
+// function _decomposeHeatableArea — removed (replaced by _groupAndEqualizeRuns)
+// function _generateCellRuns — removed (replaced by _generatePolygonClippedRuns)
+// function _connectCells — removed (no longer needed — single continuous serpentine)
+// function _optimizeCableLengthPolygon — removed (replaced by inline binary search)
+
+/**
+ * LEGACY — Phase 2: Decompose the heatable area scanline map into rectangular cells.
  * Groups consecutive scanlines with compatible interval structures.
  */
 function _decomposeHeatableArea(heatableArea, spacing_cm) {
@@ -7022,10 +7332,10 @@ function _optimizeCableLengthPolygon(roomId, productId, direction, startCorner, 
 }
 
 /**
- * Top-level polygon-aware cable generator.
- * Orchestrates: heatable area → decomposition → per-cell runs → connections → length optimization.
+ * LEGACY — Top-level polygon-aware cable generator (v1, replaced by v2 above).
+ * Kept for reference only. Not called.
  */
-function generateCablePolygonAware(roomId, productId, direction, startCorner) {
+function _generateCablePolygonAware_v1_LEGACY(roomId, productId, direction, startCorner) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -7136,8 +7446,8 @@ function generateCablePolygonAware(roomId, productId, direction, startCorner) {
   };
 }
 
-// ── Debug overlay for polygon-aware cable engine ─────────────
-function _drawDebugCableCells() {
+// ── LEGACY debug overlay (v1, replaced by v2 above) ─────────
+function _drawDebugCableCells_v1_LEGACY() {
   if (!S.ui._debugCableCells) return;
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) return;
@@ -8878,31 +9188,16 @@ function drawCables() {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Draw run segments — cell-aware: each cell may have its own direction
-    if (cable.cells && cable.cells.length > 0) {
-      for (const cell of cable.cells) {
-        const dir = cell.direction || cable.direction;
-        for (const run of cell.runs) {
-          for (const seg of run.segments) {
-            const p1 = dir === 'v' ? w2s(run.pos_cm, seg.start_cm) : w2s(seg.start_cm, run.pos_cm);
-            const p2 = dir === 'v' ? w2s(run.pos_cm, seg.end_cm) : w2s(seg.end_cm, run.pos_cm);
-            ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-          }
-        }
-        // Draw U-turns within this cell
-        _drawCableUTurns({ direction: dir, runs: cell.runs, spacing_cm: cell.spacing_cm, startCorner: cable.startCorner });
+    // Draw run segments
+    for (const run of cable.runs) {
+      for (const seg of run.segments) {
+        const p1 = cable.direction === 'v' ? w2s(run.pos_cm, seg.start_cm) : w2s(seg.start_cm, run.pos_cm);
+        const p2 = cable.direction === 'v' ? w2s(run.pos_cm, seg.end_cm) : w2s(seg.end_cm, run.pos_cm);
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
       }
-    } else {
-      for (const run of cable.runs) {
-        for (const seg of run.segments) {
-          const p1 = cable.direction === 'v' ? w2s(run.pos_cm, seg.start_cm) : w2s(seg.start_cm, run.pos_cm);
-          const p2 = cable.direction === 'v' ? w2s(run.pos_cm, seg.end_cm) : w2s(seg.end_cm, run.pos_cm);
-          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-        }
-      }
-      // Draw U-turns between adjacent runs
-      _drawCableUTurns(cable);
     }
+    // Draw U-turns between adjacent runs (handles height transitions with extension lines)
+    _drawCableUTurns(cable);
 
     // Draw cell connection paths (polygon-aware engine)
     if (cable.connections && cable.connections.length > 0) {
@@ -9101,42 +9396,52 @@ function drawCables() {
 
 function _drawCableUTurns(cable) {
   if (cable.runs.length < 2) return;
+  const dir = cable.direction;
 
   for (let i = 0; i < cable.runs.length - 1; i++) {
     const runA = cable.runs[i], runB = cable.runs[i + 1];
     if (!runA.segments.length || !runB.segments.length) continue;
 
-    // Alternating connection: depends on startCorner
-    const connectHigh = _uTurnIsHigh(i, cable.direction, cable.startCorner);
+    const connectHigh = _uTurnIsHigh(i, dir, cable.startCorner);
     const segA = connectHigh ? runA.segments[runA.segments.length - 1] : runA.segments[0];
     const segB = connectHigh ? runB.segments[runB.segments.length - 1] : runB.segments[0];
     const endA = connectHigh ? segA.end_cm : segA.start_cm;
     const endB = connectHigh ? segB.end_cm : segB.start_cm;
 
-    let pA, pB;
-    if (cable.direction === 'v') {
-      pA = w2s(runA.pos_cm, endA);
-      pB = w2s(runB.pos_cm, endB);
-    } else {
-      pA = w2s(endA, runA.pos_cm);
-      pB = w2s(endB, runB.pos_cm);
+    // For runs of different heights: draw extension line + arc at common endpoint
+    const commonEnd = connectHigh ? Math.min(endA, endB) : Math.max(endA, endB);
+
+    // Extension line from runA to common arc level (if heights differ)
+    if (Math.abs(endA - commonEnd) > 0.5) {
+      const pF = dir === 'v' ? w2s(runA.pos_cm, endA) : w2s(endA, runA.pos_cm);
+      const pT = dir === 'v' ? w2s(runA.pos_cm, commonEnd) : w2s(commonEnd, runA.pos_cm);
+      ctx.beginPath(); ctx.moveTo(pF.x, pF.y); ctx.lineTo(pT.x, pT.y); ctx.stroke();
     }
 
-    // Draw arc (half-circle) between the two endpoints, bulging toward the wall
+    // Half-circle arc at common endpoint level
+    const pA = dir === 'v' ? w2s(runA.pos_cm, commonEnd) : w2s(commonEnd, runA.pos_cm);
+    const pB = dir === 'v' ? w2s(runB.pos_cm, commonEnd) : w2s(commonEnd, runB.pos_cm);
+
     const midX = (pA.x + pB.x) / 2, midY = (pA.y + pB.y) / 2;
     const radius = Math.hypot(pB.x - pA.x, pB.y - pA.y) / 2;
-    if (radius < 1) continue;
+    if (radius >= 1) {
+      const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
+      const dx = pB.x - pA.x, dy = pB.y - pA.y;
+      let wallDirX = 0, wallDirY = 0;
+      if (dir === 'h') { wallDirX = connectHigh ? 1 : -1; }
+      else { wallDirY = connectHigh ? 1 : -1; }
+      const rightDot = dy * wallDirX + (-dx) * wallDirY;
+      ctx.beginPath();
+      ctx.arc(midX, midY, radius, angle + Math.PI, angle, rightDot < 0);
+      ctx.stroke();
+    }
 
-    const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x);
-    const dx = pB.x - pA.x, dy = pB.y - pA.y;
-    let wallDirX = 0, wallDirY = 0;
-    if (cable.direction === 'h') { wallDirX = connectHigh ? 1 : -1; }
-    else { wallDirY = connectHigh ? 1 : -1; }
-    const rightDot = dy * wallDirX + (-dx) * wallDirY;
-    const ccw = rightDot < 0;
-    ctx.beginPath();
-    ctx.arc(midX, midY, radius, angle + Math.PI, angle, ccw);
-    ctx.stroke();
+    // Extension line from common arc level to runB (if heights differ)
+    if (Math.abs(endB - commonEnd) > 0.5) {
+      const pF = dir === 'v' ? w2s(runB.pos_cm, commonEnd) : w2s(commonEnd, runB.pos_cm);
+      const pT = dir === 'v' ? w2s(runB.pos_cm, endB) : w2s(endB, runB.pos_cm);
+      ctx.beginPath(); ctx.moveTo(pF.x, pF.y); ctx.lineTo(pT.x, pT.y); ctx.stroke();
+    }
   }
 }
 
