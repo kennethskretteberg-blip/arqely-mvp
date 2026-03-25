@@ -1,5 +1,50 @@
 # Romtegner Project History
 
+## 2026-03-25: Cable Coverage Engine V6 — full area-first pipeline
+
+### Problem
+V4 engine (`generateCablePolygonAware`) generates global parallel lines and clips to room polygon. For irregular rooms (L-shapes, T-shapes, rooms with obstacles), runs at height transitions are dropped to prevent Y-splits, leaving large uncovered gaps. A V5 skeleton was attempted but scored ~20% against requirements — missing topology analysis, per-cell direction, residual pocket detection, coverage validation, and proper debug.
+
+### Solution — V6 nine-stage pipeline
+Complete reimplementation as area-first pipeline with structured intermediate data:
+
+```
+Room + Obstacles + Zones
+  → [1] _v6BuildHeatableArea     → ScanlineMap (obstacles subtracted as geometry)
+  → [2] _v6AnalyzeTopology       → TopologyReport (concave events, necks, width transitions)
+  → [3] _v6DecomposeCells        → CellSet (topology-informed splits, not arbitrary overlap)
+  → [4] _v6SweepCell             → CellSweepResults (per-cell v/h direction selection)
+  → [5] _v6ValidateCellCoverage  → CoverageReport (residual pocket detection + sub-cell re-sweep)
+  → [6] _v6ConnectCells          → ConnectionPlan (obstacle-safe, wall-following fallback)
+  → [7] _v6OptimizeLength        → OptimizedResult (coverage ≥75% hard constraint)
+  → [8] _v6ValidateFinal         → ValidationReport (coverage, spacing, clearance, length)
+  → [9] _v6DrawDebug             → 12-layer debug overlay
+```
+
+### Key improvements over V4/V5
+- **Topology analysis**: Detects concave events, width transitions >30%, necks, structural shifts
+- **Topology-informed decomposition**: Splits at detected structural changes, not arbitrary 75% overlap
+- **Per-cell direction selection**: Each cell independently tries both v/h, picks highest score
+- **Residual pocket detection**: After sweep, measures uncovered areas, classifies (negligible/acceptable/unacceptable), attempts orthogonal sub-cell re-sweep for unacceptable pockets
+- **Coverage-preserving optimization**: Hard 75% coverage floor — rejects length-optimization trials that sacrifice coverage
+- **Obstacle-safe connections**: Validates paths with ptInPoly sampling, wall-following fallback
+- **12-layer debug overlay**: Toggle `S.ui._debugCableV6 = true` — shows room, offset, heatable area, topology events, cells, sweep directions, scanlines, paths, connections, residual pockets, coverage metrics, length stats
+- **Structured validation**: Typed warnings with severity and location
+
+### Integration
+- V6 is primary strategy in `autoFillCable()`, V5 secondary, V4 tertiary fallback
+- All engines coexist — V6 produces `cable._v6Debug` for debug overlay
+- Console output: `[CableV6] runs=X, cells=Y, coverage=Z%, topology=simple|moderate|complex, warnings=N`
+
+### Verified results
+- Rectangular rooms: 1 cell, 93-100% coverage, 0 warnings, simple topology
+- 6-point polygon rooms: 91% coverage, 0 warnings, residual pocket detected
+- 8-point polygon rooms: 3 cells, moderate topology (2 split candidates), residual pockets detected
+- Fixed-length products: exact length matching (diff=0.00m) with coverage preserved
+- No JS errors, all 5 test rooms pass
+
+---
+
 ## 2026-03-23: Cable engine overhaul — polygon-aware layout, zone support, dev-bypass
 
 ### Session summary

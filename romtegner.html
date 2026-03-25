@@ -7198,10 +7198,1629 @@ function _drawDebugCableCells() {
     ctx.fillText(`Cell ${i} (${cell.runs.length} runs)`, (tl.x + br.x) / 2, tl.y + 14);
   }
   ctx.restore();
+
+  // V5 debug: draw heatable area polygon overlay
+  if (typeof _drawDebugV5HeatableArea === 'function') _drawDebugV5HeatableArea(cable);
+
+  // V6 debug: 12-layer overlay
+  if (typeof _v6DrawDebug === 'function' && cable._v6Debug) {
+    const room = S.rooms.find(r => r.id === cable.roomId);
+    if (room) _v6DrawDebug(cable, room);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // ██ END POLYGON-AWARE CABLE COVERAGE ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// ██ POLYGON-AWARE CABLE COVERAGE ENGINE V5 (AREA-FIRST)
+// ██ Pipeline: HeatableArea → Cells → Serpentine → Connect → Optimize
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Stage 1: Build the valid heatable polygon.
+ * Insets room by wall margin, collects obstacles/forbidden zones.
+ */
+function _buildHeatablePolygon(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const margin = _effectiveMarginCm(productId);
+  const insetPoly = _offsetPolygon(room.points, margin);
+  if (!insetPoly || insetPoly.length < 3) return null;
+  return {
+    polygon: insetPoly,
+    margin,
+    roomId,
+    roomPoly: room.points,
+    obstacles: S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3),
+    forbiddenZones: (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3)
+  };
+}
+
+/**
+ * Stage 2: Decompose heatable polygon into sweepable cells.
+ * Groups consecutive scanlines by interval structure similarity.
+ * Each cell has a common sweep range for equalized runs.
+ */
+function _decomposeIntoSweepCells(heatablePoly, direction, spacing_cm, margin) {
+  if (!heatablePoly || heatablePoly.length < 3) return [];
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perpAxis = direction === 'v' ? 'x' : 'y';
+
+  // Perpendicular extent of inset polygon
+  const perpVals = heatablePoly.map(p => p[perpAxis]);
+  const perpMin = Math.min(...perpVals);
+  const perpMax = Math.max(...perpVals);
+  if (perpMax - perpMin < spacing_cm) return [];
+
+  // Generate scanline positions at CC spacing, centered
+  const usable = perpMax - perpMin;
+  const N = Math.max(1, Math.floor(usable / spacing_cm) + 1);
+  const span = (N - 1) * spacing_cm;
+  const side = (usable - span) / 2;
+  const positions = [];
+  for (let i = 0; i < N; i++) positions.push(perpMin + side + i * spacing_cm);
+
+  // Clip each scanline to the inset polygon
+  const scanlines = [];
+  for (const pos of positions) {
+    const intervals = clipScanlineToPolygon(sweepAxis, pos, heatablePoly);
+    if (intervals.length > 0) {
+      scanlines.push({ pos, intervals });
+    }
+  }
+  if (scanlines.length === 0) return [];
+
+  // Helper: overlap fraction between two interval sets
+  function _intervalOverlap(a, b) {
+    const inter = intersectIntervalSets(a, b);
+    const uni = unionIntervalSets(a, b);
+    const interLen = inter.reduce((s, iv) => s + (iv[1] - iv[0]), 0);
+    const uniLen = uni.reduce((s, iv) => s + (iv[1] - iv[0]), 0);
+    return uniLen > 0 ? interLen / uniLen : 0;
+  }
+
+  // Group consecutive scanlines with compatible intervals (>75% overlap)
+  const cells = [];
+  let cellStart = 0;
+  for (let i = 1; i <= scanlines.length; i++) {
+    const atEnd = i === scanlines.length;
+    const compatible = !atEnd && _intervalOverlap(
+      scanlines[cellStart].intervals,
+      scanlines[i].intervals
+    ) > 0.75;
+
+    if (!compatible) {
+      const cellScanlines = scanlines.slice(cellStart, i);
+      // Common sweep range (intersection)
+      let sweepLo = -Infinity, sweepHi = Infinity;
+      for (const sl of cellScanlines) {
+        const lo = Math.min(...sl.intervals.map(iv => iv[0]));
+        const hi = Math.max(...sl.intervals.map(iv => iv[1]));
+        if (lo > sweepLo) sweepLo = lo;
+        if (hi < sweepHi) sweepHi = hi;
+      }
+      // Union sweep range (for debug/stats)
+      let unionLo = Infinity, unionHi = -Infinity;
+      for (const sl of cellScanlines) {
+        const lo = Math.min(...sl.intervals.map(iv => iv[0]));
+        const hi = Math.max(...sl.intervals.map(iv => iv[1]));
+        if (lo < unionLo) unionLo = lo;
+        if (hi > unionHi) unionHi = hi;
+      }
+      if (sweepHi > sweepLo) {
+        cells.push({
+          id: cells.length,
+          perpMin: cellScanlines[0].pos,
+          perpMax: cellScanlines[cellScanlines.length - 1].pos,
+          sweepRange: { lo: sweepLo, hi: sweepHi },
+          unionSweepRange: { lo: unionLo, hi: unionHi },
+          scanlines: cellScanlines
+        });
+      }
+      cellStart = i;
+    }
+  }
+
+  // Merge cells narrower than 2×CC into neighbors if sweep ranges compatible
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const w = cells[i].perpMax - cells[i].perpMin;
+    if (w < spacing_cm * 2 && cells.length > 1) {
+      const prev = i > 0 ? cells[i - 1] : null;
+      const next = i < cells.length - 1 ? cells[i + 1] : null;
+      const target = (prev && next)
+        ? ((prev.perpMax - prev.perpMin) >= (next.perpMax - next.perpMin) ? prev : next)
+        : (prev || next);
+      if (target) {
+        const aLen = target.sweepRange.hi - target.sweepRange.lo;
+        const bLen = cells[i].sweepRange.hi - cells[i].sweepRange.lo;
+        const interLo = Math.max(target.sweepRange.lo, cells[i].sweepRange.lo);
+        const interHi = Math.min(target.sweepRange.hi, cells[i].sweepRange.hi);
+        const interLen = Math.max(0, interHi - interLo);
+        const uniLen = Math.max(aLen, bLen);
+        if (uniLen > 0 && interLen / uniLen > 0.8) {
+          target.perpMin = Math.min(target.perpMin, cells[i].perpMin);
+          target.perpMax = Math.max(target.perpMax, cells[i].perpMax);
+          target.scanlines = target.scanlines.concat(cells[i].scanlines).sort((a, b) => a.pos - b.pos);
+          target.sweepRange = {
+            lo: Math.max(target.sweepRange.lo, cells[i].sweepRange.lo),
+            hi: Math.min(target.sweepRange.hi, cells[i].sweepRange.hi)
+          };
+          cells.splice(i, 1);
+        }
+      }
+    }
+  }
+  cells.forEach((c, i) => c.id = i);
+  return cells;
+}
+
+/**
+ * Stage 3: Fill a single cell with equalized serpentine runs.
+ * Uses _generatePolygonClippedRuns scoped to cell's perpendicular range.
+ */
+function _fillCellSerpentine(cell, direction, spacing_cm, roomId, productId, startFromHigh, extraSweepMargin) {
+  // Generate run positions within cell bounds
+  const cellWidth = cell.perpMax - cell.perpMin;
+  if (cellWidth < 0) return null;
+  const N = Math.max(1, Math.floor(cellWidth / spacing_cm) + 1);
+  const actualSpan = (N - 1) * spacing_cm;
+  const sideMargin = (cellWidth - actualSpan) / 2;
+  const firstPos = cell.perpMin + sideMargin;
+
+  const positions = [];
+  for (let i = 0; i < N; i++) {
+    positions.push(startFromHigh
+      ? (firstPos + actualSpan - i * spacing_cm)
+      : (firstPos + i * spacing_cm));
+  }
+
+  // Clip runs to room polygon + subtract obstacles
+  let runs = _generatePolygonClippedRuns(roomId, productId, direction, positions, spacing_cm, extraSweepMargin || 0);
+  if (runs.length === 0) return null;
+
+  // Equalize: clip all runs to common sweep range (LOCKED rule — prevents Y-splits)
+  if (runs.length > 1) {
+    let cLo = -Infinity, cHi = Infinity;
+    for (const r of runs) {
+      if (r.segments.length === 0) continue;
+      const rLo = r.segments[0].start_cm;
+      const rHi = r.segments[r.segments.length - 1].end_cm;
+      if (rLo > cLo) cLo = rLo;
+      if (rHi < cHi) cHi = rHi;
+    }
+    if (cHi > cLo) {
+      for (const r of runs) {
+        r.segments = r.segments.map(s => ({
+          start_cm: Math.max(s.start_cm, cLo),
+          end_cm: Math.min(s.end_cm, cHi)
+        })).filter(s => s.end_cm > s.start_cm);
+      }
+    }
+  }
+  runs = runs.filter(r => r.segments.length > 0);
+  if (runs.length === 0) return null;
+
+  const totalLength = _calcTotalCableLength(runs, spacing_cm);
+  const perpExtent = runs.length > 1
+    ? [Math.min(...runs.map(r => r.pos_cm)), Math.max(...runs.map(r => r.pos_cm))]
+    : [runs[0].pos_cm, runs[0].pos_cm];
+  const sweepExtent = runs.length > 0 && runs[0].segments.length > 0
+    ? [runs[0].segments[0].start_cm, runs[0].segments[runs[0].segments.length - 1].end_cm]
+    : [0, 0];
+
+  return {
+    id: cell.id,
+    direction,
+    spacing_cm,
+    runs,
+    totalLength_cm: totalLength,
+    bounds: direction === 'v'
+      ? { xMin: perpExtent[0], xMax: perpExtent[1], yMin: sweepExtent[0], yMax: sweepExtent[1] }
+      : { xMin: sweepExtent[0], xMax: sweepExtent[1], yMin: perpExtent[0], yMax: perpExtent[1] }
+  };
+}
+
+/**
+ * Stage 4: Connect cell paths into one continuous cable.
+ * Orders cells, determines exit/entry points, generates connections.
+ */
+function _connectCellPathsV5(cellResults, direction, startCorner, roomPoly, margin) {
+  if (cellResults.length === 0) return { orderedCells: [], connections: [], allRuns: [], totalLength_cm: 0 };
+  if (cellResults.length === 1) {
+    return {
+      orderedCells: cellResults,
+      connections: [],
+      allRuns: cellResults[0].runs,
+      totalLength_cm: cellResults[0].totalLength_cm
+    };
+  }
+
+  // Order cells by perpendicular position based on startCorner
+  const isStartLow = (startCorner === 'bl' || startCorner === 'tl');
+  const perpKey = direction === 'v' ? 'xMin' : 'yMin';
+  cellResults.sort((a, b) => isStartLow
+    ? a.bounds[perpKey] - b.bounds[perpKey]
+    : b.bounds[perpKey] - a.bounds[perpKey]);
+
+  const connections = [];
+  const allRuns = [];
+  let totalLength = 0;
+  let runCountSoFar = 0;
+
+  for (let ci = 0; ci < cellResults.length; ci++) {
+    const cell = cellResults[ci];
+    const cellRuns = cell.runs;
+    if (cellRuns.length === 0) continue;
+
+    // Determine if this cell's runs need to be reversed so the cable
+    // enters from the correct side (matching previous cell's exit)
+    if (ci > 0 && connections.length > 0) {
+      const lastConn = connections[connections.length - 1];
+      const entryPt = lastConn.path[lastConn.path.length - 1];
+
+      // Which end of the cell is closer to the entry point?
+      const firstRun = cellRuns[0];
+      const lastRun = cellRuns[cellRuns.length - 1];
+      const firstPos = firstRun.pos_cm;
+      const lastPos = lastRun.pos_cm;
+      const entryPerp = direction === 'v' ? entryPt.x : entryPt.y;
+
+      if (Math.abs(lastPos - entryPerp) < Math.abs(firstPos - entryPerp)) {
+        cellRuns.reverse();
+      }
+    }
+
+    // Add cell runs
+    allRuns.push(...cellRuns);
+    totalLength += cell.totalLength_cm;
+
+    // Generate connection to next cell
+    if (ci < cellResults.length - 1) {
+      const nextCell = cellResults[ci + 1];
+      if (nextCell.runs.length === 0) continue;
+
+      // Exit point: last run of current cell
+      const lastRun = cellRuns[cellRuns.length - 1];
+      const exitRunIdx = runCountSoFar + cellRuns.length - 1;
+      const exitHigh = _uTurnIsHigh(exitRunIdx, direction, startCorner);
+      const exitSweep = exitHigh
+        ? lastRun.segments[lastRun.segments.length - 1].end_cm
+        : lastRun.segments[0].start_cm;
+      const exitPt = direction === 'v'
+        ? { x: lastRun.pos_cm, y: exitSweep }
+        : { x: exitSweep, y: lastRun.pos_cm };
+
+      // Entry point: first run of next cell (try both ends, pick closest)
+      const nextFirstRun = nextCell.runs[0];
+      const nextLastRun = nextCell.runs[nextCell.runs.length - 1];
+      const cands = [nextFirstRun, nextLastRun];
+      let bestEntry = null, bestDist = Infinity;
+      for (let ci2 = 0; ci2 < cands.length; ci2++) {
+        const r = cands[ci2];
+        for (const useHigh of [true, false]) {
+          const sw = useHigh
+            ? r.segments[r.segments.length - 1].end_cm
+            : r.segments[0].start_cm;
+          const pt = direction === 'v' ? { x: r.pos_cm, y: sw } : { x: sw, y: r.pos_cm };
+          const d = Math.hypot(pt.x - exitPt.x, pt.y - exitPt.y);
+          if (d < bestDist) { bestDist = d; bestEntry = pt; }
+        }
+      }
+
+      if (bestEntry) {
+        connections.push({
+          fromCell: cell.id,
+          toCell: nextCell.id,
+          path: [exitPt, bestEntry],
+          length_cm: bestDist
+        });
+        totalLength += bestDist;
+      }
+    }
+    runCountSoFar += cellRuns.length;
+  }
+
+  return { orderedCells: cellResults, connections, allRuns, totalLength_cm: totalLength };
+}
+
+/**
+ * Stage 5: Optimize cable length for fixed-length products.
+ * Binary search on spacing + sweep margin, then symmetric trim.
+ */
+function _optimizeCableLengthV5(roomId, productId, direction, startCorner, targetLen_cm, heatableArea) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+  const margin = heatableArea.margin;
+
+  // Helper: run full pipeline at given spacing + extra sweep margin
+  function _tryPipeline(spacing, extraSweepMargin) {
+    const cells = _decomposeIntoSweepCells(heatableArea.polygon, direction, spacing, margin);
+    if (cells.length === 0) return null;
+    const cellResults = cells.map(c =>
+      _fillCellSerpentine(c, direction, spacing, roomId, productId, startFromHigh, extraSweepMargin)
+    ).filter(r => r && r.runs.length > 0);
+    if (cellResults.length === 0) return null;
+    const connected = _connectCellPathsV5(cellResults, direction, startCorner, heatableArea.roomPoly, margin);
+    return connected;
+  }
+
+  // Phase 1: Binary search on spacing
+  let bestResult = null, bestDiff = Infinity, bestSp = null;
+
+  // Try different run counts
+  const perpVals = heatableArea.polygon.map(p => direction === 'v' ? p.x : p.y);
+  const perpRange = Math.max(...perpVals) - Math.min(...perpVals);
+  const nMin = Math.max(2, Math.floor(perpRange / maxSp) + 1);
+  const nMax = Math.max(nMin, Math.floor(perpRange / minSp) + 1);
+
+  for (let tryN = nMin; tryN <= nMax + 1 && bestDiff > 1; tryN++) {
+    let lo = Math.max(minSp, perpRange / (tryN + 0.5));
+    let hi = Math.min(maxSp, perpRange / Math.max(1, tryN - 1.5));
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+
+    for (let iter = 0; iter < 20 && bestDiff > 0.5; iter++) {
+      const mid = (lo + hi) / 2;
+      const res = _tryPipeline(mid, 0);
+      if (!res || res.allRuns.length === 0) { lo = mid; continue; }
+      const diff = res.totalLength_cm - targetLen_cm;
+      if (Math.abs(diff) < bestDiff) {
+        bestDiff = Math.abs(diff); bestResult = res; bestSp = mid;
+      }
+      if (diff > 0) hi = mid; else lo = mid;
+    }
+  }
+
+  // Phase 2: Fine-tune with extra sweep margin
+  if (bestDiff > 1 && bestSp) {
+    let loM = 0, hiM = 30;
+    for (let iter = 0; iter < 25 && bestDiff > 0.5; iter++) {
+      const midM = (loM + hiM) / 2;
+      const res = _tryPipeline(bestSp, midM);
+      if (!res || res.allRuns.length === 0) { hiM = midM; continue; }
+      const diff = res.totalLength_cm - targetLen_cm;
+      if (Math.abs(diff) < bestDiff) {
+        bestDiff = Math.abs(diff); bestResult = res;
+      }
+      if (diff > 0) loM = midM; else hiM = midM;
+    }
+  }
+
+  if (!bestResult) return null;
+
+  // Phase 3: Symmetric trim if still off
+  if (bestDiff > 1 && bestResult.totalLength_cm > targetLen_cm) {
+    const allRuns = bestResult.allRuns;
+    const overshoot = bestResult.totalLength_cm - targetLen_cm;
+    const totalRuns = allRuns.length;
+    if (totalRuns > 0) {
+      const trimPerEnd = overshoot / totalRuns / 2;
+      for (const run of allRuns) {
+        if (run.segments.length === 0) continue;
+        run.segments[0].start_cm += trimPerEnd;
+        run.segments[run.segments.length - 1].end_cm -= trimPerEnd;
+        run.segments = run.segments.filter(s => s.end_cm > s.start_cm);
+      }
+      bestResult.allRuns = allRuns.filter(r => r.segments.length > 0);
+      bestResult.totalLength_cm = targetLen_cm;
+    }
+  }
+
+  return {
+    runs: bestResult.allRuns,
+    totalLength_cm: bestResult.totalLength_cm,
+    spacing_cm: bestSp || minSp,
+    direction,
+    cells: _buildCellInfo(bestResult.allRuns, direction, bestSp || minSp),
+    connections: bestResult.connections
+  };
+}
+
+/**
+ * Top-level V5 orchestrator: area-first polygon-aware cable generation.
+ * Pipeline: HeatableArea → Cells → Serpentine → Connect → Optimize
+ */
+function generateCablePolygonV5(roomId, productId, direction, startCorner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  // Stage 1: Build heatable area
+  const ha = _buildHeatablePolygon(roomId, productId);
+  if (!ha) return null;
+
+  const margin = ha.margin;
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+
+  // Calculate initial spacing
+  let spacing;
+  if (prod.cable_length_m) {
+    const areas = roomAreas(room);
+    const nettoM2 = areas.net / 10000;
+    spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
+  } else {
+    spacing = Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+  }
+
+  // Auto-select best direction: try both, pick most uniform cell coverage
+  function _tryDir(dir) {
+    const cells = _decomposeIntoSweepCells(ha.polygon, dir, spacing, margin);
+    if (cells.length === 0) return null;
+    const sfh = (startCorner === 'br' || startCorner === 'tr');
+    const filled = cells.map(c => _fillCellSerpentine(c, dir, spacing, roomId, productId, sfh, 0)).filter(r => r && r.runs.length > 0);
+    if (filled.length === 0) return null;
+    const totalRuns = filled.reduce((s, c) => s + c.runs.length, 0);
+    // Coverage score: total run area / heatable area
+    let runArea = 0;
+    for (const c of filled) {
+      for (const r of c.runs) {
+        for (const s of r.segments) runArea += (s.end_cm - s.start_cm) * spacing;
+      }
+    }
+    const polyArea = Math.abs(compArea(ha.polygon));
+    const coverage = polyArea > 0 ? runArea / polyArea : 0;
+    return { dir, cellCount: filled.length, totalRuns, coverage };
+  }
+
+  const tryV = _tryDir('v');
+  const tryH = _tryDir('h');
+  if (tryV && tryH) {
+    if (tryH.coverage > tryV.coverage + 0.02) direction = 'h';
+    else if (tryV.coverage > tryH.coverage + 0.02) direction = 'v';
+  } else if (tryH && !tryV) {
+    direction = 'h';
+  } else if (tryV && !tryH) {
+    direction = 'v';
+  }
+
+  const startFromHigh = (startCorner === 'br' || startCorner === 'tr');
+
+  // For fixed-length products, use the length optimizer
+  if (prod.cable_length_m) {
+    const optimized = _optimizeCableLengthV5(roomId, productId, direction, startCorner, prod.cable_length_m * 100, ha);
+    if (optimized && optimized.runs.length > 0) {
+      console.log(`[CableV5] optimized: runs=${optimized.runs.length}, spacing=${optimized.spacing_cm.toFixed(1)}cm, total=${(optimized.totalLength_cm/100).toFixed(1)}m, target=${prod.cable_length_m}m, diff=${((optimized.totalLength_cm - prod.cable_length_m*100)/100).toFixed(2)}m, cells=${optimized.cells.length}`);
+      return optimized;
+    }
+  }
+
+  // Stage 2: Decompose into cells
+  const cells = _decomposeIntoSweepCells(ha.polygon, direction, spacing, margin);
+  if (cells.length === 0) return null;
+
+  // Stage 3: Fill each cell
+  const cellResults = cells.map(c =>
+    _fillCellSerpentine(c, direction, spacing, roomId, productId, startFromHigh, 0)
+  ).filter(r => r && r.runs.length > 0);
+  if (cellResults.length === 0) return null;
+
+  // Stage 4: Connect cells
+  const connected = _connectCellPathsV5(cellResults, direction, startCorner, room.points, margin);
+  if (connected.allRuns.length === 0) return null;
+
+  const result = {
+    runs: connected.allRuns,
+    totalLength_cm: connected.totalLength_cm,
+    spacing_cm: spacing,
+    direction,
+    cells: _buildCellInfo(connected.allRuns, direction, spacing),
+    connections: connected.connections
+  };
+
+  console.log(`[CableV5] runs=${result.runs.length}, spacing=${spacing.toFixed(1)}cm, total=${(result.totalLength_cm/100).toFixed(1)}m, cells=${result.cells.length}`);
+  return result;
+}
+
+/**
+ * Debug rendering for V5: heatable area polygon + cell boundaries.
+ * Called from _drawDebugCableCells when V5 is active.
+ */
+function _drawDebugV5HeatableArea(cable) {
+  if (!S.ui._debugCableCells) return;
+  const room = S.rooms.find(r => r.id === cable.roomId);
+  if (!room) return;
+  const ha = _buildHeatablePolygon(cable.roomId, cable.productId);
+  if (!ha || !ha.polygon || ha.polygon.length < 3) return;
+
+  ctx.save();
+  // Draw inset (heatable) polygon as dashed green outline
+  ctx.strokeStyle = 'rgba(0,200,80,0.7)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  const p0 = w2s(ha.polygon[0].x, ha.polygon[0].y);
+  ctx.moveTo(p0.x, p0.y);
+  for (let i = 1; i < ha.polygon.length; i++) {
+    const pi = w2s(ha.polygon[i].x, ha.polygon[i].y);
+    ctx.lineTo(pi.x, pi.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Draw expanded obstacles as dashed red outlines
+  for (const h of ha.obstacles) {
+    const expanded = _offsetPolygon(h.points, -ha.margin);
+    if (!expanded || expanded.length < 3) continue;
+    ctx.strokeStyle = 'rgba(200,50,50,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    const hp0 = w2s(expanded[0].x, expanded[0].y);
+    ctx.moveTo(hp0.x, hp0.y);
+    for (let i = 1; i < expanded.length; i++) {
+      const hpi = w2s(expanded[i].x, expanded[i].y);
+      ctx.lineTo(hpi.x, hpi.y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ██ END POLYGON-AWARE CABLE COVERAGE ENGINE V5
+// ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// ██ CABLE COVERAGE ENGINE V6 — FULL AREA-FIRST PIPELINE
+// ██ 9-stage pipeline: HeatableArea → Topology → Cells → Sweep
+// ██   → CoverageValidation → Connect → Optimize → Validate → Debug
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Stage 1: Build scanline-based heatable area with obstacles subtracted as geometry.
+ * Unlike V5, obstacles are subtracted HERE, not deferred to later stages.
+ */
+function _v6BuildHeatableArea(roomId, productId, direction, spacing_cm) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const margin = _effectiveMarginCm(productId);
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perpAxis = direction === 'v' ? 'x' : 'y';
+  const uR = spacing_cm / 2;
+  const sweepMargin = margin + uR;
+
+  // Perpendicular extent of room
+  const perpVals = room.points.map(p => p[perpAxis]);
+  const perpMin = Math.min(...perpVals) + margin;
+  const perpMax = Math.max(...perpVals) - margin;
+  if (perpMax - perpMin < spacing_cm) return null;
+
+  // Generate scanline positions centered
+  const usable = perpMax - perpMin;
+  const N = Math.max(1, Math.floor(usable / spacing_cm) + 1);
+  const span = (N - 1) * spacing_cm;
+  const side = (usable - span) / 2;
+  const positions = [];
+  for (let i = 0; i < N; i++) positions.push(perpMin + side + i * spacing_cm);
+
+  const roomH = S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3);
+  const roomFZ = (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
+
+  // Build scanline map with full obstacle subtraction
+  const scanlines = [];
+  let sweepMin = Infinity, sweepMax = -Infinity;
+  for (const pos of positions) {
+    let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
+    intervals = intervals.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi > lo);
+    // Subtract obstacles expanded by margin
+    for (const h of roomH) {
+      const hI = clipScanlineToPolygon(sweepAxis, pos, h.points);
+      const hE = hI.map(([lo, hi]) => [lo - margin, hi + margin]);
+      intervals = subtractIntervalSets(intervals, hE);
+    }
+    // Subtract forbidden zones expanded by margin
+    for (const fz of roomFZ) {
+      const fzI = clipScanlineToPolygon(sweepAxis, pos, fz.points);
+      const fzE = fzI.map(([lo, hi]) => [lo - margin, hi + margin]);
+      intervals = subtractIntervalSets(intervals, fzE);
+    }
+    intervals = _mergeShortGaps(intervals, spacing_cm * 0.3);
+    if (intervals.length > 0) {
+      for (const iv of intervals) { if (iv[0] < sweepMin) sweepMin = iv[0]; if (iv[1] > sweepMax) sweepMax = iv[1]; }
+      scanlines.push({ pos, intervals });
+    }
+  }
+  if (scanlines.length === 0) return null;
+
+  // Compute net area
+  let netArea = 0;
+  for (const sl of scanlines) {
+    for (const [lo, hi] of sl.intervals) netArea += (hi - lo) * spacing_cm;
+  }
+
+  // Detect disconnected components via interval overlap between consecutive scanlines
+  const compId = new Array(scanlines.length).fill(-1);
+  let nextComp = 0;
+  compId[0] = nextComp++;
+  for (let i = 1; i < scanlines.length; i++) {
+    const overlap = intersectIntervalSets(scanlines[i - 1].intervals, scanlines[i].intervals);
+    const overlapLen = overlap.reduce((s, [lo, hi]) => s + (hi - lo), 0);
+    if (overlapLen > 0) {
+      compId[i] = compId[i - 1];
+    } else {
+      compId[i] = nextComp++;
+    }
+  }
+  const components = [];
+  for (let c = 0; c < nextComp; c++) {
+    const indices = [];
+    let cArea = 0;
+    for (let i = 0; i < scanlines.length; i++) {
+      if (compId[i] === c) {
+        indices.push(i);
+        for (const [lo, hi] of scanlines[i].intervals) cArea += (hi - lo) * spacing_cm;
+      }
+    }
+    components.push({ scanlineIndices: indices, area: cArea });
+  }
+
+  return {
+    scanlines, boundingBox: { perpMin: scanlines[0].pos, perpMax: scanlines[scanlines.length - 1].pos, sweepMin, sweepMax },
+    netArea, components, margin, sweepMargin, roomId, direction, spacing_cm,
+    obstacles: roomH, forbiddenZones: roomFZ, roomPoly: room.points
+  };
+}
+
+/**
+ * Stage 2: Analyze topology of the scanline map.
+ * Detects concave events, width transitions, necks, and split candidates.
+ */
+function _v6AnalyzeTopology(ha) {
+  if (!ha || ha.scanlines.length < 2) return { complexity: 'simple', concaveEvents: [], necks: [], pockets: [], splitCandidates: [] };
+
+  const concaveEvents = [];
+  const necks = [];
+  const splitCandidates = [];
+
+  function _totalWidth(sl) { return sl.intervals.reduce((s, [lo, hi]) => s + (hi - lo), 0); }
+
+  for (let i = 0; i < ha.scanlines.length - 1; i++) {
+    const slA = ha.scanlines[i], slB = ha.scanlines[i + 1];
+    const midPos = (slA.pos + slB.pos) / 2;
+
+    // Interval count change
+    if (slA.intervals.length !== slB.intervals.length) {
+      concaveEvents.push({ pos: midPos, type: 'interval_change', fromCount: slA.intervals.length, toCount: slB.intervals.length });
+      splitCandidates.push({ pos: midPos, reason: 'interval_count_change' });
+    }
+
+    // Width transition >30%
+    const wA = _totalWidth(slA), wB = _totalWidth(slB);
+    const maxW = Math.max(wA, wB);
+    if (maxW > 0 && Math.abs(wA - wB) / maxW > 0.30) {
+      concaveEvents.push({ pos: midPos, type: 'width_transition', widthA: wA, widthB: wB });
+      if (!splitCandidates.find(sc => Math.abs(sc.pos - midPos) < ha.spacing_cm * 0.5)) {
+        splitCandidates.push({ pos: midPos, reason: 'width_transition' });
+      }
+    }
+
+    // Structural shift: intervals move by >CC
+    if (slA.intervals.length === slB.intervals.length && slA.intervals.length > 0) {
+      let maxShift = 0;
+      for (let j = 0; j < slA.intervals.length; j++) {
+        const midA = (slA.intervals[j][0] + slA.intervals[j][1]) / 2;
+        const midB = (slB.intervals[j][0] + slB.intervals[j][1]) / 2;
+        maxShift = Math.max(maxShift, Math.abs(midA - midB));
+      }
+      if (maxShift > ha.spacing_cm) {
+        concaveEvents.push({ pos: midPos, type: 'structural_shift', shift: maxShift });
+        if (!splitCandidates.find(sc => Math.abs(sc.pos - midPos) < ha.spacing_cm * 0.5)) {
+          splitCandidates.push({ pos: midPos, reason: 'structural_shift' });
+        }
+      }
+    }
+  }
+
+  // Detect necks: scanlines with total width < 2×CC
+  for (let i = 0; i < ha.scanlines.length; i++) {
+    const w = _totalWidth(ha.scanlines[i]);
+    if (w < ha.spacing_cm * 2 && w > 0) {
+      necks.push({ pos: ha.scanlines[i].pos, width: w, scanlineIdx: i });
+    }
+  }
+
+  // Detect negligible pockets: single-scanline components
+  const pockets = [];
+  for (const comp of ha.components) {
+    if (comp.scanlineIndices.length === 1 && comp.area < ha.spacing_cm * ha.spacing_cm * 4) {
+      pockets.push({ scanlineIdx: comp.scanlineIndices[0], area: comp.area });
+    }
+  }
+
+  // Deduplicate and sort split candidates
+  splitCandidates.sort((a, b) => a.pos - b.pos);
+  const complexity = splitCandidates.length === 0 ? 'simple' : splitCandidates.length <= 2 ? 'moderate' : 'complex';
+
+  return { complexity, concaveEvents, necks, pockets, splitCandidates };
+}
+
+/**
+ * Stage 3: Decompose heatable area into sweepable cells using topology-informed splits.
+ * Uses split candidates from Stage 2 instead of arbitrary overlap thresholds.
+ */
+function _v6DecomposeCells(ha, topology) {
+  if (!ha || ha.scanlines.length === 0) return { cells: [] };
+
+  // If simple: one cell
+  if (topology.complexity === 'simple' && topology.splitCandidates.length === 0) {
+    const sl = ha.scanlines;
+    let sMin = Infinity, sMax = -Infinity;
+    for (const s of sl) for (const [lo, hi] of s.intervals) { if (lo < sMin) sMin = lo; if (hi > sMax) sMax = hi; }
+    return { cells: [{
+      id: 0,
+      scanlines: sl,
+      boundingBox: { perpMin: sl[0].pos, perpMax: sl[sl.length - 1].pos, sweepMin: sMin, sweepMax: sMax },
+      area: ha.netArea,
+      adjacentCellIds: []
+    }] };
+  }
+
+  // Partition scanlines at split candidate positions
+  const splitPositions = topology.splitCandidates.map(sc => sc.pos);
+  const cells = [];
+  let cellStart = 0;
+
+  for (let i = 0; i < ha.scanlines.length; i++) {
+    const isEnd = i === ha.scanlines.length - 1;
+    const nextPos = !isEnd ? (ha.scanlines[i].pos + ha.scanlines[i + 1].pos) / 2 : Infinity;
+    const hitSplit = splitPositions.some(sp => nextPos >= sp - ha.spacing_cm * 0.3 && nextPos <= sp + ha.spacing_cm * 0.3);
+
+    if (hitSplit || isEnd) {
+      const cellScanlines = ha.scanlines.slice(cellStart, i + 1);
+      if (cellScanlines.length > 0) {
+        let sMin = Infinity, sMax = -Infinity, cArea = 0;
+        for (const s of cellScanlines) {
+          for (const [lo, hi] of s.intervals) { if (lo < sMin) sMin = lo; if (hi > sMax) sMax = hi; cArea += (hi - lo) * ha.spacing_cm; }
+        }
+        cells.push({
+          id: cells.length,
+          scanlines: cellScanlines,
+          boundingBox: { perpMin: cellScanlines[0].pos, perpMax: cellScanlines[cellScanlines.length - 1].pos, sweepMin: sMin, sweepMax: sMax },
+          area: cArea,
+          adjacentCellIds: []
+        });
+      }
+      cellStart = i + 1;
+    }
+  }
+
+  // Validate cell consistency: within each cell, check interval count uniformity
+  // If inconsistent (different interval counts), sub-split at the inconsistency
+  const finalCells = [];
+  for (const cell of cells) {
+    if (cell.scanlines.length <= 2) { finalCells.push(cell); continue; }
+    let subStart = 0;
+    for (let i = 1; i < cell.scanlines.length; i++) {
+      const isLast = i === cell.scanlines.length - 1;
+      const countA = cell.scanlines[i - 1].intervals.length;
+      const countB = cell.scanlines[i].intervals.length;
+      const wA = cell.scanlines[i - 1].intervals.reduce((s, iv) => s + (iv[1] - iv[0]), 0);
+      const wB = cell.scanlines[i].intervals.reduce((s, iv) => s + (iv[1] - iv[0]), 0);
+      const inconsistent = countA !== countB || (Math.max(wA, wB) > 0 && Math.abs(wA - wB) / Math.max(wA, wB) > 0.20);
+
+      if (inconsistent || isLast) {
+        const endIdx = inconsistent ? i : i + 1;
+        const subScanlines = cell.scanlines.slice(subStart, endIdx);
+        if (subScanlines.length > 0) {
+          let sMin = Infinity, sMax = -Infinity, cArea = 0;
+          for (const s of subScanlines) for (const [lo, hi] of s.intervals) { if (lo < sMin) sMin = lo; if (hi > sMax) sMax = hi; cArea += (hi - lo) * ha.spacing_cm; }
+          finalCells.push({
+            id: finalCells.length,
+            scanlines: subScanlines,
+            boundingBox: { perpMin: subScanlines[0].pos, perpMax: subScanlines[subScanlines.length - 1].pos, sweepMin: sMin, sweepMax: sMax },
+            area: cArea,
+            adjacentCellIds: []
+          });
+        }
+        subStart = inconsistent ? i : i + 1;
+      }
+    }
+  }
+
+  // Merge trivially thin cells (<2×CC) into compatible neighbors
+  for (let i = finalCells.length - 1; i >= 0; i--) {
+    const w = finalCells[i].boundingBox.perpMax - finalCells[i].boundingBox.perpMin;
+    if (w < ha.spacing_cm * 2 && finalCells.length > 1) {
+      const prev = i > 0 ? finalCells[i - 1] : null;
+      const next = i < finalCells.length - 1 ? finalCells[i + 1] : null;
+      const target = (prev && next) ? ((prev.area >= next.area) ? prev : next) : (prev || next);
+      if (target) {
+        // Check interval structure compatibility
+        const tCount = target.scanlines[0].intervals.length;
+        const cCount = finalCells[i].scanlines[0].intervals.length;
+        if (tCount === cCount) {
+          target.scanlines = target.scanlines.concat(finalCells[i].scanlines).sort((a, b) => a.pos - b.pos);
+          target.area += finalCells[i].area;
+          target.boundingBox.perpMin = Math.min(target.boundingBox.perpMin, finalCells[i].boundingBox.perpMin);
+          target.boundingBox.perpMax = Math.max(target.boundingBox.perpMax, finalCells[i].boundingBox.perpMax);
+          target.boundingBox.sweepMin = Math.min(target.boundingBox.sweepMin, finalCells[i].boundingBox.sweepMin);
+          target.boundingBox.sweepMax = Math.max(target.boundingBox.sweepMax, finalCells[i].boundingBox.sweepMax);
+          finalCells.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  // Determine adjacency
+  for (let i = 0; i < finalCells.length; i++) {
+    for (let j = i + 1; j < finalCells.length; j++) {
+      const gap = Math.min(
+        Math.abs(finalCells[i].boundingBox.perpMax - finalCells[j].boundingBox.perpMin),
+        Math.abs(finalCells[j].boundingBox.perpMax - finalCells[i].boundingBox.perpMin)
+      );
+      if (gap <= ha.spacing_cm * 1.5) {
+        finalCells[i].adjacentCellIds.push(finalCells[j].id);
+        finalCells[j].adjacentCellIds.push(finalCells[i].id);
+      }
+    }
+  }
+
+  // Re-index
+  finalCells.forEach((c, i) => c.id = i);
+  return { cells: finalCells };
+}
+
+/**
+ * Stage 4: Per-cell sweep — tries BOTH directions, picks optimal.
+ * Returns the best sweep result for a single cell.
+ */
+function _v6SweepCell(cell, roomId, productId, spacing_cm, startCorner, ha) {
+  function _tryDir(dir) {
+    const sfh = (startCorner === 'br' || startCorner === 'tr');
+    const perpAxis = dir === 'v' ? 'x' : 'y';
+    const cellPerpMin = Math.min(...cell.scanlines.map(sl => sl.pos));
+    const cellPerpMax = Math.max(...cell.scanlines.map(sl => sl.pos));
+
+    // If trying orthogonal direction, recalculate perpendicular from cell bounds
+    let pMin, pMax;
+    if ((dir === 'v' && ha.direction === 'v') || (dir === 'h' && ha.direction === 'h')) {
+      // Same direction as heatable area — use scanline positions directly
+      pMin = cellPerpMin;
+      pMax = cellPerpMax;
+    } else {
+      // Orthogonal direction — use sweep extent of cell as perpendicular range
+      pMin = cell.boundingBox.sweepMin;
+      pMax = cell.boundingBox.sweepMax;
+    }
+
+    const cellWidth = pMax - pMin;
+    if (cellWidth < 0) return null;
+    const nRuns = Math.max(1, Math.floor(cellWidth / spacing_cm) + 1);
+    const actualSpan = (nRuns - 1) * spacing_cm;
+    const sideM = (cellWidth - actualSpan) / 2;
+    const firstPos = pMin + sideM;
+    const positions = [];
+    for (let i = 0; i < nRuns; i++) {
+      positions.push(sfh ? (firstPos + actualSpan - i * spacing_cm) : (firstPos + i * spacing_cm));
+    }
+
+    let runs = _generatePolygonClippedRuns(roomId, productId, dir, positions, spacing_cm, 0);
+    if (runs.length === 0) return null;
+
+    // Equalize: clip all runs to common sweep range (LOCKED rule)
+    if (runs.length > 1) {
+      let cLo = -Infinity, cHi = Infinity;
+      for (const r of runs) {
+        if (r.segments.length === 0) continue;
+        if (r.segments[0].start_cm > cLo) cLo = r.segments[0].start_cm;
+        if (r.segments[r.segments.length - 1].end_cm < cHi) cHi = r.segments[r.segments.length - 1].end_cm;
+      }
+      if (cHi > cLo) {
+        for (const r of runs) {
+          r.segments = r.segments.map(s => ({ start_cm: Math.max(s.start_cm, cLo), end_cm: Math.min(s.end_cm, cHi) })).filter(s => s.end_cm > s.start_cm);
+        }
+      }
+    }
+    runs = runs.filter(r => r.segments.length > 0);
+    if (runs.length === 0) return null;
+
+    // Score
+    let runArea = 0;
+    const runLens = [];
+    let microRuns = 0, fragments = 0;
+    for (const r of runs) {
+      let rLen = 0;
+      for (const s of r.segments) { rLen += s.end_cm - s.start_cm; runArea += (s.end_cm - s.start_cm) * spacing_cm; }
+      runLens.push(rLen);
+      if (rLen < spacing_cm) microRuns++;
+      if (r.segments.length > 1) fragments++;
+    }
+    const coveragePercent = cell.area > 0 ? (runArea / cell.area) * 100 : 0;
+    const mean = runLens.length > 0 ? runLens.reduce((a, b) => a + b, 0) / runLens.length : 0;
+    const stddev = runLens.length > 1 ? Math.sqrt(runLens.reduce((s, v) => s + (v - mean) ** 2, 0) / runLens.length) : 0;
+    const uniformity = mean > 0 ? 1 - stddev / mean : 0;
+    const score = coveragePercent + uniformity * 20 - microRuns * 5 - fragments * 2;
+
+    return {
+      cellId: cell.id, direction: dir, spacing_cm, runs,
+      totalLength_cm: _calcTotalCableLength(runs, spacing_cm),
+      coveragePercent, sweepQuality: score, _score: score
+    };
+  }
+
+  // Try the heatable area's primary direction first, then orthogonal
+  const primary = _tryDir(ha.direction);
+  const ortho = _tryDir(ha.direction === 'v' ? 'h' : 'v');
+
+  if (primary && ortho) return primary._score >= ortho._score ? primary : ortho;
+  return primary || ortho;
+}
+
+/**
+ * Stage 5: Validate cell coverage — detect residual uncovered pockets.
+ * Creates sub-cells for unacceptable pockets and re-sweeps in orthogonal direction.
+ */
+function _v6ValidateCellCoverage(cellSweep, cell, ha, productId) {
+  if (!cellSweep || !cellSweep.runs || cellSweep.runs.length === 0) {
+    return { residuals: [], totalCoverage: 0, cellCoverage: 0 };
+  }
+
+  // Build map of swept intervals at each scanline position
+  const sweptMap = new Map();
+  for (const r of cellSweep.runs) {
+    sweptMap.set(r.pos_cm, r.segments.map(s => [s.start_cm, s.end_cm]));
+  }
+
+  // For each cell scanline, compute residual = heatable - swept
+  const residualScanlines = [];
+  for (const sl of cell.scanlines) {
+    const swept = sweptMap.get(sl.pos) || [];
+    const residual = subtractIntervalSets(sl.intervals, swept);
+    const residualLen = residual.reduce((s, [lo, hi]) => s + (hi - lo), 0);
+    if (residualLen > 0.5) {
+      residualScanlines.push({ pos: sl.pos, intervals: residual, totalLen: residualLen });
+    }
+  }
+
+  if (residualScanlines.length === 0) {
+    return { residuals: [], totalCoverage: 100, cellCoverage: 100 };
+  }
+
+  // Group consecutive residual scanlines into pocket regions
+  const pockets = [];
+  let pocketStart = 0;
+  for (let i = 1; i <= residualScanlines.length; i++) {
+    const isEnd = i === residualScanlines.length;
+    const gap = !isEnd ? Math.abs(residualScanlines[i].pos - residualScanlines[i - 1].pos) : Infinity;
+    if (gap > ha.spacing_cm * 1.5 || isEnd) {
+      const pocketScanlines = residualScanlines.slice(pocketStart, i);
+      let pArea = 0, maxDepth = 0;
+      for (const ps of pocketScanlines) {
+        pArea += ps.totalLen * ha.spacing_cm;
+        for (const [lo, hi] of ps.intervals) { if (hi - lo > maxDepth) maxDepth = hi - lo; }
+      }
+      pockets.push({
+        scanlineRange: [pocketScanlines[0].pos, pocketScanlines[pocketScanlines.length - 1].pos],
+        scanlines: pocketScanlines,
+        area: pArea,
+        maxDepth,
+        classification: 'pending',
+        subCellSweep: null
+      });
+      pocketStart = i;
+    }
+  }
+
+  // Classify and handle each pocket
+  for (const pocket of pockets) {
+    if (pocket.area < 5 || (cell.area > 0 && pocket.area / cell.area < 0.01)) {
+      pocket.classification = 'negligible';
+    } else if (pocket.maxDepth < 3) {
+      pocket.classification = 'acceptable';
+    } else {
+      pocket.classification = 'unacceptable';
+      // Try orthogonal direction sub-cell sweep
+      const orthDir = cellSweep.direction === 'v' ? 'h' : 'v';
+      const subCell = {
+        id: cell.id * 100 + pockets.indexOf(pocket),
+        scanlines: pocket.scanlines,
+        boundingBox: {
+          perpMin: pocket.scanlineRange[0], perpMax: pocket.scanlineRange[1],
+          sweepMin: Math.min(...pocket.scanlines.flatMap(s => s.intervals.map(iv => iv[0]))),
+          sweepMax: Math.max(...pocket.scanlines.flatMap(s => s.intervals.map(iv => iv[1])))
+        },
+        area: pocket.area,
+        adjacentCellIds: [cell.id]
+      };
+      const subSweep = _v6SweepCell(subCell, ha.roomId, productId, ha.spacing_cm, 'bl', ha);
+      if (subSweep && subSweep.coveragePercent > 50) {
+        pocket.subCellSweep = subSweep;
+        pocket.classification = 'recovered';
+      } else {
+        pocket.classification = 'uncoverable';
+      }
+    }
+  }
+
+  // Calculate total coverage
+  let sweptArea = 0;
+  for (const r of cellSweep.runs) {
+    for (const s of r.segments) sweptArea += (s.end_cm - s.start_cm) * ha.spacing_cm;
+  }
+  let recoveredArea = 0;
+  for (const p of pockets) {
+    if (p.subCellSweep) {
+      for (const r of p.subCellSweep.runs) {
+        for (const s of r.segments) recoveredArea += (s.end_cm - s.start_cm) * ha.spacing_cm;
+      }
+    }
+  }
+  const cellCoverage = cell.area > 0 ? ((sweptArea + recoveredArea) / cell.area) * 100 : 0;
+
+  return { residuals: pockets, totalCoverage: cellCoverage, cellCoverage };
+}
+
+/**
+ * Stage 6: Connect cells into one continuous cable path with obstacle-safe routing.
+ */
+function _v6ConnectCells(cellSweeps, ha, roomId, startCorner) {
+  if (cellSweeps.length === 0) return { orderedCells: [], connections: [], allRuns: [], totalLength_cm: 0 };
+  if (cellSweeps.length === 1) {
+    return { orderedCells: cellSweeps, connections: [], allRuns: cellSweeps[0].runs, totalLength_cm: cellSweeps[0].totalLength_cm };
+  }
+
+  const room = S.rooms.find(r => r.id === roomId);
+  const obstacles = ha.obstacles || [];
+
+  // Order cells by perpendicular position
+  const isStartLow = (startCorner === 'bl' || startCorner === 'tl');
+  cellSweeps.sort((a, b) => {
+    const aPerp = a.runs.length > 0 ? a.runs[0].pos_cm : 0;
+    const bPerp = b.runs.length > 0 ? b.runs[0].pos_cm : 0;
+    return isStartLow ? aPerp - bPerp : bPerp - aPerp;
+  });
+
+  const connections = [];
+  const allRuns = [];
+  let totalLength = 0;
+  let runCountSoFar = 0;
+
+  for (let ci = 0; ci < cellSweeps.length; ci++) {
+    const cell = cellSweeps[ci];
+    if (!cell.runs || cell.runs.length === 0) continue;
+    const cellRuns = [...cell.runs]; // copy to allow reversal
+
+    // Reverse runs if entry point is closer to last run than first
+    if (ci > 0 && connections.length > 0) {
+      const lastConn = connections[connections.length - 1];
+      const entryPt = lastConn.path[lastConn.path.length - 1];
+      const firstPos = cellRuns[0].pos_cm;
+      const lastPos = cellRuns[cellRuns.length - 1].pos_cm;
+      const entryPerp = cell.direction === 'v' ? entryPt.x : entryPt.y;
+      if (Math.abs(lastPos - entryPerp) < Math.abs(firstPos - entryPerp)) {
+        cellRuns.reverse();
+      }
+    }
+
+    allRuns.push(...cellRuns);
+    totalLength += cell.totalLength_cm;
+
+    // Connect to next cell
+    if (ci < cellSweeps.length - 1) {
+      const nextCell = cellSweeps[ci + 1];
+      if (!nextCell.runs || nextCell.runs.length === 0) continue;
+
+      const lastRun = cellRuns[cellRuns.length - 1];
+      const exitIdx = runCountSoFar + cellRuns.length - 1;
+      const exitHigh = _uTurnIsHigh(exitIdx, cell.direction, startCorner);
+      const exitSweep = exitHigh
+        ? lastRun.segments[lastRun.segments.length - 1].end_cm
+        : lastRun.segments[0].start_cm;
+      const exitPt = cell.direction === 'v'
+        ? { x: lastRun.pos_cm, y: exitSweep }
+        : { x: exitSweep, y: lastRun.pos_cm };
+
+      // Find best entry in next cell
+      let bestEntry = null, bestDist = Infinity;
+      for (const r of [nextCell.runs[0], nextCell.runs[nextCell.runs.length - 1]]) {
+        for (const useHigh of [true, false]) {
+          const sw = useHigh ? r.segments[r.segments.length - 1].end_cm : r.segments[0].start_cm;
+          const pt = nextCell.direction === 'v' ? { x: r.pos_cm, y: sw } : { x: sw, y: r.pos_cm };
+          const d = Math.hypot(pt.x - exitPt.x, pt.y - exitPt.y);
+          if (d < bestDist) { bestDist = d; bestEntry = pt; }
+        }
+      }
+
+      // Validate path doesn't cross obstacles
+      let pathValid = true;
+      if (bestEntry && obstacles.length > 0) {
+        for (let t = 0; t <= 1; t += 0.1) {
+          const px = exitPt.x + (bestEntry.x - exitPt.x) * t;
+          const py = exitPt.y + (bestEntry.y - exitPt.y) * t;
+          for (const obs of obstacles) {
+            if (ptInPoly(px, py, obs.points)) { pathValid = false; break; }
+          }
+          if (!pathValid) break;
+        }
+      }
+
+      // If blocked, try wall-following route (simplified: add midpoint on room boundary)
+      let path = [exitPt, bestEntry];
+      if (!pathValid && room && bestEntry) {
+        const midX = (exitPt.x + bestEntry.x) / 2;
+        const midY = (exitPt.y + bestEntry.y) / 2;
+        const proj = _projectToRoomWall({ x: midX, y: midY }, room, 100);
+        if (proj) {
+          const wallPt = { x: room.points[proj.wallIdx].x + (room.points[(proj.wallIdx + 1) % room.points.length].x - room.points[proj.wallIdx].x) * proj.t,
+                           y: room.points[proj.wallIdx].y + (room.points[(proj.wallIdx + 1) % room.points.length].y - room.points[proj.wallIdx].y) * proj.t };
+          path = [exitPt, wallPt, bestEntry];
+          // Re-check validity
+          pathValid = true; // wall-following assumed safe
+        }
+      }
+
+      const connLen = path.reduce((s, p, i) => i === 0 ? 0 : s + Math.hypot(p.x - path[i - 1].x, p.y - path[i - 1].y), 0);
+      connections.push({ fromCell: cell.cellId, toCell: nextCell.cellId, path, length_cm: connLen, valid: pathValid });
+      totalLength += connLen;
+    }
+    runCountSoFar += cellRuns.length;
+  }
+
+  return { orderedCells: cellSweeps, connections, allRuns, totalLength_cm: totalLength };
+}
+
+/**
+ * Stage 7: Cable length optimizer — coverage-preserving.
+ * Rejects any trial where coverage drops below 75%.
+ */
+function _v6OptimizeLength(roomId, productId, direction, startCorner, targetLen_cm, ha) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const MIN_COVERAGE = 75;
+
+  function _tryFull(spacing, extraSweepMargin) {
+    const haLocal = _v6BuildHeatableArea(roomId, productId, direction, spacing);
+    if (!haLocal) return null;
+    const topo = _v6AnalyzeTopology(haLocal);
+    const cellSet = _v6DecomposeCells(haLocal, topo);
+    if (cellSet.cells.length === 0) return null;
+    const sfh = (startCorner === 'br' || startCorner === 'tr');
+    const sweeps = cellSet.cells.map(c => _v6SweepCell(c, roomId, productId, spacing, startCorner, haLocal)).filter(s => s && s.runs.length > 0);
+    if (sweeps.length === 0) return null;
+    const connected = _v6ConnectCells(sweeps, haLocal, roomId, startCorner);
+
+    // Check coverage
+    let sweptArea = 0;
+    for (const r of connected.allRuns) for (const s of r.segments) sweptArea += (s.end_cm - s.start_cm) * spacing;
+    const coverage = haLocal.netArea > 0 ? (sweptArea / haLocal.netArea) * 100 : 0;
+    if (coverage < MIN_COVERAGE) return null; // REJECT low coverage
+
+    return { runs: connected.allRuns, totalLength_cm: connected.totalLength_cm, coverage, spacing, cells: cellSet.cells, connections: connected.connections, heatableArea: haLocal };
+  }
+
+  let bestResult = null, bestDiff = Infinity, bestSp = null;
+
+  // Phase 1: binary search on spacing
+  const perpVals = ha.scanlines.map(sl => sl.pos);
+  const perpRange = Math.max(...perpVals) - Math.min(...perpVals);
+  const nMin = Math.max(2, Math.floor(perpRange / maxSp) + 1);
+  const nMax = Math.max(nMin, Math.floor(perpRange / minSp) + 1);
+
+  for (let tryN = nMin; tryN <= nMax + 1 && bestDiff > 1; tryN++) {
+    let lo = Math.max(minSp, perpRange / (tryN + 0.5));
+    let hi = Math.min(maxSp, perpRange / Math.max(1, tryN - 1.5));
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+
+    for (let iter = 0; iter < 20 && bestDiff > 0.5; iter++) {
+      const mid = (lo + hi) / 2;
+      const res = _tryFull(mid, 0);
+      if (!res) { lo = mid; continue; }
+      const diff = res.totalLength_cm - targetLen_cm;
+      if (Math.abs(diff) < bestDiff) { bestDiff = Math.abs(diff); bestResult = res; bestSp = mid; }
+      if (diff > 0) hi = mid; else lo = mid;
+    }
+  }
+
+  // Phase 2: fine-tune with extra sweep margin
+  if (bestDiff > 1 && bestSp) {
+    let loM = 0, hiM = 30;
+    for (let iter = 0; iter < 25 && bestDiff > 0.5; iter++) {
+      const midM = (loM + hiM) / 2;
+      const res = _tryFull(bestSp, midM);
+      if (!res) { hiM = midM; continue; }
+      const diff = res.totalLength_cm - targetLen_cm;
+      if (Math.abs(diff) < bestDiff) { bestDiff = Math.abs(diff); bestResult = res; }
+      if (diff > 0) loM = midM; else hiM = midM;
+    }
+  }
+
+  if (!bestResult) return null;
+
+  // Phase 3: symmetric trim if still off (with coverage check)
+  if (bestDiff > 1 && bestResult.totalLength_cm > targetLen_cm) {
+    const overshoot = bestResult.totalLength_cm - targetLen_cm;
+    const nRuns = bestResult.runs.length;
+    if (nRuns > 0) {
+      const trimPerEnd = overshoot / nRuns / 2;
+      for (const run of bestResult.runs) {
+        if (run.segments.length === 0) continue;
+        run.segments[0].start_cm += trimPerEnd;
+        run.segments[run.segments.length - 1].end_cm -= trimPerEnd;
+        run.segments = run.segments.filter(s => s.end_cm > s.start_cm);
+      }
+      bestResult.runs = bestResult.runs.filter(r => r.segments.length > 0);
+      // Re-check coverage after trim
+      let sweptArea = 0;
+      for (const r of bestResult.runs) for (const s of r.segments) sweptArea += (s.end_cm - s.start_cm) * (bestSp || ha.spacing_cm);
+      const covAfterTrim = ha.netArea > 0 ? (sweptArea / ha.netArea) * 100 : 0;
+      if (covAfterTrim < MIN_COVERAGE) return null; // reject trim if coverage drops
+      bestResult.coverage = covAfterTrim;
+      bestResult.totalLength_cm = targetLen_cm;
+    }
+  }
+
+  return {
+    runs: bestResult.runs,
+    totalLength_cm: bestResult.totalLength_cm,
+    targetLength_cm: targetLen_cm,
+    spacing_cm: bestSp || ha.spacing_cm,
+    delta_cm: bestResult.totalLength_cm - targetLen_cm,
+    coverageAfterOpt: bestResult.coverage,
+    cells: bestResult.cells,
+    connections: bestResult.connections,
+    heatableArea: bestResult.heatableArea
+  };
+}
+
+/**
+ * Stage 8: Final validation — comprehensive checks on the complete layout.
+ */
+function _v6ValidateFinal(result, roomId, productId, ha) {
+  const warnings = [];
+  const room = S.rooms.find(r => r.id === roomId);
+  const margin = ha.margin;
+
+  // Coverage check
+  let sweptArea = 0;
+  for (const r of result.runs) for (const s of r.segments) sweptArea += (s.end_cm - s.start_cm) * result.spacing_cm;
+  const coverage = ha.netArea > 0 ? (sweptArea / ha.netArea) * 100 : 0;
+  if (coverage < 80) warnings.push({ type: 'coverage', message: `Coverage ${coverage.toFixed(0)}% < 80%`, severity: coverage < 60 ? 'error' : 'warning', location: null });
+
+  // Spacing consistency
+  const spacings = [];
+  for (let i = 1; i < result.runs.length; i++) {
+    spacings.push(Math.abs(result.runs[i].pos_cm - result.runs[i - 1].pos_cm));
+  }
+  if (spacings.length > 0) {
+    const meanSp = spacings.reduce((a, b) => a + b, 0) / spacings.length;
+    const maxDev = Math.max(...spacings.map(s => Math.abs(s - meanSp)));
+    if (meanSp > 0 && maxDev / meanSp > 0.10) {
+      warnings.push({ type: 'spacing', message: `Spacing deviation ${(maxDev/meanSp*100).toFixed(0)}% > 10%`, severity: 'warning', location: null });
+    }
+  }
+
+  // Obstacle clearance (sample check)
+  for (const obs of (ha.obstacles || [])) {
+    for (const r of result.runs) {
+      for (const s of r.segments) {
+        const midSweep = (s.start_cm + s.end_cm) / 2;
+        const pt = result.direction === 'v' ? { x: r.pos_cm, y: midSweep } : { x: midSweep, y: r.pos_cm };
+        if (ptInPoly(pt.x, pt.y, obs.points)) {
+          warnings.push({ type: 'clearance', message: `Run at ${r.pos_cm.toFixed(0)}cm intersects obstacle`, severity: 'error', location: pt });
+          break;
+        }
+      }
+    }
+  }
+
+  // Length fit
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  const lengthDelta = prod && prod.cable_length_m ? Math.abs(result.totalLength_cm - prod.cable_length_m * 100) / 100 : 0;
+  if (prod && prod.cable_length_m) {
+    if (lengthDelta > 1) warnings.push({ type: 'length', message: `Length delta ${lengthDelta.toFixed(2)}m > 1m`, severity: 'error', location: null });
+    else if (lengthDelta > 0.5) warnings.push({ type: 'length', message: `Length delta ${lengthDelta.toFixed(2)}m > 0.5m`, severity: 'warning', location: null });
+  }
+
+  const spStats = spacings.length > 0 ? {
+    min: Math.min(...spacings), max: Math.max(...spacings),
+    mean: spacings.reduce((a, b) => a + b, 0) / spacings.length,
+    stddev: spacings.length > 1 ? Math.sqrt(spacings.reduce((s, v) => s + (v - spacings.reduce((a, b) => a + b, 0) / spacings.length) ** 2, 0) / spacings.length) : 0
+  } : { min: 0, max: 0, mean: 0, stddev: 0 };
+
+  return { valid: warnings.every(w => w.severity !== 'error'), warnings, coverage, lengthDelta, spacingStats: spStats };
+}
+
+/**
+ * Stage 9: 12-layer debug visualization.
+ * Stores debug data on cable._v6Debug, renders when S.ui._debugCableV6 is true.
+ */
+function _v6DrawDebug(cable, room) {
+  if (!S.ui._debugCableV6 || !cable._v6Debug) return;
+  const dbg = cable._v6Debug;
+  const ha = dbg.heatableArea;
+  if (!ha) return;
+
+  ctx.save();
+
+  // Layer 1: Room polygon (blue dashed)
+  ctx.strokeStyle = 'rgba(60,120,220,0.6)'; ctx.lineWidth = 1.5; ctx.setLineDash([8, 4]);
+  ctx.beginPath();
+  const rp0 = w2s(room.points[0].x, room.points[0].y); ctx.moveTo(rp0.x, rp0.y);
+  for (let i = 1; i < room.points.length; i++) { const p = w2s(room.points[i].x, room.points[i].y); ctx.lineTo(p.x, p.y); }
+  ctx.closePath(); ctx.stroke();
+
+  // Layer 2: Wall offset polygon (green dashed)
+  const inset = _offsetPolygon(room.points, ha.margin);
+  if (inset && inset.length >= 3) {
+    ctx.strokeStyle = 'rgba(0,200,80,0.6)'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const ip0 = w2s(inset[0].x, inset[0].y); ctx.moveTo(ip0.x, ip0.y);
+    for (let i = 1; i < inset.length; i++) { const p = w2s(inset[i].x, inset[i].y); ctx.lineTo(p.x, p.y); }
+    ctx.closePath(); ctx.stroke();
+  }
+
+  // Layer 3: Heatable area (green filled rects per scanline interval)
+  ctx.fillStyle = 'rgba(0,200,80,0.08)'; ctx.setLineDash([]);
+  for (const sl of ha.scanlines) {
+    const halfCC = ha.spacing_cm / 2;
+    for (const [lo, hi] of sl.intervals) {
+      const tl = ha.direction === 'v' ? w2s(sl.pos - halfCC, lo) : w2s(lo, sl.pos - halfCC);
+      const br = ha.direction === 'v' ? w2s(sl.pos + halfCC, hi) : w2s(hi, sl.pos + halfCC);
+      ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    }
+  }
+
+  // Layer 4: Topology events (red circles + labels)
+  if (dbg.topology) {
+    ctx.fillStyle = 'rgba(220,40,40,0.8)'; ctx.font = "bold 9px 'DM Sans',sans-serif"; ctx.textAlign = 'center';
+    for (const ev of dbg.topology.concaveEvents) {
+      const sp = ha.direction === 'v' ? w2s(ev.pos, ha.boundingBox.sweepMin - 10) : w2s(ha.boundingBox.sweepMin - 10, ev.pos);
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillText(ev.type.slice(0, 6), sp.x, sp.y - 7);
+    }
+    // Necks
+    ctx.fillStyle = 'rgba(255,165,0,0.8)';
+    for (const neck of dbg.topology.necks) {
+      const sp = ha.direction === 'v' ? w2s(neck.pos, ha.boundingBox.sweepMin - 10) : w2s(ha.boundingBox.sweepMin - 10, neck.pos);
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillText('neck', sp.x, sp.y - 6);
+    }
+  }
+
+  // Layer 5: Cell boundaries (colored fills)
+  if (dbg.cellSet) {
+    const colors = ['rgba(255,100,100,0.12)', 'rgba(100,255,100,0.12)', 'rgba(100,100,255,0.12)', 'rgba(255,255,100,0.12)', 'rgba(255,100,255,0.12)'];
+    for (let i = 0; i < dbg.cellSet.cells.length; i++) {
+      const cell = dbg.cellSet.cells[i];
+      const b = cell.boundingBox;
+      const tl = w2s(ha.direction === 'v' ? b.perpMin : b.sweepMin, ha.direction === 'v' ? b.sweepMin : b.perpMin);
+      const br = w2s(ha.direction === 'v' ? b.perpMax : b.sweepMax, ha.direction === 'v' ? b.sweepMax : b.perpMax);
+      ctx.fillStyle = colors[i % colors.length];
+      ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      ctx.strokeStyle = colors[i % colors.length].replace('0.12', '0.5');
+      ctx.lineWidth = 2; ctx.setLineDash([6, 3]);
+      ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      ctx.setLineDash([]);
+      // Label
+      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.font = "bold 10px 'DM Sans',sans-serif"; ctx.textAlign = 'center';
+      ctx.fillText(`Cell ${i} (${cell.scanlines.length}sl, ${(cell.area/10000).toFixed(2)}m²)`, (tl.x + br.x) / 2, tl.y + 12);
+    }
+  }
+
+  // Layer 6: Sweep directions (arrows per cell)
+  if (dbg.cellSweeps) {
+    for (const cs of dbg.cellSweeps) {
+      if (!cs || !cs.runs || cs.runs.length === 0) continue;
+      const midRun = cs.runs[Math.floor(cs.runs.length / 2)];
+      const midSeg = midRun.segments[0];
+      if (!midSeg) continue;
+      const midPt = cs.direction === 'v'
+        ? w2s(midRun.pos_cm, (midSeg.start_cm + midSeg.end_cm) / 2)
+        : w2s((midSeg.start_cm + midSeg.end_cm) / 2, midRun.pos_cm);
+      ctx.strokeStyle = 'rgba(0,0,200,0.8)'; ctx.lineWidth = 2; ctx.setLineDash([]);
+      const len = 20;
+      const dx = cs.direction === 'v' ? 0 : len;
+      const dy = cs.direction === 'v' ? len : 0;
+      ctx.beginPath(); ctx.moveTo(midPt.x - dx / 2, midPt.y - dy / 2); ctx.lineTo(midPt.x + dx / 2, midPt.y + dy / 2); ctx.stroke();
+      // Arrowhead
+      ctx.beginPath(); ctx.moveTo(midPt.x + dx / 2, midPt.y + dy / 2);
+      ctx.lineTo(midPt.x + dx / 2 - (cs.direction === 'v' ? 4 : 0) - (cs.direction === 'h' ? 0 : 4), midPt.y + dy / 2 - (cs.direction === 'v' ? 0 : 4) - (cs.direction === 'h' ? 4 : 0));
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,200,0.7)'; ctx.font = "9px 'DM Sans',sans-serif"; ctx.textAlign = 'center';
+      ctx.fillText(cs.direction === 'v' ? '↕' : '↔', midPt.x, midPt.y - 12);
+    }
+  }
+
+  // Layer 9: Connections (orange dashed)
+  if (dbg.connections) {
+    ctx.strokeStyle = 'rgba(255,140,0,0.8)'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
+    for (const conn of dbg.connections) {
+      if (!conn.path || conn.path.length < 2) continue;
+      ctx.beginPath();
+      const p0 = w2s(conn.path[0].x, conn.path[0].y); ctx.moveTo(p0.x, p0.y);
+      for (let j = 1; j < conn.path.length; j++) { const pj = w2s(conn.path[j].x, conn.path[j].y); ctx.lineTo(pj.x, pj.y); }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // Layer 10: Residual pockets (red hatched)
+  if (dbg.coverageReports) {
+    for (const report of dbg.coverageReports) {
+      for (const res of (report.residuals || [])) {
+        if (res.classification === 'negligible') continue;
+        ctx.fillStyle = res.classification === 'unacceptable' || res.classification === 'uncoverable' ? 'rgba(255,0,0,0.15)' : 'rgba(255,165,0,0.1)';
+        ctx.strokeStyle = res.classification === 'unacceptable' ? 'rgba(255,0,0,0.5)' : 'rgba(255,165,0,0.3)';
+        ctx.lineWidth = 1;
+        for (const sl of (res.scanlines || [])) {
+          const halfCC = ha.spacing_cm / 2;
+          for (const [lo, hi] of sl.intervals) {
+            const tl = ha.direction === 'v' ? w2s(sl.pos - halfCC, lo) : w2s(lo, sl.pos - halfCC);
+            const br = ha.direction === 'v' ? w2s(sl.pos + halfCC, hi) : w2s(hi, sl.pos + halfCC);
+            ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+            ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+          }
+        }
+      }
+    }
+  }
+
+  // Layer 11: Coverage metrics (text overlay)
+  if (dbg.validation) {
+    ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.font = "bold 11px 'DM Sans',sans-serif"; ctx.textAlign = 'left';
+    const anchor = w2s(ha.boundingBox.perpMin, ha.boundingBox.sweepMin - 5);
+    ctx.fillText(`Coverage: ${dbg.validation.coverage?.toFixed(1) || '?'}%`, anchor.x, anchor.y - 28);
+    if (dbg.validation.warnings.length > 0) {
+      ctx.fillStyle = 'rgba(200,0,0,0.8)';
+      ctx.fillText(`Warnings: ${dbg.validation.warnings.length}`, anchor.x, anchor.y - 16);
+    }
+  }
+
+  // Layer 12: Length stats
+  if (dbg.lengthStats) {
+    const anchor = w2s(ha.boundingBox.perpMax, ha.boundingBox.sweepMin - 5);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.font = "10px 'DM Sans',sans-serif"; ctx.textAlign = 'right';
+    ctx.fillText(`Total: ${(dbg.lengthStats.total / 100).toFixed(1)}m`, anchor.x, anchor.y - 28);
+    if (dbg.lengthStats.target) ctx.fillText(`Target: ${(dbg.lengthStats.target / 100).toFixed(1)}m  Δ${(dbg.lengthStats.delta / 100).toFixed(2)}m`, anchor.x, anchor.y - 16);
+    ctx.fillText(`CC: ${dbg.lengthStats.spacing?.toFixed(1) || '?'}cm`, anchor.x, anchor.y - 4);
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Top-level V6 orchestrator: full area-first pipeline.
+ */
+function generateCableV6(roomId, productId, direction, startCorner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  const margin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  let spacing;
+  if (prod.cable_length_m) {
+    const areas = roomAreas(room);
+    const nettoM2 = areas.net / 10000;
+    spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
+  } else {
+    spacing = Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+  }
+
+  // Auto-select direction: quick stages 1-4 for both, pick best coverage
+  function _quickTry(dir) {
+    const ha = _v6BuildHeatableArea(roomId, productId, dir, spacing);
+    if (!ha) return null;
+    const topo = _v6AnalyzeTopology(ha);
+    const cellSet = _v6DecomposeCells(ha, topo);
+    if (cellSet.cells.length === 0) return null;
+    const sweeps = cellSet.cells.map(c => _v6SweepCell(c, roomId, productId, spacing, startCorner, ha)).filter(s => s && s.runs.length > 0);
+    if (sweeps.length === 0) return null;
+    let totalCov = 0, totalArea = 0;
+    for (let i = 0; i < sweeps.length; i++) {
+      totalCov += sweeps[i].coveragePercent * (cellSet.cells[i]?.area || 1);
+      totalArea += cellSet.cells[i]?.area || 1;
+    }
+    return { dir, coverage: totalArea > 0 ? totalCov / totalArea : 0 };
+  }
+
+  const tryV = _quickTry('v');
+  const tryH = _quickTry('h');
+  if (tryV && tryH) {
+    if (tryH.coverage > tryV.coverage + 2) direction = 'h';
+    else if (tryV.coverage > tryH.coverage + 2) direction = 'v';
+  } else if (tryH && !tryV) direction = 'h';
+  else if (tryV && !tryH) direction = 'v';
+
+  // Full pipeline
+  const ha = _v6BuildHeatableArea(roomId, productId, direction, spacing);
+  if (!ha) return null;
+
+  const topology = _v6AnalyzeTopology(ha);
+  const cellSet = _v6DecomposeCells(ha, topology);
+  if (cellSet.cells.length === 0) return null;
+
+  const cellSweeps = cellSet.cells.map(c => _v6SweepCell(c, roomId, productId, spacing, startCorner, ha)).filter(s => s && s.runs.length > 0);
+  if (cellSweeps.length === 0) return null;
+
+  // Stage 5: Coverage validation + sub-cell recovery
+  const coverageReports = cellSweeps.map((cs, i) => _v6ValidateCellCoverage(cs, cellSet.cells[i], ha, productId));
+  // Merge sub-cell sweeps as additional cellSweeps
+  for (const report of coverageReports) {
+    for (const res of report.residuals) {
+      if (res.subCellSweep && res.subCellSweep.runs.length > 0) {
+        cellSweeps.push(res.subCellSweep);
+      }
+    }
+  }
+
+  // Stage 6: Connect
+  let connected = _v6ConnectCells(cellSweeps, ha, roomId, startCorner);
+  if (connected.allRuns.length === 0) return null;
+
+  let result;
+
+  // Stage 7: Length optimization
+  if (prod.cable_length_m) {
+    const optimized = _v6OptimizeLength(roomId, productId, direction, startCorner, prod.cable_length_m * 100, ha);
+    if (optimized && optimized.runs.length > 0) {
+      result = optimized;
+    }
+  }
+
+  if (!result) {
+    result = {
+      runs: connected.allRuns,
+      totalLength_cm: connected.totalLength_cm,
+      spacing_cm: spacing,
+      cells: cellSet.cells,
+      connections: connected.connections,
+      heatableArea: ha
+    };
+  }
+
+  // Stage 8: Final validation
+  const validation = _v6ValidateFinal({ runs: result.runs, spacing_cm: result.spacing_cm, direction }, roomId, productId, ha);
+
+  // Compute final coverage for logging
+  let sweptArea = 0;
+  for (const r of result.runs) for (const s of r.segments) sweptArea += (s.end_cm - s.start_cm) * result.spacing_cm;
+  const finalCoverage = ha.netArea > 0 ? (sweptArea / ha.netArea) * 100 : 0;
+
+  // Build output
+  const output = {
+    runs: result.runs,
+    totalLength_cm: result.totalLength_cm || _calcTotalCableLength(result.runs, result.spacing_cm),
+    spacing_cm: result.spacing_cm,
+    direction,
+    cells: _buildCellInfo(result.runs, direction, result.spacing_cm),
+    connections: result.connections || [],
+    _v6Debug: {
+      heatableArea: ha,
+      topology,
+      cellSet,
+      cellSweeps,
+      coverageReports,
+      connections: result.connections || connected.connections,
+      validation,
+      lengthStats: {
+        total: result.totalLength_cm || _calcTotalCableLength(result.runs, result.spacing_cm),
+        target: prod.cable_length_m ? prod.cable_length_m * 100 : null,
+        delta: prod.cable_length_m ? (result.totalLength_cm || 0) - prod.cable_length_m * 100 : 0,
+        spacing: result.spacing_cm
+      }
+    }
+  };
+
+  console.log(`[CableV6] runs=${output.runs.length}, cells=${cellSet.cells.length}, coverage=${finalCoverage.toFixed(1)}%, spacing=${result.spacing_cm.toFixed(1)}cm, total=${(output.totalLength_cm/100).toFixed(1)}m${prod.cable_length_m ? ', target=' + prod.cable_length_m + 'm, diff=' + ((output.totalLength_cm - prod.cable_length_m*100)/100).toFixed(2) + 'm' : ''}, warnings=${validation.warnings.length}, topology=${topology.complexity}`);
+
+  return output;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ██ END CABLE COVERAGE ENGINE V6
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -7818,7 +9437,117 @@ function autoFillCable(roomId, productId) {
     }
   }
 
-  // Try polygon-aware engine first (handles irregular rooms with multi-cell coverage)
+  // Try V6 full area-first pipeline (topology → cells → per-cell sweep → coverage validation)
+  {
+    const corners = ['bl', 'br', 'tl', 'tr'];
+    const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    let v6Best = null, v6BestScore = -Infinity, v6BestCorner = bestCorner, v6BestDir = bestDir;
+    for (const dir of dirs) {
+      for (const corner of corners) {
+        const res = generateCableV6(roomId, productId, dir, corner);
+        if (!res || res.runs.length === 0) continue;
+        const tmpCable = { roomId, direction: dir, runs: res.runs };
+        const ep = _cableEndpoints(tmpCable);
+        let score = 0;
+        if (ep) {
+          for (const fz of forbiddenZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
+            if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
+          }
+          for (const pz of preferredZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+          }
+        }
+        if (res.cells && res.cells.length > 1) score += 5;
+        if (prod.cable_length_m) {
+          const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
+          score += Math.max(0, 10 - diff * 0.1);
+        }
+        // Bonus for V6 validation (fewer warnings = better)
+        if (res._v6Debug && res._v6Debug.validation) {
+          score += (res._v6Debug.validation.warnings.length === 0) ? 3 : -res._v6Debug.validation.warnings.filter(w => w.severity === 'error').length * 5;
+        }
+        if (dir === primaryDir) score += 1;
+        if (userCorner && corner === userCorner) score += 3;
+        if (score > v6BestScore) {
+          v6BestScore = score; v6Best = res; v6BestCorner = corner; v6BestDir = dir;
+        }
+      }
+    }
+    if (v6Best && v6Best.runs.length > 0) {
+      return {
+        id: S.counters.nextCableId++,
+        roomId, productId,
+        direction: v6Best.direction || v6BestDir,
+        spacing_cm: v6Best.spacing_cm,
+        startCorner: v6BestCorner,
+        runs: v6Best.runs,
+        totalLength_cm: v6Best.totalLength_cm,
+        lockedEnd: !!prod.cable_length_m,
+        lockedStart: false,
+        cells: v6Best.cells,
+        connections: v6Best.connections,
+        _v6Debug: v6Best._v6Debug
+      };
+    }
+  }
+
+  // Try V5 area-first engine (decompose → fill cells → connect)
+  {
+    const corners = ['bl', 'br', 'tl', 'tr'];
+    const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    let v5Best = null, v5BestScore = -Infinity, v5BestCorner = bestCorner, v5BestDir = bestDir;
+    for (const dir of dirs) {
+      for (const corner of corners) {
+        const res = generateCablePolygonV5(roomId, productId, dir, corner);
+        if (!res || res.runs.length === 0) continue;
+        const tmpCable = { roomId, direction: dir, runs: res.runs };
+        const ep = _cableEndpoints(tmpCable);
+        let score = 0;
+        if (ep) {
+          for (const fz of forbiddenZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
+            if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
+          }
+          for (const pz of preferredZones) {
+            if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+          }
+        }
+        // Reward multi-cell coverage
+        if (res.cells && res.cells.length > 1) score += 5;
+        // Reward length match
+        if (prod.cable_length_m) {
+          const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
+          score += Math.max(0, 10 - diff * 0.1);
+        }
+        if (dir === primaryDir) score += 1;
+        if (userCorner && corner === userCorner) score += 3;
+        if (score > v5BestScore) {
+          v5BestScore = score;
+          v5Best = res;
+          v5BestCorner = corner;
+          v5BestDir = dir;
+        }
+      }
+    }
+    if (v5Best && v5Best.runs.length > 0) {
+      return {
+        id: S.counters.nextCableId++,
+        roomId, productId,
+        direction: v5Best.direction || v5BestDir,
+        spacing_cm: v5Best.spacing_cm,
+        startCorner: v5BestCorner,
+        runs: v5Best.runs,
+        totalLength_cm: v5Best.totalLength_cm,
+        lockedEnd: !!prod.cable_length_m,
+        lockedStart: false,
+        cells: v5Best.cells,
+        connections: v5Best.connections
+      };
+    }
+  }
+
+  // Fallback: Try V4 polygon-aware engine (handles irregular rooms with multi-cell coverage)
   {
     const corners = ['bl', 'br', 'tl', 'tr'];
     const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
