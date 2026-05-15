@@ -2097,6 +2097,7 @@ const S = {
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   varmekabel: { targetWm2: 130, screedThicknessCm: 4 },
+  varmematte: { gapCm: 0 },   // gap between mats (cm). User-controlled, 0-5cm range.
   documentation: {},  // keyed by roomId: {checklist, measurements, photos, signature, notes}
   bgs: {}   // keyed by floor id (number) or '__global__'
 };
@@ -2142,6 +2143,7 @@ function _savePrefs() {
       theme:       S.ui.theme,
       snap:        { ...S.snap },
       gapCm:       S.varmefolie.gapCm,
+      matGapCm:    S.varmematte.gapCm,
       showLabels:  S.ui.showStripLabels
     };
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
@@ -2152,6 +2154,7 @@ function _applyPrefs() {
   if (p.theme)      S.ui.theme = p.theme;
   if (p.snap)       Object.assign(S.snap, p.snap);
   if (p.gapCm != null) S.varmefolie.gapCm = p.gapCm;
+  if (p.matGapCm != null) S.varmematte.gapCm = p.matGapCm;
   if (p.showLabels != null) S.ui.showStripLabels = p.showLabels;
 }
 _applyPrefs();
@@ -3875,7 +3878,9 @@ function autoFillMatSerpentine(productId) {
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
   const marginCm = (prod.min_wall_margin_mm || 50) / 10;
-  const gapCm = (prod.min_gap_mm || 20) / 10;
+  // Mat gap is user-controlled (0–5 cm), defaults to 0 for max coverage.
+  // The supplier's min_gap_mm is treated as a recommendation, not a hard floor.
+  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
   const totalLengthCm = prod.mat_total_length_mm ? prod.mat_total_length_mm / 10 : null;
   const isFixedLength = totalLengthCm !== null;
@@ -10121,6 +10126,52 @@ function hideGapPanel() {
   document.getElementById('gap-panel').style.display = 'none';
 }
 
+// ─── AVSTAND MELLOM VARMEMATTER (GAP-PANEL) ───────────────────
+function openMatGapPanel(e) {
+  e.stopPropagation();
+  const gapMm = Math.round((S.varmematte.gapCm || 0) * 10);
+  const presets = [0, 10, 20, 30, 40, 50];   // 0–5 cm
+  const presetBtns = presets.map(mm => {
+    const on = gapMm === mm ? ' on' : '';
+    return `<button class="gap-preset-btn${on}" onclick="setMatGap(${mm})">${mm/10} cm</button>`;
+  }).join('');
+  const panel = document.getElementById('gap-panel');
+  panel.innerHTML = `
+    <div class="gap-title">Avstand mellom matter</div>
+    <div class="gap-presets">${presetBtns}</div>
+    <div class="gap-custom-row">
+      <span class="gap-custom-lbl">Egendefinert:</span>
+      <input id="mat-gap-mm-input" class="gap-mm-input" type="number" min="0" max="50" step="1" value="${gapMm}"
+        onclick="event.stopPropagation()"
+        oninput="setMatGap(Math.max(0, Math.min(50, parseFloat(this.value)||0)), true)" />
+      <span class="gap-custom-lbl">mm (maks 5 cm)</span>
+    </div>`;
+  const W = window.innerWidth, H = window.innerHeight;
+  panel.style.display = 'block';
+  const pw = panel.offsetWidth || 270, ph = panel.offsetHeight || 120;
+  panel.style.left = Math.min(e.clientX, W - pw - 8) + 'px';
+  panel.style.top  = Math.min(e.clientY + 8, H - ph - 8) + 'px';
+}
+
+// gapMm: gap in millimetres, clamped to 0–50 mm (0–5 cm).
+// Just stores the preference — does not re-run auto-layout; the next
+// "Fyll rom" call picks it up.
+function setMatGap(gapMm, _live) {
+  S.varmematte.gapCm = Math.max(0, Math.min(50, gapMm)) / 10;
+  _savePrefs();
+  // Refresh preset highlight in the panel without flicker
+  const panel = document.getElementById('gap-panel');
+  if (panel && panel.style.display !== 'none') {
+    const buttons = panel.querySelectorAll('.gap-preset-btn');
+    const mm = Math.round(S.varmematte.gapCm * 10);
+    buttons.forEach(b => {
+      const v = parseFloat(b.textContent) * 10;
+      b.classList.toggle('on', Math.round(v) === mm);
+    });
+  }
+  updateCtxBar();
+}
+
 // gapMm: desired gap in millimetres; skipUndo = true when called live from input field
 function setRoomGap(roomId, gapMm, skipUndo) {
   const gapCm = Math.max(0, gapMm) / 10;
@@ -11549,7 +11600,7 @@ function drawMats() {
       }
     }
 
-    // Label
+    // Label \u2014 written along the length axis so it stays readable in either rotation
     if (S.view.zoom > 0.38 && !isOtherRoom) {
       const label = prod ? prod.name : 'Matte';
       const nR = numRuns > 1 ? ` \u00d7${numRuns}` : '';
@@ -11559,8 +11610,13 @@ function drawMats() {
       ctx.font = "10px 'DM Sans',sans-serif";
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      // In mat-local coords, length runs along the Y axis. Rotate the text -90\u00b0
+      // so it reads along that long axis instead of crossing the narrow width.
+      ctx.save();
+      ctx.rotate(-Math.PI / 2);
       ctx.fillText(label, 0, -6);
       ctx.fillText(dims, 0, 6);
+      ctx.restore();
     }
 
     ctx.restore();
@@ -23935,11 +23991,14 @@ function _ctxBarItems() {
          <span style="font-size:11px;padding:0 2px;color:var(--dim)">${nR} lgd</span>
          <button class="snap-chip" onclick="_matChangeRuns(1)" title="Legg til lengde"${nR >= maxPossibleRuns ? ' disabled' : ''}>+</button>`
       : '';
+    const matGapCm = (S.varmematte?.gapCm || 0);
     return `<span class="ctxbar-lbl">\u{1F7EB} Matte</span>
       <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Matte'} \u2014 ${lenInfo} \u00b7 ${watt} W</span>
       ${excessHtml}${runsHtml}
       <button class="snap-chip" onclick="_matRotate90()" title="Roter 90\u00b0">\u21bb 90\u00b0</button>
       <span style="font-size:11px;padding:0 2px;color:var(--dim)">${rotDeg}\u00b0</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="openMatGapPanel(event)" title="Avstand mellom matter (p\u00e5virker neste auto-fyll)">\u2194 ${matGapCm} cm</button>
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="deleteMat(${ui.selectedMatId})" title="Slett matte">\u{1F5D1} Slett</button>`;
   }
@@ -24282,6 +24341,7 @@ function _buildSaveData() {
     view       : {...S.view},
     varmefolie : {...S.varmefolie},
     varmekabel : {...S.varmekabel},
+    varmematte : {...S.varmematte},
     bgs: Object.fromEntries(
       Object.entries(S.bgs)
         .filter(([,bg]) => bg.dataUrl)
