@@ -1277,6 +1277,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
       <div id="stair-settings-panel" style="display:none;position:absolute;top:40px;right:8px;z-index:50"></div>
       <div id="snow-settings-panel" style="display:none;position:absolute;top:40px;right:8px;z-index:50"></div>
       <div id="zoom-badge">100%</div>
+      <div id="render-stats" style="display:none;position:absolute;top:8px;left:50%;transform:translateX(-50%);background:rgba(20,22,28,0.92);color:#22d3ee;font:11px/1.2 'DM Mono',ui-monospace,monospace;padding:4px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;z-index:60;pointer-events:none">— fps</div>
 
       <!-- ROOM WORKFLOW PANEL (fixed top-left of canvas) -->
       <div id="room-workflow-panel" style="display:none">
@@ -2221,6 +2222,7 @@ function resizeCanvas() {
   const wrap = document.getElementById('canvas-wrap');
   canvas.width  = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
+  markDirty();   // canvas resize clears the buffer — must redraw
 }
 window.addEventListener('resize', resizeCanvas);
 
@@ -2374,6 +2376,56 @@ let _needsRender = true;
 
 /** Mark canvas as needing a re-render. The rAF loop will pick it up. */
 function markDirty() { _needsRender = true; }
+
+/**
+ * Returns true if any drag/rotation/pan/interaction is currently in progress.
+ * Used as a safety net in the mousemove handler — any active drag will trigger
+ * a re-render even if the specific drag branch doesn't call markDirty().
+ *
+ * Keep this list in sync with the let-declared module-level interaction flags
+ * (search for `let _\\w+Dragging` and similar). Adding a new drag flag without
+ * adding it here will cause the drag to appear frozen until mouseup.
+ */
+function _anyInteractionActive() {
+  return (
+    _panning || _dragging ||
+    _roomDragging || _movingWall || _hwMoving ||
+    _stripDragging || _sgDragging || _sgEndDragging ||
+    _groupDragging || _groupEndDragging ||
+    _dhDragging || _dhRotating ||
+    _matDragging || _matRotating ||
+    _plateDragging || _stairDragging ||
+    _vdDragging || _vdPending ||
+    _dimOffDragging || _annotDragging ||
+    _cardDragging || _cableLabelDragging || _cableGizmoDragging ||
+    _thDragging || _mmDragging || _vfPickDrag
+  );
+}
+
+/**
+ * Updates the FPS counter widget if visible. No-op if widget isn't in DOM.
+ * Hidden behind Ctrl+Shift+P (P for performance).
+ */
+function _updateRenderStatsWidget() {
+  const el = document.getElementById('render-stats');
+  if (!el || el.style.display === 'none') return;
+  el.textContent = `${_renderFps} fps · ${_renderCount} total`;
+}
+
+// Idle FPS reporter: when render loop is paused (no mutations), the widget
+// wouldn't otherwise update. This interval ticks every 500ms and resets the
+// displayed fps to 0 if no renders happened in the last second.
+setInterval(() => {
+  const el = document.getElementById('render-stats');
+  if (!el || el.style.display === 'none') return;
+  const now = performance.now();
+  if (now - _renderTickStart >= 1000) {
+    _renderFps = 0;
+    _renderTickStart = now;
+    _renderTickCount = 0;
+    el.textContent = `0 fps · ${_renderCount} total`;
+  }
+}, 500);
 
 function render() {
   _needsRender = false;   // we're rendering now — rAF loop can skip until next change
@@ -15884,6 +15936,7 @@ function _vfDirEvt(e) {
   if (_vfPickCv) _drawVfPicker(_vfPickCv, _vfPickHover);
   const lbl2 = document.getElementById('vf-pick-lbl');
   if (lbl2) { lbl2.textContent = '\u2713 ' + _vfPickerLabel(); lbl2.style.color='var(--accent,#22d3ee)'; lbl2.style.fontWeight='600'; }
+  markDirty();   // direction change affects auto-fill arrows on canvas
 }
 
 function vfPanelHtml(room) {
@@ -18327,6 +18380,10 @@ function dupeRoom(id) {
 
 // ─── SIDEBAR ─────────────────────────────────────────────────
 function renderSidebar() {
+  // Anything that changes the sidebar likely also affects the canvas (selection,
+  // rooms, strips, etc.). Over-marking is cheap (1 render/frame) and prevents
+  // missing edge cases.
+  markDirty();
   let h='';
   const hasParts = S.project.parts.length > 0;
 
@@ -21334,6 +21391,7 @@ function pushUndo() {
   if (_undoStack.length>UNDO_MAX) _undoStack.shift();
   _updUndoBtn();
   _scheduleAutoSave();
+  markDirty();   // any state change tracked by undo must trigger a re-render
 }
 function undo() {
   if (_undoStack.length===0) return;
@@ -21420,6 +21478,9 @@ function undo() {
     S.ui.activeFloorId = S.floors.length > 0 ? S.floors[0].id : null;
   }
   _updUndoBtn(); renderSidebar(); updateWip();
+  // Force violations recompute on undo since strip/cable contents may have changed
+  _invalidateViolations(); _cableViolationsDirty = true;
+  markDirty();
 }
 function _updUndoBtn() {
   const btn=document.getElementById('chip-undo'); if(!btn) return;
@@ -22389,6 +22450,11 @@ canvas.addEventListener('mousedown', e=>{
 });
 
 canvas.addEventListener('mousemove', e=>{
+  // Safety net: any active drag/interaction triggers a re-render this frame,
+  // regardless of whether the specific branch below calls render()/markDirty().
+  // This is what makes the conditional rAF loop safe — see _anyInteractionActive().
+  if (_anyInteractionActive()) markDirty();
+
   // Cable label drag
   if (_cableLabelDragging && _cableLabelDragId !== null) {
     const cable = S.cables.find(c => c.id === _cableLabelDragId);
@@ -23271,6 +23337,7 @@ canvas.addEventListener('wheel', e=>{
   S.view.panX+=before.x-after.x;
   S.view.panY+=before.y-after.y;
   document.getElementById('zoom-badge').textContent=Math.round(nz*100)+'%';
+  markDirty();
 },{passive:false});
 
 canvas.addEventListener('contextmenu', e=>{
@@ -23416,6 +23483,9 @@ function insertCornerPoint(roomId, wallId, wx, wy) {
 document.addEventListener('keydown', e=>{
   if (e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
   S.shiftHeld=e.shiftKey;
+  // Broad safety net: most canvas-focused keys (Esc, arrows, delete, R, etc.)
+  // change state. One extra render per key is cheap insurance.
+  markDirty();
 
   if (e.key==='Escape') {
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
@@ -23457,6 +23527,22 @@ document.addEventListener('keydown', e=>{
     e.preventDefault();
     const btn=document.getElementById('btn-import-products');
     if(btn){const on=btn.style.display!=='none'; btn.style.display=on?'none':''; }
+    return;
+  }
+  // Ctrl+Shift+P = toggle render-stats overlay (renders/sec + total renders)
+  // Use to verify dirty-flag rendering is working — should be 0 fps at idle.
+  if ((e.ctrlKey||e.metaKey)&&e.shiftKey&&(e.key==='P'||e.key==='p')) {
+    e.preventDefault();
+    const el=document.getElementById('render-stats');
+    if (el) {
+      const showing = el.style.display !== 'none';
+      el.style.display = showing ? 'none' : 'block';
+      if (!showing) {
+        _renderTickStart = performance.now();
+        _renderTickCount = 0;
+        el.textContent = `0 fps · ${_renderCount} total`;
+      }
+    }
     return;
   }
   // Edit 6: Ctrl+R = rotate mode, Ctrl+F = move mode
@@ -23788,6 +23874,7 @@ function updateCtxBar() {
   _updateVfDirVisibility();
   _updateStairSettingsPanel();
   updHint();
+  markDirty();   // ctx bar updates correlate with selection state — canvas often needs refresh
 }
 
 function _ctxBarItems() {
@@ -28130,6 +28217,11 @@ function _showNewCustomerPopup() {
 async function _createCustomerFromPopup() {
   const name = document.getElementById('ncp-name')?.value?.trim();
   if (!name) { const m=document.getElementById('ncp-msg'); if(m){m.style.display='block';m.textContent='Kundenavn er påkrevd';} return; }
+  if (!_userOrg || !_userOrg.id) {
+    const m=document.getElementById('ncp-msg');
+    if(m){m.style.display='block';m.textContent='Du er ikke knyttet til en organisasjon. Kontakt administrator.';}
+    return;
+  }
   try {
     const row = {
       org_id: _userOrg.id,
@@ -30540,17 +30632,36 @@ _dbgWatch(canvas, 'wheel',      'canvas/wheel');
 _dbgWatch(document, 'keydown',  'doc/keydown');
 
 // ─── RENDER LOOP ──────────────────────────────────────────────
+// Conditional rAF loop — only renders when _needsRender is true.
+// Saves ~60fps of idle CPU. Mutations must call markDirty() (or render() directly)
+// to schedule a redraw. _anyInteractionActive() in mousemove acts as safety net
+// for active drag operations.
+let _renderCount = 0;        // total renders since load (for FPS counter widget)
+let _renderTickStart = 0;    // perf timestamp of last fps-bucket
+let _renderTickCount = 0;    // renders in current fps-bucket
+let _renderFps = 0;          // most recent measured fps
 (function loop(){
-  _debug.lastRenderStart = performance.now();
-  _debug.renderInFlight = true;
-  try {
-    render();
-  } catch(e) {
-    _debug.pushError(e);
-    console.error('[render]', e);
+  if (_needsRender) {
+    _debug.lastRenderStart = performance.now();
+    _debug.renderInFlight = true;
+    try {
+      render();
+    } catch(e) {
+      _debug.pushError(e);
+      console.error('[render]', e);
+    }
+    _debug.lastRenderEnd = performance.now();
+    _debug.renderInFlight = false;
+    _renderCount++;
+    _renderTickCount++;
+    const now = performance.now();
+    if (now - _renderTickStart >= 1000) {
+      _renderFps = Math.round(_renderTickCount * 1000 / (now - _renderTickStart));
+      _renderTickStart = now;
+      _renderTickCount = 0;
+      _updateRenderStatsWidget();
+    }
   }
-  _debug.lastRenderEnd = performance.now();
-  _debug.renderInFlight = false;
   requestAnimationFrame(loop);
 })();
 </script>
