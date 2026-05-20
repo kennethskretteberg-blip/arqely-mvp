@@ -3952,8 +3952,10 @@ function autoFillMatSerpentine(productId) {
   const totalLengthCm = prod.mat_total_length_mm ? prod.mat_total_length_mm / 10 : null;
   const isFixedLength = totalLengthCm !== null;
 
-  // Determine layout direction via PCA
-  const dir = _suggestDirection(room);  // 'h' or 'v'
+  // Respect user's direction choice (set via the workflow-panel direction
+  // picker, shared with varmefolie). Fall back to PCA suggestion if unset.
+  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+  const dir = userDir || _suggestDirection(room);
 
   // Room bounding box
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -3976,60 +3978,60 @@ function autoFillMatSerpentine(productId) {
   if (runLengthCm < minLenCm) runLengthCm = minLenCm;
   if (runLengthCm > alongSpan) { alert('Rommet er for kort for denne matten'); return; }
 
+  // Always one mat object with num_runs (matches the physical product:
+  // a single mat/roll cut into serpentine lengths, not N separate mats).
+  // For fixed-length products, runs are capped at totalLengthCm/runLengthCm
+  // so the order doesn't exceed what the user actually has.
+  const maxRuns = Math.floor((acrossSpan + gapCm) / (matWidthCm + gapCm));
+  if (maxRuns <= 0) return;
+  let actualRuns = maxRuns;
   if (isFixedLength) {
-    // ── Fixed-length product: ONE mat object with num_runs ──
-    const maxRuns = Math.floor((acrossSpan + gapCm) / (matWidthCm + gapCm));
-    if (maxRuns <= 0) return;
     const neededRuns = Math.floor(totalLengthCm / runLengthCm);
-    const actualRuns = Math.min(maxRuns, neededRuns);
-    if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
+    actualRuns = Math.min(maxRuns, neededRuns);
+  }
+  if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
 
-    pushUndo();
+  pushUndo();
 
-    // Center the multi-run group in the room
-    const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * gapCm;
-    const acrossCenter = (acrossMin + acrossMax) / 2;
-    const alongCenter = (alongMin + alongMax) / 2;
-    const acrossStart = acrossCenter - totalW / 2;
-    const alongStart = alongCenter - runLengthCm / 2;
+  const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * gapCm;
+  const acrossCenter = (acrossMin + acrossMax) / 2;
+  const alongCenter = (alongMin + alongMax) / 2;
 
-    let matX, matY;
-    if (dir === 'h') {
-      // rotation=90: width_cm maps to Y, length_cm maps to X in world
-      // Center = (x_cm + totalW/2, y_cm + runLengthCm/2)
-      // We need center at (alongCenter, acrossCenter)
-      matX = alongCenter - totalW / 2;
-      matY = acrossCenter - runLengthCm / 2;
-    } else {
-      // rotation=0: width_cm maps to X, length_cm maps to Y
-      matX = acrossStart;
-      matY = alongStart;
-    }
+  // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
+  // along-axis dimension before rotation. rotation_deg=90 swaps them in world.
+  let matX, matY;
+  if (dir === 'h') {
+    matX = alongCenter - totalW / 2;
+    matY = acrossCenter - runLengthCm / 2;
+  } else {
+    matX = acrossCenter - totalW / 2;
+    matY = alongCenter - runLengthCm / 2;
+  }
 
-    const mat = {
-      id: S.counters.nextMatId++,
-      roomId: room.id,
-      productId: productId,
-      x_cm: matX,
-      y_cm: matY,
-      width_cm: matWidthCm,
-      length_cm: runLengthCm,
-      num_runs: actualRuns,
-      rotation_deg: dir === 'h' ? 90 : 0
-    };
-    S.mats.push(mat);
+  const mat = {
+    id: S.counters.nextMatId++,
+    roomId: room.id,
+    productId: productId,
+    x_cm: matX,
+    y_cm: matY,
+    width_cm: matWidthCm,
+    length_cm: runLengthCm,
+    num_runs: actualRuns,
+    rotation_deg: dir === 'h' ? 90 : 0
+  };
+  S.mats.push(mat);
 
-    _invalidateMatCache();
-    _trackProductUsage(productId);
-    S.ui.selectedMatId = mat.id;
-    const box = document.getElementById('rwp-product-actions');
-    if (box) box.style.display = 'none';
-    renderSidebar(); updateCtxBar(); render();
+  _invalidateMatCache();
+  _trackProductUsage(productId);
+  S.ui.selectedMatId = mat.id;
+  const box = document.getElementById('rwp-product-actions');
+  if (box) box.style.display = 'none';
+  renderSidebar(); updateCtxBar(); render();
 
-    // Check for excess
-    const usedLengthCm = actualRuns * runLengthCm;
+  const usedLengthCm = actualRuns * runLengthCm;
+  if (isFixedLength) {
     const excessCm = totalLengthCm - usedLengthCm;
-    if (excessCm > 10) { // more than 10cm excess
+    if (excessCm > 10) {
       const excessM = (excessCm / 100).toFixed(1);
       let msg = `⚠ Overskudd: ${excessM}m matte`;
       if (prod.cable_length_m && totalLengthCm > 0) {
@@ -4040,76 +4042,9 @@ function autoFillMatSerpentine(productId) {
       msg += ' — kan legges løst med limpistol';
       _showToast(msg, 'warning');
     }
-
-    console.log(`autoFillMatSerpentine: 1 matte, ${actualRuns} lengder × ${runLengthCm}cm, brukt ${usedLengthCm}cm / ${totalLengthCm}cm, retning=${dir}`);
-
-  } else {
-    // ── Variable-length product: old behavior (multiple independent mats) ──
-    const maxLenCm = (prod.mat_max_length_mm || 10000) / 10;
-    const nRows = Math.floor((acrossSpan + gapCm) / (matWidthCm + gapCm));
-    if (nRows <= 0) return;
-
-    const totalAcross = nRows * matWidthCm + (nRows - 1) * gapCm;
-    const acrossOffset = acrossMin + (acrossSpan - totalAcross) / 2;
-
-    pushUndo();
-    const mats = [];
-
-    for (let row = 0; row < nRows; row++) {
-      const rowCenter = acrossOffset + matWidthCm / 2 + row * (matWidthCm + gapCm);
-      const rowEdge = rowCenter - matWidthCm / 2;
-      const intervals = clipStripToRoom(rowEdge, matWidthCm, dir, room.points, marginCm);
-
-      for (const [segStart, segEnd] of intervals) {
-        let availLen = segEnd - segStart;
-        if (availLen < minLenCm) continue;
-        let matLen = cutCm > 0 ? Math.floor(availLen / cutCm) * cutCm : availLen;
-        if (matLen > maxLenCm) matLen = cutCm > 0 ? Math.floor(maxLenCm / cutCm) * cutCm : maxLenCm;
-        if (matLen < minLenCm) matLen = minLenCm;
-        if (matLen > availLen) continue;
-
-        const segCenter = (segStart + segEnd) / 2;
-        const rowCtr = rowEdge + matWidthCm / 2;
-        let matX, matY;
-        if (dir === 'h') {
-          matX = segCenter - matWidthCm / 2;
-          matY = rowCtr - matLen / 2;
-        } else {
-          matX = rowEdge;
-          matY = segCenter - matLen / 2;
-        }
-
-        const mat = {
-          id: S.counters.nextMatId++,
-          roomId: room.id,
-          productId: productId,
-          x_cm: matX, y_cm: matY,
-          width_cm: matWidthCm,
-          length_cm: matLen,
-          num_runs: 1,
-          rotation_deg: dir === 'h' ? 90 : 0
-        };
-        S.mats.push(mat);
-        mats.push(mat);
-      }
-    }
-
-    if (mats.length === 0) {
-      S.undoStack.pop();
-      alert('Ingen matter passer i dette rommet');
-      return;
-    }
-
-    _invalidateMatCache();
-    _trackProductUsage(productId);
-    S.ui.selectedMatId = mats[0].id;
-    const box = document.getElementById('rwp-product-actions');
-    if (box) box.style.display = 'none';
-    renderSidebar(); updateCtxBar(); render();
-
-    const totalLen = mats.reduce((s, m) => s + m.length_cm, 0);
-    console.log(`autoFillMatSerpentine: ${mats.length} rader, total lengde ${totalLen}cm, retning=${dir}`);
   }
+
+  console.log(`autoFillMatSerpentine: 1 matte, ${actualRuns} lengder × ${runLengthCm}cm = ${usedLengthCm}cm total, retning=${dir}`);
 }
 
 function showVfPlacePanel(familyName, categoryId) {
