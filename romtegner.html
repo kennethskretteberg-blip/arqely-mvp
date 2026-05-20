@@ -3994,13 +3994,11 @@ function autoFillMatSerpentine(productId) {
 
   // ── Variant picker ─────────────────────────────────────────────
   // Mats come in many sizes (e.g. EcoMat 100T: 1 m² … 15 m²). The user
-  // can pick any specific size, but for auto-fill we want the largest
-  // variant in the family that does NOT exceed the room's ideal need —
-  // an undersized mat with leftover area is the expected default.
-  // Variants must share width and family with the picked product. We
-  // accept multiple family-key forms because Supabase data isn't always
-  // tagged with product_family, so we also strip the size suffix from
-  // the name (e.g. "EcoMat 60T 0.5×4m" → "EcoMat 60T") and match siblings.
+  // picks any specific size; auto-fill prefers the SMALLEST variant
+  // whose total length covers the room's ideal need — so all room runs
+  // are filled even at the cost of some excess. If no variant covers
+  // the full need, fall back to the largest available (best partial
+  // coverage). Variants must share width and family.
   const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
   const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
   const variantOf = p => {
@@ -4017,9 +4015,10 @@ function autoFillMatSerpentine(productId) {
     .sort((a,b) => a.lenMm - b.lenMm);
   if (candidates.length > 1) {
     const idealMm = idealLenCm * 10;
-    // Largest variant whose length <= ideal need; if none fits, smallest.
-    const fit = candidates.filter(c => c.lenMm <= idealMm).pop()
-             || candidates[0];
+    // Smallest variant whose length >= ideal need (covers all room runs);
+    // if no variant covers, largest available (best partial coverage).
+    const fit = candidates.find(c => c.lenMm >= idealMm)
+             || candidates[candidates.length - 1];
     if (fit.p.id !== prod.id) {
       prod = fit.p;
       productId = fit.p.id;
@@ -4051,7 +4050,16 @@ function autoFillMatSerpentine(productId) {
 
   pushUndo();
 
-  const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * gapCm;
+  // Distribute leftover across-axis space as even gaps between mats
+  // (mats can lie flush against each other, but spreading them evenly
+  // gives better heat coverage and looks cleaner). The user's gapCm
+  // setting acts as a minimum — if the even-distribute gap would be
+  // smaller, we fall back to it.
+  const evenGapCm = actualRuns > 1
+    ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
+    : 0;
+  const effectiveGapCm = Math.max(gapCm, evenGapCm);
+  const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * effectiveGapCm;
   const acrossCenter = (acrossMin + acrossMax) / 2;
   const alongCenter = (alongMin + alongMax) / 2;
 
@@ -4075,6 +4083,7 @@ function autoFillMatSerpentine(productId) {
     width_cm: matWidthCm,
     length_cm: runLengthCm,
     num_runs: actualRuns,
+    gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0
   };
   S.mats.push(mat);
@@ -11325,9 +11334,10 @@ let _hoveredMatId = null;
 
 /** Total width across all runs of a multi-run mat (including gaps between runs) */
 function _matTotalWidthCm(mat) {
-  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
-  const gapCm = (prod?.min_gap_mm || 20) / 10;
   const n = mat.num_runs || 1;
+  const gapCm = mat.gap_cm != null
+    ? mat.gap_cm
+    : (HEATING_PRODUCTS.find(p => p.id === mat.productId)?.min_gap_mm || 20) / 10;
   return n * mat.width_cm + Math.max(0, n - 1) * gapCm;
 }
 
@@ -11339,7 +11349,7 @@ function drawMats() {
     const isOtherRoom = mat.roomId !== S.ui.selectedRoomId;
     const numRuns = mat.num_runs || 1;
     const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
-    const gapCm = (prod?.min_gap_mm || 20) / 10;
+    const gapCm = mat.gap_cm != null ? mat.gap_cm : (prod?.min_gap_mm || 20) / 10;
 
     ctx.save();
     const totalW = _matTotalWidthCm(mat);
