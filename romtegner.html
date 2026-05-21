@@ -15848,6 +15848,35 @@ function drawPreview() {
   const pts  = S.drawing.points;
   const mp   = S.drawing.mousePos;
 
+  // Hindring split-choice overlay — two candidate polygons, user clicks one
+  if (S.ui.hindringChoice) {
+    const hc = S.ui.hindringChoice;
+    const drawPoly = (poly, fillStyle, strokeStyle, label, labelColor) => {
+      if (poly.length < 3) return;
+      const spts = poly.map(p => w2s(p.x, p.y));
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(spts[0].x, spts[0].y);
+      for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
+      ctx.closePath();
+      ctx.fillStyle = fillStyle; ctx.fill();
+      ctx.strokeStyle = strokeStyle; ctx.lineWidth = 2; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+      // Label at centroid
+      const cx = spts.reduce((a, p) => a + p.x, 0) / spts.length;
+      const cy = spts.reduce((a, p) => a + p.y, 0) / spts.length;
+      ctx.fillStyle = labelColor;
+      ctx.font = "bold 18px 'DM Sans', sans-serif";
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, cx, cy - 8);
+      ctx.font = "10px 'DM Sans', sans-serif";
+      ctx.fillText('klikk for å velge', cx, cy + 10);
+      ctx.restore();
+    };
+    drawPoly(hc.polyA, 'rgba(34, 211, 238, 0.18)', 'rgba(34, 211, 238, 0.9)', 'A', 'rgba(8, 100, 150, 0.95)');
+    drawPoly(hc.polyB, 'rgba(255, 140, 60, 0.18)', 'rgba(255, 140, 60, 0.9)', 'B', 'rgba(200, 80, 30, 0.95)');
+    return;
+  }
+
   // Dim line preview
   if (mode==='dim') {
     if (S.drawing.dimPending) {
@@ -17803,6 +17832,7 @@ function exitDrawing() {
   // draw-toolbar stays visible — persistent quick-action bar
   S.ui.drawMode = null;
   S.ui.spacePan = false;
+  S.ui.hindringChoice = null;
   S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null; S.drawing.dimPending=null;
   S.drawing.wbw={ started:false, startPoint:null, walls:[], direction:'right', mouseMode:false };
   S.drawing.skillevegg={ startWallIdx:null, startPt:null, endWallIdx:null, endPt:null, phase:0, pendingSplit:null, wallNormal:null, liveThickness:S.ui.skilleveggThicknessCm||10, thicknessDragSide:1 };
@@ -20652,9 +20682,11 @@ function _projectToRoomWall(pt, room, threshold) {
   return best;
 }
 
-// Trace room wall vertices from wallIdx/t at start to wallIdx/t at end (shortest path).
-// Returns array of intermediate points (room corners) between the two wall projections.
-function _traceWallPath(room, startWall, startT, endWall, endT) {
+// Trace room wall vertices from wallIdx/t at start to wallIdx/t at end.
+// Returns array of intermediate points (room corners) between the two wall
+// projections. `which` selects 'fwd', 'bwd', or 'shortest' (default — used
+// by callers that don't care which side they get).
+function _traceWallPath(room, startWall, startT, endWall, endT, which) {
   const n = room.points.length;
   if (startWall === endWall) return []; // Same wall — direct close, no corners needed
 
@@ -20671,6 +20703,8 @@ function _traceWallPath(room, startWall, startT, endWall, endT) {
     if (bwd.length > n) break;
   }
 
+  if (which === 'fwd') return fwd;
+  if (which === 'bwd') return bwd;
   return fwd.length <= bwd.length ? fwd : bwd;
 }
 
@@ -21783,6 +21817,24 @@ canvas.addEventListener('mousedown', e=>{
     S.drawing.points.push({x:wp.x, y:wp.y});
     updHint();
   } else if (mode==='hindring-polygon') {
+    // If we're awaiting a split-choice (polygon spans wall-to-wall), the
+    // click picks one of the two candidate halves instead of adding points.
+    if (S.ui.hindringChoice) {
+      const hc = S.ui.hindringChoice;
+      const inA = ptInPoly(wp.x, wp.y, hc.polyA);
+      const inB = ptInPoly(wp.x, wp.y, hc.polyB);
+      let picked = null;
+      if (inA && !inB) picked = hc.polyA;
+      else if (inB && !inA) picked = hc.polyB;
+      // If both/neither (rare overlap or click outside), do nothing — wait
+      // for an unambiguous click. Esc still cancels via existing handlers.
+      if (picked) {
+        S.ui.hindringChoice = null;
+        createHindringFromPolygon(picked);
+        render();
+      }
+      return;
+    }
     // Shift frees length-snap but keeps angle-snap (handled in getWorldPos)
     if (S.drawing.points.length >= 3) {
       const p0=S.drawing.points[0];
@@ -21795,7 +21847,10 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
 
-    // Wall auto-close: if new point and first point are both on room walls, auto-close along walls
+    // Wall auto-close: if new point and first point are both on room walls,
+    // the user has drawn a polyline that splits the room. We close along the
+    // walls and let the user pick which half is the actual hindring (instead
+    // of always picking the shortest corner-trace).
     const WALL_SNAP_CM = 5; // snap distance to wall in cm
     if (S.drawing.points.length >= 2) {
       const room = S.rooms.find(r => r.id === S.ui.hindringRoomId);
@@ -21803,17 +21858,33 @@ canvas.addEventListener('mousedown', e=>{
         const newPtSnap = _projectToRoomWall(wp, room, WALL_SNAP_CM);
         const firstPtSnap = _projectToRoomWall(S.drawing.points[0], room, WALL_SNAP_CM);
         if (newPtSnap && firstPtSnap) {
-          // Both points are near walls — auto-close!
-          // Add the current point (snapped to wall)
-          const pts = [...S.drawing.points, { x: newPtSnap.proj.x, y: newPtSnap.proj.y }];
-          // Trace corners between the two wall contact points
-          const corners = _traceWallPath(room, newPtSnap.wallIdx, newPtSnap.t, firstPtSnap.wallIdx, firstPtSnap.t);
-          for (const c of corners) pts.push(c);
-          // Snap first point to wall too
-          pts[0] = { x: firstPtSnap.proj.x, y: firstPtSnap.proj.y };
-          pushUndo();
-          createHindringFromPolygon(pts);
-          return;
+          // Build the user's polyline with both endpoints snapped to walls
+          const polyline = [
+            { x: firstPtSnap.proj.x, y: firstPtSnap.proj.y },
+            ...S.drawing.points.slice(1),
+            { x: newPtSnap.proj.x, y: newPtSnap.proj.y },
+          ];
+          // Forward and backward corner traces between the two wall hits
+          const fwdCorners = _traceWallPath(room, newPtSnap.wallIdx, newPtSnap.t, firstPtSnap.wallIdx, firstPtSnap.t, 'fwd');
+          const bwdCorners = _traceWallPath(room, newPtSnap.wallIdx, newPtSnap.t, firstPtSnap.wallIdx, firstPtSnap.t, 'bwd');
+          // Two candidate hindring polygons: polyline + each corner trace
+          const polyA = [...polyline, ...fwdCorners];
+          const polyB = [...polyline, ...bwdCorners];
+          if (polyA.length >= 3 && polyB.length >= 3) {
+            pushUndo();
+            S.ui.hindringChoice = {
+              roomId: room.id,
+              polylineLen: polyline.length, // shared prefix length
+              polyA,
+              polyB,
+            };
+            // Keep drawMode so existing escape/cancel hooks still work, but
+            // stop accumulating new points.
+            S.drawing.points = [...polyline];
+            updHint();
+            render();
+            return;
+          }
         }
       }
     }
