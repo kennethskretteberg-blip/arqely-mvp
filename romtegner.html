@@ -25271,8 +25271,8 @@ async function exportPDF(opts) {
     doc.setFontSize(7);
     doc.setTextColor(150);
     const footerY = H - 8;
-    const footerLeft = _pName ? `${_pName}${_pPhone ? ' · '+_pPhone : ''}${_pWeb ? ' · '+_pWeb : ''}` : 'Romtegner · arqely.com';
-    doc.text(footerLeft, M, footerY);
+    const footerLeft = _pName ? `${_pName}${_pPhone ? ' · '+_pPhone : ''}${_pWeb ? ' · '+_pWeb : ''}` : '';
+    if (footerLeft) doc.text(footerLeft, M, footerY);
     doc.text(`Side ${doc.internal.getNumberOfPages()}`, W - M, footerY, { align: 'right' });
   };
 
@@ -25316,8 +25316,6 @@ async function exportPDF(opts) {
   doc.setFontSize(9);
   doc.setTextColor(120, 130, 150);
   doc.text('Generert: ' + _date(), M, y);
-  y += 4;
-  doc.text('Romtegner \u2014 arqely.com', M, y);
   y += 10;
   _line(y); y += 8;
   // Free text on cover
@@ -25377,15 +25375,15 @@ async function exportPDF(opts) {
     doc.setTextColor(20, 40, 80);
     doc.text(fs.floor ? fs.floor.name : 'Uten etasje', M, y); y += 7;
 
-    // Table header
+    // Table header (Produkt column widened so name + article numbers fit)
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
     doc.setTextColor(80, 90, 110);
-    const cols = [M, M + 40, M + 70, M + 100, M + 130, M + 155];
+    const cols = [M, M + 28, M + 47, M + 66, M + 158, M + 175];
     doc.text('Rom', cols[0], y);
     doc.text('Brutto m\u00b2', cols[1], y);
     doc.text('Netto m\u00b2', cols[2], y);
-    doc.text('Produkter', cols[3], y);
+    doc.text('Produkt', cols[3], y);
     doc.text('Effekt (W)', cols[4], y);
     doc.text('W/m\u00b2', cols[5], y);
     y += 3;
@@ -25394,25 +25392,49 @@ async function exportPDF(opts) {
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(30, 40, 60);
     for (const rs of fs.rooms) {
-      _checkPage(6);
-      const st = rs.stats;
-      // Count product types in room
-      const prodTypes = [];
-      if (_stripsForRoom(S.rooms.find(r=>r.name===rs.name)?.id || -1).length > 0) prodTypes.push('VF');
       const rm = S.rooms.find(r => r.name === rs.name);
+      // Aggregate products by productId across all kinds (strip/cable/mat/plate)
+      const tally = new Map(); // productId \u2192 { product, count }
+      const _add = (prodId) => {
+        if (prodId == null) return;
+        const p = HEATING_PRODUCTS.find(hp => hp.id === prodId);
+        if (!p) return;
+        const e = tally.get(prodId) || { product: p, count: 0 };
+        e.count += 1;
+        tally.set(prodId, e);
+      };
       if (rm) {
-        if (_cablesForRoom(rm.id).length > 0) prodTypes.push('Kabel');
-        if (_matsForRoom(rm.id).length > 0) prodTypes.push('Matte');
-        if (_platesForRoom(rm.id).length > 0) prodTypes.push('Plate');
+        for (const s of _stripsForRoom(rm.id)) _add(s.productId);
+        for (const c of _cablesForRoom(rm.id)) _add(c.productId);
+        for (const m of _matsForRoom(rm.id)) _add(m.productId);
+        for (const p of _platesForRoom(rm.id)) _add(p.productId);
       }
+      // Render: one line per product, name + (CVA / EL) and count
+      const prodLines = [];
+      for (const { product, count } of tally.values()) {
+        const codes = [product.article_no, product.el_nr].filter(Boolean).join(' / ');
+        const codeStr = codes ? ' (' + codes + ')' : '';
+        prodLines.push(`${count}\u00d7 ${product.name}${codeStr}`);
+      }
+      if (prodLines.length === 0) prodLines.push('\u2014');
+
+      const st = rs.stats;
       const wm2 = st.nettoM2 > 0 ? Math.round(st.totalW / st.nettoM2) : 0;
+      const rowH = prodLines.length * 4 + 1;
+      _checkPage(rowH + 1);
       doc.text(rs.name, cols[0], y);
       doc.text(st.bruttoM2.toFixed(1), cols[1], y);
       doc.text(st.nettoM2.toFixed(1), cols[2], y);
-      doc.text(prodTypes.join(', ') || '\u2014', cols[3], y);
+      // Product lines stacked vertically, then size other cols to align at first line
+      prodLines.forEach((pl, i) => {
+        const wrapped = doc.splitTextToSize(pl, (cols[4] - cols[3]) - 2);
+        wrapped.forEach((wl, j) => {
+          doc.text(wl, cols[3], y + (i + j) * 4);
+        });
+      });
       doc.text(String(st.totalW), cols[4], y);
       doc.text(String(wm2), cols[5], y);
-      y += 5;
+      y += rowH;
     }
     // Floor total
     _checkPage(8);
@@ -25911,7 +25933,7 @@ async function exportPDF(opts) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7);
     doc.setTextColor(150, 160, 180);
-    doc.text('Arqely Romtegner \u2014 arqely.com', M, H - 8);
+    if (_pName) doc.text(_pName, M, H - 8);
     doc.text(S.project.name || 'Prosjekt', W / 2, H - 8, { align: 'center' });
     doc.text('Side ' + i + ' / ' + pageCount, W - M, H - 8, { align: 'right' });
   }
@@ -25923,6 +25945,82 @@ async function exportPDF(opts) {
 
 /** Render a single room to an offscreen canvas and return base64 PNG */
 function _renderRoomToImage(room) {
+  // Strategy: render to the main canvas with a temporary view that fits
+  // this room, capture as dataURL, then restore the previous view. This
+  // gives a pixel-perfect "what you see in canvas" image including dim
+  // chains, cable U-turns, labels and any other render() side artefacts —
+  // without duplicating hundreds of lines of draw logic offscreen.
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  const rW = Math.max(1, rMaxX - rMinX), rH = Math.max(1, rMaxY - rMinY);
+
+  // Save state we'll modify
+  const saved = {
+    zoom: S.view.zoom, panX: S.view.panX, panY: S.view.panY,
+    activeFloorId: S.ui?.activeFloorId,
+    selectedRoomId: S.ui?.selectedRoomId,
+    selectedStripId: S.ui?.selectedStripId,
+    selectedCableId: S.ui?.selectedCableId,
+    selectedMatId: S.ui?.selectedMatId,
+    selectedWallId: S.ui?.selectedWallId,
+    selectedHindringId: S.ui?.selectedHindringId,
+    selectedAnnot: S.ui?.selectedAnnot,
+  };
+  // Reserve room for outside dim chains. Margin in cm — chain offsets are
+  // 32 cm (room-dim) + addons (cable +65, mat +65, strip +20), so 120 cm
+  // total around the room is safe across all combinations.
+  const padCm = 120;
+  const cW = canvas.width, cH = canvas.height;
+  const fitScale = Math.min(
+    cW / ((rW + 2 * padCm) * BASE_SCALE),
+    cH / ((rH + 2 * padCm) * BASE_SCALE)
+  );
+  S.view.zoom = fitScale;
+  const roomCx = (rMinX + rMaxX) / 2;
+  const roomCy = (rMinY + rMaxY) / 2;
+  S.view.panX = cW / 2 - roomCx * BASE_SCALE * fitScale;
+  S.view.panY = cH / 2 - roomCy * BASE_SCALE * fitScale;
+  // Focus on this room so selection-driven visuals (e.g. selected room
+  // gizmo) don't bleed in from whatever was previously selected.
+  if (S.ui) {
+    if (S.ui.activeFloorId !== undefined && room.floorId != null) {
+      S.ui.activeFloorId = room.floorId;
+    }
+    S.ui.selectedRoomId = room.id;
+    S.ui.selectedStripId = null;
+    S.ui.selectedCableId = null;
+    S.ui.selectedMatId = null;
+    S.ui.selectedWallId = null;
+    S.ui.selectedHindringId = null;
+    S.ui.selectedAnnot = null;
+  }
+  // Render to the main canvas with the temporary view
+  if (typeof markDirty === 'function') markDirty();
+  if (typeof render === 'function') render();
+  const dataURL = canvas.toDataURL('image/png');
+
+  // Restore everything and re-render so the user's view is untouched
+  S.view.zoom = saved.zoom;
+  S.view.panX = saved.panX;
+  S.view.panY = saved.panY;
+  if (S.ui) {
+    if (saved.activeFloorId !== undefined) S.ui.activeFloorId = saved.activeFloorId;
+    S.ui.selectedRoomId = saved.selectedRoomId;
+    S.ui.selectedStripId = saved.selectedStripId;
+    S.ui.selectedCableId = saved.selectedCableId;
+    S.ui.selectedMatId = saved.selectedMatId;
+    S.ui.selectedWallId = saved.selectedWallId;
+    S.ui.selectedHindringId = saved.selectedHindringId;
+    S.ui.selectedAnnot = saved.selectedAnnot;
+  }
+  if (typeof markDirty === 'function') markDirty();
+  if (typeof render === 'function') render();
+  return dataURL;
+}
+
+// Legacy offscreen renderer — kept for reference / fallback. Not called.
+function _renderRoomToImageOffscreen(room) {
   const offW = 800, offH = 440;
   const offCanvas = document.createElement('canvas');
   offCanvas.width = offW; offCanvas.height = offH;
