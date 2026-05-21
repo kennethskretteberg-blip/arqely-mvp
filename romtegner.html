@@ -3172,17 +3172,9 @@ function autoAddStrips(roomId, productId) {
       const chosenProd = HEATING_PRODUCTS.find(pp => pp.id === chosenId);
       const chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       if (cursor + chosenNc > baseMax - MIN_MARGIN_CM + 0.01) break;
-      const segments = computeClippedSegments(roomId, direction, cursor, chosenId);
-      for (const seg of segments) {
-        S.strips.push({
-          id: S.counters.nextStripId++,
-          roomId, productId: chosenId, direction,
-          pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm
-        });
-      }
+      _pushStripsAtPos(roomId, chosenId, direction, cursor);
       cursor += chosenNc + GAP_CM;
     }
-    _invalidateStripCache();
   } else {
     let cursor = baseMax - MIN_MARGIN_CM;
     while (cursor - smallestNc >= basePos + MIN_MARGIN_CM - 0.01) {
@@ -3191,17 +3183,9 @@ function autoAddStrips(roomId, productId) {
       const chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       const pos = cursor - chosenNc;
       if (pos < basePos + MIN_MARGIN_CM - 0.01) break;
-      const segments = computeClippedSegments(roomId, direction, pos, chosenId);
-      for (const seg of segments) {
-        S.strips.push({
-          id: S.counters.nextStripId++,
-          roomId, productId: chosenId, direction,
-          pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm
-        });
-      }
+      _pushStripsAtPos(roomId, chosenId, direction, pos);
       cursor = pos - GAP_CM;
     }
-    _invalidateStripCache();
   }
 
   // Center strips symmetrically for equal cold zones
@@ -10395,6 +10379,33 @@ function renderSemiAutoPalette() {
   showRoomWorkflowPanel();
 }
 
+/**
+ * Place strip(s) at a single perpendicular position, automatically splitting
+ * around hindringer / forbidden zones via computeClippedSegments(). Returns
+ * the array of strips pushed (length 0 if no valid segment fits at this
+ * position, 1 for a clean rectangular slot, N for a slot crossing N obstacles).
+ *
+ * Callers that need cursor-advance / snapping / overlap handling do that
+ * around this helper — the helper only owns the push + cache invalidation.
+ */
+function _pushStripsAtPos(roomId, productId, direction, pos_cm) {
+  const segments = computeClippedSegments(roomId, direction, pos_cm, productId);
+  const created = [];
+  for (const seg of segments) {
+    const strip = {
+      id: S.counters.nextStripId++,
+      roomId, productId, direction,
+      pos_cm,
+      start_cm: seg.start_cm,
+      length_cm: seg.length_cm,
+    };
+    S.strips.push(strip);
+    created.push(strip);
+  }
+  if (created.length > 0) _invalidateStripCache();
+  return created;
+}
+
 function doSemiAutoStep(productId) {
   const prod = HEATING_PRODUCTS.find(p => p.id === productId); if (!prod) return;
   const room = S.rooms.find(r => r.id === S.ui.semiAutoRoomId); if (!room) return;
@@ -10405,28 +10416,21 @@ function doSemiAutoStep(productId) {
   const fromHigh = !!S.ui.semiAutoFromHigh;
   const roomNear = (dir === 'v' ? Math.min(...xs) : Math.min(...ys)) + MARGIN;
   const roomFar  = (dir === 'v' ? Math.max(...xs) : Math.max(...ys)) - MARGIN;
-  const along    = dir === 'v' ? Math.max(...ys) - Math.min(...ys) : Math.max(...xs) - Math.min(...xs);
-  const baseAlong = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
   let cursor = S.ui.semiAutoCursor;
 
   if (!fromHigh) {
     // Fill forward (low → high)
     while (cursor + nc <= roomFar + 0.01) {
-      S.strips.push({ id: S.counters.nextStripId++,
-        roomId: room.id, productId: prod.id, direction: dir,
-        pos_cm: cursor, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
+      _pushStripsAtPos(room.id, prod.id, dir, cursor);
       cursor += nc + GAP;
     }
   } else {
     // Fill backward (high → low); cursor marks the RIGHT/BOTTOM edge of next strip
     while (cursor - nc >= roomNear - 0.01) {
-      S.strips.push({ id: S.counters.nextStripId++,
-        roomId: room.id, productId: prod.id, direction: dir,
-        pos_cm: cursor - nc, start_cm: baseAlong + MARGIN, length_cm: along - 2 * MARGIN });
+      _pushStripsAtPos(room.id, prod.id, dir, cursor - nc);
       cursor -= nc + GAP;
     }
   }
-  _invalidateStripCache();
   S.ui.semiAutoCursor = cursor;
   renderSemiAutoPalette();
   renderSidebar(); updateObjInfo();
@@ -22547,6 +22551,8 @@ canvas.addEventListener('mousedown', e=>{
     }
     // ── Dim line click — select (keep selectedRoomId so room stays visible) ──
     const _allDims=[]; for(const r of S.rooms){if(_roomOnActiveFloor(r) && r.dims) for(const d of r.dims) _allDims.push(d);}
+    // Floating dims (not tied to a room — used for bg-calibration check)
+    if (S.floatingDims) for (const d of S.floatingDims) _allDims.push(d);
     for (const dim of _allDims) {
       const off=dim.offset||0;
       const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
@@ -23541,6 +23547,9 @@ canvas.addEventListener('contextmenu', e=>{
   // Check hindring
   const hh=hitHindring(rawWp.x, rawWp.y);
   if (hh!==null) { hindringCtxMenu(e, hh); return; }
+  // Check user dim lines (room-attached + floating)
+  const hd = _hitDimLine(rawWp.x, rawWp.y, sx, sy);
+  if (hd !== null) { dimCtxMenu(e, hd); return; }
   const hit=hitTest(rawWp.x,rawWp.y);
   if (hit?.wallId) showWallCtxMenu(e, hit.roomId, hit.wallId, wp); // wp kept for snapped corner insert
   else if (hit?.roomId) canvasRoomCtxMenu(e,hit.roomId);
@@ -23780,9 +23789,8 @@ document.addEventListener('keydown', e=>{
     }
   }
   if (e.key==='Delete'&&S.ui.selectedDimId) {
-    const _crDel=currentRoom();
-    if(_crDel) { pushUndo(); _crDel.dims=_crDel.dims.filter(d=>d.id!==S.ui.selectedDimId); }
-    S.ui.selectedDimId=null; updateWip(); return;
+    deleteDim(S.ui.selectedDimId);
+    return;
   }
   if (e.key==='Delete'&&S.ui.selectedRoomId) { deleteRoom(S.ui.selectedRoomId); return; }
   if (e.key==='Enter'&&S.ui.drawMode==='skillevegg'&&S.drawing.skillevegg.phase===2) { commitSkillevegg(); return; }
@@ -24020,6 +24028,68 @@ function _toggleMatDimSnap(roomId) {
   if (!rm) return;
   rm.matDimSnap = !rm.matDimSnap;
   renderSidebar(); render();
+}
+
+// Hit-test for a user-drawn dim line (room-attached or floating).
+// Mirrors the click-selection logic in canvas mousedown. Returns the dim id
+// or null. Tolerance ~8 px on the dim line and ~6 px on the extension lines.
+function _hitDimLine(wx, wy, sx, sy) {
+  const _all = [];
+  for (const r of S.rooms) {
+    if (!_roomOnActiveFloor(r) || !r.dims) continue;
+    for (const d of r.dims) _all.push(d);
+  }
+  if (S.floatingDims) for (const d of S.floatingDims) _all.push(d);
+  for (const dim of _all) {
+    const off = dim.offset || 0;
+    const wdx = dim.p2.x - dim.p1.x, wdy = dim.p2.y - dim.p1.y;
+    const wLen = Math.hypot(wdx, wdy); if (wLen < 1) continue;
+    const wnx = -wdy / wLen, wny = wdx / wLen;
+    const sd1 = w2s(dim.p1.x + wnx * off, dim.p1.y + wny * off);
+    const sd2 = w2s(dim.p2.x + wnx * off, dim.p2.y + wny * off);
+    const sp1 = w2s(dim.p1.x, dim.p1.y), sp2 = w2s(dim.p2.x, dim.p2.y);
+    if (distSegPx(sx, sy, sd1.x, sd1.y, sd2.x, sd2.y) < 8 ||
+        distSegPx(sx, sy, sp1.x, sp1.y, sd1.x, sd1.y) < 6 ||
+        distSegPx(sx, sy, sp2.x, sp2.y, sd2.x, sd2.y) < 6) {
+      return dim.id;
+    }
+  }
+  return null;
+}
+
+// Right-click context menu for a user dim line.
+function dimCtxMenu(e, dimId) {
+  e.preventDefault();
+  S.ui.selectedDimId = dimId;
+  render();
+  document.getElementById('ctx-menu').innerHTML = `
+    ${_angreItem()}
+    <div class="ctx-item danger" onclick="deleteDim(${dimId});hideCtx()">✕ Slett mållinje</div>`;
+  showCtxAt(e.clientX, e.clientY);
+}
+
+// Delete a dim line by id — handles both room-attached and floating dims.
+function deleteDim(dimId) {
+  if (dimId == null) return;
+  let found = false;
+  pushUndo();
+  for (const r of S.rooms) {
+    if (!r.dims) continue;
+    const before = r.dims.length;
+    r.dims = r.dims.filter(d => d.id !== dimId);
+    if (r.dims.length !== before) found = true;
+  }
+  if (!found && S.floatingDims) {
+    const before = S.floatingDims.length;
+    S.floatingDims = S.floatingDims.filter(d => d.id !== dimId);
+    if (S.floatingDims.length !== before) found = true;
+  }
+  if (!found) {
+    // Nothing to delete — drop the undo entry we just pushed
+    if (Array.isArray(_undoStack) && _undoStack.length) _undoStack.pop();
+  }
+  if (S.ui.selectedDimId === dimId) S.ui.selectedDimId = null;
+  updateWip(); render();
 }
 
 // Toggle room dimension snap by room ID (used from sidebar icons + context menu)
