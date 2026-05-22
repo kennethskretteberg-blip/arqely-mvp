@@ -10459,40 +10459,48 @@ function manualDragEnd(e) {
 function drawDropPreview() {
   const s = S.ui.dropPreviewStrip; if (!s) return;
   const nc = s.nc;
+  const segs = s.segments || (s.start_cm != null ? [{ start_cm: s.start_cm, length_cm: s.length_cm }] : []);
+  if (!segs.length) return;
   ctx.save();
   ctx.globalAlpha = 0.5;
-  let bx, by, bw, bh;
-  if (s.direction === 'v') {
-    const p1 = w2s(s.pos_cm, s.start_cm), p2 = w2s(s.pos_cm + nc, s.start_cm + s.length_cm);
-    bx=p1.x; by=p1.y; bw=p2.x-p1.x; bh=p2.y-p1.y;
-  } else {
-    const p1 = w2s(s.start_cm, s.pos_cm), p2 = w2s(s.start_cm + s.length_cm, s.pos_cm + nc);
-    bx=p1.x; by=p1.y; bw=p2.x-p1.x; bh=p2.y-p1.y;
-  }
   ctx.fillStyle   = s.invalid ? 'rgba(255,60,60,0.35)' : 'rgba(255,200,80,0.35)';
   ctx.strokeStyle = s.invalid ? 'rgba(255,80,80,1)'    : 'rgba(255,220,80,1)';
   ctx.lineWidth = 2;
   ctx.setLineDash([6, 3]);
-  ctx.fillRect(bx, by, bw, bh);
-  ctx.strokeRect(bx, by, bw, bh);
-  ctx.setLineDash([]);
-  // Draw green ghost at snap position if overlapping
-  if (s.invalid && s.snapPos != null) {
-    let gx, gy, gw, gh;
+  // One ghost rectangle per actual segment — shows the user exactly how the
+  // strip will split around hindringer + forbidden zones at this position.
+  for (const seg of segs) {
+    let bx, by, bw, bh;
     if (s.direction === 'v') {
-      const g1 = w2s(s.snapPos, s.start_cm), g2 = w2s(s.snapPos + nc, s.start_cm + s.length_cm);
-      gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+      const p1 = w2s(s.pos_cm, seg.start_cm), p2 = w2s(s.pos_cm + nc, seg.start_cm + seg.length_cm);
+      bx=p1.x; by=p1.y; bw=p2.x-p1.x; bh=p2.y-p1.y;
     } else {
-      const g1 = w2s(s.start_cm, s.snapPos), g2 = w2s(s.start_cm + s.length_cm, s.snapPos + nc);
-      gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+      const p1 = w2s(seg.start_cm, s.pos_cm), p2 = w2s(seg.start_cm + seg.length_cm, s.pos_cm + nc);
+      bx=p1.x; by=p1.y; bw=p2.x-p1.x; bh=p2.y-p1.y;
     }
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeRect(bx, by, bw, bh);
+  }
+  ctx.setLineDash([]);
+  // Green ghost at snap position if the drop would currently collide
+  if (s.invalid && s.snapPos != null) {
     ctx.globalAlpha = 0.7;
     ctx.fillStyle = 'rgba(34,197,94,0.2)';
     ctx.strokeStyle = 'rgba(34,197,94,0.9)';
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
-    ctx.fillRect(gx, gy, gw, gh);
-    ctx.strokeRect(gx, gy, gw, gh);
+    for (const seg of segs) {
+      let gx, gy, gw, gh;
+      if (s.direction === 'v') {
+        const g1 = w2s(s.snapPos, seg.start_cm), g2 = w2s(s.snapPos + nc, seg.start_cm + seg.length_cm);
+        gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+      } else {
+        const g1 = w2s(seg.start_cm, s.snapPos), g2 = w2s(seg.start_cm + seg.length_cm, s.snapPos + nc);
+        gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
+      }
+      ctx.fillRect(gx, gy, gw, gh);
+      ctx.strokeRect(gx, gy, gw, gh);
+    }
     ctx.setLineDash([]);
   }
   ctx.restore();
@@ -10600,32 +10608,53 @@ canvas.addEventListener('dragover', e => {
   const dir = S.varmefolie.direction;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const MARGIN = _effectiveMarginCm(prod.id);
-  let pos, startCm, lengthCm;
+  let pos;
   if (dir === 'v') {
     pos = Math.max(Math.min(...xs) + MARGIN, Math.min(wp.x - nc/2, Math.max(...xs) - nc - MARGIN));
-    startCm = Math.min(...ys) + MARGIN;
-    lengthCm = Math.max(...ys) - Math.min(...ys) - 2 * MARGIN;
   } else {
     pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
-    startCm = Math.min(...xs) + MARGIN;
-    lengthCm = Math.max(...xs) - Math.min(...xs) - 2 * MARGIN;
   }
-  // Check whether this preview position would overlap an existing strip
+  // Compute actual segments the drop would create — preview matches the
+  // commit path (clipped around hindringer + zones, snapped to cut-interval).
+  const segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  // Perp-axis overlap against existing strips (preview turns red on real
+  // collision; same along-axis fix as _stripOverlapsAny so split-strips
+  // sharing pos_cm don't flag falsely).
   const dragProdId = S.ui.dragWidth.productId;
   let previewInvalid = false;
+  outer:
   for (const o of _stripsForRoomDir(room.id, dir)) {
     const onc = _stripNettoCm(o);
     const gapReq = _effectiveGapCmPair(dragProdId, o.productId);
-    const gap = pos >= o.pos_cm ? pos - (o.pos_cm + onc) : o.pos_cm - (pos + nc);
-    if (gap < gapReq - 0.01) { previewInvalid = true; break; }
+    const perpGap = pos >= o.pos_cm ? pos - (o.pos_cm + onc) : o.pos_cm - (pos + nc);
+    if (perpGap >= gapReq - 0.01) continue;
+    const oStart = o.start_cm, oEnd = o.start_cm + o.length_cm;
+    for (const seg of segments) {
+      const sStart = seg.start_cm, sEnd = seg.start_cm + seg.length_cm;
+      if (Math.min(sEnd, oEnd) - Math.max(sStart, oStart) > 0.01) {
+        previewInvalid = true; break outer;
+      }
+    }
   }
-  // Compute magnetic snap position if overlapping
   let snapPos = null;
   if (previewInvalid) {
-    const tmpStrip = { id: -999, roomId: room.id, direction: dir, pos_cm: pos, productId: S.ui.dragWidth.productId };
+    const tmpStrip = { id: -999, roomId: room.id, direction: dir, pos_cm: pos, productId: dragProdId,
+                       start_cm: segments[0]?.start_cm ?? 0, length_cm: segments[0]?.length_cm ?? 0 };
     snapPos = _snapStripToNearest(tmpStrip);
   }
-  S.ui.dropPreviewStrip = { pos_cm: pos, start_cm: startCm, length_cm: Math.max(5, lengthCm), direction: dir, nc, roomId: room.id, invalid: previewInvalid, snapPos };
+  // Union along-range across all segments — kept for drawStripGapLine() and
+  // any other consumer that expects a single start_cm/length_cm.
+  let unionStart = 0, unionLen = 0;
+  if (segments.length) {
+    unionStart = segments[0].start_cm;
+    const unionEnd = segments[segments.length - 1].start_cm + segments[segments.length - 1].length_cm;
+    unionLen = Math.max(5, unionEnd - unionStart);
+  }
+  S.ui.dropPreviewStrip = {
+    pos_cm: pos, segments, direction: dir, nc, roomId: room.id,
+    invalid: previewInvalid, snapPos,
+    start_cm: unionStart, length_cm: unionLen,
+  };
 });
 
 canvas.addEventListener('dragleave', () => {
@@ -14564,14 +14593,21 @@ function _clampStripToRoom(strip, origPos) {
 // Returns true if strip overlaps (or is closer than supplier min gap to) any same-direction strip in the same room
 function _stripOverlapsAny(strip) {
   const nc = _stripNettoCm(strip);
+  const aStart = strip.start_cm, aEnd = strip.start_cm + strip.length_cm;
   const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   for (const o of others) {
     const onc = _stripNettoCm(o);
     const gapCm = _effectiveGapCmPair(strip.productId, o.productId);
-    const gap = strip.pos_cm >= o.pos_cm
+    const perpGap = strip.pos_cm >= o.pos_cm
       ? strip.pos_cm - (o.pos_cm + onc)
       : o.pos_cm - (strip.pos_cm + nc);
-    if (gap < gapCm - 0.01) return true;
+    if (perpGap >= gapCm - 0.01) continue; // wide enough across — fine
+    // Perp-overlap detected. Now check along-axis: two strips that share the
+    // same perp band but cover different along-ranges (e.g. split around a
+    // hindring) are NOT overlapping — they sit end-to-end, not side-by-side.
+    const oStart = o.start_cm, oEnd = o.start_cm + o.length_cm;
+    const alongOverlap = Math.min(aEnd, oEnd) - Math.max(aStart, oStart);
+    if (alongOverlap > 0.01) return true;
   }
   return false;
 }
