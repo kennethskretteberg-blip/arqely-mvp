@@ -25641,17 +25641,55 @@ async function exportPDF(opts) {
     doc.setFontSize(14);
     doc.setTextColor(20, 60, 130);
     doc.text(cards[i].value, cx + 3, y + 16);
+    // Measure width while the bold 14px font is still active so the unit
+    // doesn't crash into the value.
+    const valWidth = doc.getTextWidth(cards[i].value);
     if (cards[i].unit) {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.setTextColor(120, 130, 150);
-      const tw = doc.getTextWidth(cards[i].value);
-      doc.text(' ' + cards[i].unit, cx + 3 + tw, y + 16);
+      doc.text(cards[i].unit, cx + 3 + valWidth + 2, y + 16);
     }
   }
   y += cardH + 8;
 
-  // ── Per-floor tables (Rom · Type · m² · W/m² · W · Status) ──
+  // Pick the dominant product family for a room — shown as "Type"
+  // (e.g. "FlexFoil 60W", "InFloor 10T", "EcoMat 100T"). Selects the
+  // family with the highest installed W in the room.
+  const _roomProductFamily = (room) => {
+    const byFam = new Map();
+    const add = (pid, w) => {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === pid);
+      if (!p) return;
+      const sizeRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
+      const fam = p.product_family || (p.name ? p.name.replace(sizeRe, '').trim() : '—');
+      byFam.set(fam, (byFam.get(fam) || 0) + (w || 0));
+    };
+    for (const s of _stripsForRoom(room.id)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      add(s.productId, (p?.watt_per_m2 || 0) * (nc * s.length_cm) / 10000);
+    }
+    for (const c of _cablesForRoom(room.id)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
+      add(c.productId, p?.watt_per_m ? p.watt_per_m * (c.totalLength_cm / 100) : 0);
+    }
+    for (const m of _matsForRoom(room.id)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
+      const a = (m.width_cm * (m.num_runs || 1) * m.length_cm) / 10000;
+      add(m.productId, (p?.watt_per_m2 || 0) * a);
+    }
+    for (const pl of _platesForRoom(room.id)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
+      add(pl.productId, (p?.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000);
+    }
+    if (!byFam.size) return '—';
+    let best = '—', bestW = -1;
+    for (const [fam, w] of byFam) { if (w > bestW) { best = fam; bestW = w; } }
+    return best;
+  };
+
+  // ── Per-floor tables (Rom · Type · m² · W/m² · W) ──
   for (const fs of floorSummaries) {
     _checkPage(20);
     doc.setFont('helvetica', 'bold');
@@ -25662,13 +25700,12 @@ async function exportPDF(opts) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
     doc.setTextColor(120, 130, 150);
-    const cols = [M, M + 50, M + 95, M + 120, M + 145, M + 175];
+    const cols = [M, M + 45, M + 110, M + 135, M + 165];
     doc.text('Rom', cols[0], y);
     doc.text('Type', cols[1], y);
     doc.text('m\u00b2', cols[2], y);
     doc.text('W/m\u00b2', cols[3], y);
     doc.text('W', cols[4], y);
-    doc.text('Status', cols[5], y);
     y += 2.5;
     _line(y); y += 4;
 
@@ -25679,15 +25716,10 @@ async function exportPDF(opts) {
       const wm2 = st.nettoM2 > 0 ? Math.round(st.totalW / st.nettoM2) : 0;
       doc.setTextColor(30, 40, 60);
       doc.text(rs.name, cols[0], y);
-      doc.text(rs.room.roomType || rs.room.type || '\u2014', cols[1], y);
+      doc.text(_roomProductFamily(rs.room), cols[1], y);
       doc.text(st.nettoM2.toFixed(1), cols[2], y);
-      doc.text(rs.targetWm2 ? String(rs.targetWm2) : (wm2 ? String(wm2) : '\u2014'), cols[3], y);
+      doc.text(wm2 ? String(wm2) : '\u2014', cols[3], y);
       doc.text(String(Math.round(st.totalW)), cols[4], y);
-      const [cr, cg, cb] = rs.status.color;
-      doc.setTextColor(cr, cg, cb);
-      doc.setFont('helvetica', 'bold');
-      doc.text(rs.status.sym, cols[5], y);
-      doc.setFont('helvetica', 'normal');
       y += 5;
     }
     // Floor total
@@ -25699,16 +25731,7 @@ async function exportPDF(opts) {
     doc.text(String(Math.round(fs.totalW)) + ' W', cols[4], y);
     y += 8;
   }
-  // Status-symbol legend
-  _checkPage(10); y += 2;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7);
-  doc.setTextColor(120, 130, 150);
-  doc.text('\u25cf Innenfor target', M, y);
-  doc.text('\u25d0 Delvis dekket', M + 38, y);
-  doc.text('\u25cb Ikke startet', M + 76, y);
-  doc.text('\u26a0 Validering / avvik', M + 110, y);
-  y += 6;
+  // (Status legend removed \u2014 Status column is gone)
 
   // ── Room detail pages ──
   const _selectedRooms = opts.rooms && opts.rooms.length > 0 ? S.rooms.filter(r => opts.rooms.includes(r.id)) : S.rooms;
@@ -25742,51 +25765,77 @@ async function exportPDF(opts) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(120, 130, 150);
-    doc.text(`${actualWm2} W/m²${targetWm2 ? '  (target ' + targetWm2 + ')' : ''}`, W - M, y + 12, { align: 'right' });
+    doc.text(`${actualWm2} W/m²`, W - M, y + 12, { align: 'right' });
     y += 18;
     _line(y); y += 5;
 
-    // Room drawing
+    // Room drawing — bigger, with other rooms desaturated for focus
     try {
-      const imgData = _renderRoomToImage(room);
+      const imgData = _renderRoomToImage(room, { focusRoom: true });
       if (imgData) {
         const imgW = pw;
-        const imgH = imgW * 0.55;
+        const imgH = imgW * 0.70;
         _checkPage(imgH + 5);
         doc.addImage(imgData, 'PNG', M, y, imgW, imgH);
         y += imgH + 5;
       }
     } catch(e) { console.warn('PDF room image failed:', e); }
 
-    // \u2500\u2500 Spec table (left half) + Validation panel (right half) \u2500\u2500
-    _checkPage(55);
-    const half = (pw - 4) / 2;
-    const specX = M;
-    const valX = M + half + 4;
-    const startY = y;
-    let leftY = y;
-
-    // Spec table \u2014 one row per heating element in the room
+    // \u2500\u2500 Dekning-statistikk (matches room-label on canvas) \u2500\u2500
+    _checkPage(20);
+    const heatedM2 = (stats.stripM2 || 0) + (stats.cableAreaM2 || 0) + (stats.matAreaM2 || 0) + (stats.plateAreaM2 || 0);
+    const dekningPct = stats.nettoM2 > 0 ? Math.round((heatedM2 / stats.nettoM2) * 100) : 0;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(20, 60, 130);
-    doc.text('Spesifikasjon', specX, leftY); leftY += 5;
-    doc.setFontSize(7);
-    doc.setTextColor(120, 130, 150);
-    const specCols = [specX, specX + 22, specX + 60, specX + 84];
-    doc.text('Type', specCols[0], leftY);
-    doc.text('Produkt', specCols[1], leftY);
-    doc.text('Mengde', specCols[2], leftY);
-    doc.text('Areal', specCols[3], leftY);
-    leftY += 1.5;
-    doc.setDrawColor(220, 228, 240);
-    doc.line(specX, leftY, specX + half, leftY); leftY += 3;
+    doc.text('Areal og dekning', M, y); y += 5;
+    doc.setFontSize(8);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(40, 50, 70);
+    const statCols = [M, M + 42, M + 84, M + 126];
+    const statLabels = ['Brutto areal', 'Netto areal', 'Oppvarmet areal', 'Dekning'];
+    const statValues = [
+      stats.bruttoM2.toFixed(2) + ' m\u00b2',
+      stats.nettoM2.toFixed(2) + ' m\u00b2',
+      heatedM2.toFixed(2) + ' m\u00b2',
+      dekningPct + ' %',
+    ];
+    doc.setTextColor(120, 130, 150);
     doc.setFontSize(7);
+    for (let i = 0; i < 4; i++) doc.text(statLabels[i], statCols[i], y);
+    y += 4;
+    doc.setTextColor(20, 60, 130);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    for (let i = 0; i < 4; i++) doc.text(statValues[i], statCols[i], y);
+    y += 6;
+    _line(y); y += 4;
+
+    // \u2500\u2500 Spec table \u2014 full width, Antall and Lengde as separate columns \u2500\u2500
+    _checkPage(30);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(20, 60, 130);
+    doc.text('Spesifikasjon', M, y); y += 5;
+    doc.setFontSize(7);
+    doc.setTextColor(120, 130, 150);
+    const specCols = [M, M + 26, M + 110, M + 145, M + 170];
+    doc.text('Type', specCols[0], y);
+    doc.text('Produkt', specCols[1], y);
+    doc.text('Antall', specCols[2], y);
+    doc.text('Lengde', specCols[3], y);
+    doc.text('Effekt', specCols[4], y);
+    y += 1.5;
+    doc.setDrawColor(220, 228, 240);
+    doc.line(M, y, M + pw, y); y += 3;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(40, 50, 70);
+    doc.setFontSize(8);
 
     const specRows = [];
-    // Strips
+    // Strips \u2014 N stk all at the same length doesn't really happen (each
+    // strip may be a different length around hindringer), so we display
+    // count + total length across the product.
     const stripByProd = {};
     for (const s of _stripsForRoom(room.id)) {
       const k = s.productId;
@@ -25798,22 +25847,55 @@ async function exportPDF(opts) {
       const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
       const nc = p ? ((p.netto_width_mm || p.width_mm) / 10) : 0;
       const m2 = (nc * info.totalLen) / 10000;
-      specRows.push({ type: 'Folie', name: p?.name || 'Folie', mengde: `${info.count} stk \u00b7 ${(info.totalLen/100).toFixed(1)} m`, areal: m2.toFixed(2) + ' m\u00b2' });
+      const watt = Math.round((p?.watt_per_m2 || 0) * m2);
+      specRows.push({
+        type: 'Folie', name: p?.name || 'Folie',
+        antall: info.count + ' stk',
+        lengde: (info.totalLen / 100).toFixed(1) + ' m',
+        effekt: watt + ' W',
+      });
     }
-    // Cables
+    // Cables \u2014 usually 1 stk per product, total length is the cable length.
+    const cableByProd = {};
     for (const c of _cablesForRoom(room.id)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
-      specRows.push({ type: 'Kabel', name: p?.name || 'Kabel', mengde: `${(c.totalLength_cm/100).toFixed(1)} m \u00b7 CC ${Math.round(c.spacing_cm*10)} mm`, areal: stats.cableAreaM2.toFixed(2) + ' m\u00b2' });
+      const k = c.productId;
+      if (!cableByProd[k]) cableByProd[k] = { count: 0, totalLen: 0 };
+      cableByProd[k].count++;
+      cableByProd[k].totalLen += c.totalLength_cm || 0;
     }
-    // Mats
+    for (const [pid, info] of Object.entries(cableByProd)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
+      const lenM = info.totalLen / 100;
+      const watt = p?.watt_per_m ? Math.round(p.watt_per_m * lenM) : 0;
+      specRows.push({
+        type: 'Kabel', name: p?.name || 'Kabel',
+        antall: info.count + ' stk',
+        lengde: lenM.toFixed(1) + ' m',
+        effekt: watt + ' W',
+      });
+    }
+    // Mats \u2014 count the physical mat objects; length is num_runs \u00d7 length.
+    const matByProd = {};
     for (const m of _matsForRoom(room.id)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
+      const k = m.productId;
+      if (!matByProd[k]) matByProd[k] = { count: 0, totalLen: 0, totalArea: 0 };
       const nRuns = m.num_runs || 1;
       const totLen = nRuns * m.length_cm;
-      const a = (m.width_cm * totLen) / 10000;
-      specRows.push({ type: 'Matte', name: p?.name || 'Matte', mengde: `${nRuns} lgd \u00b7 ${(totLen/100).toFixed(1)} m`, areal: a.toFixed(2) + ' m\u00b2' });
+      matByProd[k].count++;
+      matByProd[k].totalLen += totLen;
+      matByProd[k].totalArea += (m.width_cm * totLen) / 10000;
     }
-    // Plates
+    for (const [pid, info] of Object.entries(matByProd)) {
+      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
+      const watt = Math.round((p?.watt_per_m2 || 0) * info.totalArea);
+      specRows.push({
+        type: 'Matte', name: p?.name || 'Matte',
+        antall: info.count + ' stk',
+        lengde: (info.totalLen / 100).toFixed(1) + ' m',
+        effekt: watt + ' W',
+      });
+    }
+    // Plates \u2014 count only, no linear length.
     const plateByProd = {};
     for (const pl of _platesForRoom(room.id)) {
       const k = pl.productId;
@@ -25823,110 +25905,43 @@ async function exportPDF(opts) {
     }
     for (const [pid, info] of Object.entries(plateByProd)) {
       const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      specRows.push({ type: 'Plate', name: p?.name || 'Plate', mengde: `${info.count} stk`, areal: info.areaM2.toFixed(2) + ' m\u00b2' });
+      const watt = Math.round((p?.watt_per_m2 || 0) * info.areaM2);
+      specRows.push({
+        type: 'Plate', name: p?.name || 'Plate',
+        antall: info.count + ' stk',
+        lengde: '\u2014',
+        effekt: watt + ' W',
+      });
     }
-    if (specRows.length === 0) specRows.push({ type: '\u2014', name: 'Ingen produkter', mengde: '', areal: '' });
+    if (specRows.length === 0) {
+      specRows.push({ type: '\u2014', name: 'Ingen produkter', antall: '', lengde: '', effekt: '' });
+    }
     for (const r of specRows) {
-      doc.text(r.type, specCols[0], leftY);
-      const wrapped = doc.splitTextToSize(r.name, specCols[2] - specCols[1] - 2);
-      doc.text(wrapped[0] || '', specCols[1], leftY);
-      doc.text(r.mengde, specCols[2], leftY);
-      doc.text(r.areal, specCols[3], leftY);
-      leftY += 4.5;
-    }
-    leftY += 2;
-
-    // Empty fields for hand-fill at install time (NEK 400 753.514)
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(120, 130, 150);
-    doc.text('Fylles ut ved installasjon', specX, leftY); leftY += 4;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
-    doc.setTextColor(80, 90, 110);
-    const fillFields = [
-      ['Motstand kald (\u03a9)', '___________________'],
-      ['Motstand varm (\u03a9)', '___________________'],
-      ['Isolasjonsmotstand', '___________________'],
-      ['Serienummer', '___________________'],
-    ];
-    for (const [lbl, line] of fillFields) {
-      doc.text(lbl + ':', specX, leftY);
-      doc.text(line, specX + 30, leftY);
-      leftY += 4.5;
-    }
-
-    // \u2500\u2500 Validation panel (right half) \u2500\u2500
-    let rightY = startY;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(20, 60, 130);
-    doc.text('Validering', valX, rightY); rightY += 5;
-    doc.setFontSize(8);
-
-    const _viols = [];
-    try {
-      for (const s of _stripsForRoom(room.id)) {
-        const v = getStripViolations(s);
-        if (v) _viols.push({ ref: 'Folie', v });
-      }
-    } catch(_) {}
-    try {
-      for (const c of _cablesForRoom(room.id)) {
-        const v = getCableViolations(c);
-        if (v) _viols.push({ ref: 'Kabel', v });
-      }
-    } catch(_) {}
-
-    const _check = (ok, label) => {
       _checkPage(5);
-      if (ok) { doc.setTextColor(40, 160, 90); doc.text('\u2713', valX, rightY); }
-      else    { doc.setTextColor(200, 80, 60); doc.text('\u2715', valX, rightY); }
-      doc.setTextColor(50, 60, 80);
-      doc.text(label, valX + 4, rightY);
-      rightY += 4.5;
-    };
-
-    if (_viols.length === 0 && _stripsForRoom(room.id).length === 0 && _cablesForRoom(room.id).length === 0) {
-      doc.setTextColor(140, 150, 170);
-      doc.text('Ingen varmeelementer i rommet.', valX, rightY); rightY += 4.5;
-    } else {
-      const allOk = !_viols.some(x => x.v && x.v.hasAny);
-      if (allOk) {
-        _check(true, 'Alle valideringer OK');
-      } else {
-        // Surface each specific check from the violation object. The shape
-        // is loose (different elements have different keys), so we walk it.
-        const seen = new Set();
-        for (const { ref, v } of _viols) {
-          for (const [key, val] of Object.entries(v || {})) {
-            if (key === 'hasAny') continue;
-            if (typeof val !== 'object' && !val) continue;
-            const tag = `${ref}/${key}`;
-            if (seen.has(tag)) continue;
-            seen.add(tag);
-            const hit = val && (val === true || val.hasViolation || val.length > 0);
-            _check(!hit, `${ref}: ${key}`);
-          }
-        }
-        if (rightY === startY + 5) _check(false, 'Avvik registrert');
-      }
+      doc.text(r.type, specCols[0], y);
+      const nameWrap = doc.splitTextToSize(r.name, specCols[2] - specCols[1] - 2);
+      doc.text(nameWrap[0] || '', specCols[1], y);
+      doc.text(r.antall, specCols[2], y);
+      doc.text(r.lengde, specCols[3], y);
+      doc.text(r.effekt, specCols[4], y);
+      y += 4.5;
     }
-
-    // Sync left/right column heights
-    y = Math.max(leftY, rightY) + 3;
+    y += 4;
     _line(y); y += 4;
 
-    // \u2500\u2500 Hindringer + soner \u2500\u2500
+    // \u2500\u2500 Hindringer + soner (two columns, full width) \u2500\u2500
     const roomHinds = (S.hindrings || []).filter(h => h.roomId === room.id);
     const roomZones = (S.zones || []).filter(z => z.roomId === room.id);
     if (roomHinds.length || roomZones.length) {
       _checkPage(20);
+      const halfW = (pw - 4) / 2;
+      const colA = M;
+      const colB = M + halfW + 4;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(8);
       doc.setTextColor(20, 60, 130);
-      doc.text('Hindringer', specX, y);
-      doc.text('Soner', valX, y);
+      doc.text('Hindringer', colA, y);
+      doc.text('Soner', colB, y);
       y += 4;
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(7);
@@ -25936,18 +25951,18 @@ async function exportPDF(opts) {
         _checkPage(4);
         if (roomHinds[i]) {
           const h = roomHinds[i];
-          doc.text(`\u2022 ${h.label || h.type || 'Hindring'}`, specX, y);
+          doc.text(`\u2022 ${h.label || h.type || 'Hindring'}`, colA, y);
         } else if (i === 0) {
           doc.setTextColor(160, 170, 185);
-          doc.text('\u2014', specX, y);
+          doc.text('\u2014', colA, y);
           doc.setTextColor(60, 70, 90);
         }
         if (roomZones[i]) {
           const z = roomZones[i];
-          doc.text(`\u2022 ${z.type || 'sone'}${z.label ? ' \u2014 ' + z.label : ''}`, valX, y);
+          doc.text(`\u2022 ${z.type || 'sone'}${z.label ? ' \u2014 ' + z.label : ''}`, colB, y);
         } else if (i === 0) {
           doc.setTextColor(160, 170, 185);
-          doc.text('\u2014', valX, y);
+          doc.text('\u2014', colB, y);
           doc.setTextColor(60, 70, 90);
         }
         y += 4;
@@ -26079,14 +26094,16 @@ async function exportPDF(opts) {
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(80, 90, 110);
-  const mcols = [M, M + 50, M + 72, M + 95, M + 118, M + 140, M + 162];
+  // Antall and Lengde split into separate columns (was "Antall/lengde").
+  const mcols = [M, M + 50, M + 72, M + 88, M + 108, M + 128, M + 148, M + 170];
   doc.text('Produkt', mcols[0], y);
   doc.text('Type', mcols[1], y);
-  doc.text('Antall/lengde', mcols[2], y);
-  doc.text('Areal', mcols[3], y);
-  doc.text('Effekt', mcols[4], y);
-  doc.text('El.nr', mcols[5], y);
-  doc.text('Lev.art.nr', mcols[6], y);
+  doc.text('Antall', mcols[2], y);
+  doc.text('Lengde', mcols[3], y);
+  doc.text('Areal', mcols[4], y);
+  doc.text('Effekt', mcols[5], y);
+  doc.text('El.nr', mcols[6], y);
+  doc.text('Lev.art.nr', mcols[7], y);
   y += 3; _line(y); y += 4;
 
   doc.setFont('helvetica', 'normal');
@@ -26164,16 +26181,17 @@ async function exportPDF(opts) {
     const artNo = prod?.article_no || '\u2014';
     // Always show piece count; append meters when the product has a
     // meaningful linear measure (Folie / Kabel / Kabel (trapp) / Matte).
-    const meters = info.totalLen > 0 ? (info.totalLen / 100).toFixed(1) + ' m' : null;
-    const showMeters = meters && info.type !== 'Plate';
-    const qty = `${info.count} stk${showMeters ? ' · ' + meters : ''}`;
+    const showMeters = info.totalLen > 0 && info.type !== 'Plate';
+    const antall = info.count + ' stk';
+    const lengde = showMeters ? (info.totalLen / 100).toFixed(1) + ' m' : '—';
     doc.text(name.substring(0, 28), mcols[0], y);
     doc.text(info.type, mcols[1], y);
-    doc.text(qty, mcols[2], y);
-    doc.text(info.areaM2.toFixed(2) + ' m\u00b2', mcols[3], y);
-    doc.text(Math.round(info.watt) + ' W', mcols[4], y);
-    doc.text(elNo, mcols[5], y);
-    doc.text(artNo, mcols[6], y);
+    doc.text(antall, mcols[2], y);
+    doc.text(lengde, mcols[3], y);
+    doc.text(info.areaM2.toFixed(2) + ' m\u00b2', mcols[4], y);
+    doc.text(Math.round(info.watt) + ' W', mcols[5], y);
+    doc.text(elNo, mcols[6], y);
+    doc.text(artNo, mcols[7], y);
     y += 5;
   }
 
@@ -26369,7 +26387,8 @@ async function exportPDF(opts) {
 }
 
 /** Render a single room to an offscreen canvas and return base64 PNG */
-function _renderRoomToImage(room) {
+function _renderRoomToImage(room, opts) {
+  opts = opts || {};
   // Strategy: render to the main canvas with a temporary view that fits
   // this room, capture as dataURL, then restore the previous view. This
   // gives a pixel-perfect "what you see in canvas" image including dim
@@ -26436,7 +26455,40 @@ function _renderRoomToImage(room) {
   // Render to the main canvas with the temporary view
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
-  const dataURL = canvas.toDataURL('image/png');
+  let dataURL;
+  if (opts.focusRoom) {
+    // Compose: full scene desaturated + dimmed, with the focus room's
+    // bounding box (incl. dim-chain padding) re-drawn in full color from
+    // the main canvas. Other visible rooms become near-monochrome context.
+    const sc = S.view.zoom * BASE_SCALE;
+    const padPx = 130 * sc;     // ~130 cm in pixels — covers dim chains
+    const sCenter = w2s((rMinX + rMaxX) / 2, (rMinY + rMaxY) / 2);
+    const focusW = rW * sc + 2 * padPx;
+    const focusH = rH * sc + 2 * padPx;
+    const focusX = sCenter.x - focusW / 2;
+    const focusY = sCenter.y - focusH / 2;
+    const off = document.createElement('canvas');
+    off.width = canvas.width; off.height = canvas.height;
+    const ofx = off.getContext('2d');
+    // White background so the desaturated overlay reads as paper
+    ofx.fillStyle = '#ffffff';
+    ofx.fillRect(0, 0, off.width, off.height);
+    // Desaturated + dimmed copy of the full render
+    try { ofx.filter = 'grayscale(1) opacity(0.35)'; } catch(_) {}
+    ofx.drawImage(canvas, 0, 0);
+    try { ofx.filter = 'none'; } catch(_) {}
+    // Crisp focus area on top
+    const cx = Math.max(0, Math.floor(focusX));
+    const cy = Math.max(0, Math.floor(focusY));
+    const cw = Math.min(canvas.width - cx, Math.ceil(focusW));
+    const ch = Math.min(canvas.height - cy, Math.ceil(focusH));
+    if (cw > 0 && ch > 0) {
+      ofx.drawImage(canvas, cx, cy, cw, ch, cx, cy, cw, ch);
+    }
+    dataURL = off.toDataURL('image/png');
+  } else {
+    dataURL = canvas.toDataURL('image/png');
+  }
 
   // Restore everything and re-render so the user's view is untouched
   S.view.zoom = saved.zoom;
