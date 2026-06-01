@@ -8769,6 +8769,205 @@ function _v6DrawDebug(cable, room) {
 }
 
 /**
+ * Boustrophedon corner-to-corner cable engine.
+ * Spec: docs/claude/kabel-hjorne-til-hjorne-spec.md (prototype: kabel-prototype.html).
+ *
+ * Goal: even strand spacing (CC) everywhere, clean half-circle U-turns, ONE continuous
+ * path that starts in one room corner and ends in another — also on angled rooms.
+ *
+ * Approach (rectilinear / axis-aligned rooms, v1):
+ *   1. Global CC run grid on the perpendicular axis (centred) → identical CC everywhere.
+ *   2. Slabs at every room/obstacle/zone vertex; maximal equal-band slabs become cells.
+ *   3. Equalize WITHIN each cell (per-cell band) so protruding parts keep coverage.
+ *   4. One global-index serpentine across cells; choose perp-order + start-side so every
+ *      cell handoff lands on a SHARED band edge (a normal U-turn — never a floor jump).
+ *   5. Corner anchoring by CONSTRUCTION: start + end land in room corners.
+ *
+ * The output matches the existing renderer (drawCables + _drawCableUTurns): the emitted
+ * `startCorner` is chosen so `_uTurnIsHigh()` reproduces this exact serpentine. No renderer
+ * change needed. Rooms with holes / stacked cells (obstacle in the middle) or where no
+ * start-side gives clean handoffs return null → autoFillCable falls back to V6/V5/V4.
+ *
+ * LOCKED rules respected: half-circle U-turns r=CC/2, sweepMargin = margin + CC/2,
+ * equal-length runs WITHIN a cell, one start / one end, no Y-splits.
+ */
+function generateCableBoustrophedon(roomId, productId, direction, startCorner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  const margin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const minBend = (prod.min_bend_radius_mm || 0) / 10;
+  const minSpEff = Math.max(minSp, minBend > 0 ? 2 * minBend : minSp);
+
+  // Inner-offset polygon corners for corner-landing scoring
+  let cornerPts = _offsetPolygon(room.points, margin);
+  if (!cornerPts || cornerPts.length < 3) cornerPts = room.points;
+  const _minCornerDist = (pt) => Math.min(...cornerPts.map(c => Math.hypot(c.x - pt.x, c.y - pt.y)));
+
+  const net = Math.max(1, roomAreas(room).net);
+
+  // Build a complete layout for one direction + spacing. Tries the 4 traversal
+  // variants (perp asc/desc × start low/high) and returns the cleanest one, or null.
+  function _layout(dir, spacing) {
+    const sweepAxis = dir === 'v' ? 'y' : 'x';
+    const perpAxis = dir === 'v' ? 'x' : 'y';
+    const sweepMargin = margin + spacing / 2;
+
+    const perpVals = room.points.map(p => p[perpAxis]);
+    const rawPerpMin = Math.min(...perpVals), rawPerpMax = Math.max(...perpVals);
+    const perpMin = rawPerpMin + margin, perpMax = rawPerpMax - margin;
+    const usable = perpMax - perpMin;
+    if (usable <= 0) return null;
+    const N = Math.max(1, Math.floor(usable / spacing + 1e-9) + 1);
+    const sideGap = (usable - (N - 1) * spacing) / 2;
+    const runUs = [];
+    for (let i = 0; i < N; i++) runUs.push(perpMin + sideGap + i * spacing);
+
+    const roomH = S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3);
+    const roomFZ = (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
+
+    // Slab events: every perp coord where coverage can change
+    const evSet = new Set();
+    for (const p of room.points) evSet.add(p[perpAxis]);
+    for (const h of roomH) for (const p of h.points) evSet.add(p[perpAxis]);
+    for (const fz of roomFZ) for (const p of fz.points) evSet.add(p[perpAxis]);
+    const ev = [...evSet].filter(u => u >= rawPerpMin - 1e-6 && u <= rawPerpMax + 1e-6).sort((a, b) => a - b);
+
+    const slabs = [];
+    for (let i = 0; i + 1 < ev.length; i++) {
+      const a = ev[i], b = ev[i + 1];
+      if (b - a < 1e-3) continue;
+      const mid = (a + b) / 2;
+      let iv = clipScanlineToPolygon(sweepAxis, mid, room.points)
+        .map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi - lo > 1e-6);
+      for (const h of roomH) {
+        const hI = clipScanlineToPolygon(sweepAxis, mid, h.points).map(([lo, hi]) => [lo - margin, hi + margin]);
+        iv = subtractIntervalSets(iv, hI);
+      }
+      for (const fz of roomFZ) {
+        const fzI = clipScanlineToPolygon(sweepAxis, mid, fz.points).map(([lo, hi]) => [lo - margin, hi + margin]);
+        iv = subtractIntervalSets(iv, fzI);
+      }
+      iv = iv.filter(([lo, hi]) => hi - lo > 1e-6);
+      if (iv.length === 0) continue;
+      // v1 only handles single-interval rooms (no holes / stacked cells)
+      if (iv.length > 1) return null;
+      slabs.push({ u0: a, u1: b, lo: iv[0][0], hi: iv[0][1] });
+    }
+    if (slabs.length === 0) return null;
+
+    // Group contiguous equal-band slabs into cells
+    const cells = [];
+    for (const s of slabs) {
+      const key = Math.round(s.lo * 100) / 100 + '|' + Math.round(s.hi * 100) / 100;
+      const last = cells.length ? cells[cells.length - 1] : null;
+      if (last && last.key === key && Math.abs(last.u1 - s.u0) < 1e-2) last.u1 = s.u1;
+      else cells.push({ key, u0: s.u0, u1: s.u1, lo: s.lo, hi: s.hi });
+    }
+    for (const c of cells) c.runUs = runUs.filter(u => u >= c.u0 - 1e-6 && u <= c.u1 + 1e-6);
+    const liveCells = cells.filter(c => c.runUs.length > 0 && c.hi - c.lo > 1e-6);
+    if (liveCells.length === 0) return null;
+
+    // Build one global-index serpentine for a traversal variant
+    function build(perpAsc, startHigh) {
+      const ordered = liveCells.slice().sort((p, q) => perpAsc ? p.u0 - q.u0 : q.u0 - p.u0);
+      const flat = [];
+      ordered.forEach((c, ci) => {
+        const us = c.runUs.slice().sort((a, b) => perpAsc ? a - b : b - a);
+        for (const u of us) flat.push({ u, lo: c.lo, hi: c.hi, cellIdx: ci });
+      });
+      if (flat.length === 0) return null;
+      // Cell-handoff cleanliness: a boundary U-turn must land on a shared band edge
+      let openLen = 0;
+      for (let i = 0; i + 1 < flat.length; i++) {
+        if (flat[i].cellIdx === flat[i + 1].cellIdx) continue;
+        const startHigh_i = (i % 2 === 0) ? startHigh : !startHigh;
+        const endHigh_i = !startHigh_i;        // a straight run flips side
+        const aSide = endHigh_i ? flat[i].hi : flat[i].lo;
+        const bSide = endHigh_i ? flat[i + 1].hi : flat[i + 1].lo;
+        openLen += Math.abs(aSide - bSide);
+      }
+      const runs = flat.map(f => ({ pos_cm: f.u, segments: [{ start_cm: f.lo, end_cm: f.hi }] }));
+      const n = flat.length;
+      const startSweep0 = startHigh ? flat[0].hi : flat[0].lo;
+      const startHigh_last = ((n - 1) % 2 === 0) ? startHigh : !startHigh;
+      const endSweepLast = (!startHigh_last) ? flat[n - 1].hi : flat[n - 1].lo;
+      const start = dir === 'v' ? { x: flat[0].u, y: startSweep0 } : { x: startSweep0, y: flat[0].u };
+      const end = dir === 'v' ? { x: flat[n - 1].u, y: endSweepLast } : { x: endSweepLast, y: flat[n - 1].u };
+      // Emit the startCorner so the renderer's _uTurnIsHigh reproduces this serpentine.
+      // (freeHigh == startHigh; perp letter from perpAsc.)
+      let sc;
+      if (dir === 'v') sc = startHigh ? (perpAsc ? 'bl' : 'br') : (perpAsc ? 'tl' : 'tr');
+      else sc = startHigh ? (perpAsc ? 'br' : 'tr') : (perpAsc ? 'bl' : 'tl');
+      const length = _calcTotalCableLength(runs, spacing);
+      let swept = 0; for (const f of flat) swept += (f.hi - f.lo) * spacing;
+      return { runs, openLen, start, end, startCornerStr: sc, totalLength_cm: length, swept };
+    }
+
+    let best = null, bestSel = -Infinity;
+    for (const perpAsc of [true, false]) {
+      for (const startHigh of [true, false]) {
+        const b = build(perpAsc, startHigh);
+        if (!b) continue;
+        let sel = -b.openLen * 100;
+        sel += Math.max(0, 8 - _minCornerDist(b.start) * 0.1);
+        sel += Math.max(0, 8 - _minCornerDist(b.end) * 0.1);
+        if (b.startCornerStr === startCorner) sel += 0.5;
+        if (sel > bestSel) { bestSel = sel; best = b; }
+      }
+    }
+    if (!best) return null;
+    if (best.openLen > 1.0) return null;                 // would need a floor jump → reject
+    const coverage = best.swept / net;
+    if (coverage < 0.5) return null;
+    return {
+      runs: best.runs,
+      totalLength_cm: best.totalLength_cm,
+      spacing_cm: spacing,
+      direction: dir,
+      startCorner: best.startCornerStr,
+      cells: liveCells,
+      start: best.start,
+      end: best.end,
+      coverage
+    };
+  }
+
+  // Spacing selection: fixed-length products bisect CC to hit target length.
+  function _solve(dir) {
+    if (!prod.cable_length_m) {
+      const sp = Math.max(minSpEff, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+      return _layout(dir, sp);
+    }
+    const target = prod.cable_length_m * 100;
+    const nettoM2 = net / 10000;
+    let sp = Math.max(minSpEff, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
+    let lo = minSpEff, hi = maxSp, bestRes = null, bestDiff = Infinity;
+    for (let it = 0; it < 24; it++) {
+      const r = _layout(dir, sp);
+      if (r) {
+        const d = r.totalLength_cm - target;
+        if (Math.abs(d) < bestDiff) { bestDiff = Math.abs(d); bestRes = r; }
+        if (Math.abs(d) < 1) break;
+        if (d < 0) hi = sp; else lo = sp;   // smaller spacing → more cable
+      } else {
+        lo = sp;                            // too tight here, try larger spacing
+      }
+      const nsp = (lo + hi) / 2;
+      if (Math.abs(nsp - sp) < 1e-3) break;
+      sp = nsp;
+    }
+    return bestRes;
+  }
+
+  return _solve(direction);
+}
+
+/**
  * Top-level V6 orchestrator: full area-first pipeline.
  */
 function generateCableV6(roomId, productId, direction, startCorner) {
@@ -9350,6 +9549,53 @@ function autoFillCable(roomId, productId) {
           }
         }
       }
+    }
+  }
+
+  // Try boustrophedon corner-to-corner engine (primary — clean rooms only).
+  // It self-selects start corner + side to guarantee corner-to-corner landing and
+  // clean cell handoffs; returns null for holes/stacked cells → falls through to V6.
+  {
+    const dirs = userDir ? [bestDir] : [bestDir, bestDir === 'v' ? 'h' : 'v'];
+    let bBest = null, bBestScore = -Infinity;
+    for (const dir of dirs) {
+      const res = generateCableBoustrophedon(roomId, productId, dir, userCorner || bestCorner);
+      if (!res || res.runs.length === 0) continue;
+      const tmpCable = { roomId, direction: res.direction, runs: res.runs, startCorner: res.startCorner };
+      const ep = _cableEndpoints(tmpCable);
+      // Skip if endpoints land in a forbidden zone — let V6's 4-corner search handle zones.
+      let forbiddenHit = false;
+      if (ep) {
+        for (const fz of forbiddenZones) {
+          if (ptInPoly(ep.start.x, ep.start.y, fz.points) || ptInPoly(ep.end.x, ep.end.y, fz.points)) forbiddenHit = true;
+        }
+      }
+      if (forbiddenHit) continue;
+      let score = 0;
+      if (ep) for (const pz of preferredZones) if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+      if (prod.cable_length_m) {
+        const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
+        score += Math.max(0, 10 - diff * 0.1);
+      }
+      if (res.cells && res.cells.length > 1) score += 5;
+      if (dir === primaryDir) score += 1;
+      if (score > bBestScore) { bBestScore = score; bBest = res; }
+    }
+    if (bBest && bBest.runs.length > 0) {
+      return {
+        id: S.counters.nextCableId++,
+        roomId, productId,
+        direction: bBest.direction,
+        spacing_cm: bBest.spacing_cm,
+        startCorner: bBest.startCorner,
+        runs: bBest.runs,
+        totalLength_cm: bBest.totalLength_cm,
+        lockedEnd: !!prod.cable_length_m,
+        lockedStart: false,
+        cells: bBest.cells,
+        connections: [],
+        _engine: 'boustrophedon'
+      };
     }
   }
 
