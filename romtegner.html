@@ -8791,6 +8791,294 @@ function _v6DrawDebug(cable, room) {
  * LOCKED rules respected: half-circle U-turns r=CC/2, sweepMargin = margin + CC/2,
  * equal-length runs WITHIN a cell, one start / one end, no Y-splits.
  */
+// ─────────────────────────────────────────────────────────────────────────
+// SKEW / OBSTACLE CABLE ENGINE (engine2 — see docs/claude/kabel-prototype-skra.html
+// and kabel-hjorne-til-hjorne-spec.md §2.7). Handles arbitrary polygons (slanted
+// walls) + holes via a ROTATED sweep frame + boustrophedon cells.
+//   • Rotated sweep frame: runs are made vertical in a frame aligned to a chosen
+//     wall direction, so strands follow slanted walls with equal CC.
+//   • Constant-CC grid on the perpendicular axis (equal strand spacing).
+//   • Holes split a run into lanes → boustrophedon cells; cells joined into ONE
+//     path with wall-hugging connectors (parity-aware).
+//   • U-turn arc direction = LOCKED "vend utover": outward normal (0,±1) in the
+//     rotated frame, rotated to world.
+// Produces an ADDITIVE representation: cable.pathEls (ordered world-space
+// elements) + start/end. Axis-aligned cables are untouched (no regression).
+// ─────────────────────────────────────────────────────────────────────────
+const _SK_EPS = 1e-6;
+function _skRotate(pts, ang) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return pts.map(p => ({ x: p.x * c - p.y * s, y: p.x * s + p.y * c }));
+}
+function _skBbox(pts) {
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+// vertical line x=xv intersect polygon → sorted y-intervals (even-odd rule)
+function _skClipVertical(xv, poly) {
+  const ys = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    if ((a.x <= xv && b.x > xv) || (b.x <= xv && a.x > xv)) {
+      const t = (xv - a.x) / (b.x - a.x);
+      ys.push(a.y + t * (b.y - a.y));
+    }
+  }
+  ys.sort((p, q) => p - q);
+  const iv = [];
+  for (let i = 0; i + 1 < ys.length; i += 2) iv.push([ys[i], ys[i + 1]]);
+  return iv;
+}
+function _skSubtract(A, B) {
+  let out = A.map(iv => [iv[0], iv[1]]);
+  for (const [blo, bhi] of B) {
+    const next = [];
+    for (const [lo, hi] of out) {
+      if (bhi <= lo + _SK_EPS || blo >= hi - _SK_EPS) { next.push([lo, hi]); continue; }
+      if (blo > lo + _SK_EPS) next.push([lo, Math.min(hi, blo)]);
+      if (bhi < hi - _SK_EPS) next.push([Math.max(lo, bhi), hi]);
+    }
+    out = next.filter(([lo, hi]) => hi - lo > _SK_EPS);
+  }
+  return out;
+}
+const _skOverlap = (a, b) => Math.min(a[1], b[1]) - Math.max(a[0], b[0]);
+function _skUF(n) { const p = [...Array(n).keys()]; const f = x => p[x] === x ? x : (p[x] = f(p[x])); return { f, u: (a, b) => { p[f(a)] = f(b); } }; }
+function _skPolyArea(p) { let a = 0; for (let i = 0; i < p.length; i++) { const j = (i + 1) % p.length; a += p[i].x * p[j].y - p[j].x * p[i].y; } return Math.abs(a) / 2; }
+
+// Build the run-grid + boustrophedon cells in the rotated (runs-vertical) frame.
+function _skGenerateRotated(roomR, holesR, CC, margin) {
+  const bb = _skBbox(roomR);
+  const sweepMargin = margin + CC / 2;
+  const usable = (bb.maxX - margin) - (bb.minX + margin);
+  if (usable <= 0) return null;
+  const N = Math.max(1, Math.floor(usable / CC + _SK_EPS) + 1);
+  const span = (N - 1) * CC;
+  const x0 = bb.minX + margin + (usable - span) / 2;
+  const runs = [];
+  for (let i = 0; i < N; i++) {
+    const x = x0 + i * CC;
+    let iv = _skClipVertical(x, roomR);
+    for (const h of holesR) {
+      const hi = _skClipVertical(x, h).map(([lo, hh]) => [lo - margin, hh + margin]);
+      iv = _skSubtract(iv, hi);
+    }
+    iv = iv.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi - lo > _SK_EPS);
+    runs.push({ x, lanes: iv });
+  }
+  const laneNodes = [];
+  const idx = runs.map(() => []);
+  runs.forEach((r, ri) => r.lanes.forEach((lane, li) => { idx[ri][li] = laneNodes.length; laneNodes.push({ ri, li, lo: lane[0], hi: lane[1], x: r.x }); }));
+  if (laneNodes.length === 0) return null;
+  // Link lane a (run i) to lane b (run i+1) ONLY when the connection is 1:1.
+  // A split/merge (obstacle edge = critical point) changes the count → no link →
+  // a new cell starts. Keeps every cell single-lane-per-run → sweeps cleanly.
+  const U = _skUF(laneNodes.length);
+  for (let ri = 0; ri + 1 < runs.length; ri++) {
+    const A = runs[ri].lanes, B = runs[ri + 1].lanes;
+    A.forEach((a, ai) => {
+      const bMatches = B.map((b, bi) => _skOverlap(a, b) > _SK_EPS ? bi : -1).filter(bi => bi >= 0);
+      B.forEach((b, bi) => {
+        if (_skOverlap(a, b) <= _SK_EPS) return;
+        const aMatches = A.map((aa, aai) => _skOverlap(aa, b) > _SK_EPS ? aai : -1).filter(aai => aai >= 0);
+        if (bMatches.length === 1 && aMatches.length === 1) U.u(idx[ri][ai], idx[ri + 1][bi]);
+      });
+    });
+  }
+  const cellMap = new Map();
+  laneNodes.forEach((nd, i) => { const r = U.f(i); if (!cellMap.has(r)) cellMap.set(r, []); cellMap.get(r).push(nd); });
+  const cells = [...cellMap.values()].map(nodes => {
+    nodes.sort((a, b) => a.x - b.x);
+    const xs = nodes.map(n => n.x);
+    return { nodes, xMin: Math.min(...xs), xMax: Math.max(...xs),
+             loMin: Math.min(...nodes.map(n => n.lo)), hiMax: Math.max(...nodes.map(n => n.hi)) };
+  });
+  return { runs, cells, bb, sweepMargin, N, x0, CC };
+}
+// Serpentine ONE cell → ordered elements: run, uturn, run, uturn, …
+function _skSerpCell(cell, ltr, entryLow) {
+  const ns = cell.nodes.slice().sort((a, b) => ltr ? a.x - b.x : b.x - a.x);
+  const elements = [];
+  let prevEnd = null, prevRun = null;
+  for (let k = 0; k < ns.length; k++) {
+    const nd = ns[k];
+    const startLowRun = (entryLow === (k % 2 === 0));
+    const wStart = startLowRun ? nd.lo : nd.hi;
+    const wEnd = startLowRun ? nd.hi : nd.lo;
+    if (prevEnd) elements.push({ kind: 'uturn', from: prevEnd, to: { x: nd.x, y: wStart }, high: prevRun.y1 > prevRun.y0 });
+    const run = { x: nd.x, y0: wStart, y1: wEnd };
+    elements.push({ kind: 'run', a: { x: nd.x, y: wStart }, b: { x: nd.x, y: wEnd }, y0: wStart, y1: wEnd });
+    prevEnd = { x: nd.x, y: wEnd }; prevRun = run;
+  }
+  const exitLow = !(entryLow === ((ns.length - 1) % 2 === 0));
+  return { elements, exit: prevEnd, exitLow, lastRun: prevRun };
+}
+function _skAdjacent(A, B, CC) {
+  for (const a of A.nodes) for (const b of B.nodes)
+    if (Math.abs(a.x - b.x) <= CC * 1.5 && (Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)) > -_SK_EPS) return true;
+  return false;
+}
+// One continuous path via greedy walk over the cell-adjacency graph. Cells join
+// via clean U-turns (shared edge) or wall-hug connectors (around an obstacle).
+function _skBuildPath(model, roomCornersR, CC, margin) {
+  const { cells } = model;
+  const tol = margin + CC + 0.5;
+  const nearCorner = p => p && Math.min(...roomCornersR.map(c => Math.hypot(c.x - p.x, c.y - p.y))) <= tol;
+
+  function attempt(startCell, ltr, startLow) {
+    const visited = new Array(cells.length).fill(false);
+    const order = []; let cur = startCell;
+    while (cur != null) {
+      visited[cur] = true; order.push(cur);
+      let next = null;
+      for (let j = 0; j < cells.length; j++) {
+        if (visited[j] || !_skAdjacent(cells[cur], cells[j], CC)) continue;
+        if (next == null || (ltr ? cells[j].xMin < cells[next].xMin : cells[j].xMin > cells[next].xMin)) next = j;
+      }
+      if (next == null) for (let j = 0; j < cells.length; j++)
+        if (!visited[j] && (next == null || cells[j].xMin < cells[next].xMin)) next = j;
+      cur = next;
+    }
+    const elements = []; let openLen = 0, prevEnd = null, prevRun = null, arriveLow = startLow, firstStart = null;
+    for (const ci of order) {
+      const seg = _skSerpCell(cells[ci], ltr, arriveLow);
+      if (!seg.elements.length) continue;
+      const f = { x: seg.elements[0].a.x, y: seg.elements[0].a.y };
+      if (firstStart == null) firstStart = f;
+      if (prevEnd) {
+        const dX = Math.abs(f.x - prevEnd.x), dY = Math.abs(f.y - prevEnd.y);
+        const clean = dY < CC * 0.6 && dX < CC * 1.6;
+        if (!clean) openLen += dY + Math.max(0, dX - CC);
+        elements.push({ kind: clean ? 'uturn' : 'connector', from: prevEnd, to: f, high: prevRun ? prevRun.y1 > prevRun.y0 : true });
+      }
+      for (const el of seg.elements) elements.push(el);
+      prevEnd = seg.exit; prevRun = seg.lastRun; arriveLow = seg.exitLow;
+    }
+    return { elements, openLen, start: firstStart, end: prevEnd };
+  }
+
+  let best = null, bestScore = -Infinity;
+  for (let sc = 0; sc < cells.length; sc++)
+    for (const ltr of [true, false]) for (const low of [true, false]) {
+      const t = attempt(sc, ltr, low);
+      if (!t.start) continue;
+      const s = -t.openLen * 10 + (nearCorner(t.start) ? 5 : 0) + (nearCorner(t.end) ? 5 : 0);
+      if (s > bestScore) { bestScore = s; best = t; }
+    }
+  return best;
+}
+
+// Core engine for one fixed CC. Returns world-space ordered elements or null.
+function _skEngineCore(room, holes, CC, margin, angleDeg) {
+  const cand = new Set([0, 90]);
+  if (angleDeg != null) { cand.clear(); cand.add(angleDeg); }
+  else for (let i = 0; i < room.length; i++) {
+    const a = room[i], b = room[(i + 1) % room.length];
+    let deg = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+    deg = ((deg % 180) + 180) % 180;
+    cand.add(Math.round(deg * 10) / 10);
+  }
+  let best = null;
+  for (const deg of cand) {
+    const rot = (90 - deg) * Math.PI / 180;
+    const roomR = _skRotate(room, rot);
+    const holesR = holes.map(h => _skRotate(h, rot));
+    const model = _skGenerateRotated(roomR, holesR, CC, margin);
+    if (!model) continue;
+    const path = _skBuildPath(model, roomR, CC, margin);
+    if (!path || !path.start) continue;
+    let cov = 0; for (const el of path.elements) if (el.kind === 'run') cov += Math.abs(el.y1 - el.y0) * CC;
+    const area = _skPolyArea(room) - holes.reduce((s, h) => s + _skPolyArea(h), 0);
+    const score = cov - path.openLen * CC * 2;
+    if (!best || score > best.score) best = { score, rot, deg, model, path, coverage: area > 0 ? cov / area : 0 };
+  }
+  if (!best) return null;
+  const inv = -best.rot;
+  // World-space ordered elements (arcs sampled at render time → compact + crisp)
+  const els = best.path.elements.map(el => {
+    if (el.kind === 'run') { const w = _skRotate([el.a, el.b], inv); return { kind: 'run', a: w[0], b: w[1] }; }
+    const w = _skRotate([el.from, el.to], inv);
+    const nrm = _skRotate([{ x: 0, y: el.high ? 1 : -1 }], inv)[0];
+    return { kind: el.kind, from: w[0], to: w[1], nrm };
+  });
+  const start = _skRotate([best.path.start], inv)[0];
+  const end = _skRotate([best.path.end], inv)[0];
+  // length: run = |b-a|, uturn = π·d/2, connector = L (dX+dY wall-hug)
+  let len = 0;
+  for (const el of els) {
+    if (el.kind === 'run') len += Math.hypot(el.b.x - el.a.x, el.b.y - el.a.y);
+    else { const d = Math.hypot(el.to.x - el.from.x, el.to.y - el.from.y); len += el.kind === 'uturn' ? Math.PI * d / 2 : (Math.abs(el.to.x - el.from.x) + Math.abs(el.to.y - el.from.y)); }
+  }
+  return { els, start, end, angleDeg: best.deg, coverage: best.coverage, openLen: best.path.openLen, totalLength_cm: len, nCells: best.model.cells.length };
+}
+
+/**
+ * Public skew/obstacle engine. Returns an additive cable shape:
+ *   { _engine:'skew', pathEls, start, end, angleDeg, spacing_cm, totalLength_cm,
+ *     coverage, openLen, nCells, runs:[], connections:[] }
+ * or null. Holes = room hindrings + forbidden zones.
+ */
+function generateCableSkew(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+
+  const margin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10;
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const minBend = (prod.min_bend_radius_mm || 0) / 10;
+  const minSpEff = Math.max(minSp, minBend > 0 ? 2 * minBend : minSp);
+
+  const roomPts = room.points.map(p => ({ x: p.x, y: p.y }));
+  const holes = [];
+  for (const h of S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3))
+    holes.push(h.points.map(p => ({ x: p.x, y: p.y })));
+  for (const z of (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3))
+    holes.push(z.points.map(p => ({ x: p.x, y: p.y })));
+
+  const _run = (sp) => {
+    const core = _skEngineCore(roomPts, holes, sp, margin, null);
+    if (!core) return null;
+    return {
+      _engine: 'skew',
+      pathEls: core.els,
+      start: core.start, end: core.end,
+      angleDeg: core.angleDeg,
+      spacing_cm: sp,
+      totalLength_cm: core.totalLength_cm,
+      coverage: core.coverage,
+      openLen: core.openLen,
+      nCells: core.nCells,
+      cc_mm: Math.round(sp * 10),
+      runs: [], connections: []
+    };
+  };
+
+  // Fixed-length products: bisect CC to hit target length (smaller CC → more cable).
+  if (!prod.cable_length_m) {
+    const sp = Math.max(minSpEff, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+    return _run(sp);
+  }
+  const target = prod.cable_length_m * 100;
+  const net = Math.max(1, roomAreas(room).net) / 10000;
+  let sp = Math.max(minSpEff, Math.min(maxSp, (net / prod.cable_length_m) * 100));
+  let lo = minSpEff, hi = maxSp, bestRes = null, bestDiff = Infinity;
+  for (let it = 0; it < 24; it++) {
+    const r = _run(sp);
+    if (r) {
+      const d = r.totalLength_cm - target;
+      if (Math.abs(d) < bestDiff) { bestDiff = Math.abs(d); bestRes = r; }
+      if (Math.abs(d) < 1) break;
+      if (d < 0) hi = sp; else lo = sp;   // smaller spacing → more cable
+    } else { lo = sp; }
+    const nsp = (lo + hi) / 2;
+    if (Math.abs(nsp - sp) < 1e-3) break;
+    sp = nsp;
+  }
+  return bestRes;
+}
+
 function generateCableBoustrophedon(roomId, productId, direction, startCorner) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
@@ -9596,6 +9884,50 @@ function autoFillCable(roomId, productId) {
         connections: [],
         _engine: 'boustrophedon'
       };
+    }
+  }
+
+  // Try the rotated/skew engine (corner-to-corner serpentine for non-rectilinear rooms
+  // and rooms with obstacles). Spec §2.7 / step 0: this is PURELY ADDITIVE — it is gated
+  // so plain rectangular/L/T rooms with no holes NEVER reach it and stay on the existing
+  // axis-aligned engines (no regression). Skew cables are auto-fill-only (no drag-edit v1).
+  {
+    // A room is "rectilinear" iff every edge is axis-aligned (dx≈0 or dy≈0).
+    const _EPS = 0.5; // cm
+    let rectilinear = true;
+    const rp = room.points || [];
+    for (let i = 0; i < rp.length && rectilinear; i++) {
+      const a = rp[i], b = rp[(i + 1) % rp.length];
+      const dx = Math.abs(b.x - a.x), dy = Math.abs(b.y - a.y);
+      if (dx > _EPS && dy > _EPS) rectilinear = false;
+    }
+    const hasHindring = S.hindrings.some(h => h.roomId === roomId && h.points && h.points.length >= 3);
+    const hasForbidden = forbiddenZones.length > 0;
+    const needSkew = (!rectilinear) || hasHindring || hasForbidden;
+    if (needSkew) {
+      const res = generateCableSkew(roomId, productId);
+      // Accept only if it produced a corner-to-corner path with good coverage and no open jumps.
+      if (res && res.pathEls && res.pathEls.length > 0 &&
+          res.coverage >= 70 && (res.openLen || 0) < spacing * 1.5) {
+        return {
+          id: S.counters.nextCableId++,
+          roomId, productId,
+          _engine: 'skew',
+          pathEls: res.pathEls,
+          start: res.start, end: res.end,
+          angleDeg: res.angleDeg,
+          spacing_cm: res.spacing_cm,
+          cc_mm: res.cc_mm,
+          totalLength_cm: res.totalLength_cm,
+          coverage: res.coverage,
+          openLen: res.openLen,
+          nCells: res.nCells,
+          runs: [], connections: [],
+          lockedEnd: !!prod.cable_length_m,
+          lockedStart: false
+        };
+      }
+      // else: fall through to V6/V5/V4 fallbacks below.
     }
   }
 
@@ -11342,7 +11674,8 @@ function drawCables() {
   for (const cable of S.cables) {
     if (!_roomIdOnActiveFloor(cable.roomId)) continue;
     const room = S.rooms.find(r => r.id === cable.roomId);
-    if (!room || !cable.runs || cable.runs.length === 0) continue;
+    const _hasGeom = (cable.runs && cable.runs.length > 0) || (cable.pathEls && cable.pathEls.length > 0);
+    if (!room || !_hasGeom) continue;
 
     const isSel = S.ui.selectedCableId === cable.id;
     const isHov = !isSel && _hoveredCableId === cable.id;
@@ -11392,6 +11725,9 @@ function drawCables() {
     }
     // Draw U-turns between adjacent runs (natural serpentine with wall-following)
     _drawCableUTurns(cable);
+
+    // Skew/obstacle engine: draw explicit world-space path elements
+    if (cable.pathEls && cable.pathEls.length) _drawCableSkewPath(cable);
 
     // Draw cell connection paths (polygon-aware engine)
     if (cable.connections && cable.connections.length > 0) {
@@ -11458,12 +11794,20 @@ function drawCables() {
     // Violation warnings are shown in sidebar, not on canvas
 
     // Cable label — movable, hideable
-    if (S.ui.showStripLabels && cable.runs.length > 0 && cable.labelVisible !== false) {
+    if (S.ui.showStripLabels && _hasGeom && cable.labelVisible !== false) {
       const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
       if (prod) {
         let cPt;
         if (cable.labelPos) {
           cPt = w2s(cable.labelPos.x, cable.labelPos.y);
+        } else if (cable.pathEls && cable.pathEls.length) {
+          // Skew/obstacle engine: center on the path-element bounding box
+          const xs = [], ys = [];
+          for (const el of cable.pathEls) {
+            if (el.kind === 'run') { xs.push(el.a.x, el.b.x); ys.push(el.a.y, el.b.y); }
+            else { xs.push(el.from.x, el.to.x); ys.push(el.from.y, el.to.y); }
+          }
+          cPt = w2s((Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2);
         } else {
           // Default: center of cable area
           const allPos = cable.runs.map(r => r.pos_cm);
@@ -11585,6 +11929,48 @@ function drawCables() {
     }
 
     ctx.restore();
+  }
+}
+
+// Draw a skew/obstacle cable from its explicit world-space path elements.
+// runs → straight lines; uturns → half-circle arcs bulging along the outward
+// normal (LOCKED "vend utover"); connectors → dashed wall-hug L (around holes).
+// Assumes ctx stroke style / lineWidth already set by the caller.
+function _drawCableSkewPath(cable) {
+  const els = cable.pathEls;
+  if (!els || !els.length) return;
+  const sp = cable.spacing_cm || ((cable.cc_mm || 120) / 10);
+  for (const el of els) {
+    if (el.kind === 'run') {
+      const a = w2s(el.a.x, el.a.y), b = w2s(el.b.x, el.b.y);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    } else if (el.kind === 'uturn') {
+      const f = el.from, t = el.to;
+      const d = Math.hypot(t.x - f.x, t.y - f.y);
+      if (d < sp * 2.4 && d > 1e-6) {
+        const mid = { x: (f.x + t.x) / 2, y: (f.y + t.y) / 2 }, R = d / 2;
+        const nx = el.nrm ? el.nrm.x : 0, ny = el.nrm ? el.nrm.y : 1;
+        const p0 = w2s(f.x, f.y);
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i <= 16; i++) {
+          const a = Math.PI * i / 16;
+          const wx = mid.x - Math.cos(a) * (t.x - f.x) / 2 + Math.sin(a) * nx * R;
+          const wy = mid.y - Math.cos(a) * (t.y - f.y) / 2 + Math.sin(a) * ny * R;
+          const q = w2s(wx, wy); ctx.lineTo(q.x, q.y);
+        }
+        ctx.stroke();
+      } else {
+        const a = w2s(f.x, f.y), b = w2s(t.x, t.y);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    } else { // connector — wall-hug L (dashed)
+      const f = el.from, t = el.to;
+      const p0 = w2s(f.x, f.y), corner = w2s(f.x, t.y), p1 = w2s(t.x, t.y);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(corner.x, corner.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
+      ctx.restore();
+    }
   }
 }
 
@@ -13571,6 +13957,17 @@ function hitCable(wx, wy) {
   for (let i = S.cables.length - 1; i >= 0; i--) {
     const cable = S.cables[i];
     if (!_roomIdOnActiveFloor(cable.roomId)) continue;
+    // Skew/obstacle engine: hit-test against path-element segments (chord approx)
+    if (cable.pathEls && cable.pathEls.length) {
+      let hit = false;
+      for (const el of cable.pathEls) {
+        const a = el.kind === 'run' ? el.a : el.from;
+        const b = el.kind === 'run' ? el.b : el.to;
+        if (distSeg(wx, wy, a.x, a.y, b.x, b.y) <= tolCm) { hit = true; break; }
+      }
+      if (hit) return cable;
+      continue;
+    }
     if (!cable.runs) continue;
     for (const run of cable.runs) {
       for (const seg of run.segments) {
@@ -13608,6 +14005,10 @@ function hitCable(wx, wy) {
 
 /** Get start and end world coordinates of a cable's serpentine path */
 function _cableEndpoints(cable) {
+  // Skew/obstacle engine: start/end are stored explicitly in world coords.
+  if (cable.pathEls && cable.pathEls.length && cable.start && cable.end) {
+    return { start: { x: cable.start.x, y: cable.start.y }, end: { x: cable.end.x, y: cable.end.y } };
+  }
   if (!cable.runs || cable.runs.length === 0) return null;
   const firstRun = cable.runs[0];
   const lastRun = cable.runs[cable.runs.length - 1];
@@ -22524,11 +22925,20 @@ canvas.addEventListener('mousedown', e=>{
         const rawWp = s2w(sx0, sy0);
         if (!cable.labelPos) {
           // Initialize labelPos from current auto-center
-          const allPos = cable.runs.map(r => r.pos_cm);
-          const allSweep = cable.runs.flatMap(r => r.segments.flatMap(s => [s.start_cm, s.end_cm]));
-          const cPerp = (Math.min(...allPos) + Math.max(...allPos)) / 2;
-          const cSweep = (Math.min(...allSweep) + Math.max(...allSweep)) / 2;
-          cable.labelPos = cable.direction === 'v' ? {x: cPerp, y: cSweep} : {x: cSweep, y: cPerp};
+          if (cable.pathEls && cable.pathEls.length) {
+            const xs = [], ys = [];
+            for (const el of cable.pathEls) {
+              if (el.kind === 'run') { xs.push(el.a.x, el.b.x); ys.push(el.a.y, el.b.y); }
+              else { xs.push(el.from.x, el.to.x); ys.push(el.from.y, el.to.y); }
+            }
+            cable.labelPos = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+          } else {
+            const allPos = cable.runs.map(r => r.pos_cm);
+            const allSweep = cable.runs.flatMap(r => r.segments.flatMap(s => [s.start_cm, s.end_cm]));
+            const cPerp = (Math.min(...allPos) + Math.max(...allPos)) / 2;
+            const cSweep = (Math.min(...allSweep) + Math.max(...allSweep)) / 2;
+            cable.labelPos = cable.direction === 'v' ? {x: cPerp, y: cSweep} : {x: cSweep, y: cPerp};
+          }
         }
         _cableLabelDragOffset = { x: rawWp.x - cable.labelPos.x, y: rawWp.y - cable.labelPos.y };
         canvas.style.cursor = 'grabbing';
@@ -22913,7 +23323,7 @@ canvas.addEventListener('mousedown', e=>{
 
     // ── Cable start/end gizmo — drag ──
     const csgHit = hitCableStartGizmo(sx0, sy0);
-    if (csgHit && !csgHit.lockedStart) {
+    if (csgHit && !csgHit.lockedStart && !(csgHit.pathEls && csgHit.pathEls.length)) {
       pushUndo();
       _cableGizmoDragging = true;
       _cableGizmoDragType = 'start';

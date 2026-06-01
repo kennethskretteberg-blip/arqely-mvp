@@ -113,6 +113,45 @@ ikke er et helt multiplum slik at U-svingene ellers ville stå ulikt fra veggen)
 båndet. CC mellom strengene røres aldri — bare hvor langt strengene strekker seg mot
 sveip-veggen. Slik får du *både* lik CC *og* eksakt hjørne-landing.
 
+### 2.7 Skråvegger og hindringer (generell motor — `engine2`)
+De rettvinklede reglene over generaliserer til vilkårlige polygoner med to grep:
+
+**(a) Rotert sveiperamme for skråvegger.** Roter all geometri slik at strengene blir
+parallelle med en valgt vegg (kandidat-vinkler = hver veggretning + 0°/90°; velg den med
+best dekning). Kjør samme scanline-serpentin i den roterte rammen, og roter resultatet
+tilbake. Da **følger strengene skråveggen** med lik CC, og U-svingene trapper seg pent
+langs skråningen. Strenglengden får variere naturlig langs skråveggen — det er *ikke* en
+Y-split (banen forgrener seg aldri), bare en streng som er litt kortere enn naboen.
+
+**Bueretning (LOCKED — `_uTurnIsHigh`/`wallDir`):** hver bue skal alltid **vende utover**,
+vekk fra strengkroppene. Bestem retningen lokalt fra strengen som ender i svingen: gikk
+strengen oppover (`y1 > y0`) er svingen i topp-enden → bue oppover; ellers nederst → bue
+nedover. Dette tilsvarer `wallDir = connectHigh ? +1 : -1` i `_drawCableUTurns` (linje
+11591). Bruk ALDRI «vekk fra rom-sentrum»-heuristikk — den bommer ved hindringer og
+innvendige svinger. I rotert ramme er normalen ganske enkelt (0, ±1), rotert til verden.
+Verifisert på trapes, parallellogram, kappet hjørne og triangel: lik CC, ~95–96 %
+dekning, hjørne-til-hjørne, null gulv-hopp.
+
+**(b) Boustrophedon-celler rundt hindringer.** En hindring (hull) splitter strengene som
+passerer den i to baner (over/under). Standard boustrophedon: ved hindringens kant endrer
+banetallet seg (1→2 eller 2→1) — det er et **kritisk punkt** som starter nye celler.
+Koble baner mellom nabostrenger **kun når koblingen er 1:1** (én bane treffer nøyaktig én
+bane); ved split/merge lages ny celle. Da blir hver celle enkel-banet og sveipes rent.
+Cellene (venstre, over, under, høyre) bindes til **én** bane via en grådig vandring over
+celle-naboskapsgrafen, med **veggnære koblinger** rundt hindringen — aldri tvers over
+åpent gulv.
+
+> **Ærlige begrensninger** (verifisert i prototypen):
+> - **Fritstående hindring midt i rom:** kabelen ruter pent rundt, men *slutten havner
+>   ved hindringen*, ikke i et fjernt hjørne — det er geometrisk uunngåelig for et hull
+>   (du dekker fire soner og må ende ved den siste). Hindring **mot vegg** (søyle, trapp)
+>   blir derimot et hakk = ren enkelt-celle, hjørne-til-hjørne.
+> - **Triangel:** spissen gir svært korte strenger som faller bort; start/slutt kan ligge
+>   ~20 cm fra selve spissen. Akseptabelt — en spiss kan ikke varmes helt ut uansett.
+
+Prototype for dette: `docs/claude/kabel-prototype-skra.html` (trapes, parallellogram,
+kappet hjørne, triangel, hindring midt/mot vegg; Auto- eller manuell sveipevinkel).
+
 ---
 
 ## 3 — Hva endres, hva beholdes
@@ -143,17 +182,22 @@ begge retninger:
 - **Ingen hopp over gulv** — celleoverganger skjer på delt kant som en vanlig sving
   (`openLen ≈ 0`); for forgrenede rom vises en veggnær kobling med lengde i cm.
 
-Prototypen håndterer aksejusterte (rettvinklede) rom + rektangulære hindringer —
-det dekker rommene i skjermbildene dine. Skrå (ikke-90°) vegger krever samme idé på et
-rotert sveip-koordinatsystem; det er notert i porteringsprompten under.
+Den **første** prototypen (`kabel-prototype.html`) dekker rettvinklede rom + rektangulære
+hindringer (skjermbildene dine). Den **generelle** prototypen
+(`kabel-prototype-skra.html`) utvider til **skråvegger og vilkårlige hindringer** via en
+rotert sveiperamme + boustrophedon-celler (se §2.7) — verifisert på trapes, parallellogram,
+kappet hjørne, triangel og hindring midt/mot vegg.
 
 ---
 
 ## 5 — Ferdig Claude Code-prompt (lim inn i `arqely-mvp`)
 
+> **NB:** Linjenumrene under er omtrentlige og kan ha forskjøvet seg — **søk på
+> funksjonsnavn** (`grep`), ikke på tall.
+
 ```
-Les autoFillCable() (linje ~9243) og generateCableSerpentine() (linje 6327) i
-romtegner.html, og les docs/claude/kabel-hjorne-til-hjorne-spec.md +
+Les autoFillCable() og generateCableSerpentine() i romtegner.html (FINN dem ved å søke
+på navn, ikke linjenummer), og les docs/claude/kabel-hjorne-til-hjorne-spec.md +
 docs/claude/kabel-prototype.html (kjørbar referanse-motor med verifiserte invarianter).
 
 Mål: gjøre kabel-auto-fill forutsigbar og hjørne-til-hjørne, uten å bryte LOCKED-reglene
@@ -186,14 +230,81 @@ Jobb stegvis og IKKE slett noe før det er bevist trygt:
    alle tilfeller minst like bra. Trekk den dupliserte scoringen (linje 9311, 9364,
    9419, 9474, 9530) ut til én _scoreCableCandidate(res, ctx).
 
-4. Skrå vegger: hvis room.points har ikke-90°-kanter, kjør samme algoritme i et
-   sveip-koordinatsystem rotert til dominansretningen (PCA / lengste vegg), så strengene
-   følger veggen. Behold aksejustert hurtigsti for rettvinklede rom.
+4. Skråvegger + vilkårlige hindringer (port fra kabel-prototype-skra.html, se §2.7):
+   - Skråvegger: roter geometrien så strengene blir parallelle med valgt vegg (kandidat-
+     vinkler = hver veggretning + 0/90°, velg best dekning), kjør scanline-serpentinen i
+     rotert ramme, roter tilbake. Strenglengden får variere langs skråveggen (ikke
+     Y-split). Behold aksejustert hurtigsti for rettvinklede rom.
+   - Hindringer: bygg boustrophedon-celler ved å koble baner mellom nabostrenger KUN ved
+     1:1-treff (split/merge ved hindringskant = ny celle). Bind cellene til én bane via
+     grådig vandring over naboskapsgrafen med veggnære koblinger rundt hindringen.
+   - Aksepter de ærlige grensene i §2.7 (fritstående hindring → slutt ved hindring;
+     triangelspiss → ~20 cm fra spissen).
 
-Test i preview-serveren romtegner på rektangel, L, T, U, rom-med-hindring og rom-med-
-forbudt-sone. Vis meg skjermbilder av hver, og bekreft for hvert: lik CC, rene
-halvsirkel-svinger, og at S og E sitter i hvert sitt hjørne. Ikke fjern V4/V5/V6 før
-jeg har godkjent skjermbildene.
+Test i preview-serveren romtegner på rektangel, L, T, U, trapes, kappet-hjørne-rom,
+rom-med-hindring (midt og mot vegg) og rom-med-forbudt-sone. Vis meg skjermbilder av
+hver, og bekreft: lik CC, rene svinger som følger veggen, og at S og E sitter i hjørner
+(unntatt fritstående hindring). Ikke fjern V4/V5/V6 før jeg har godkjent skjermbildene.
+```
+
+---
+
+## 5b — Ferdig Claude Code-prompt: SKRÅVEGGER + HINDRINGER (frittstående)
+
+Bruk denne hvis du bare vil ta skråvegg-/hindring-delen. Den porterer den verifiserte
+referansemotoren i `docs/claude/kabel-prototype-skra.html` (engine2) inn i romtegner.html.
+
+> **NB om linjenumre:** alle linjehenvisninger i dette dokumentet kan ha forskjøvet seg
+> (filen vokser). **Finn funksjonene ved å søke på NAVN** (`grep`), ikke på tall.
+
+```
+Les docs/claude/kabel-prototype-skra.html (kjørbar referansemotor "engine2",
+funksjonene generateCable2, _generateRotated, _serpCell, _buildPath) og
+docs/claude/kabel-hjorne-til-hjorne-spec.md §2.7. Les også CLAUDE.md sine LOCKED
+kabelregler og _drawCableUTurns/_uTurnIsHigh. VIKTIG: finn alle funksjoner ved å SØKE
+på funksjonsnavn (grep), ikke på linjenumre — tallene i spec-en kan ha forskjøvet seg.
+
+Mål: la kabel-auto-fill håndtere SKRÅVEGGER (ikke-90°) og HINDRINGER like rent som
+rettvinklede rom — lik CC, svinger som vender utover, hjørne-til-hjørne, uten hopp over
+åpent gulv. IKKE bryt LOCKED-reglene (halvsirkel r=CC/2, sweepMargin=margin+CC/2, ingen
+Y-split, lik strenglengde innen en celle).
+
+Jobb stegvis, ikke slett gammelt før nytt er bevist i preview:
+
+0. IKKE REGRESSER rettvinklede rom. Behold den aksejusterte hurtigstien (0/90°) som
+   allerede gir rene L-/T-rom hjørne-til-hjørne. Den roterte ramma under skal kun være
+   et tillegg for ikke-90°-vegger; for rene rektangulære rom skal resultatet være
+   identisk med i dag. Verifiser L og T på nytt etter endringen.
+
+1. SKRÅVEGG via rotert sveiperamme. Lag _cableSweepAngles(room) som returnerer
+   kandidatvinkler = hver veggretning (mod 180°) + 0/90°. For hver: roter room.points
+   (og hindringer) så strengene blir vertikale, kjør den eksisterende scanline-
+   serpentinen (clipScanlineToPolygon finnes allerede), roter resultatet tilbake. Velg
+   vinkelen med best dekning. Strenglengden får variere langs skråveggen — det er IKKE
+   en Y-split. (Når dominansvinkelen er 0/90° faller dette automatisk tilbake til
+   hurtigstien fra steg 0.)
+
+2. HINDRINGER via boustrophedon-celler. Når en hindring splitter en streng i to baner
+   (over/under), koble baner mellom nabostrenger KUN ved 1:1-treff; ved split/merge
+   (hindringskant) starter ny celle. Hver celle blir da enkel-banet og sveipes rent.
+   Bind cellene (venstre/over/under/høyre) til ÉN sammenhengende bane via en grådig
+   vandring over celle-naboskapsgrafen, med VEGGNÆRE koblinger rundt hindringen — aldri
+   tvers over åpent gulv. Hindring mot vegg skal bli et rent hakk (én celle).
+
+3. BUERETNING (LOCKED). Hver U-sving skal vende UTOVER, bestemt lokalt: gikk strengen
+   oppover (y1>y0) → bue i topp-enden (opp); ellers → bue ned. Dette er samme regel som
+   wallDir = connectHigh ? +1 : -1 i _drawCableUTurns. I rotert ramme er bulge-normalen
+   (0, ±1) rotert til verden. Bruk ALDRI «vekk fra rom-sentrum».
+
+4. HJØRNE-ANKER. Søk over starthjørne/retning og velg banen med null gulv-hopp og begge
+   ender nær romhjørner. Aksepter de ærlige grensene i §2.7: fritstående hindring midt i
+   rom → slutten havner ved hindringen (geometrisk uunngåelig); triangelspiss → start/
+   slutt ~20 cm fra spissen.
+
+Test i preview-serveren romtegner på: trapes, parallellogram, rom med kappet hjørne,
+triangel, rom med hindring midt i, og rom med hindring mot vegg. Vis skjermbilder og
+bekreft for hver: lik CC, alle buer vender utover, og ruting rundt hindring uten gulv-
+hopp. Behold dagens motorer som fallback til jeg har godkjent skjermbildene.
 ```
 
 ---

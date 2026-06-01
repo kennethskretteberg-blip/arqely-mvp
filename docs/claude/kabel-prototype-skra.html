@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kabel-layout — skråvegger og hindringer</title>
+<style>
+  :root { --bg:#f6f8fb; --ink:#1f2733; --dim:#65718a; --line:#dce3ee; --accent:#e2641e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:'DM Sans',system-ui,sans-serif; color:var(--ink); background:var(--bg); }
+  .wrap { display:grid; grid-template-columns:300px 1fr; min-height:100vh; }
+  .panel { padding:22px 20px; border-right:1px solid var(--line); background:#fff; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  .sub { font-size:12px; color:var(--dim); margin:0 0 18px; line-height:1.5; }
+  .grp { margin-bottom:18px; }
+  .grp > label { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); display:block; margin-bottom:7px; }
+  select { width:100%; padding:8px; border:1px solid var(--line); border-radius:7px; font:inherit; background:#fff; }
+  .seg { display:flex; gap:6px; flex-wrap:wrap; }
+  .seg button { flex:1; min-width:56px; padding:7px 8px; border:1px solid var(--line); border-radius:7px; background:#fff; font:inherit; font-size:13px; cursor:pointer; }
+  .seg button.sel { border-color:var(--accent); background:#fff4ec; color:var(--accent); font-weight:600; }
+  input[type=range] { width:100%; }
+  .ccv { font-size:13px; color:var(--dim); }
+  .canvas-wrap { position:relative; overflow:hidden; }
+  canvas { width:100%; height:100vh; display:block; touch-action:none; cursor:grab; }
+  canvas.drag { cursor:grabbing; }
+  .toolbar { position:absolute; top:14px; right:14px; display:flex; gap:6px; }
+  .toolbar button { width:34px; height:34px; border:1px solid var(--line); background:rgba(255,255,255,.92); border-radius:8px; font-size:16px; cursor:pointer; backdrop-filter:blur(6px); line-height:1; }
+  .toolbar button.fit { width:auto; padding:0 12px; font-size:13px; }
+  .drag-handle { position:absolute; top:6px; right:8px; font-size:11px; color:#b6c0d2; cursor:move; user-select:none; }
+  .hud, .legend { cursor:move; }
+  .hud { position:absolute; top:14px; left:14px; max-width:340px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:10px; padding:20px 14px 12px; backdrop-filter:blur(6px); }
+  .badge { display:inline-block; font-size:12px; padding:4px 9px; border-radius:20px; margin:3px 4px 3px 0; font-weight:600; }
+  .badge.ok { background:#e6f6ec; color:#1faa59; }
+  .badge.no { background:#fdeaea; color:#d23b3b; }
+  .badge.mut { background:#eef1f6; color:#65718a; }
+  .stat { font-size:12px; color:var(--dim); margin-top:8px; }
+  .legend { position:absolute; bottom:14px; left:14px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:12px; color:var(--dim); line-height:1.7; }
+  .legend b { color:var(--ink); }
+  .sw { display:inline-block; width:11px; height:11px; border-radius:3px; vertical-align:-1px; margin-right:5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <h1>Kabel — skråvegger &amp; hindringer</h1>
+    <p class="sub">Generell motor: roterer sveiperammen etter veggene, så strengene følger skråvegger med lik avstand, og ruter rundt hindringer. Auto velger beste retning; du kan overstyre vinkelen.</p>
+    <div class="grp"><label>Romform</label><select id="shape"></select></div>
+    <div class="grp"><label>Sveipevinkel</label><div class="seg">
+      <button id="auto" class="sel">Auto</button><button id="manual">Manuell</button></div>
+      <div id="angwrap" style="margin-top:8px; display:none">
+        <input id="ang" type="range" min="0" max="170" step="5" value="0">
+        <div class="ccv" id="angv">0°</div></div></div>
+    <div class="grp"><label>CC — senteravstand</label>
+      <input id="cc" type="range" min="6" max="20" step="1" value="12">
+      <div class="ccv" id="ccv">12 cm</div></div>
+  </div>
+  <div class="canvas-wrap">
+    <canvas id="cv"></canvas>
+    <div class="toolbar">
+      <button id="zin" title="Zoom inn">+</button>
+      <button id="zout" title="Zoom ut">−</button>
+      <button id="fit" class="fit" title="Tilpass">Tilpass</button>
+    </div>
+    <div class="hud">
+      <span class="drag-handle">⠿ dra</span>
+      <span class="badge ok" id="b-cc">Lik CC ✓</span>
+      <span class="badge ok" id="b-cov">Dekning</span>
+      <span class="badge ok" id="b-corner">Start + slutt i hjørne ✓</span>
+      <span class="badge ok" id="b-jump">Ingen hopp over gulv ✓</span>
+      <div class="stat" id="stat">—</div>
+    </div>
+    <div class="legend">
+      <span class="sw" style="background:#e2641e"></span><b>Kabelstreng</b> + sving (følger veggen)<br>
+      <span class="sw" style="background:#f0a060"></span>Veggnær kobling (rundt hindring)<br>
+      <span class="sw" style="background:#1faa59"></span>Start (S)&nbsp;&nbsp;<span class="sw" style="background:#d23b3b"></span>Slutt (E)
+    </div>
+  </div>
+</div>
+<script>
+/* engine2 */
+// ─────────────────────────────────────────────────────────────────────────
+// General cable engine v2 — arbitrary polygons (slanted walls) + holes.
+//   • Rotated sweep frame: runs are made vertical in a frame aligned to a
+//     chosen wall direction, so strands follow slanted walls.
+//   • Constant CC grid on the perpendicular axis (equal strand spacing).
+//   • Runs keep their NATURAL length (clipped to the polygon) → even coverage
+//     along slants; consecutive run-ends joined by fillet U-turns.
+//   • Holes (obstacles) split a run into lanes → boustrophedon cells; cells
+//     joined into ONE path with wall-hugging connectors (parity-aware).
+// ─────────────────────────────────────────────────────────────────────────
+const EPS = 1e-6;
+
+function rotatePts(pts, ang) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return pts.map(p => ({ x: p.x * c - p.y * s, y: p.x * s + p.y * c }));
+}
+function bbox(pts) {
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+// vertical line x=xv intersect polygon → sorted y-intervals (even-odd)
+function clipVertical(xv, poly) {
+  const ys = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    if ((a.x <= xv && b.x > xv) || (b.x <= xv && a.x > xv)) {
+      const t = (xv - a.x) / (b.x - a.x);
+      ys.push(a.y + t * (b.y - a.y));
+    }
+  }
+  ys.sort((p, q) => p - q);
+  const iv = [];
+  for (let i = 0; i + 1 < ys.length; i += 2) iv.push([ys[i], ys[i + 1]]);
+  return iv;
+}
+function subtract(A, B) {
+  let out = A.map(iv => [iv[0], iv[1]]);
+  for (const [blo, bhi] of B) {
+    const next = [];
+    for (const [lo, hi] of out) {
+      if (bhi <= lo + EPS || blo >= hi - EPS) { next.push([lo, hi]); continue; }
+      if (blo > lo + EPS) next.push([lo, Math.min(hi, blo)]);
+      if (bhi < hi - EPS) next.push([Math.max(lo, bhi), hi]);
+    }
+    out = next.filter(([lo, hi]) => hi - lo > EPS);
+  }
+  return out;
+}
+const overlap = (a, b) => Math.min(a[1], b[1]) - Math.max(a[0], b[0]); // >0 if overlap
+
+// union-find
+function uf(n) { const p = [...Array(n).keys()]; const f = x => p[x] === x ? x : (p[x] = f(p[x])); return { f, u: (a, b) => { p[f(a)] = f(b); } }; }
+
+// ── core in rotated frame ────────────────────────────────────────────────
+function _generateRotated(roomR, holesR, CC, margin) {
+  const bb = bbox(roomR);
+  const sweepMargin = margin + CC / 2;
+  // constant-CC grid on x, centred (≈ half-CC from bbox walls)
+  const usable = (bb.maxX - margin) - (bb.minX + margin);
+  if (usable <= 0) return null;
+  const N = Math.max(1, Math.floor(usable / CC + EPS) + 1);
+  const span = (N - 1) * CC;
+  const x0 = bb.minX + margin + (usable - span) / 2;
+  const runs = [];
+  for (let i = 0; i < N; i++) {
+    const x = x0 + i * CC;
+    let iv = clipVertical(x, roomR);
+    // subtract holes (expanded by margin in y is approximate; expand by margin)
+    for (const h of holesR) {
+      const hi = clipVertical(x, h).map(([lo, hh]) => [lo - margin, hh + margin]);
+      iv = subtract(iv, hi);
+    }
+    // shrink run-ends by sweepMargin (keeps U-turn inside wall margin)
+    iv = iv.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi - lo > EPS);
+    runs.push({ x, lanes: iv });
+  }
+  // drop empty leading/trailing runs but keep indices
+  const laneNodes = []; // {ri, li, lo, hi, x}
+  const idx = runs.map(() => []);
+  runs.forEach((r, ri) => r.lanes.forEach((lane, li) => { idx[ri][li] = laneNodes.length; laneNodes.push({ ri, li, lo: lane[0], hi: lane[1], x: r.x }); }));
+  if (laneNodes.length === 0) return null;
+
+  // Boustrophedon cell connectivity: link lane a (run i) to lane b (run i+1)
+  // ONLY when the connection is 1:1 — a overlaps exactly one lane in run i+1
+  // AND b overlaps exactly one lane in run i. At a split/merge (critical point,
+  // e.g. an obstacle edge) the count changes → no link → a new cell starts.
+  // This keeps every cell single-lane-per-run, so each sweeps cleanly.
+  const U = uf(laneNodes.length);
+  for (let ri = 0; ri + 1 < runs.length; ri++) {
+    const A = runs[ri].lanes, B = runs[ri + 1].lanes;
+    A.forEach((a, ai) => {
+      const bMatches = B.map((b, bi) => overlap(a, b) > EPS ? bi : -1).filter(bi => bi >= 0);
+      B.forEach((b, bi) => {
+        if (overlap(a, b) <= EPS) return;
+        const aMatches = A.map((aa, aai) => overlap(aa, b) > EPS ? aai : -1).filter(aai => aai >= 0);
+        if (bMatches.length === 1 && aMatches.length === 1) U.u(idx[ri][ai], idx[ri + 1][bi]);
+      });
+    });
+  }
+  const cellMap = new Map();
+  laneNodes.forEach((nd, i) => { const r = U.f(i); if (!cellMap.has(r)) cellMap.set(r, []); cellMap.get(r).push(nd); });
+  const cells = [...cellMap.values()].map(nodes => {
+    nodes.sort((a, b) => a.x - b.x);
+    const xs = nodes.map(n => n.x);
+    return { nodes, xMin: Math.min(...xs), xMax: Math.max(...xs),
+             loMin: Math.min(...nodes.map(n => n.lo)), hiMax: Math.max(...nodes.map(n => n.hi)) };
+  });
+  return { runs, cells, bb, sweepMargin, N, x0, CC };
+}
+
+// Serpentine ONE cell, entering at `entryLow` side. Returns runs + clean
+// internal U-turns and the physical exit point/side.
+function _serpCell(cell, ltr, entryLow) {
+  const ns = cell.nodes.slice().sort((a, b) => ltr ? a.x - b.x : b.x - a.x);
+  const runs = [], links = [];
+  let prevEnd = null, prevRun = null;
+  for (let k = 0; k < ns.length; k++) {
+    const nd = ns[k];
+    const startLowRun = (entryLow === (k % 2 === 0));
+    const wStart = startLowRun ? nd.lo : nd.hi;
+    const wEnd = startLowRun ? nd.hi : nd.lo;
+    // bulge outward = toward the end the previous run terminated at (high or low)
+    if (prevEnd) links.push({ type: 'uturn', from: prevEnd, to: { x: nd.x, y: wStart }, high: prevRun.y1 > prevRun.y0 });
+    const run = { x: nd.x, y0: wStart, y1: wEnd };
+    runs.push(run); prevEnd = { x: nd.x, y: wEnd }; prevRun = run;
+  }
+  const exitLow = !(entryLow === ((ns.length - 1) % 2 === 0));
+  return { runs, links, exit: prevEnd, exitLow, lastRun: prevRun };
+}
+// two cells adjacent if some node pair is within ~CC in x and overlaps in y
+function _adjacent(A, B, CC) {
+  for (const a of A.nodes) for (const b of B.nodes)
+    if (Math.abs(a.x - b.x) <= CC * 1.5 && (Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)) > -EPS) return true;
+  return false;
+}
+// One continuous path via greedy walk over the cell-adjacency graph — handles
+// chains AND the around-an-obstacle cycle. Cells join via wall-hug connectors.
+function _buildPath(model, roomCornersR, CC, margin) {
+  const { cells } = model;
+  const tol = margin + CC + 0.5;
+  const nearCorner = p => p && Math.min(...roomCornersR.map(c => Math.hypot(c.x - p.x, c.y - p.y))) <= tol;
+
+  function attempt(startCell, ltr, startLow) {
+    const visited = new Array(cells.length).fill(false);
+    const order = []; let cur = startCell;
+    while (cur != null) {
+      visited[cur] = true; order.push(cur);
+      let next = null;
+      for (let j = 0; j < cells.length; j++) {
+        if (visited[j] || !_adjacent(cells[cur], cells[j], CC)) continue;
+        if (next == null || (ltr ? cells[j].xMin < cells[next].xMin : cells[j].xMin > cells[next].xMin)) next = j;
+      }
+      if (next == null) for (let j = 0; j < cells.length; j++)
+        if (!visited[j] && (next == null || cells[j].xMin < cells[next].xMin)) next = j;
+      cur = next;
+    }
+    const runsOut = [], links = []; let openLen = 0, prevEnd = null, prevRun = null, arriveLow = startLow;
+    for (const ci of order) {
+      const seg = _serpCell(cells[ci], ltr, arriveLow);
+      if (prevEnd) {
+        const f = { x: seg.runs[0].x, y: seg.runs[0].y0 };
+        const dX = Math.abs(f.x - prevEnd.x), dY = Math.abs(f.y - prevEnd.y);
+        const clean = dY < CC * 0.6 && dX < CC * 1.6;
+        if (!clean) openLen += dY + Math.max(0, dX - CC);
+        links.push({ type: clean ? 'uturn' : 'connector', from: prevEnd, to: f, high: prevRun.y1 > prevRun.y0 });
+      }
+      for (const r of seg.runs) runsOut.push(r);
+      for (const l of seg.links) links.push(l);
+      prevEnd = seg.exit; prevRun = seg.lastRun; arriveLow = seg.exitLow;
+    }
+    const start = runsOut.length ? { x: runsOut[0].x, y: runsOut[0].y0 } : null;
+    return { runsOut, links, openLen, start, end: prevEnd };
+  }
+
+  let best = null, bestScore = -Infinity;
+  for (let sc = 0; sc < cells.length; sc++)
+    for (const ltr of [true, false]) for (const low of [true, false]) {
+      const t = attempt(sc, ltr, low);
+      if (!t.start) continue;
+      const s = -t.openLen * 10 + (nearCorner(t.start) ? 5 : 0) + (nearCorner(t.end) ? 5 : 0);
+      if (s > bestScore) { bestScore = s; best = t; }
+    }
+  return best;
+}
+
+// ── public: arbitrary polygon + holes, auto sweep angle ──────────────────
+function generateCable2(opts) {
+  const { room, holes = [], CC = 12, margin = 2.5, angleDeg = null } = opts;
+  // candidate run-parallel angles: each edge direction (mod 180) + axes
+  const cand = new Set([0, 90]);
+  if (angleDeg != null) cand.clear(), cand.add(angleDeg);
+  else for (let i = 0; i < room.length; i++) {
+    const a = room[i], b = room[(i + 1) % room.length];
+    let deg = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+    deg = ((deg % 180) + 180) % 180;
+    cand.add(Math.round(deg * 10) / 10);
+  }
+  let best = null;
+  for (const deg of cand) {
+    // rotate so runs (parallel to `deg`) become vertical → rotate by (90-deg)
+    const rot = (90 - deg) * Math.PI / 180;
+    const roomR = rotatePts(room, rot);
+    const holesR = holes.map(h => rotatePts(h, rot));
+    const model = _generateRotated(roomR, holesR, CC, margin);
+    if (!model) continue;
+    const cornersR = roomR;
+    const path = _buildPath(model, cornersR, CC, margin);
+    if (!path) continue;
+    // coverage
+    let cov = 0; for (const r of path.runsOut) cov += Math.abs(r.y1 - r.y0) * CC;
+    const area = polyArea(room) - holes.reduce((s, h) => s + polyArea(h), 0);
+    const score = cov - path.openLen * CC * 2; // prefer coverage, penalise jumps
+    if (!best || score > best.score) best = { score, rot, deg, model, path, coverage: area > 0 ? cov / area : 0 };
+  }
+  if (!best) return null;
+  // rotate path geometry back to world
+  const inv = -best.rot;
+  const runs = best.path.runsOut.map(r => {
+    const a = rotatePts([{ x: r.x, y: r.y0 }, { x: r.x, y: r.y1 }], inv);
+    return { a: a[0], b: a[1] };
+  });
+  const links = best.path.links.map(l => {
+    const pts = rotatePts([l.from, l.to], inv);
+    // outward bulge normal: internal frame (0, +1) for high turn else (0,-1)
+    const nrm = rotatePts([{ x: 0, y: l.high ? 1 : -1 }], inv)[0];
+    return { type: l.type, from: pts[0], to: pts[1], nrm };
+  });
+  const start = rotatePts([best.path.start], inv)[0];
+  const end = rotatePts([best.path.end], inv)[0];
+  return { runs, links, start, end, angleDeg: best.deg, coverage: best.coverage,
+           openLen: best.path.openLen, nRuns: runs.length, nCells: best.model.cells.length, CC };
+}
+
+function polyArea(p) { let a = 0; for (let i = 0; i < p.length; i++) { const j = (i + 1) % p.length; a += p[i].x * p[j].y - p[j].x * p[i].y; } return Math.abs(a) / 2; }
+
+
+/* ── prototype UI + renderer (engine2: arbitrary polygons + holes) ─────── */
+const SHAPES = {
+  rect:   { label:'Rektangel', room:[{x:0,y:0},{x:500,y:0},{x:500,y:300},{x:0,y:300}] },
+  l:      { label:'L-form', room:[{x:0,y:0},{x:500,y:0},{x:500,y:300},{x:250,y:300},{x:250,y:550},{x:0,y:550}] },
+  t:      { label:'T-form', room:[{x:0,y:300},{x:300,y:300},{x:300,y:500},{x:500,y:500},{x:500,y:300},{x:800,y:300},{x:800,y:0},{x:0,y:0}] },
+  trap:   { label:'Trapes (to skråvegger)', room:[{x:0,y:0},{x:500,y:0},{x:400,y:300},{x:100,y:300}] },
+  para:   { label:'Parallellogram', room:[{x:0,y:0},{x:400,y:0},{x:550,y:300},{x:150,y:300}] },
+  slant:  { label:'Skrå vegg (kappet hjørne)', room:[{x:0,y:0},{x:500,y:0},{x:500,y:200},{x:250,y:400},{x:0,y:400}] },
+  tri:    { label:'Triangel', room:[{x:0,y:0},{x:500,y:0},{x:0,y:400}] },
+  obsMid: { label:'Hindring (midt i rom)', room:[{x:0,y:0},{x:500,y:0},{x:500,y:300},{x:0,y:300}], holes:[[{x:200,y:110},{x:300,y:110},{x:300,y:190},{x:200,y:190}]] },
+  obsWall:{ label:'Hindring (mot vegg)', room:[{x:0,y:0},{x:500,y:0},{x:500,y:300},{x:0,y:300}], holes:[[{x:210,y:210},{x:300,y:210},{x:300,y:300},{x:210,y:300}]] },
+};
+
+const cv = document.getElementById('cv');
+const cx = cv.getContext('2d');
+let state = { shape:'trap', cc:12, mode:'auto', angle:0 };
+let view = { scale:1, tx:0, ty:0 };
+
+function bboxOf(pts){ const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y); return {minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys)}; }
+
+function draw() {
+  const dpr = window.devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr; cx.setTransform(dpr,0,0,dpr,0,0); cx.clearRect(0,0,W,H);
+  const shp = SHAPES[state.shape];
+  const res = generateCable2({ room:shp.room, holes:shp.holes||[], CC:state.cc, margin:2.5, angleDeg: state.mode==='manual'?state.angle:null });
+  const bb = bboxOf(shp.room), pad=60;
+  const s0 = Math.min((W-2*pad)/(bb.maxX-bb.minX),(H-2*pad)/(bb.maxY-bb.minY));
+  const ox = pad+(W-2*pad-(bb.maxX-bb.minX)*s0)/2, oy = pad+(H-2*pad-(bb.maxY-bb.minY)*s0)/2;
+  const S = (x,y)=>({ x: view.tx+view.scale*(ox+(x-bb.minX)*s0), y: view.ty+view.scale*(H-(oy+(y-bb.minY)*s0)) });
+  const cen = { x:(bb.minX+bb.maxX)/2, y:(bb.minY+bb.maxY)/2 };
+
+  // room
+  cx.beginPath(); shp.room.forEach((p,i)=>{ const q=S(p.x,p.y); i?cx.lineTo(q.x,q.y):cx.moveTo(q.x,q.y); }); cx.closePath();
+  cx.fillStyle='#eef2f8'; cx.fill(); cx.strokeStyle='#9fb0c8'; cx.lineWidth=1.5; cx.stroke();
+  // holes
+  for (const h of (shp.holes||[])) { cx.beginPath(); h.forEach((p,i)=>{ const q=S(p.x,p.y); i?cx.lineTo(q.x,q.y):cx.moveTo(q.x,q.y); }); cx.closePath(); cx.fillStyle='#d7deea'; cx.fill(); cx.strokeStyle='#aeb9cc'; cx.stroke(); }
+
+  if (!res) { setBadge(false,0,false,false,0,0,'—'); return; }
+
+  cx.strokeStyle='#e2641e'; cx.lineWidth=2.4; cx.lineCap='round'; cx.lineJoin='round';
+  for (const r of res.runs) { const a=S(r.a.x,r.a.y), b=S(r.b.x,r.b.y); cx.beginPath(); cx.moveTo(a.x,a.y); cx.lineTo(b.x,b.y); cx.stroke(); }
+  for (const l of res.links) {
+    const f=l.from, t=l.to, d=Math.hypot(t.x-f.x,t.y-f.y), p0=S(f.x,f.y), p1=S(t.x,t.y);
+    if (l.type==='uturn' && d < state.cc*2.4) {
+      // half-circle in WORLD space, bulging along the engine's outward normal
+      // (always away from the run bodies — the LOCKED "vend utover" rule)
+      const mid={x:(f.x+t.x)/2,y:(f.y+t.y)/2}, R=d/2||0.1;
+      const nx=l.nrm.x, ny=l.nrm.y;
+      cx.beginPath(); cx.moveTo(p0.x,p0.y);
+      for (let i=1;i<=12;i++){ const a=Math.PI*i/12;
+        const wx=mid.x-Math.cos(a)*(t.x-f.x)/2+Math.sin(a)*nx*R;
+        const wy=mid.y-Math.cos(a)*(t.y-f.y)/2+Math.sin(a)*ny*R;
+        const q=S(wx,wy); cx.lineTo(q.x,q.y); } cx.stroke();
+    } else {
+      // wall-hugging L connector (dashed)
+      const corner=S(f.x,t.y);
+      cx.save(); cx.setLineDash([5,4]); cx.strokeStyle='#f0a060';
+      cx.beginPath(); cx.moveTo(p0.x,p0.y); cx.lineTo(corner.x,corner.y); cx.lineTo(p1.x,p1.y); cx.stroke(); cx.restore();
+      cx.strokeStyle='#e2641e';
+    }
+  }
+  // markers
+  const sp=S(res.start.x,res.start.y), ep=S(res.end.x,res.end.y);
+  cx.fillStyle='#1faa59'; cx.beginPath(); cx.arc(sp.x,sp.y,8,0,7); cx.fill();
+  cx.fillStyle='#fff'; cx.font='bold 9px sans-serif'; cx.textAlign='center'; cx.textBaseline='middle'; cx.fillText('S',sp.x,sp.y);
+  cx.fillStyle='#d23b3b'; cx.beginPath(); cx.arc(ep.x,ep.y,8,0,7); cx.fill(); cx.fillStyle='#fff'; cx.fillText('E',ep.x,ep.y);
+
+  // badges
+  const corners=shp.room;
+  const tol=2.5+state.cc+0.6;
+  const near=p=>Math.min(...corners.map(c=>Math.hypot(c.x-p.x,c.y-p.y)));
+  const cornerOK = near(res.start)<=tol && near(res.end)<=tol;
+  const jumpOK = res.openLen < 0.5;
+  let len=0; for(const r of res.runs) len+=Math.hypot(r.b.x-r.a.x,r.b.y-r.a.y);
+  for(const l of res.links){ const d=Math.hypot(l.to.x-l.from.x,l.to.y-l.from.y); len += l.type==='uturn'? Math.PI*d/2 : d; }
+  setBadge(true, res.coverage, cornerOK, jumpOK, res.nRuns, res.angleDeg, (len/100).toFixed(1)+' m', res.openLen);
+}
+
+function setBadge(cc, cov, corner, jump, n, ang, len, openLen) {
+  const set=(id,cls,txt)=>{const e=document.getElementById(id); e.className='badge '+cls; e.textContent=txt;};
+  set('b-cc', cc?'ok':'no', 'Lik CC '+(cc?'✓':'✗'));
+  set('b-cov', cov>=0.9?'ok':'mut', 'Dekning '+Math.round(cov*100)+'%');
+  set('b-corner', corner?'ok':'no', 'Start + slutt i hjørne '+(corner?'✓':'✗'));
+  set('b-jump', jump?'ok':'mut', jump?'Ingen hopp over gulv ✓':'Veggnær kobling '+Math.round(openLen)+' cm');
+  document.getElementById('stat').textContent = `${n} strenger · sveipevinkel ${ang}° · ~${len} kabel`;
+}
+
+// ── controls ──
+const sel=document.getElementById('shape');
+for(const k in SHAPES){ const o=document.createElement('option'); o.value=k; o.textContent=SHAPES[k].label; sel.appendChild(o); } sel.value=state.shape;
+sel.onchange=e=>{ state.shape=e.target.value; draw(); };
+const ccS=document.getElementById('cc'); ccS.oninput=()=>{ state.cc=+ccS.value; document.getElementById('ccv').textContent=state.cc+' cm'; draw(); };
+const angS=document.getElementById('ang'); angS.oninput=()=>{ state.angle=+angS.value; document.getElementById('angv').textContent=state.angle+'°'; draw(); };
+document.getElementById('auto').onclick=function(){ state.mode='auto'; this.classList.add('sel'); document.getElementById('manual').classList.remove('sel'); document.getElementById('angwrap').style.display='none'; draw(); };
+document.getElementById('manual').onclick=function(){ state.mode='manual'; this.classList.add('sel'); document.getElementById('auto').classList.remove('sel'); document.getElementById('angwrap').style.display='block'; draw(); };
+
+// ── zoom + pan ──
+function zoomAt(px,py,f){ view.scale*=f; view.tx=px-f*(px-view.tx); view.ty=py-f*(py-view.ty); draw(); }
+cv.addEventListener('wheel',e=>{ e.preventDefault(); const r=cv.getBoundingClientRect(); zoomAt(e.clientX-r.left,e.clientY-r.top, e.deltaY<0?1.12:1/1.12); },{passive:false});
+let panning=null;
+cv.addEventListener('pointerdown',e=>{ panning={x:e.clientX,y:e.clientY,tx:view.tx,ty:view.ty}; cv.classList.add('drag'); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove',e=>{ if(!panning)return; view.tx=panning.tx+(e.clientX-panning.x); view.ty=panning.ty+(e.clientY-panning.y); draw(); });
+cv.addEventListener('pointerup',()=>{ panning=null; cv.classList.remove('drag'); });
+cv.addEventListener('pointercancel',()=>{ panning=null; cv.classList.remove('drag'); });
+const ctr=()=>({x:cv.clientWidth/2,y:cv.clientHeight/2});
+document.getElementById('zin').onclick=()=>{const c=ctr();zoomAt(c.x,c.y,1.2);};
+document.getElementById('zout').onclick=()=>{const c=ctr();zoomAt(c.x,c.y,1/1.2);};
+document.getElementById('fit').onclick=()=>{ view={scale:1,tx:0,ty:0}; draw(); };
+
+// ── draggable panels ──
+function makeDraggable(el){ let d=null;
+  el.addEventListener('pointerdown',e=>{ if(['BUTTON','SELECT','INPUT'].includes(e.target.tagName))return; const r=el.getBoundingClientRect(),p=el.parentElement.getBoundingClientRect(); d={dx:e.clientX-r.left,dy:e.clientY-r.top,pw:p.width,ph:p.height,ew:r.width,eh:r.height}; el.style.right='auto'; el.style.bottom='auto'; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+  el.addEventListener('pointermove',e=>{ if(!d)return; const p=el.parentElement.getBoundingClientRect(); let nx=e.clientX-p.left-d.dx, ny=e.clientY-p.top-d.dy; nx=Math.max(0,Math.min(nx,d.pw-d.ew)); ny=Math.max(0,Math.min(ny,d.ph-d.eh)); el.style.left=nx+'px'; el.style.top=ny+'px'; });
+  el.addEventListener('pointerup',()=>{ d=null; });
+}
+document.querySelectorAll('.hud, .legend').forEach(makeDraggable);
+window.addEventListener('resize', draw);
+draw();
+</script></body></html>
