@@ -1,6 +1,6 @@
 # Romtegner — Arkitektur- og Funksjonsstatus
 
-> Sist oppdatert: 2026-03-11
+> Sist oppdatert: 2026-06-01 (regenerert fra faktisk kode)
 
 ---
 
@@ -9,8 +9,8 @@
 | Egenskap | Verdi |
 |----------|-------|
 | **Fil** | `romtegner.html` (single-file app) |
-| **Linjer** | ~13 700 (HTML + CSS + JS) |
-| **Funksjoner** | 453 top-level functions |
+| **Linjer** | 32 025 (HTML + CSS + JS) |
+| **Funksjoner** | ~1 032 (958 `function`-deklarasjoner + 74 arrow-funksjoner) |
 | **Byggsteg** | Ingen — ren HTML/JS/CSS |
 | **Server** | `serve-romtegner.js` (Node.js, port 4000) |
 | **Backend** | Supabase (produktkatalog, prosjektlagring) |
@@ -26,7 +26,7 @@
 - **Rendering derivert fra state** — ingen pikseldata lagres
 - **Sentralt state-objekt `S`** med ~14 top-level properties, ~50 UI-flagg
 - **Undo-stack** med dyp kopi av state (maks 50 nivåer)
-- **Dirty-flag rendering** (infrastruktur finnes, men rAF-loop kjører ubetinget pga. drag-handlers)
+- **Dirty-flag rendering** (aktiv — betinget rAF-loop, se §11.1)
 
 ### 2.2 Scene-hierarki
 
@@ -144,6 +144,25 @@ S (state)
 | Validering | ✅ | `getCableViolations()` — CC-grenser, avlesingsregel (soft warning) |
 
 **Produkter i Supabase:** 25 InFloor 17T + 19 InFloor 10T = 44 Cenika kabel-varianter
+
+**Layout-motorer (5 stk, orkestrert av `autoFillCable()` linje 9237):**
+
+Auto-fill kjører motorene i kaskade og returnerer ved første treff. V6 er
+**primær** og leverer resultatet for de fleste rom; de øvrige er fallback.
+
+| Motor | Funksjon | Linje | Rolle |
+|-------|----------|-------|-------|
+| Serpentine | `generateCableSerpentine()` | 6327 | Sentrert, deterministisk N-beregning. Brukes i forarbeid + siste fallback |
+| Length-driven | `generateCableLayoutLengthDriven()` | 6504 | Fyller etter målsatt kabellengde |
+| V4 (polygon-aware) | `generateCablePolygonAware()` | 6888 | Polygon-klippet fallback |
+| V5 (polygon) | `generateCablePolygonV5()` | 7701 | Polygon-klippet fallback |
+| V6 | `generateCableV6()` | 8768 | **Primær** motor |
+
+> ⚠️ **Teknisk gjeld:** Motorene deler nesten ordrett duplisert scoringslogikk,
+> og serpentin-forarbeidet kjøres ofte uten å bli brukt. Se forbedringsplanen
+> (P1 — konsolider kabel-layout-motoren). Alle LOCKED-regler i CLAUDE.md
+> (U-svinger = halvsirkler r=CC/2, lik banelengde / ingen Y-splits,
+> `sweepMargin = margin + CC/2`) gjelder uavhengig av motor.
 
 ### 3.3 Varmematte (Fase 4) ✅ Komplett
 
@@ -323,10 +342,23 @@ SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 | Mekanisme | Status | Beskrivelse |
 |-----------|--------|-------------|
 | Versjonert cache | ✅ | `_stripsForRoom()`, `_cablesForRoom()`, `_matsForRoom()` |
-| Dirty-flag | ⚠️ | Infrastruktur finnes, men deaktivert (krever render() i ~12 handlers) |
+| Dirty-flag rendering | ✅ | Aktiv betinget rAF-loop — se §11.1 |
 | Viewport culling | ⬜ | Planlagt for >50 rom |
 | Spatial indexing | ⬜ | Planlagt for >200 objekter |
 | Per-rom rendering | ✅ | Kollisjon/validering filtrerer på roomId først |
+
+### 11.1 Dirty-flag rendering (aktiv)
+
+Render-loopen kjører ikke lenger ubetinget. Mekanismen (linje 31990–32022):
+
+- `let _needsRender = true;` (linje 2381) — global flagg
+- `function markDirty() { _needsRender = true; }` (linje 2384) — settes ved mutasjon
+- Betinget rAF-loop (linje 31999–32022): `if (_needsRender) { render(); }` hver frame,
+  ellers hoppes render over → sparer ~60fps tomgangs-CPU
+- `render()` nullstiller `_needsRender = false` (linje 2440) når tegningen er ferdig
+- 16 `markDirty()`-kall i mutasjons-handlere, pluss direkte `render()`-kall der det trengs
+- `_anyInteractionActive()` i mousemove fungerer som sikkerhetsnett under aktiv drag
+- FPS måles og vises i render-stats-widget (`_renderFps`, `_updateRenderStatsWidget()`)
 
 ---
 
@@ -334,14 +366,14 @@ SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 
 | Metrikk | Antall |
 |---------|--------|
-| Kodelinjer totalt | ~13 700 |
-| Top-level funksjoner | 453 |
-| Seksjons-headers | 83 |
-| Rendering-funksjoner (draw*) | ~34 |
-| Hit-test funksjoner (hit*) | ~35 |
-| S.ui properties | ~50 |
-| HTML element IDs | ~80 |
-| Modaler | 7 |
+| Kodelinjer totalt | 32 025 |
+| Funksjoner (`function` + arrow) | ~1 032 (958 + 74) |
+| Seksjons-headers (`// ───`) | 285 |
+| Rendering-funksjoner (draw*) | 40 |
+| Hit-test funksjoner (hit*) | 49 |
+| Kabel-layout-motorer | 5 (V6 primær) |
+| S.ui properties | 82 |
+| Modal-IDer (`modal-*`) | 10 |
 | Widgets | 4 |
 | CSS custom properties | ~20 (lys/mørk tema) |
 | Undo-stack dybde | 50 |
