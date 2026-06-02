@@ -26608,7 +26608,8 @@ function _expPreviewRoom(roomId) {
   if (!room) return;
   const area = document.getElementById('exp-preview-area');
   if (!area) return;
-  const imgData = _renderRoomToImage(room);
+  const imgRes = _renderRoomToImage(room, { focusRoom: true });
+  const imgData = imgRes && imgRes.url ? imgRes.url : '';
   const stats = _computeRoomStats(room);
   const wm2 = stats.nettoM2 > 0 ? Math.round(stats.totalW / stats.nettoM2) : 0;
   const coverage = stats.nettoM2 > 0 ? Math.round(stats.heatedM2/stats.nettoM2*100) : 0;
@@ -26977,12 +26978,14 @@ async function exportPDF(opts) {
 
     // Room drawing — bigger, with other rooms desaturated for focus
     try {
-      const imgData = _renderRoomToImage(room, { focusRoom: true });
-      if (imgData) {
+      const imgRes = _renderRoomToImage(room, { focusRoom: true });
+      if (imgRes && imgRes.url) {
         const imgW = pw;
-        const imgH = imgW * 0.70;
+        // Height follows the cropped image's real aspect so the room fills
+        // the page width (no fixed 0.70 letterbox).
+        const imgH = imgW * (imgRes.aspect || 0.70);
         _checkPage(imgH + 5);
-        doc.addImage(imgData, 'PNG', M, y, imgW, imgH);
+        doc.addImage(imgRes.url, 'JPEG', M, y, imgW, imgH);
         y += imgH + 5;
       }
     } catch(e) { console.warn('PDF room image failed:', e); }
@@ -27233,7 +27236,7 @@ async function exportPDF(opts) {
     try {
       const stairImg = _renderStairToImage(stair);
       const imgW = pw, imgH = pw * 0.6;
-      doc.addImage(stairImg, 'PNG', M, y, imgW, imgH);
+      doc.addImage(stairImg, 'JPEG', M, y, imgW, imgH);
       y += imgH + 6;
     } catch(e) { y += 4; }
     // Stair stats — general info
@@ -27672,11 +27675,15 @@ function _renderRoomToImage(room, opts) {
     selectedAnnot: S.ui?.selectedAnnot,
     showGrid: S.ui?.showGrid,
     pdfMode: S.ui?._pdfMode,
+    stripDimSnap: room.stripDimSnap,
+    cableDimSnap: room.cableDimSnap,
+    matDimSnap: room.matDimSnap,
   };
   // Reserve room for outside dim chains. Margin in cm — chain offsets are
-  // 32 cm (room-dim) + addons (cable +65, mat +65, strip +20), so 120 cm
-  // total around the room is safe across all combinations.
-  const padCm = 120;
+  // 32 cm (room-dim) + addons (cable +65, mat +65, strip +20), so 150 cm
+  // total around the room is safe across all combinations (incl. the folie/
+  // kabel/matte measurement chains we force on below).
+  const padCm = 150;
   const cW = canvas.width, cH = canvas.height;
   // Pick zoom so (room + 2×pad) fits inside the canvas. BASE_SCALE × zoom
   // is pixels per world-cm; canvas dims divided by that gives world-cm
@@ -27712,43 +27719,63 @@ function _renderRoomToImage(room, opts) {
     S.ui.selectedHindringId = null;
     S.ui.selectedAnnot = null;
   }
+  // Show the folie/kabel/matte measurement chains in the print — enable only
+  // for heating types this room actually has, so the room-dimension chain's
+  // outward offset doesn't balloon (each enabled type pushes it further out).
+  room.stripDimSnap = (S.strips || []).some(s => s.roomId === room.id);
+  room.cableDimSnap = (S.cables || []).some(c => c.roomId === room.id);
+  room.matDimSnap   = (S.mats   || []).some(m => m.roomId === room.id);
   // Render to the main canvas with the temporary view
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
-  let dataURL;
+  // Focus box (room bbox + dim-chain padding), in screen px. Used to crop
+  // tightly so the room fills the output instead of floating in empty space.
+  const sc = S.view.zoom * BASE_SCALE;
+  const padPx = padCm * sc;     // ~150 cm in pixels — covers dim chains
+  const sCenter = w2s((rMinX + rMaxX) / 2, (rMinY + rMaxY) / 2);
+  const focusW = rW * sc + 2 * padPx;
+  const focusH = rH * sc + 2 * padPx;
+  const focusX = sCenter.x - focusW / 2;
+  const focusY = sCenter.y - focusH / 2;
+  // Clamp the crop rect to the canvas bounds.
+  const cx = Math.max(0, Math.floor(focusX));
+  const cy = Math.max(0, Math.floor(focusY));
+  const cw = Math.min(canvas.width - cx, Math.ceil(focusW));
+  const ch = Math.min(canvas.height - cy, Math.ceil(focusH));
+
+  // Source canvas: in focusRoom mode, compose a desaturated full scene with
+  // the focus area re-drawn crisp on top (neighbours read as faint context).
+  let srcCanvas = canvas;
   if (opts.focusRoom) {
-    // Compose: full scene desaturated + dimmed, with the focus room's
-    // bounding box (incl. dim-chain padding) re-drawn in full color from
-    // the main canvas. Other visible rooms become near-monochrome context.
-    const sc = S.view.zoom * BASE_SCALE;
-    const padPx = 130 * sc;     // ~130 cm in pixels — covers dim chains
-    const sCenter = w2s((rMinX + rMaxX) / 2, (rMinY + rMaxY) / 2);
-    const focusW = rW * sc + 2 * padPx;
-    const focusH = rH * sc + 2 * padPx;
-    const focusX = sCenter.x - focusW / 2;
-    const focusY = sCenter.y - focusH / 2;
     const off = document.createElement('canvas');
     off.width = canvas.width; off.height = canvas.height;
     const ofx = off.getContext('2d');
-    // White background so the desaturated overlay reads as paper
     ofx.fillStyle = '#ffffff';
     ofx.fillRect(0, 0, off.width, off.height);
-    // Desaturated + dimmed copy of the full render
     try { ofx.filter = 'grayscale(1) opacity(0.35)'; } catch(_) {}
     ofx.drawImage(canvas, 0, 0);
     try { ofx.filter = 'none'; } catch(_) {}
-    // Crisp focus area on top
-    const cx = Math.max(0, Math.floor(focusX));
-    const cy = Math.max(0, Math.floor(focusY));
-    const cw = Math.min(canvas.width - cx, Math.ceil(focusW));
-    const ch = Math.min(canvas.height - cy, Math.ceil(focusH));
-    if (cw > 0 && ch > 0) {
-      ofx.drawImage(canvas, cx, cy, cw, ch, cx, cy, cw, ch);
-    }
-    dataURL = off.toDataURL('image/png');
-  } else {
-    dataURL = canvas.toDataURL('image/png');
+    if (cw > 0 && ch > 0) ofx.drawImage(canvas, cx, cy, cw, ch, cx, cy, cw, ch);
+    srcCanvas = off;
   }
+
+  // Crop the focus rect into a capped-resolution target canvas → JPEG.
+  // Capping width keeps the PDF small; A4 at ~150 DPI needs ≤ ~1400 px.
+  const q = opts.jpegQuality || 0.82;
+  const maxW = opts.maxWidth || 1400;
+  const safeCw = Math.max(1, cw), safeCh = Math.max(1, ch);
+  const aspect = safeCh / safeCw;
+  const outW = Math.min(maxW, safeCw);
+  const outH = Math.max(1, Math.round(outW * aspect));
+  const tgt = document.createElement('canvas');
+  tgt.width = outW; tgt.height = outH;
+  const tctx = tgt.getContext('2d');
+  tctx.fillStyle = '#ffffff';
+  tctx.fillRect(0, 0, outW, outH);
+  tctx.imageSmoothingEnabled = true;
+  try { tctx.imageSmoothingQuality = 'high'; } catch(_) {}
+  tctx.drawImage(srcCanvas, cx, cy, safeCw, safeCh, 0, 0, outW, outH);
+  const dataURL = tgt.toDataURL('image/jpeg', q);
 
   // Restore everything and re-render so the user's view is untouched
   S.view.zoom = saved.zoom;
@@ -27766,9 +27793,12 @@ function _renderRoomToImage(room, opts) {
     S.ui.showGrid = saved.showGrid;
     S.ui._pdfMode = saved.pdfMode;
   }
+  room.stripDimSnap = saved.stripDimSnap;
+  room.cableDimSnap = saved.cableDimSnap;
+  room.matDimSnap = saved.matDimSnap;
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
-  return dataURL;
+  return { url: dataURL, w: outW, h: outH, aspect };
 }
 
 // Legacy offscreen renderer — kept for reference / fallback. Not called.
@@ -27944,7 +27974,7 @@ function _renderStairToImage(stair) {
   c.fillRect(0, 0, offW, offH);
 
   const surfs = stair.surfaces;
-  if (!surfs || !surfs.length) return offCanvas.toDataURL('image/png');
+  if (!surfs || !surfs.length) return offCanvas.toDataURL('image/jpeg', 0.85);
 
   // Calculate bounds
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -28052,7 +28082,7 @@ function _renderStairToImage(stair) {
   c.fillStyle = '#888'; c.font = '11px sans-serif';
   c.fillText(`${Math.round(sW)} × ${Math.round(sH)} cm`, 10, 28);
 
-  return offCanvas.toDataURL('image/png');
+  return offCanvas.toDataURL('image/jpeg', 0.85);
 }
 
 // ─── MODAL KEYBOARD SHORTCUTS ─────────────────────────────────
