@@ -26976,17 +26976,39 @@ async function exportPDF(opts) {
     y += 18;
     _line(y); y += 5;
 
-    // Room drawing — bigger, with other rooms desaturated for focus
+    // Count distinct spec rows up-front (one row per product group, min 1) so
+    // we can budget the page height and keep EVERYTHING about this room on ONE
+    // A4 page: image + «Areal, effekt og dekning» + «Spesifikasjon».
+    const _specRowCount = (() => {
+      const ids = new Set();
+      for (const s of _stripsForRoom(room.id)) ids.add('s' + s.productId);
+      for (const c of _cablesForRoom(room.id)) ids.add('c' + c.productId);
+      for (const m of _matsForRoom(room.id)) ids.add('m' + m.productId);
+      for (const pl of _platesForRoom(room.id)) ids.add('p' + pl.productId);
+      return Math.max(1, ids.size);
+    })();
+
+    // Room drawing — height budgeted so key figures + spec fit on the SAME page.
     try {
-      const imgRes = _renderRoomToImage(room, { focusRoom: true });
+      const imgRes = _renderRoomToImage(room, { focusRoom: true, targetWidthMm: pw });
       if (imgRes && imgRes.url) {
+        const aspect = imgRes.aspect || 0.70;
         const imgW = pw;
-        // Height follows the cropped image's real aspect so the room fills
-        // the page width (no fixed 0.70 letterbox).
-        const imgH = imgW * (imgRes.aspect || 0.70);
-        _checkPage(imgH + 5);
-        doc.addImage(imgRes.url, 'JPEG', M, y, imgW, imgH);
-        y += imgH + 5;
+        const pageH = doc.internal.pageSize.getHeight();
+        const bottom = M;                          // bottom margin
+        // Height budget for the blocks that must share this page below the image:
+        const metricsH = 30;                       // header + 2 rows + divider
+        const specH = 5 + 5 + _specRowCount * 5 + 4; // header + colrow/line + rows + pad
+        const gaps = 12;                           // air between blocks
+        const availImgH = (pageH - bottom) - y - metricsH - specH - gaps;
+        let imgH = Math.min(imgW * aspect, Math.max(55, availImgH)); // floor 55 mm
+        let imgW2 = imgW, imgX = M;
+        if (imgH < imgW * aspect) {                // height-constrained → keep aspect
+          imgW2 = imgH / aspect;
+          imgX = M + (pw - imgW2) / 2;             // center horizontally
+        }
+        doc.addImage(imgRes.url, 'JPEG', imgX, y, imgW2, imgH);
+        y += imgH + 6;
       }
     } catch(e) { console.warn('PDF room image failed:', e); }
 
@@ -26997,7 +27019,7 @@ async function exportPDF(opts) {
     // the reader catch the failure mode the user described: a room that
     // has fine flateeffekt on its narrow heatable area but where total
     // installed power is too low to heat the room as a whole.
-    _checkPage(28);
+    // (No _checkPage here — the image height was budgeted so this fits.)
     const heatedM2 = (stats.stripM2 || 0) + (stats.cableAreaM2 || 0) + (stats.matAreaM2 || 0) + (stats.plateAreaM2 || 0);
     const dekningNettoPct = stats.nettoM2 > 0 ? Math.round((heatedM2 / stats.nettoM2) * 100) : 0;
     const dekningBruttoPct = stats.bruttoM2 > 0 ? Math.round((heatedM2 / stats.bruttoM2) * 100) : 0;
@@ -27043,7 +27065,7 @@ async function exportPDF(opts) {
     _line(y); y += 4;
 
     // \u2500\u2500 Spec table \u2014 full width, Antall and Lengde as separate columns \u2500\u2500
-    _checkPage(30);
+    // (No _checkPage here \u2014 budgeted to share the page with image + metrics.)
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(20, 60, 130);
@@ -27678,21 +27700,33 @@ function _renderRoomToImage(room, opts) {
     stripDimSnap: room.stripDimSnap,
     cableDimSnap: room.cableDimSnap,
     matDimSnap: room.matDimSnap,
+    canvasW: canvas.width,
+    canvasH: canvas.height,
   };
   // Reserve room for outside dim chains. Margin in cm — chain offsets are
   // 32 cm (room-dim) + addons (cable +65, mat +65, strip +20), so 150 cm
   // total around the room is safe across all combinations (incl. the folie/
   // kabel/matte measurement chains we force on below).
   const padCm = 150;
-  const cW = canvas.width, cH = canvas.height;
-  // Pick zoom so (room + 2×pad) fits inside the canvas. BASE_SCALE × zoom
-  // is pixels per world-cm; canvas dims divided by that gives world-cm
-  // that fits across the canvas.
-  const fitScale = Math.min(
-    cW / ((rW + 2 * padCm) * BASE_SCALE),
-    cH / ((rH + 2 * padCm) * BASE_SCALE)
-  );
-  S.view.zoom = fitScale;
+  // SHARPNESS-FIRST capture. Instead of grabbing the (low-res) screen canvas
+  // and upscaling, we temporarily resize the main canvas backing store to the
+  // exact target pixel size and render the room 1:1 at ~300 DPI. No upscaling
+  // → crisp detail for the installer. The focus box (room bbox + dim-chain
+  // padding) is mapped to fill the whole canvas, so the room fills the page.
+  const worldW = rW + 2 * padCm;       // cm spanning canvas width
+  const worldH = rH + 2 * padCm;       // cm spanning canvas height
+  const aspect = worldH / worldW;      // out height / out width
+  const dpi = opts.dpi || 300;
+  const targetWmm = opts.targetWidthMm || 180; // A4 printable width (mm)
+  const MAXPX = opts.maxWidth || 2600;         // hard cap for very long rooms
+  const outW = Math.max(600, Math.min(MAXPX, Math.round((targetWmm / 25.4) * dpi)));
+  const outH = Math.max(1, Math.round(outW * aspect));
+  // Resize the live canvas to the output resolution (restored afterwards).
+  canvas.width = outW;
+  canvas.height = outH;
+  // Zoom so the world box maps exactly onto the canvas: sc px per world-cm.
+  const scOut = outW / worldW;
+  S.view.zoom = scOut / BASE_SCALE;
   // panX/panY are WORLD coords (cm) of the point that maps to canvas
   // center — see w2s(): (wx - panX) * sc + canvas.width/2. So pan to the
   // room's centroid to center the room on canvas.
@@ -27725,59 +27759,21 @@ function _renderRoomToImage(room, opts) {
   room.stripDimSnap = (S.strips || []).some(s => s.roomId === room.id);
   room.cableDimSnap = (S.cables || []).some(c => c.roomId === room.id);
   room.matDimSnap   = (S.mats   || []).some(m => m.roomId === room.id);
-  // Render to the main canvas with the temporary view
+  // Render to the (resized) main canvas with the temporary view. The world
+  // box already maps 1:1 onto the canvas, so the whole canvas IS the room.
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
-  // Focus box (room bbox + dim-chain padding), in screen px. Used to crop
-  // tightly so the room fills the output instead of floating in empty space.
-  const sc = S.view.zoom * BASE_SCALE;
-  const padPx = padCm * sc;     // ~150 cm in pixels — covers dim chains
-  const sCenter = w2s((rMinX + rMaxX) / 2, (rMinY + rMaxY) / 2);
-  const focusW = rW * sc + 2 * padPx;
-  const focusH = rH * sc + 2 * padPx;
-  const focusX = sCenter.x - focusW / 2;
-  const focusY = sCenter.y - focusH / 2;
-  // Clamp the crop rect to the canvas bounds.
-  const cx = Math.max(0, Math.floor(focusX));
-  const cy = Math.max(0, Math.floor(focusY));
-  const cw = Math.min(canvas.width - cx, Math.ceil(focusW));
-  const ch = Math.min(canvas.height - cy, Math.ceil(focusH));
 
-  // Source canvas: in focusRoom mode, compose a desaturated full scene with
-  // the focus area re-drawn crisp on top (neighbours read as faint context).
-  let srcCanvas = canvas;
-  if (opts.focusRoom) {
-    const off = document.createElement('canvas');
-    off.width = canvas.width; off.height = canvas.height;
-    const ofx = off.getContext('2d');
-    ofx.fillStyle = '#ffffff';
-    ofx.fillRect(0, 0, off.width, off.height);
-    try { ofx.filter = 'grayscale(1) opacity(0.35)'; } catch(_) {}
-    ofx.drawImage(canvas, 0, 0);
-    try { ofx.filter = 'none'; } catch(_) {}
-    if (cw > 0 && ch > 0) ofx.drawImage(canvas, cx, cy, cw, ch, cx, cy, cw, ch);
-    srcCanvas = off;
-  }
+  // Capture the whole canvas straight to JPEG — no crop, no upscale. The
+  // pixels were rendered at the target resolution so detail is crisp.
+  // q≈0.9 keeps detail high; file size is not the constraint (~1 MB is fine).
+  const q = opts.jpegQuality || 0.9;
+  const dataURL = canvas.toDataURL('image/jpeg', q);
 
-  // Crop the focus rect into a capped-resolution target canvas → JPEG.
-  // Capping width keeps the PDF small; A4 at ~150 DPI needs ≤ ~1400 px.
-  const q = opts.jpegQuality || 0.82;
-  const maxW = opts.maxWidth || 1400;
-  const safeCw = Math.max(1, cw), safeCh = Math.max(1, ch);
-  const aspect = safeCh / safeCw;
-  const outW = Math.min(maxW, safeCw);
-  const outH = Math.max(1, Math.round(outW * aspect));
-  const tgt = document.createElement('canvas');
-  tgt.width = outW; tgt.height = outH;
-  const tctx = tgt.getContext('2d');
-  tctx.fillStyle = '#ffffff';
-  tctx.fillRect(0, 0, outW, outH);
-  tctx.imageSmoothingEnabled = true;
-  try { tctx.imageSmoothingQuality = 'high'; } catch(_) {}
-  tctx.drawImage(srcCanvas, cx, cy, safeCw, safeCh, 0, 0, outW, outH);
-  const dataURL = tgt.toDataURL('image/jpeg', q);
-
-  // Restore everything and re-render so the user's view is untouched
+  // Restore canvas backing store and view, then re-render so the user's
+  // on-screen view is untouched.
+  canvas.width = saved.canvasW;
+  canvas.height = saved.canvasH;
   S.view.zoom = saved.zoom;
   S.view.panX = saved.panX;
   S.view.panY = saved.panY;
