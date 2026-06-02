@@ -8895,23 +8895,58 @@ function _skGenerateRotated(roomR, holesR, CC, margin) {
   });
   return { runs, cells, bb, sweepMargin, N, x0, CC };
 }
+// Sample a clean half-circle (chord from→to is the diameter, r = |chord|/2)
+// in the ROTATED frame, bulging toward +y (high) or -y. Requires from.y==to.y.
+function _skUturnPolyline(from, to, high, segs) {
+  segs = segs || 24;
+  const cx = (from.x + to.x) / 2, cy = (from.y + to.y) / 2;
+  const dx = from.x - cx;                 // ±r
+  const sweep = (high ? 1 : -1) * (dx >= 0 ? 1 : -1) * Math.PI;
+  const pts = [];
+  for (let i = 0; i <= segs; i++) {
+    const th = sweep * (i / segs);
+    pts.push({ x: cx + dx * Math.cos(th), y: cy + dx * Math.sin(th) });
+  }
+  return pts;
+}
 // Serpentine ONE cell → ordered elements: run, uturn, run, uturn, …
+// Each strand is CLIPPED to its neighbour strands' common turn-height so every
+// U-turn is an identical half-circle (from.y === to.y, r = CC/2) that the strand
+// meets tangentially — no stub, no cusp. First strand's start and last strand's
+// end stay FULL (corner anchors). The price: a thin triangle by the slanted wall
+// stays uncovered. (LOCKED rules upheld: r=CC/2, bulge outward, equal length.)
 function _skSerpCell(cell, ltr, entryLow) {
   const ns = cell.nodes.slice().sort((a, b) => ltr ? a.x - b.x : b.x - a.x);
-  const elements = [];
-  let prevEnd = null, prevRun = null;
+  // Pass 1: raw sweep-ends per strand + `high` flag (strand ended on hi-side).
+  const R = [];
   for (let k = 0; k < ns.length; k++) {
     const nd = ns[k];
     const startLowRun = (entryLow === (k % 2 === 0));
-    const wStart = startLowRun ? nd.lo : nd.hi;
-    const wEnd = startLowRun ? nd.hi : nd.lo;
-    if (prevEnd) elements.push({ kind: 'uturn', from: prevEnd, to: { x: nd.x, y: wStart }, high: prevRun.y1 > prevRun.y0 });
-    const run = { x: nd.x, y0: wStart, y1: wEnd };
-    elements.push({ kind: 'run', a: { x: nd.x, y: wStart }, b: { x: nd.x, y: wEnd }, y0: wStart, y1: wEnd });
-    prevEnd = { x: nd.x, y: wEnd }; prevRun = run;
+    R.push({ x: nd.x, lo: nd.lo, hi: nd.hi,
+             wStart: startLowRun ? nd.lo : nd.hi,
+             wEnd:   startLowRun ? nd.hi : nd.lo,
+             high:   startLowRun });          // wEnd is on the hi-side ⇔ startLowRun
   }
+  // Pass 2: clip each turn to the neighbour pair's common height.
+  for (let k = 0; k + 1 < R.length; k++) {
+    const A = R[k], B = R[k + 1];
+    const c = A.high ? Math.min(A.hi, B.hi)   // top turn → common (lowest) top
+                     : Math.max(A.lo, B.lo);  // bottom turn → common (highest) bottom
+    A.wEnd = c; B.wStart = c;
+  }
+  // Pass 3: emit elements. U-turns now have from.y === to.y → clean half-circles.
+  const elements = [];
+  let prevEnd = null, prevHigh = null;
+  for (let k = 0; k < R.length; k++) {
+    const s = R[k];
+    if (prevEnd) elements.push({ kind: 'uturn', from: prevEnd, to: { x: s.x, y: s.wStart }, high: prevHigh });
+    elements.push({ kind: 'run', a: { x: s.x, y: s.wStart }, b: { x: s.x, y: s.wEnd }, y0: s.wStart, y1: s.wEnd });
+    prevEnd = { x: s.x, y: s.wEnd }; prevHigh = s.high;
+  }
+  const last = R[R.length - 1];
   const exitLow = !(entryLow === ((ns.length - 1) % 2 === 0));
-  return { elements, exit: prevEnd, exitLow, lastRun: prevRun };
+  return { elements, exit: prevEnd, exitLow,
+           lastRun: last ? { x: last.x, y0: last.wStart, y1: last.wEnd } : null };
 }
 function _skAdjacent(A, B, CC) {
   for (const a of A.nodes) for (const b of B.nodes)
@@ -8999,7 +9034,13 @@ function _skEngineCore(room, holes, CC, margin, angleDeg) {
     if (el.kind === 'run') { const w = _skRotate([el.a, el.b], inv); return { kind: 'run', a: w[0], b: w[1] }; }
     const w = _skRotate([el.from, el.to], inv);
     const nrm = _skRotate([{ x: 0, y: el.high ? 1 : -1 }], inv)[0];
-    return { kind: el.kind, from: w[0], to: w[1], nrm };
+    const out = { kind: el.kind, from: w[0], to: w[1], nrm };
+    // Clean within-cell U-turn (from.y===to.y in rotated frame): pre-sample the
+    // identical half-circle and store world-space points so the renderer just
+    // strokes a tangent-smooth polyline (no cusp).
+    if (el.kind === 'uturn' && Math.abs(el.from.y - el.to.y) < 1e-6)
+      out.pts = _skRotate(_skUturnPolyline(el.from, el.to, el.high, 24), inv);
+    return out;
   });
   const start = _skRotate([best.path.start], inv)[0];
   const end = _skRotate([best.path.end], inv)[0];
@@ -11949,6 +11990,14 @@ function _drawCableSkewPath(cable) {
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     } else if (el.kind === 'uturn') {
       const f = el.from, t = el.to;
+      // Pre-sampled identical half-circle (clipped within-cell turn) → stroke pts.
+      if (el.pts && el.pts.length > 1) {
+        const p0 = w2s(el.pts[0].x, el.pts[0].y);
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i < el.pts.length; i++) { const q = w2s(el.pts[i].x, el.pts[i].y); ctx.lineTo(q.x, q.y); }
+        ctx.stroke();
+        continue;
+      }
       const d = Math.hypot(t.x - f.x, t.y - f.y);
       if (d < sp * 2.4 && d > 1e-6) {
         const mid = { x: (f.x + t.x) / 2, y: (f.y + t.y) / 2 }, R = d / 2;
