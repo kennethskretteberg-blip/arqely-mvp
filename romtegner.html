@@ -2839,7 +2839,7 @@ function drawRoomCard(room) {
     if (stats.cableProductName) rows.push(['Kabel', stats.cableProductName]);
     if (stats.cableCount > 1) rows.push(['Antall kabler', stats.cableCount + ' stk']);
     rows.push(['Kabellengde', stats.cableLenM.toFixed(1) + ' m']);
-    if (stats.cableCcCm > 0) rows.push(['CC', stats.cableCcCm.toFixed(1) + ' cm (' + Math.round(stats.cableCcCm * 10) + ' mm)']);
+    if (stats.cableCcCm > 0) rows.push(['CC', stats.cableCcCm.toFixed(1) + ' cm']);
   }
   rows.push(['Installert effekt', stats.totalW + ' W']);
   if (stats.wm2Total > 0) rows.push(['W/m² (rom)',      stats.wm2Total + ' W/m²']);
@@ -11977,7 +11977,8 @@ function drawCables() {
         const lengthM = (cable.totalLength_cm / 100).toFixed(1) + ' m';
         const cableWatt = prod.watt_per_m ? Math.round((cable.totalLength_cm / 100) * prod.watt_per_m) : 0;
         const ccMm = cable.cc_mm || (cable.runs.length > 1 ? Math.round(Math.abs(cable.runs[1].pos_cm - cable.runs[0].pos_cm) * 10) : 0);
-        const infoLine = lengthM + (cableWatt > 0 ? ' · ' + cableWatt + ' W' : '') + (ccMm > 0 ? ' · CC ' + ccMm + 'mm' : '');
+        const ccCm = cable.spacing_cm != null ? cable.spacing_cm : (ccMm > 0 ? ccMm / 10 : 0);
+        const infoLine = lengthM + (cableWatt > 0 ? ' · ' + cableWatt + ' W' : '') + (ccCm > 0 ? ' · CC ' + ccCm.toFixed(1) + ' cm' : '');
 
         ctx.save();
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -17807,14 +17808,21 @@ function _drawCableDimChainForRoom(room) {
 function _drawCableDimChainForRoomInner(room) {
   const cables = _cablesForRoom(room.id);
   if (!cables.length) return;
+  // Skew/additive cables (rotated rooms) carry pathEls instead of axis runs —
+  // dimension them in their own rotated frame.
+  const skewCables = cables.filter(c => c.pathEls && c.pathEls.length && (!c.runs || !c.runs.length));
+  if (skewCables.length) _drawCableSkewDimChain(room, skewCables);
+  // Axis-aligned cables use the run/direction chain below.
+  const axisCables = cables.filter(c => c.runs && c.runs.length);
+  if (!axisCables.length) return;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const wMinX = Math.min(...xs), wMaxX = Math.max(...xs);
   const wMinY = Math.min(...ys), wMaxY = Math.max(...ys);
 
   // Determine dominant cable direction
-  const dirs = cables.map(c => c.direction);
+  const dirs = axisCables.map(c => c.direction);
   const dir = dirs.filter(d => d === 'v').length >= dirs.filter(d => d === 'h').length ? 'v' : 'h';
-  const dirCables = cables.filter(c => c.direction === dir);
+  const dirCables = axisCables.filter(c => c.direction === dir);
   if (!dirCables.length) return;
 
   // Collect all run positions and sweep extents
@@ -17978,6 +17986,103 @@ function _drawCableDimChainForRoomInner(room) {
       const s1 = w2s(seg.from, wallY), s2 = w2s(seg.to, wallY);
       _drawChainSeg(s1.x, chainScreenY, s2.x, chainScreenY, seg.to - seg.from, 0, 1, false);
     }
+  }
+  ctx.restore();
+}
+
+// Cable dimension chain for SKEW cables (rotated rooms — pathEls, no axis runs).
+// Works entirely in the run-aligned frame (u = along runs, n = across/CC) using
+// world coordinates, then rotates each measured point to screen via w2s.
+function _drawCableSkewDimChain(room, skewCables) {
+  // Collect straight run segments (world coords) from all skew cables.
+  const runs = [];
+  for (const cable of skewCables) {
+    for (const el of (cable.pathEls || [])) {
+      if (el.kind === 'run' && el.a && el.b) runs.push({ a: el.a, b: el.b, cc: cable.spacing_cm || 10 });
+    }
+  }
+  if (!runs.length) return;
+  // Run-axis unit vector u from the longest run; n is perpendicular (across/CC).
+  let best = runs[0], bestLen = -1;
+  for (const r of runs) { const L = Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); if (L > bestLen) { bestLen = L; best = r; } }
+  if (bestLen <= 0) return;
+  const ux = (best.b.x - best.a.x) / bestLen, uy = (best.b.y - best.a.y) / bestLen;
+  const nx = -uy, ny = ux;
+  // Project each run: pN = across position, [uMin,uMax] = sweep extent along run.
+  const proj = [];
+  for (const r of runs) {
+    const mx = (r.a.x + r.b.x) / 2, my = (r.a.y + r.b.y) / 2;
+    const ua = r.a.x * ux + r.a.y * uy, ub = r.b.x * ux + r.b.y * uy;
+    proj.push({ pN: mx * nx + my * ny, uMin: Math.min(ua, ub), uMax: Math.max(ua, ub) });
+  }
+  proj.sort((a, b) => a.pN - b.pN);
+  // Room bounds in the (u,n) frame.
+  let nMin = Infinity, nMax = -Infinity, uMin = Infinity, uMax = -Infinity;
+  for (const p of room.points) {
+    const pn = p.x * nx + p.y * ny, pu = p.x * ux + p.y * uy;
+    if (pn < nMin) nMin = pn; if (pn > nMax) nMax = pn;
+    if (pu < uMin) uMin = pu; if (pu > uMax) uMax = pu;
+  }
+  // Across-chain (CC + wall margins): wall→run0, CC(0,1), CC(last-1,last), runLast→wall.
+  const acrossSegs = [];
+  const p0 = proj[0].pN, pLast = proj[proj.length - 1].pN;
+  if (p0 - nMin > 0.3) acrossSegs.push({ a: nMin, b: p0 });
+  if (proj.length >= 2) acrossSegs.push({ a: proj[0].pN, b: proj[1].pN });
+  if (proj.length >= 3) acrossSegs.push({ a: proj[proj.length - 2].pN, b: proj[proj.length - 1].pN });
+  if (nMax - pLast > 0.3) acrossSegs.push({ a: pLast, b: nMax });
+  // Along-chain (cable extent incl. U-turn radius vs walls).
+  const uRadius = (runs[0].cc || 10) / 2;
+  let minSweep = Infinity, maxSweep = -Infinity;
+  for (const r of proj) { if (r.uMin - uRadius < minSweep) minSweep = r.uMin - uRadius; if (r.uMax + uRadius > maxSweep) maxSweep = r.uMax + uRadius; }
+  const alongSegs = [];
+  if (minSweep - uMin > 0.3) alongSegs.push({ a: uMin, b: minSweep });
+  alongSegs.push({ a: minSweep, b: maxSweep });
+  if (uMax - maxSweep > 0.3) alongSegs.push({ a: maxSweep, b: uMax });
+
+  ctx.save();
+  ctx.font = "10px 'DM Mono',monospace";
+  const COL = _lc('rgba(180,90,30,0.85)', 'rgba(255,150,60,0.75)');
+  const COL_BG = _lc('rgba(240,244,248,0.92)', 'rgba(13,14,16,0.8)');
+  const TICK = 8, OFF = 25; // world-cm offset from wall to the dimension chain
+  // Frame (across cN, along cU) → world → screen.
+  const W = (cN, cU) => w2s(ux * cU + nx * cN, uy * cU + ny * cN);
+  function drawExt(a, b) {
+    ctx.strokeStyle = COL; ctx.lineWidth = 0.5; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  function drawSeg(s1, s2, valueCm) {
+    if (valueCm < 0.3) return;
+    const label = Math.round(valueCm * 10) / 10;
+    const str = (label % 1 === 0 ? label.toFixed(0) : label.toFixed(1)) + ' cm';
+    ctx.strokeStyle = COL; ctx.lineWidth = 0.8; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(s1.x, s1.y); ctx.lineTo(s2.x, s2.y); ctx.stroke();
+    const ang = Math.atan2(s2.y - s1.y, s2.x - s1.x);
+    const px = Math.cos(ang + Math.PI / 2), py = Math.sin(ang + Math.PI / 2);
+    ctx.beginPath();
+    ctx.moveTo(s1.x - px * TICK / 2, s1.y - py * TICK / 2); ctx.lineTo(s1.x + px * TICK / 2, s1.y + py * TICK / 2);
+    ctx.moveTo(s2.x - px * TICK / 2, s2.y - py * TICK / 2); ctx.lineTo(s2.x + px * TICK / 2, s2.y + py * TICK / 2);
+    ctx.stroke();
+    const mx = (s1.x + s2.x) / 2, my = (s1.y + s2.y) / 2;
+    let la = ang; if (la > Math.PI / 2 || la < -Math.PI / 2) la += Math.PI;
+    const tw = ctx.measureText(str).width;
+    ctx.save(); ctx.translate(mx, my); ctx.rotate(la); ctx.translate(0, -8);
+    ctx.fillStyle = COL_BG; ctx.fillRect(-tw / 2 - 3, -7, tw + 6, 14);
+    ctx.fillStyle = COL; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(str, 0, 0);
+    ctx.restore();
+  }
+  // Across-chain placed just beyond the far end of the runs (cU = uMax + OFF).
+  {
+    const chainU = uMax + OFF;
+    const bset = new Set(); acrossSegs.forEach(s => { bset.add(s.a); bset.add(s.b); });
+    for (const cN of bset) drawExt(W(cN, uMax), W(cN, chainU));
+    for (const s of acrossSegs) drawSeg(W(s.a, chainU), W(s.b, chainU), Math.abs(s.b - s.a));
+  }
+  // Along-chain placed just outside the near side across the runs (cN = nMin - OFF).
+  {
+    const chainN = nMin - OFF;
+    const bset = new Set(); alongSegs.forEach(s => { bset.add(s.a); bset.add(s.b); });
+    for (const cU of bset) drawExt(W(nMin, cU), W(chainN, cU));
+    for (const s of alongSegs) drawSeg(W(chainN, s.a), W(chainN, s.b), Math.abs(s.b - s.a));
   }
   ctx.restore();
 }
