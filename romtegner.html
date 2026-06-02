@@ -2571,6 +2571,101 @@ function _defaultCardPos(room) {
   return { x: Math.min(...xs), y: Math.max(...ys) + GRID };
 }
 
+// World-space centreline segments for a cable, INCLUDING the U-turn arcs, so
+// distance-based coverage sees the cable's true reach toward the end walls
+// (the run ends are clipped sweepMargin = margin+CC/2 from the wall, but the
+// U-turn bulges CC/2 back toward the wall, reaching ~margin).
+function _cableWorldSegments(cab) {
+  const segs = [];
+  // Skew / additive cables: ordered path elements (runs + sampled U-turns).
+  if (cab.pathEls && cab.pathEls.length) {
+    for (const el of cab.pathEls) {
+      if (el.kind === 'run') segs.push({ x1: el.a.x, y1: el.a.y, x2: el.b.x, y2: el.b.y });
+      else if (el.kind === 'uturn') {
+        if (el.pts && el.pts.length > 1) for (let i = 0; i + 1 < el.pts.length; i++)
+          segs.push({ x1: el.pts[i].x, y1: el.pts[i].y, x2: el.pts[i + 1].x, y2: el.pts[i + 1].y });
+        else if (el.from && el.to) segs.push({ x1: el.from.x, y1: el.from.y, x2: el.to.x, y2: el.to.y });
+      } else if (el.kind === 'connector' && el.from && el.to) {
+        segs.push({ x1: el.from.x, y1: el.from.y, x2: el.from.x, y2: el.to.y });
+        segs.push({ x1: el.from.x, y1: el.to.y, x2: el.to.x, y2: el.to.y });
+      }
+    }
+    return segs;
+  }
+  // Axis-aligned cables: straight runs + reconstructed half-circle U-turns.
+  const dir = cab.direction, runs = cab.runs || [];
+  for (const run of runs) for (const seg of (run.segments || [])) {
+    if (dir === 'v') segs.push({ x1: run.pos_cm, y1: seg.start_cm, x2: run.pos_cm, y2: seg.end_cm });
+    else segs.push({ x1: seg.start_cm, y1: run.pos_cm, x2: seg.end_cm, y2: run.pos_cm });
+  }
+  for (let i = 0; i + 1 < runs.length; i++) {
+    const A = runs[i], B = runs[i + 1];
+    if (!A.segments.length || !B.segments.length) continue;
+    const hi = _uTurnIsHigh(i, dir, cab.startCorner);
+    const segA = hi ? A.segments[A.segments.length - 1] : A.segments[0];
+    const segB = hi ? B.segments[B.segments.length - 1] : B.segments[0];
+    const endA = hi ? segA.end_cm : segA.start_cm;
+    const endB = hi ? segB.end_cm : segB.start_cm;
+    const common = hi ? Math.min(endA, endB) : Math.max(endA, endB);
+    const posA = A.pos_cm, posB = B.pos_cm, r = Math.abs(posB - posA) / 2;
+    if (r < 0.5) continue;
+    const sgn = hi ? 1 : -1, N = 8, mid = (posA + posB) / 2, halfSpan = (posA - posB) / 2;
+    let prev = null;
+    for (let t = 0; t <= N; t++) {
+      const ph = Math.PI * t / N;
+      let x, y;
+      if (dir === 'v') { x = mid + halfSpan * Math.cos(ph); y = common + sgn * r * Math.sin(ph); }
+      else { y = mid + halfSpan * Math.cos(ph); x = common + sgn * r * Math.sin(ph); }
+      if (prev) segs.push({ x1: prev.x, y1: prev.y, x2: x, y2: y });
+      prev = { x, y };
+    }
+  }
+  return segs;
+}
+
+// Squared distance from point (px,py) to segment s={x1,y1,x2,y2}.
+function _distSeg2(px, py, s) {
+  const dx = s.x2 - s.x1, dy = s.y2 - s.y1, l2 = dx * dx + dy * dy;
+  let t = l2 > 0 ? ((px - s.x1) * dx + (py - s.y1) * dy) / l2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const qx = s.x1 + t * dx - px, qy = s.y1 + t * dy - py;
+  return qx * qx + qy * qy;
+}
+
+// Covered floor area (cm²) under the coverage definition "a point is covered if
+// it lies within CC/2 of the nearest cable". Implemented as 2-D interior grid
+// sampling (robust for any shape incl. L/T/concave — no double-counting of deep
+// uncovered regions, unlike a 1-D wall-band model). The covered FRACTION is
+// scaled by the exact nettoCm2 so grid discretisation doesn't bias the area.
+// Cached per room (keyed by geometry signature) so it doesn't recompute on
+// every pan/zoom render.
+const _cableCovCache = new Map();
+function _cableCoveredCm2(room, segs, ccCm, nettoCm2, sig) {
+  if (!segs.length || ccCm <= 0 || nettoCm2 <= 0) return 0;
+  const cached = _cableCovCache.get(room.id);
+  if (cached && cached.sig === sig) return cached.val;
+  const rp = room.points;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of rp) { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+  const half2 = (ccCm / 2) * (ccCm / 2);
+  const step = Math.max(ccCm / 2, 5);
+  const hinds = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  const zones = (S.zones || []).filter(z => z.roomId === room.id && z.type === 'forbidden' && z.points && z.points.length >= 3);
+  let total = 0, covered = 0;
+  for (let y = minY + step / 2; y < maxY; y += step) for (let x = minX + step / 2; x < maxX; x += step) {
+    if (!ptInPoly(x, y, rp)) continue;
+    let blocked = false;
+    for (const h of hinds) if (ptInPoly(x, y, h.points)) { blocked = true; break; }
+    if (!blocked) for (const z of zones) if (ptInPoly(x, y, z.points)) { blocked = true; break; }
+    if (blocked) continue;
+    total++;
+    for (const s of segs) { if (_distSeg2(x, y, s) <= half2) { covered++; break; } }
+  }
+  const val = total > 0 ? (covered / total) * nettoCm2 : 0;
+  _cableCovCache.set(room.id, { sig, val });
+  return val;
+}
+
 function _computeRoomStats(room) {
   const bruttoM2 = (room.area || 0) / 10000;
   const hinds = S.hindrings.filter(h => h.roomId === room.id);
@@ -2596,8 +2691,10 @@ function _computeRoomStats(room) {
     if (p?.watt_per_lm) foilW += p.watt_per_lm * s.length_cm / 100;
     else foilW += _stripNettoCm(s) * s.length_cm / 10000 * 60; // fallback 60 W/m²
   }
-  let cableW = 0, cableLenM = 0, cableCount = 0, cableCcCm = 0, cableProductName = '', cableAreaCm2 = 0;
+  let cableW = 0, cableLenM = 0, cableCount = 0, cableCcCm = 0, cableProductName = '';
+  let cableWmNum = 0, cableWmDen = 0;
   const roomCables = _cablesForRoom(room.id);
+  const cableSegs = [];
   for (const cab of roomCables) {
     const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId);
     const lenM = (cab.totalLength_cm || 0) / 100;
@@ -2606,16 +2703,29 @@ function _computeRoomStats(room) {
     cableCount++;
     if (!cableProductName && cp) cableProductName = cp.name || '';
     if (!cableCcCm && cab.spacing_cm) cableCcCm = cab.spacing_cm;
-    // Cable covered area: each run covers CC width × run length
-    if (cab.runs) {
-      for (const run of cab.runs) {
-        for (const seg of run.segments) {
-          cableAreaCm2 += Math.abs(seg.end_cm - seg.start_cm) * (cab.spacing_cm || 0);
-        }
-      }
-    }
+    // Flateeffekt (cable field density) = W per running metre ÷ CC. This is the
+    // physical W/m² inside the cable field, independent of room area, so it must
+    // be computed directly — NOT as totalW/area (that inflates it, since totalW
+    // includes U-turn power while the area excludes the end zones).
+    const ccM = (cab.spacing_cm || 0) / 100;
+    if (ccM > 0 && cp?.watt_per_m) { cableWmNum += lenM * (cp.watt_per_m / ccM); cableWmDen += lenM; }
+    for (const s of _cableWorldSegments(cab)) cableSegs.push(s);
   }
-  const cableAreaM2 = cableAreaCm2 / 10000;
+  const cableWm2 = cableWmDen > 0 ? Math.round(cableWmNum / cableWmDen) : 0;
+  // Cable covered area via the half-CC band model (covers end zones the old
+  // segment×CC sum missed → ~100% when the cable lies ≤ CC/2 from every wall).
+  let cableAreaM2 = 0;
+  if (cableLenM > 0 && cableSegs.length) {
+    const ccCm = cableCcCm || (roomCables[0] && roomCables[0].spacing_cm) || 0;
+    const nettoCm2 = nettoM2 * 10000;
+    // Cache signature: invalidates when room geometry, cable length/spacing, or
+    // cable path (segment count + a cheap coordinate hash that catches drags) changes.
+    let segHash = 0;
+    for (const s of cableSegs) segHash = (segHash * 31 + ((s.x1 + s.y1 + s.x2 + s.y2) | 0)) | 0;
+    const sig = room.points.length + ':' + Math.round(nettoCm2) + ':' + Math.round(cableLenM * 100) + ':' + Math.round(ccCm * 10) + ':' + cableSegs.length + ':' + segHash;
+    const coveredCm2 = _cableCoveredCm2(room, cableSegs, ccCm, nettoCm2, sig);
+    cableAreaM2 = Math.max(0, Math.min(nettoCm2, coveredCm2)) / 10000;
+  }
   let matW = 0, matAreaM2 = 0;
   for (const mat of _matsForRoom(room.id)) {
     const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
@@ -2639,7 +2749,7 @@ function _computeRoomStats(room) {
   const wm2Total = bruttoM2 > 0 ? Math.round(totalW / bruttoM2) : 0;
   // W/m² over heated area only (flateeffekt)
   const wm2Heated = heatedM2 > 0 ? Math.round(totalW / heatedM2) : 0;
-  return { bruttoM2, hindM2, zoneM2, nettoM2, stripM2, cableAreaM2, heatedM2, uncoveredM2: Math.max(0, nettoM2 - heatedM2), totalW, wm2Total, wm2Heated, cableW: Math.round(cableW), cableLenM, cableCount, cableCcCm, cableProductName, matW: Math.round(matW), matAreaM2, plateW: Math.round(plateW), plateAreaM2, plateCount };
+  return { bruttoM2, hindM2, zoneM2, nettoM2, stripM2, cableAreaM2, heatedM2, uncoveredM2: Math.max(0, nettoM2 - heatedM2), totalW, wm2Total, wm2Heated, cableWm2, cableW: Math.round(cableW), cableLenM, cableCount, cableCcCm, cableProductName, matW: Math.round(matW), matAreaM2, plateW: Math.round(plateW), plateAreaM2, plateCount };
 }
 
 function _computeStripGaps(room) {
@@ -2733,7 +2843,8 @@ function drawRoomCard(room) {
   }
   rows.push(['Installert effekt', stats.totalW + ' W']);
   if (stats.wm2Total > 0) rows.push(['W/m² (rom)',      stats.wm2Total + ' W/m²']);
-  if (stats.wm2Heated > 0) rows.push(['Flateeffekt',    stats.wm2Heated + ' W/m²']);
+  const flateeffekt = stats.cableLenM > 0 ? stats.cableWm2 : stats.wm2Heated;
+  if (flateeffekt > 0) rows.push(['Flateeffekt',    flateeffekt + ' W/m²']);
   const H = HHEAD + PAD + rows.length * HROW + PAD;
   const x = sp.x, y = sp.y;
   ctx.save();
@@ -26748,7 +26859,7 @@ async function exportPDF(opts) {
     const dekningNettoPct = stats.nettoM2 > 0 ? Math.round((heatedM2 / stats.nettoM2) * 100) : 0;
     const dekningBruttoPct = stats.bruttoM2 > 0 ? Math.round((heatedM2 / stats.bruttoM2) * 100) : 0;
     const totalW = Math.round(stats.totalW || 0);
-    const flateeffekt = heatedM2 > 0 ? Math.round(totalW / heatedM2) : 0;
+    const flateeffekt = stats.cableLenM > 0 ? (stats.cableWm2 || 0) : (heatedM2 > 0 ? Math.round(totalW / heatedM2) : 0);
     const wPerBrutto = stats.bruttoM2 > 0 ? Math.round(totalW / stats.bruttoM2) : 0;
 
     doc.setFont('helvetica', 'bold');
