@@ -674,6 +674,8 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
 .uam-sep{height:1px;background:var(--border);margin:4px 0}
 .uam-item.danger{color:#ff6b6b}
 .uam-item.danger:hover{background:rgba(255,60,60,.08)}
+.uam-switch-label{padding:8px 16px 4px;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.uam-item.uam-active{color:var(--accent);font-weight:600}
 /* Dashboard avatar (larger) */
 .dash-avatar-wrap{position:relative}
 .dash-avatar-btn{width:40px;height:40px;border-radius:50%;background:var(--accent);color:#0d0e10;border:none;cursor:pointer;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center;text-transform:uppercase;transition:box-shadow .15s;letter-spacing:-.5px}
@@ -28750,12 +28752,21 @@ function _avatarMenuHTML(id) {
   const name = _currentProfile?.full_name || _currentUser.user_metadata?.full_name || '';
   const email = _currentUser.email || '';
   const orgName = _userOrg?.name || '';
+  // P7 — org switcher: only when the user belongs to more than one org.
+  const orgSwitcher = (_userMemberships.length > 1) ? `
+    <div class="uam-switch-label">Bytt organisasjon</div>
+    ${_userMemberships.map(m => {
+      const o = m.organizations; const active = o.id === _activeOrgId;
+      return `<div class="uam-item${active ? ' uam-active' : ''}" onclick="_switchActiveOrg('${o.id}')"><span class="uam-ico">${active ? '✓' : '🏢'}</span>${_esc(o.name || 'Organisasjon')}</div>`;
+    }).join('')}
+    <div class="uam-sep"></div>` : '';
   return `
     <div class="uam-header">
       <div class="uam-name">${_esc(name || email)}</div>
       ${name ? `<div class="uam-email">${_esc(email)}</div>` : ''}
       ${orgName ? `<div class="uam-org">🏢 ${_esc(orgName)}</div>` : ''}
     </div>
+    ${orgSwitcher}
     <div class="uam-item" onclick="_openProfile()"><span class="uam-ico">⚙️</span>Innstillinger</div>
     ${_currentUser.app_metadata?.is_superadmin ? '<div class="uam-item" onclick="_openAdminPanel()"><span class="uam-ico">🛡️</span>Systemadmin</div>' : (_userOrg && (_userOrg._role === 'owner' || _userOrg._role === 'admin') ? '<div class="uam-item" onclick="_openOrgAdminPanel()"><span class="uam-ico">👥</span>Administrer</div>' : '')}
     <div class="uam-sep"></div>
@@ -30093,6 +30104,18 @@ async function _orgAdmInviteUser() {
   if (!email || !email.includes('@')) { msg.style.display='block'; msg.style.background='rgba(255,60,60,.08)'; msg.style.color='#ff6b6b'; msg.textContent='Fyll inn en gyldig e-postadresse.'; return; }
   btn.disabled = true; btn.textContent = 'Sender...';
   try {
+    // P7 — plan-based member cap. Only runs a count when a finite limit exists
+    // (Infinity today → no query, no block). RLS stays the real boundary.
+    const limit = _orgMemberLimit(_userOrg);
+    if (limit !== Infinity) {
+      const { count } = await _db.from('organization_members').select('user_id', { count:'exact', head:true }).eq('org_id', _userOrg.id);
+      if ((count || 0) >= limit) {
+        msg.style.display='block'; msg.style.background='rgba(255,60,60,.08)'; msg.style.color='#ff6b6b';
+        msg.textContent = `Medlemstaket for planen er nådd (${limit}). Oppgrader for å invitere flere.`;
+        btn.disabled=false; btn.textContent='Send invitasjon';
+        return;
+      }
+    }
     const token = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2)+Date.now().toString(36));
     const { error } = await _db.from('org_invitations').insert({ email, org_id:_userOrg.id, role, token, status:'pending', invited_by:_currentUser.id }).select().single();
     if (error) throw error;
@@ -31006,20 +31029,63 @@ async function _loadProducts() {
   _ensurePlateTestProducts();
 }
 
-let _userOrg = null;  // { id, name, org_type, supplier_name } — user's primary org
+// P7 — Multi-org: keep ALL memberships, resolve the active org from a persisted id.
+let _userMemberships = [];   // [{ org_id, role, organizations }] — every org the user belongs to
+let _activeOrgId = null;     // id of the currently active org (persisted in localStorage)
+let _userOrg = null;         // { id, name, org_type, supplier_name, _role } — resolved active org
+const _ACTIVE_ORG_KEY = 'rt_active_org_id';
+
+// Resolve _userOrg from _userMemberships + _activeOrgId. Falls back to the first
+// membership if the persisted id is missing/invalid. Keeps the _userOrg._role pattern.
+function _resolveActiveOrg() {
+  if (!_userMemberships.length) { _userOrg = null; _activeOrgId = null; return; }
+  let m = _activeOrgId && _userMemberships.find(x => x.organizations && x.organizations.id === _activeOrgId);
+  if (!m) m = _userMemberships[0];
+  _activeOrgId = m.organizations.id;
+  _userOrg = m.organizations;
+  _userOrg._role = m.role;
+}
 
 async function _loadUserOrg() {
   if (!_db || !_currentUser) return;
   try {
     const { data: memberships } = await _db.from('organization_members')
-      .select('org_id, role, organizations(id, name, org_type, supplier_name)')
+      .select('org_id, role, organizations(id, name, org_type, supplier_name, plan, subscription_status, trial_ends_at)')
       .eq('user_id', _currentUser.id);
-    if (memberships && memberships.length > 0) {
-      // Use first org (could be extended to support multiple)
-      _userOrg = memberships[0].organizations;
-      _userOrg._role = memberships[0].role;
-    }
+    _userMemberships = (memberships || []).filter(m => m.organizations);
+    try { _activeOrgId = localStorage.getItem(_ACTIVE_ORG_KEY) || null; } catch(e) {}
+    _resolveActiveOrg();
   } catch(e) { /* org lookup failed, products stay unfiltered */ }
+}
+
+// P7 — Plan-based member cap. Returns Infinity for now (no enforced cap) but
+// centralizes the rule so plans can tighten it later without touching call sites.
+function _orgMemberLimit(org) {
+  const plan = (org && org.plan) || 'free';
+  const limits = { free: Infinity, standard: Infinity, professional: Infinity };
+  return (limits[plan] != null) ? limits[plan] : Infinity;
+}
+
+// P7 — Switch the active org: persist, re-resolve, clear org-scoped caches, reload data.
+// RLS remains the security boundary; this only changes which org the UI reads/writes.
+async function _switchActiveOrg(orgId) {
+  document.querySelectorAll('.user-avatar-menu').forEach(m => m.classList.remove('open'));
+  if (!orgId || orgId === _activeOrgId) return;
+  const target = _userMemberships.find(m => m.organizations && m.organizations.id === orgId);
+  if (!target) return;
+  _activeOrgId = orgId;
+  try { localStorage.setItem(_ACTIVE_ORG_KEY, orgId); } catch(e) {}
+  _resolveActiveOrg();
+  // Clear org-scoped caches so the new org's data loads fresh.
+  _cachedCustomers = null;
+  _cachedProjects = null;
+  _projectListDirty = true;
+  // Re-filter the product catalog for the new org (supplier orgs see only their own).
+  try { await _loadProducts(); _filterProductsByOrg(); } catch(e) {}
+  try { await _loadCustomers(); } catch(e) {}
+  try { _updateAuthUserBar(); } catch(e) {}
+  try { _renderProjectList(); } catch(e) {}
+  try { _showToast('Byttet til ' + (_userOrg?.name || 'organisasjon')); } catch(e) {}
 }
 
 function _filterProductsByOrg() {
