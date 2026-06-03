@@ -5733,6 +5733,137 @@ function _gapPackDefs(defs, room, sortedProds, direction) {
   return newDefs;
 }
 
+// ─── SLANTED-WALL EDGE FILL (staircase of narrow strips) ─────────────
+// Foil strips are axis-aligned rectangles (cannot rotate), so a slanted wall is
+// covered by a STAIRCASE of narrow strips (FlexFoil 40cm / 20cm) that step inward
+// toward the slant. This is an ADDITIVE post-pass: it only runs on rooms that
+// actually have a slanted wall, and only ADDS coverage in the triangular cold
+// zone left by the wide strips — it never touches straight rooms (rect/L/T) and
+// never replaces the main width mid-room. See prompt "skråvegg-dekning".
+
+/** True if any room edge is non-axis-aligned (both dx and dy significant). */
+function _roomHasSlantedWall(room) {
+  const pts = room && room.points;
+  if (!pts || pts.length < 3) return false;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    if (Math.abs(b.x - a.x) > 0.5 && Math.abs(b.y - a.y) > 0.5) return true;
+  }
+  return false;
+}
+
+/** True if a strip band [pos_cm, pos_cm+nc] (perp axis) lies within the perp-span
+ *  of some slanted room edge — i.e. a slant is cutting coverage in this band. */
+function _posNearSlant(room, direction, pos_cm, nc) {
+  const isV = direction === 'v';
+  const perp = p => (isV ? p.x : p.y);
+  const pts = room.points;
+  const lo = pos_cm, hi = pos_cm + nc;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    if (Math.abs(b.x - a.x) > 0.5 && Math.abs(b.y - a.y) > 0.5) {
+      const e0 = perp(a), e1 = perp(b);
+      const emin = Math.min(e0, e1), emax = Math.max(e0, e1);
+      if (hi > emin + 0.01 && lo < emax - 0.01) return true;
+    }
+  }
+  return false;
+}
+
+/** Narrow FlexFoil widths (≤40cm) from the SAME family as the chosen products,
+ *  fetched independently of the user's maxWidthMm so they are always available as
+ *  slant/edge fill. Returns [{id, nc}] widest-first (e.g. 40cm then 20cm). */
+function _narrowEdgeFillProducts(sortedProds) {
+  if (!sortedProds.length) return [];
+  const ref = HEATING_PRODUCTS.find(p => p.id === sortedProds[0].id);
+  if (!ref) return [];
+  const fam = ref.product_family;
+  const pool = HEATING_PRODUCTS.filter(p =>
+    p.active !== false && p.category_id === ref.category_id &&
+    (fam ? p.product_family === fam
+         : (p.name && ref.name && p.name.split(' ')[0] === ref.name.split(' ')[0])));
+  const seen = new Set(), out = [];
+  pool.map(p => ({ id: p.id, nc: (p.netto_width_mm || p.width_mm) / 10 }))
+      .filter(w => w.nc > 0 && w.nc <= 40 + 0.01)
+      .sort((a, b) => b.nc - a.nc)
+      .forEach(w => { const k = Math.round(w.nc * 100); if (!seen.has(k)) { seen.add(k); out.push(w); } });
+  return out;
+}
+
+/** Of a candidate strip's sweep range, return the sub-ranges NOT already covered
+ *  by existing defs that share this perp band. Two strips in the same lane but at
+ *  different along-ranges are allowed (they sit end-to-end), so we only carve out
+ *  the genuinely already-covered sweep. */
+function _subtractCoveredSweep(seg, pos_cm, nc, direction, defs, _gap) {
+  let ranges = [[seg.start_cm, seg.start_cm + seg.length_cm]];
+  const bandLo = pos_cm, bandHi = pos_cm + nc;
+  for (const d of defs) {
+    if (d.direction !== direction) continue;
+    const dp = HEATING_PRODUCTS.find(p => p.id === d.productId);
+    const dnc = dp ? (dp.netto_width_mm || dp.width_mm) / 10 : 0;
+    // perp overlap? (same lane)
+    if (d.pos_cm + dnc <= bandLo + 0.01 || d.pos_cm >= bandHi - 0.01) continue;
+    const cLo = d.start_cm - 0.01, cHi = d.start_cm + d.length_cm + 0.01;
+    const next = [];
+    for (const [lo, hi] of ranges) {
+      if (cHi <= lo || cLo >= hi) { next.push([lo, hi]); continue; }
+      if (cLo > lo) next.push([lo, Math.min(hi, cLo)]);
+      if (cHi < hi) next.push([Math.max(lo, cHi), hi]);
+    }
+    ranges = next;
+  }
+  return ranges.map(([lo, hi]) => ({ start_cm: lo, length_cm: hi - lo }))
+               .filter(r => r.length_cm > 0.01);
+}
+
+/** Pack a staircase of narrow strips into the triangular cold zone along slanted
+ *  walls. Returns baseDefs plus the added staircase strips. No-op when the room
+ *  has no slanted wall, so straight rooms are guaranteed unchanged. */
+function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
+  if (!_roomHasSlantedWall(room)) return baseDefs;
+  const narrow = _narrowEdgeFillProducts(sortedProds);
+  if (!narrow.length) return baseDefs;
+
+  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+  const SLANT_MIN_LEN = 15;            // keep short edge strips down to 15cm at the slant
+  const smallestNc = narrow[narrow.length - 1].nc;
+
+  const isV = direction === 'v';
+  const perpVals = room.points.map(p => isV ? p.x : p.y);
+  const basePos = Math.min(...perpVals), baseMax = Math.max(...perpVals);
+
+  const additions = [];
+  const allDefs = baseDefs.slice();    // grows so steps avoid each other + base strips
+
+  let cursor = basePos + MARGIN;
+  let guard = 0;
+  while (cursor + smallestNc <= baseMax - MARGIN + 0.01 && guard++ < 1000) {
+    if (!_posNearSlant(room, direction, cursor, smallestNc)) { cursor += smallestNc; continue; }
+    let placed = false;
+    for (const nw of narrow) {                       // widest narrow first (40 → 20)
+      if (cursor + nw.nc > baseMax - MARGIN + 0.01) continue;
+      const segs = computeClippedSegments(room.id, direction, cursor, nw.id);
+      const newSegs = [];
+      for (const seg of segs) {
+        for (const fr of _subtractCoveredSweep(seg, cursor, nw.nc, direction, allDefs, GAP)) {
+          if (fr.length_cm >= SLANT_MIN_LEN) newSegs.push(fr);
+        }
+      }
+      if (newSegs.length) {
+        for (const fr of newSegs) {
+          const def = { roomId: room.id, productId: nw.id, direction,
+            pos_cm: cursor, start_cm: fr.start_cm, length_cm: fr.length_cm };
+          additions.push(def); allDefs.push(def);
+        }
+        cursor += nw.nc + GAP; placed = true; break;
+      }
+    }
+    if (!placed) cursor += smallestNc;
+  }
+  return additions.length ? baseDefs.concat(additions) : baseDefs;
+}
+
 function _autoFillBothDirections(room, sortedProds) {
   // Authoritative layout scorer (covered area · strip count · width types ·
   // short-strip penalty). Single source of truth — see _scoreFoilLayout.
@@ -5762,6 +5893,10 @@ function _autoFillBothDirections(room, sortedProds) {
 
     // Apply cold-zone-to-walls shift
     best = _centerStripDefs(best, room, dir);
+
+    // Slanted-wall staircase: additive narrow-strip fill in the triangular cold
+    // zone. No-op on straight rooms (rect/L/T) → identical output guaranteed.
+    best = _slantStaircaseFill(room, best, sortedProds, dir);
 
     // Calculate stats
     const netArea = _calcNetArea(room);
