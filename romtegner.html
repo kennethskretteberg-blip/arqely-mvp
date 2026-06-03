@@ -9790,6 +9790,43 @@ function autoFillCable(roomId, productId) {
   }
   return cable;
 }
+// P1 (2026-06-03): Shared scoring for cable auto-fill candidates. Previously this exact
+// formula (forbidden -100/-50, preferred +10, multi-cell +5, length-match, dir +1, corner +3)
+// was duplicated in every engine branch. Extracted here so the Boustrophedon and V6 branches
+// score candidates identically. Engine-specific extras (serpentine's corner-landing/util bonus,
+// V6's validation bonus) stay inline at their call sites.
+//   ctx: { forbiddenZones, preferredZones, cableLengthM, dir, primaryDir, corner, userCorner,
+//          forbiddenMode: 'penalty'|'skip', scoreCorner: bool }
+// `ep` is the cable endpoints (may be null); `res` is the engine result.
+function _scoreCableCandidate(res, ep, ctx) {
+  let score = 0;
+  // Penalize endpoints in forbidden zones (start heavier — it carries the splice).
+  // 'skip' mode means the caller already `continue`d on a forbidden hit (boustrophedon).
+  if (ep && ctx.forbiddenMode === 'penalty' && ctx.forbiddenZones) {
+    for (const fz of ctx.forbiddenZones) {
+      if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
+      if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
+    }
+  }
+  // Reward start in preferred zone.
+  if (ep && ctx.preferredZones) {
+    for (const pz of ctx.preferredZones) {
+      if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
+    }
+  }
+  // Reward multi-cell coverage.
+  if (res.cells && res.cells.length > 1) score += 5;
+  // Reward length match for fixed-length products.
+  if (ctx.cableLengthM) {
+    const diff = Math.abs(res.totalLength_cm - ctx.cableLengthM * 100);
+    score += Math.max(0, 10 - diff * 0.1);
+  }
+  // Bonus for user-preferred direction and corner.
+  if (ctx.dir === ctx.primaryDir) score += 1;
+  if (ctx.scoreCorner && ctx.userCorner && ctx.corner === ctx.userCorner) score += 3;
+  return score;
+}
+
 function _autoFillCableImpl(roomId, productId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
@@ -9969,14 +10006,12 @@ function _autoFillCableImpl(roomId, productId) {
         }
       }
       if (forbiddenHit) continue;
-      let score = 0;
-      if (ep) for (const pz of preferredZones) if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
-      if (prod.cable_length_m) {
-        const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
-        score += Math.max(0, 10 - diff * 0.1);
-      }
-      if (res.cells && res.cells.length > 1) score += 5;
-      if (dir === primaryDir) score += 1;
+      // Forbidden already handled via `continue` above → forbiddenMode 'skip'.
+      // Boustrophedon self-selects its corner, so no corner bonus (scoreCorner false).
+      const score = _scoreCableCandidate(res, ep, {
+        preferredZones, cableLengthM: prod.cable_length_m,
+        dir, primaryDir, forbiddenMode: 'skip', scoreCorner: false
+      });
       if (score > bBestScore) { bBestScore = score; bBest = res; }
     }
     if (bBest && bBest.runs.length > 0) {
@@ -10008,27 +10043,14 @@ function _autoFillCableImpl(roomId, productId) {
         if (!res || res.runs.length === 0) continue;
         const tmpCable = { roomId, direction: dir, runs: res.runs };
         const ep = _cableEndpoints(tmpCable);
-        let score = 0;
-        if (ep) {
-          for (const fz of forbiddenZones) {
-            if (ptInPoly(ep.start.x, ep.start.y, fz.points)) score -= 100;
-            if (ptInPoly(ep.end.x, ep.end.y, fz.points)) score -= 50;
-          }
-          for (const pz of preferredZones) {
-            if (ptInPoly(ep.start.x, ep.start.y, pz.points)) score += 10;
-          }
-        }
-        if (res.cells && res.cells.length > 1) score += 5;
-        if (prod.cable_length_m) {
-          const diff = Math.abs(res.totalLength_cm - prod.cable_length_m * 100);
-          score += Math.max(0, 10 - diff * 0.1);
-        }
-        // Bonus for V6 validation (fewer warnings = better)
+        let score = _scoreCableCandidate(res, ep, {
+          forbiddenZones, preferredZones, cableLengthM: prod.cable_length_m,
+          dir, primaryDir, corner, userCorner, forbiddenMode: 'penalty', scoreCorner: true
+        });
+        // Bonus for V6 validation (fewer warnings = better) — V6-specific, not shared.
         if (res._v6Debug && res._v6Debug.validation) {
           score += (res._v6Debug.validation.warnings.length === 0) ? 3 : -res._v6Debug.validation.warnings.filter(w => w.severity === 'error').length * 5;
         }
-        if (dir === primaryDir) score += 1;
-        if (userCorner && corner === userCorner) score += 3;
         if (score > v6BestScore) {
           v6BestScore = score; v6Best = res; v6BestCorner = corner; v6BestDir = dir;
         }
