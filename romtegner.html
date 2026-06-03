@@ -26129,6 +26129,8 @@ function _restoreProject(data) {
   if (!S.project.type) S.project.type = 'indoor';
   if (!S.project.status) S.project.status = 'in_progress';
   if (!S.project.responsible) S.project.responsible = '';
+  // P6: sync the customer name from the linked customer row (source of truth).
+  if (typeof _syncProjectCustomerName === 'function') _syncProjectCustomerName();
   S.floors    = data.floors    || [];
   S.rooms     = data.rooms     || [];
   S.hindrings = data.hindrings || [];
@@ -26763,7 +26765,7 @@ async function exportPDF(opts) {
   const proj = S.project || {};
   const prevDateStr = prevExportAt ? _isoDate(prevExportAt) : '—';
   const metaRows = [
-    ['Kunde',       proj.customer || '—'],
+    ['Kunde',       (proj.customer || '—') + (proj._customerDeleted ? ' (slettet)' : '')],
     ['Adresse',     proj.address || '—'],
     ['Ansvarlig',   proj.responsible || '—'],
     ['Prosjekt-nr', proj.projectNo || String(proj.id || '—')],
@@ -30415,8 +30417,39 @@ async function _loadCustomers() {
   try {
     const { data } = await _db.from('customers').select('*').eq('org_id', _userOrg.id).order('name');
     _cachedCustomers = data || [];
+    // P6: the cache may have loaded AFTER a project was opened — re-sync the open
+    // project's customer name now that the source-of-truth rows are available.
+    _syncProjectCustomerName();
     return _cachedCustomers;
   } catch(e) { return []; }
+}
+
+// P6: resolve a customer's CURRENT name from the loaded customer cache.
+// Returns the name if the row exists, null if the cache is loaded but the row is
+// gone (deleted), or undefined if the cache isn't available yet (caller keeps the
+// stored string untouched in that case).
+function _resolveCustomerName(customerId) {
+  if (!customerId) return undefined;
+  if (!Array.isArray(_cachedCustomers)) return undefined; // cache not loaded yet
+  const c = _cachedCustomers.find(c => c.id === customerId);
+  return c ? (c.name || '') : null;
+}
+
+// P6: when the open project links a customer row (customer_id set), that row is
+// the source of truth for the name. Adopt the current name, or flag a deleted
+// customer so the UI can show "(slettet)". Free-text customers (no customer_id)
+// are left untouched.
+function _syncProjectCustomerName() {
+  if (!S.project) return;
+  S.project._customerDeleted = false;
+  if (!S.project.customer_id) return;
+  const resolved = _resolveCustomerName(S.project.customer_id);
+  if (resolved === null) {
+    S.project._customerDeleted = true;       // row gone — keep stored string, mark deleted
+  } else if (typeof resolved === 'string') {
+    S.project.customer = resolved;           // row exists — adopt current name
+  }
+  // resolved === undefined → cache not ready; keep stored string as-is
 }
 
 function _searchCustomers(query) {
@@ -31199,6 +31232,7 @@ async function _fetchProjectList() {
         ...p,
         parts: proj.parts || [],
         _customer: proj.customer || '',
+        _customerId: proj.customer_id || null,
         _type: proj.type || 'indoor',
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
@@ -32056,12 +32090,20 @@ async function _renderProjectList() {
     const statusObj = PROJECT_STATUSES.find(s => s.id === status) || PROJECT_STATUSES[0];
     const type = p._type || 'indoor';
     const typeObj = PROJECT_TYPE_MAP[type] || PROJECT_TYPE_MAP.indoor;
-    const customer = esc(p._customer || '') || '<span style="color:var(--dim)">—</span>';
+    // P6: if the project links a customer row, that row is the source of truth for
+    // the name — resolve the live name from cache and flag a deleted customer.
+    let custName = p._customer || '';
+    if (p._customerId) {
+      const live = _resolveCustomerName(p._customerId);
+      if (typeof live === 'string') custName = live;
+      else if (live === null) custName = (p._customer || '') + ' (slettet)';
+    }
+    const customer = esc(custName) || '<span style="color:var(--dim)">—</span>';
     const responsible = esc(p._responsible || '') || '<span style="color:var(--dim)">—</span>';
     const checked = _selectedProjectIds.has(p.id) ? ' checked' : '';
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
-      <td class="pl-td pl-td-name"><span class="pl-proj-name" onclick="event.stopPropagation();_inlineRenameProject('${p.id}',this)" style="cursor:text" title="Klikk for å endre navn">${esc(p.name)}</span>${p._customer ? '<span class="pl-td-sub">'+esc(p._customer)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
+      <td class="pl-td pl-td-name"><span class="pl-proj-name" onclick="event.stopPropagation();_inlineRenameProject('${p.id}',this)" style="cursor:text" title="Klikk for å endre navn">${esc(p.name)}</span>${custName ? '<span class="pl-td-sub">'+esc(custName)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
       <td class="pl-td pl-td-desc pl-td-cust" onclick="event.stopPropagation();_quickSetCustomer('${p.id}')" style="cursor:pointer" title="Klikk for å endre kunde">${customer}</td>
       <td class="pl-td pl-td-type"><span class="pl-type-ico">${typeObj.ico}</span>${typeObj.label}</td>
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${PROJECT_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select></td>
