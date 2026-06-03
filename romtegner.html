@@ -1073,6 +1073,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
         <option value="ready_quote">Tilbudsklar</option>
         <option value="completed">Ferdig</option>
         <option value="archived">Arkivert</option>
+        <option value="trash">🗑️ Papirkurv</option>
       </select>
       <select class="dash-filter-select" id="dash-filter-type" onchange="_renderProjectList()">
         <option value="">Alle typer</option>
@@ -1089,11 +1090,12 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
       <!-- Batch toolbar -->
       <div id="batch-toolbar" class="batch-toolbar">
         <span id="batch-count" class="batch-count">0 valgt</span>
-        <button class="batch-btn danger" onclick="_batchAction('delete')">Slett</button>
-        <button class="batch-btn" onclick="_batchAction('archive')">Arkiver</button>
-        <button class="batch-btn" onclick="_batchAction('duplicate')">Dupliser</button>
-        <button class="batch-btn" onclick="_batchAction('export')">Eksporter</button>
-        <button class="batch-btn" onclick="_batchAction('status')">Endre status</button>
+        <button id="batch-btn-restore" class="batch-btn" onclick="_batchAction('restore')" style="display:none">♻️ Gjenopprett</button>
+        <button id="batch-btn-delete" class="batch-btn danger" onclick="_batchAction('delete')">Slett</button>
+        <button id="batch-btn-archive" class="batch-btn" onclick="_batchAction('archive')">Arkiver</button>
+        <button id="batch-btn-duplicate" class="batch-btn" onclick="_batchAction('duplicate')">Dupliser</button>
+        <button id="batch-btn-export" class="batch-btn" onclick="_batchAction('export')">Eksporter</button>
+        <button id="batch-btn-status" class="batch-btn" onclick="_batchAction('status')">Endre status</button>
       </div>
       <div class="pl-table-wrap">
         <table class="pl-table">
@@ -1710,11 +1712,11 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
 <!-- DELETE PROJECT CONFIRM DIALOG -->
 <div id="del-proj-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;align-items:center;justify-content:center">
   <div style="background:var(--surface);border-radius:16px;padding:28px 32px;max-width:400px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,.3)">
-    <div style="font-size:18px;font-weight:700;color:var(--fg);margin-bottom:4px">🗑️ Slett prosjekt</div>
+    <div style="font-size:18px;font-weight:700;color:var(--fg);margin-bottom:4px" id="del-proj-title">🗑️ Slett prosjekt</div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5" id="del-proj-msg"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="_cancelDeleteProject()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
-      <button onclick="_execDeleteProject()" style="padding:8px 20px;background:#e53e3e;border:none;border-radius:8px;font-size:13px;font-weight:600;color:#fff;cursor:pointer">Slett</button>
+      <button id="del-proj-confirm-btn" onclick="_execDelProjConfirm()" style="padding:8px 20px;background:#e53e3e;border:none;border-radius:8px;font-size:13px;font-weight:600;color:#fff;cursor:pointer">Flytt til papirkurv</button>
     </div>
   </div>
 </div>
@@ -31112,22 +31114,21 @@ async function _fetchProjectList() {
   if (!_db) return [];
   try {
     const _run = (cols) => _db.from('romtegner_projects').select(cols).order('updated_at', { ascending: false });
-    // Preferred: pull only data->project (the metadata the list needs), not the
-    // full data blob (room geometry / background images) — that heavy payload
-    // can stall/time out. Fall back gracefully if the column/syntax isn't available.
-    let res = await _run('id, name, description, created_at, updated_at, status, proj:data->project');
-    if (res.error && res.error.message.includes('status')) {
-      res = await _run('id, name, description, created_at, updated_at, proj:data->project');
-    }
-    // If the data->project selection itself failed (older PostgREST / syntax),
-    // fall back to the proven full-data query so the list still loads.
-    if (res.error) {
-      console.warn('Lean project fetch failed, falling back to full data:', res.error.message);
-      res = await _run('id, name, description, created_at, updated_at, status, data');
-      if (res.error && res.error.message.includes('status')) {
-        res = await _run('id, name, description, created_at, updated_at, data');
-      }
-    }
+    // Prefer the lean data->project select (list metadata only, not the heavy
+    // room geometry / background image blob). Each successive candidate drops a
+    // column/feature that may not exist on this DB (status, deleted_at, JSON-path
+    // select) so the list still loads on older schemas/PostgREST versions.
+    const candidates = [
+      'id, name, description, created_at, updated_at, status, deleted_at, proj:data->project',
+      'id, name, description, created_at, updated_at, deleted_at, proj:data->project',
+      'id, name, description, created_at, updated_at, status, proj:data->project',
+      'id, name, description, created_at, updated_at, status, deleted_at, data',
+      'id, name, description, created_at, updated_at, deleted_at, data',
+      'id, name, description, created_at, updated_at, status, data',
+      'id, name, description, created_at, updated_at, data',
+    ];
+    let res = null;
+    for (const cols of candidates) { res = await _run(cols); if (!res.error) break; }
     // Return null (not []) on error so the caller can keep showing the last good
     // list instead of blanking it out.
     if (res.error) { console.warn('Fetch projects failed:', res.error.message); return null; }
@@ -31140,6 +31141,7 @@ async function _fetchProjectList() {
         _type: proj.type || 'indoor',
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
+        _deletedAt: p.deleted_at || null,
         proj: undefined,
         data: undefined,
       };
@@ -31228,6 +31230,52 @@ async function _deleteFromSupabase(projectId) {
     }
     return { ok:true };
   } catch(e) { console.error('Delete error:', e.message); return { ok:false, reason:'error', message:e.message }; }
+}
+
+// True if the current user may permanently delete (admin/owner of org, or superadmin).
+function _isOrgAdmin() {
+  if (_currentUser?.app_metadata?.is_superadmin) return true;
+  const role = _userOrg?._role;
+  return role === 'owner' || role === 'admin';
+}
+
+// Soft delete: move project to the trash by stamping deleted_at. Any org member
+// may do this (RLS UPDATE allows it). Returns { ok, reason, message }.
+async function _trashProject(projectId) {
+  if (!_db) return { ok:false, reason:'no-db' };
+  try {
+    // Claim orphan project if user_id is NULL so the UPDATE passes RLS.
+    await _db.from('romtegner_projects').update({ user_id: _currentUser?.id, org_id: _userOrg?.id }).eq('id', projectId).is('user_id', null);
+    const { data, error } = await _db.from('romtegner_projects')
+      .update({ deleted_at: new Date().toISOString() }).eq('id', projectId).select('id');
+    if (error) {
+      console.error('Trash failed:', error.message, error.code, error.details);
+      return { ok:false, reason:'error', message:error.message };
+    }
+    if (!data || data.length === 0) {
+      console.warn('Trash affected 0 rows (RLS-blokkert eller finnes ikke):', projectId);
+      return { ok:false, reason:'no-permission' };
+    }
+    return { ok:true };
+  } catch(e) { console.error('Trash error:', e.message); return { ok:false, reason:'error', message:e.message }; }
+}
+
+// Restore from trash: clear deleted_at. Any org member may do this.
+async function _restoreTrashedProject(projectId) {
+  if (!_db) return { ok:false, reason:'no-db' };
+  try {
+    const { data, error } = await _db.from('romtegner_projects')
+      .update({ deleted_at: null }).eq('id', projectId).select('id');
+    if (error) {
+      console.error('Restore failed:', error.message, error.code, error.details);
+      return { ok:false, reason:'error', message:error.message };
+    }
+    if (!data || data.length === 0) {
+      console.warn('Restore affected 0 rows (RLS-blokkert eller finnes ikke):', projectId);
+      return { ok:false, reason:'no-permission' };
+    }
+    return { ok:true };
+  } catch(e) { console.error('Restore error:', e.message); return { ok:false, reason:'error', message:e.message }; }
 }
 
 // ─── INDEXEDDB RECOVERY STORE ─────────────────────────────────
@@ -31617,6 +31665,19 @@ function _updateBatchToolbar() {
   if (_selectedProjectIds.size > 0) {
     tb.classList.add('show');
     count.textContent = _selectedProjectIds.size + ' valgt';
+    // In trash: only Restore + (admin) permanent Delete make sense.
+    const inTrash = (document.getElementById('dash-filter-status')?.value === 'trash');
+    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+    show('batch-btn-restore', inTrash);
+    show('batch-btn-archive', !inTrash);
+    show('batch-btn-duplicate', !inTrash);
+    show('batch-btn-export', !inTrash);
+    show('batch-btn-status', !inTrash);
+    const delBtn = document.getElementById('batch-btn-delete');
+    if (delBtn) {
+      delBtn.textContent = inTrash ? 'Slett permanent' : 'Slett';
+      delBtn.style.display = (inTrash && !_isOrgAdmin()) ? 'none' : '';
+    }
   } else {
     tb.classList.remove('show');
   }
@@ -31628,16 +31689,47 @@ async function _batchAction(action) {
 
   switch(action) {
     case 'delete': {
-      if (!confirm(`Slette ${ids.length} prosjekt(er)? Dette kan ikke angres.`)) return;
-      let _delOk = 0; const _delFail = [];
-      for (const id of ids) {
-        const r = await _deleteFromSupabase(id);
-        if (r && r.ok) _delOk++; else _delFail.push(r);
+      const inTrash = (document.getElementById('dash-filter-status')?.value === 'trash');
+      if (inTrash) {
+        // Permanent delete from trash — admin/owner/superadmin only.
+        if (!_isOrgAdmin()) { alert('Kun admin kan slette permanent fra papirkurven.'); return; }
+        if (!confirm(`Slette ${ids.length} prosjekt(er) PERMANENT? Dette kan ikke angres.`)) return;
+        let _ok = 0; const _fail = [];
+        for (const id of ids) {
+          const r = await _deleteFromSupabase(id);
+          if (r && r.ok) _ok++; else _fail.push(r);
+        }
+        if (_fail.length) {
+          const noPerm = _fail.some(f => f && f.reason === 'no-permission');
+          alert(`${_ok} av ${ids.length} prosjekt(er) slettet permanent.\n\n${_fail.length} kunne ikke slettes` +
+            (noPerm ? ' — du har ikke tilgang (kun owner/admin).' : '.'));
+        }
+      } else {
+        // Soft delete — move to trash. Any member may do this.
+        if (!confirm(`Flytt ${ids.length} prosjekt(er) til papirkurven?`)) return;
+        let _ok = 0; const _fail = [];
+        for (const id of ids) {
+          const r = await _trashProject(id);
+          if (r && r.ok) _ok++; else _fail.push(r);
+        }
+        if (_fail.length) {
+          const noPerm = _fail.some(f => f && f.reason === 'no-permission');
+          alert(`${_ok} av ${ids.length} prosjekt(er) flyttet til papirkurv.\n\n${_fail.length} kunne ikke flyttes` +
+            (noPerm ? ' — du har ikke tilgang til disse.' : '.'));
+        }
       }
-      if (_delFail.length) {
-        const noPerm = _delFail.some(f => f && f.reason === 'no-permission');
-        alert(`${_delOk} av ${ids.length} prosjekt(er) slettet.\n\n${_delFail.length} kunne ikke slettes` +
-          (noPerm ? ' — du har ikke tilgang til å slette disse (de eies av en annen bruker/organisasjon, og du er ikke owner/admin).' : '.'));
+      break;
+    }
+    case 'restore': {
+      let _ok = 0; const _fail = [];
+      for (const id of ids) {
+        const r = await _restoreTrashedProject(id);
+        if (r && r.ok) _ok++; else _fail.push(r);
+      }
+      if (_fail.length) {
+        alert(`${_ok} av ${ids.length} prosjekt(er) gjenopprettet.\n\n${_fail.length} kunne ikke gjenopprettes.`);
+      } else {
+        _showToast(`${ids.length} prosjekt(er) gjenopprettet`);
       }
       break;
     }
@@ -31860,12 +31952,20 @@ async function _renderProjectList() {
     );
   }
 
-  // Apply status filter — hide archived by default (only show when explicitly filtered)
+  // Apply status filter. Trash is a special view: show ONLY soft-deleted
+  // projects. Every other view EXCLUDES soft-deleted projects.
   const statusFilter = document.getElementById('dash-filter-status')?.value || '';
-  if (statusFilter) {
-    projects = projects.filter(p => (p._status || 'in_progress') === statusFilter);
+  const inTrash = (statusFilter === 'trash');
+  if (inTrash) {
+    projects = projects.filter(p => p._deletedAt);
   } else {
-    projects = projects.filter(p => (p._status || 'in_progress') !== 'archived');
+    projects = projects.filter(p => !p._deletedAt);
+    if (statusFilter) {
+      projects = projects.filter(p => (p._status || 'in_progress') === statusFilter);
+    } else {
+      // hide archived by default (only show when explicitly filtered)
+      projects = projects.filter(p => (p._status || 'in_progress') !== 'archived');
+    }
   }
 
   // Apply type filter
@@ -31906,13 +32006,19 @@ async function _renderProjectList() {
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${PROJECT_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select></td>
       <td class="pl-td pl-td-date">${date}</td>
       <td class="pl-td pl-td-desc pl-td-resp">${responsible}</td>
-      <td class="pl-td"><div class="pl-actions">
+      <td class="pl-td"><div class="pl-actions">${inTrash ? `
+        <button class="pl-act-btn" onclick="event.stopPropagation();_restoreProjectUI('${p.id}')" title="Gjenopprett">♻️</button>${_isOrgAdmin() ? `
+        <button class="pl-act-btn danger" onclick="event.stopPropagation();_confirmPurgeProject('${p.id}','${safeName}')" title="Slett permanent">🗑️</button>` : `
+        <button class="pl-act-btn" disabled title="Kun admin kan slette permanent" style="opacity:.35;cursor:not-allowed">🗑️</button>`}` : `
         <button class="pl-act-btn" onclick="event.stopPropagation();_duplicateProject('${p.id}')" title="Dupliser">📋</button>
         <button class="pl-act-btn" onclick="event.stopPropagation();_exportProject('${p.id}')" title="Eksporter">📥</button>
-        <button class="pl-act-btn danger" onclick="event.stopPropagation();_confirmDeleteProject('${p.id}','${safeName}')" title="Slett">🗑️</button>
+        <button class="pl-act-btn danger" onclick="event.stopPropagation();_confirmDeleteProject('${p.id}','${safeName}')" title="Flytt til papirkurv">🗑️</button>`}
       </div></td>
     </tr>`;
   }).join('');
+
+  // Keep batch toolbar labels/visibility in sync with the active filter (e.g. trash).
+  _updateBatchToolbar();
 }
 
 /** Quick status change from project list dropdown */
@@ -32041,24 +32147,82 @@ async function _openCloudProject(id) {
 }
 
 let _pendingDeleteId = null;
+let _pendingPurgeId = null;
 function _confirmDeleteProject(id, name) {
   _pendingDeleteId = id;
-  document.getElementById('del-proj-msg').textContent = 'Er du sikker på at du vil slette «' + name + '»? Dette kan ikke angres.';
-  document.getElementById('del-proj-overlay').style.display = 'flex';
+  _pendingPurgeId = null;
+  const ov = document.getElementById('del-proj-overlay');
+  delete ov.dataset.mode;
+  document.getElementById('del-proj-title').textContent = '🗑️ Flytt til papirkurv';
+  document.getElementById('del-proj-msg').textContent = 'Flytt «' + name + '» til papirkurven? Du kan gjenopprette det derfra, eller en admin kan slette det permanent.';
+  const btn = document.getElementById('del-proj-confirm-btn');
+  btn.textContent = 'Flytt til papirkurv';
+  ov.style.display = 'flex';
 }
 function _cancelDeleteProject() {
   _pendingDeleteId = null;
-  document.getElementById('del-proj-overlay').style.display = 'none';
+  _pendingPurgeId = null;
+  const ov = document.getElementById('del-proj-overlay');
+  delete ov.dataset.mode;
+  ov.style.display = 'none';
 }
+// Dispatch confirm button to soft-delete or permanent purge based on overlay mode.
+function _execDelProjConfirm() {
+  const ov = document.getElementById('del-proj-overlay');
+  if (ov.dataset.mode === 'purge') return _execPurgeProject();
+  return _execDeleteProject();
+}
+// Per-row "delete" = soft delete (move to trash). Any member may do this.
 async function _execDeleteProject() {
   if (!_pendingDeleteId) return;
   const id = _pendingDeleteId;
   _pendingDeleteId = null;
   document.getElementById('del-proj-overlay').style.display = 'none';
+  const _r = await _trashProject(id);
+  if (_r && !_r.ok) {
+    alert(_r.reason === 'no-permission'
+      ? 'Du har ikke tilgang til å flytte dette prosjektet til papirkurven.'
+      : 'Kunne ikke flytte til papirkurv: ' + (_r.message || 'ukjent feil'));
+  }
+  _invalidateProjectCache();
+  _renderProjectList();
+}
+
+// Restore a project from the trash (any member).
+async function _restoreProjectUI(id) {
+  const _r = await _restoreTrashedProject(id);
+  if (_r && !_r.ok) {
+    alert(_r.reason === 'no-permission'
+      ? 'Du har ikke tilgang til å gjenopprette dette prosjektet.'
+      : 'Gjenoppretting feilet: ' + (_r.message || 'ukjent feil'));
+  }
+  _invalidateProjectCache();
+  _renderProjectList();
+}
+
+// Permanent delete from trash — admin/owner/superadmin only.
+function _confirmPurgeProject(id, name) {
+  if (!_isOrgAdmin()) { alert('Kun admin kan slette permanent.'); return; }
+  _pendingPurgeId = id;
+  _pendingDeleteId = null;
+  document.getElementById('del-proj-title').textContent = '🗑️ Slett permanent';
+  document.getElementById('del-proj-msg').textContent = 'Slett «' + name + '» PERMANENT? Dette kan ikke angres.';
+  document.getElementById('del-proj-confirm-btn').textContent = 'Slett permanent';
+  const ov = document.getElementById('del-proj-overlay');
+  ov.dataset.mode = 'purge';
+  ov.style.display = 'flex';
+}
+async function _execPurgeProject() {
+  if (!_pendingPurgeId) return;
+  const id = _pendingPurgeId;
+  _pendingPurgeId = null;
+  const ov = document.getElementById('del-proj-overlay');
+  delete ov.dataset.mode;
+  ov.style.display = 'none';
   const _r = await _deleteFromSupabase(id);
   if (_r && !_r.ok) {
     alert(_r.reason === 'no-permission'
-      ? 'Du har ikke tilgang til å slette dette prosjektet (det eies av en annen bruker/organisasjon, og du er ikke owner/admin).'
+      ? 'Du har ikke tilgang til å slette dette prosjektet permanent (kun owner/admin).'
       : 'Sletting feilet: ' + (_r.message || 'ukjent feil'));
   }
   _invalidateProjectCache();
