@@ -1,6 +1,6 @@
 # Romtegner — Arkitektur- og Funksjonsstatus
 
-> Sist oppdatert: 2026-06-01 (regenerert fra faktisk kode)
+> Sist oppdatert: 2026-06-03 (regenerert fra faktisk kode)
 
 ---
 
@@ -9,8 +9,8 @@
 | Egenskap | Verdi |
 |----------|-------|
 | **Fil** | `romtegner.html` (single-file app) |
-| **Linjer** | 32 025 (HTML + CSS + JS) |
-| **Funksjoner** | ~1 032 (958 `function`-deklarasjoner + 74 arrow-funksjoner) |
+| **Linjer** | 33 356 (HTML + CSS + JS) |
+| **Funksjoner** | ~995 `function`-deklarasjoner + et stort antall arrow-funksjoner (callbacks) |
 | **Byggsteg** | Ingen — ren HTML/JS/CSS |
 | **Server** | `serve-romtegner.js` (Node.js, port 4000) |
 | **Backend** | Supabase (produktkatalog, prosjektlagring) |
@@ -40,6 +40,8 @@ S (state)
  │    ├─ strips[]     (varmefolie, via roomId i S.strips)
  │    ├─ cables[]     (varmekabel, via roomId i S.cables)
  │    ├─ mats[]       (varmematte, via roomId i S.mats)
+ │    ├─ plates[]     (varmeplate m/kabelspor, via roomId i S.plates)
+ │    ├─ stairs[]     (trapp-modul, via roomId i S.stairs)
  │    ├─ hindrings[]  (hindringer, via roomId)
  │    └─ zones[]      (forbudt/foretrukket, via roomId i S.zones)
  ├─ groups[]   (strip-grupper for multi-select)
@@ -51,26 +53,30 @@ S (state)
 
 ### 2.3 Rendering-lag (bunn → topp)
 
+Rekkefølge slik den faktisk står i `render()` (bunn → topp):
+
 | Lag | Funksjon | Beskrivelse |
 |-----|----------|-------------|
 | 1 | `drawBgImage()` | Bakgrunnstegning (PDF/JPG/PNG) |
 | 2 | `drawGrid()` | Rutenett (50cm + 10cm subgrid) |
 | 3 | `drawRooms()` | Rom-polygoner med veggtykkelse |
-| 4 | `drawHindrings()` | Hindringer (kjøkkenøy, skap, pipe, etc.) |
-| 5 | `drawZones()` | Forbudte/foretrukne soner |
+| 4 | `drawStrips()` | Varmefolie-strips |
+| 5 | `drawCables()` | Varmekabel-serpentiner med U-svinger |
 | 6 | `drawMats()` | Varmematter (roterte rektangler) |
-| 7 | `drawCables()` | Varmekabel-serpentiner med U-svinger |
-| 8 | `drawStrips()` | Varmefolie-strips |
-| 9 | `drawAllDimAnnotations()` | Vegg-dimensjoner |
-| 10 | `drawUserDimLines()` | Bruker-dimensjonslinjer |
-| 11 | `drawHindringDistances()` | Avstandslinjer fra hindring |
-| 12 | `drawStripGapLine()` | Gap mellom strips |
-| 13 | `drawRoomCards()` | Rom-infokort |
-| 14 | Gizmoer | Strip/mat/hindring/gruppe/transform-gizmoer |
-| 15 | `drawPreview()` | Tegnemodus-preview |
-| 16 | `drawSnapDot()` | Rødt snap-punkt ved cursor |
+| 7 | `drawPlates()` | Varmeplater m/kabelspor |
+| 8 | `drawStairs()` | Trapp-modul |
+| 9 | `drawDropPreview()` / `drawStripGapLine()` | Drop-preview + gap-linje (under drag) |
+| 10 | `drawAllDimAnnotations()` | Vegg-dimensjoner |
+| 11 | `drawHindrings()` | Hindringer (kjøkkenøy, skap, pipe, etc.) |
+| 12 | `drawZones()` | Forbudte/foretrukne soner |
+| 13 | `drawPreview()` / `drawImportOverlay()` | Tegnemodus-preview / import-overlay |
+| 14 | Gizmoer | Strip/mat/plate/trapp/hindring/gruppe-gizmoer |
+| 15 | `drawUserDimLines()` / `drawDimMoveGizmo()` | Bruker-dimensjonslinjer |
+| 16 | `drawRoomCards()` | Rom-infokort |
 | 17 | `drawScaleBar()` | Målestokk-referanse |
-| 18 | `drawMinimap()` | Minimap-widget |
+| 18 | `drawMinimap()` | Minimap-widget (når synlig) |
+| 19 | `drawSnapDot()` | Rødt snap-punkt ved cursor |
+| 20 | `_positionCtxBar()` | Plasserer flytende ctxbar over valgt objekt |
 
 ### 2.4 Hit-detection (prioritert rekkefølge)
 
@@ -110,7 +116,8 @@ S (state)
 |----------|--------|----------|
 | Strip-datamodell | ✅ | `S.strips[]` med id, roomId, productId, direction, pos_cm, start_cm, length_cm |
 | Polygon-clipping | ✅ | `computeClippedSegments()` med kutte-intervall avrunding |
-| Automatisk layout | ✅ | `autoFillRoom()` med beam search breddeoptimalisering |
+| Klipp rundt smal hindring | ✅ | `clipStripAroundHindrings()` / `_clipStripAroundZones()` bruker `_obstacleUnionInBand()` — tett sampling (steg ≤2cm) så en smal søyle under en bred folie blir korrekt utsparet (tidligere 3-linjers union bommet på smale hindringer) |
+| Automatisk layout | ✅ | Live-bane: `showAutoFillComparison`/`_runWidthPickerAutoFill` → `_autoFillBothDirections` → `_applyAutoFillOption` (sammenligningspanel + gap-pack-etterpass). Den gamle `autoFillRoom`/`startAutoFill`/`confirmAutoFill`-banen er fjernet som død kode (P4). Delte hjelpere: `_autoFillRoomOnce`, `_beamSearchFill`, `_zoneFillRoom`, `_obstacleAwareFill` |
 | Symmetrisk sentrering | ✅ | `_centerStripDefs()` — lik kaldsone begge sider |
 | Auto-retning | ✅ | `_suggestDirection()` — PCA-basert (Ixx/Iyy) |
 | Seed-basert layout | ✅ | `_autoFillFromSeed()` — bidireksjonal fill fra klikkpunkt |
@@ -145,22 +152,33 @@ S (state)
 
 **Produkter i Supabase:** 25 InFloor 17T + 19 InFloor 10T = 44 Cenika kabel-varianter
 
-**Layout-motorer (5 stk, orkestrert av `autoFillCable()` linje 9237):**
+**Layout-motorer (7 stk, orkestrert av `autoFillCable()`):**
 
-Auto-fill kjører motorene i kaskade og returnerer ved første treff. V6 er
-**primær** og leverer resultatet for de fleste rom; de øvrige er fallback.
+Auto-fill kjører motorene i en **kaskade** og returnerer ved første motor som gir
+et godkjent resultat. Serpentine kjøres først som *forarbeid* (velger retning,
+hjørne og CC-spacing) men returneres normalt ikke direkte. Deretter prøves
+motorene i denne rekkefølgen (søk på funksjonsnavn — linjenr drifter):
 
-| Motor | Funksjon | Linje | Rolle |
-|-------|----------|-------|-------|
-| Serpentine | `generateCableSerpentine()` | 6327 | Sentrert, deterministisk N-beregning. Brukes i forarbeid + siste fallback |
-| Length-driven | `generateCableLayoutLengthDriven()` | 6504 | Fyller etter målsatt kabellengde |
-| V4 (polygon-aware) | `generateCablePolygonAware()` | 6888 | Polygon-klippet fallback |
-| V5 (polygon) | `generateCablePolygonV5()` | 7701 | Polygon-klippet fallback |
-| V6 | `generateCableV6()` | 8768 | **Primær** motor |
+| # | Motor | Funksjon | Rolle i kaskaden |
+|---|-------|----------|------------------|
+| — | Serpentine | `generateCableSerpentine()` | **Forarbeid** — sentrert deterministisk N-beregning som setter retning/hjørne/spacing. Siste fallback hvis alt annet feiler |
+| 1 | Skew | `generateCableSkew()` | Skråvegg/rotert ramme + hindringer. **Gated**: kjøres kun når `needSkew` (ikke-rettvinklet rom ELLER hindring ELLER forbudt sone). Returnerer additive `pathEls` (ikke `runs`) hvis `coverage ≥ 0.70`. Auto-fill-only (ingen drag-edit i v1) |
+| 2 | Boustrophedon | `generateCableBoustrophedon()` | **Primær for rene rom** — selvvelger hjørne+side for garantert hjørne-til-hjørne-landing og rene celleskift. Returnerer `null` for hull/stablede celler → faller til V6 |
+| 3 | V6 | `generateCableV6()` | Area-first pipeline (topologi → celler → per-celle sweep → dekningsvalidering). Fallback for komplekse rom |
+| 4 | V5 | `generateCablePolygonV5()` | Area-first (dekomponer → fyll celler → koble). Fallback |
+| 5 | V4 (polygon-aware) | `generateCablePolygonAware()` | Polygon-klippet multi-celle fallback |
+| 6 | Length-driven | `generateCableLayoutLengthDriven()` | Kun fastlengde-produkter: eksakt match mot målsatt kabellengde |
 
-> ⚠️ **Teknisk gjeld:** Motorene deler nesten ordrett duplisert scoringslogikk,
-> og serpentin-forarbeidet kjøres ofte uten å bli brukt. Se forbedringsplanen
-> (P1 — konsolider kabel-layout-motoren). Alle LOCKED-regler i CLAUDE.md
+I praksis: **Skew** vinner for ikke-rettvinklede rom og rom med hindring/forbudt
+sone; **Boustrophedon** vinner for rene rektangel/L/T-rom; **V6/V5/V4** er
+fallback for tilfeller de to primære ikke dekker.
+
+> ⚠️ **Teknisk gjeld:** Motorene deler nesten ordrett duplisert scoringslogikk
+> (sone-straff, hjørne-bonus, lengde-match — gjentatt i hver motor-gren i
+> `autoFillCable`). Se forbedringsplanen (P1 — konsolider kabel-layout-motoren,
+> trekk scoringen ut til ett `_scoreCableCandidate`). Skew + Boustrophedon er nye
+> og skal beholdes; kandidatene for fjerning er gamle V4/V5/length-driven HVIS
+> logging viser at de aldri vinner. Alle LOCKED-regler i CLAUDE.md
 > (U-svinger = halvsirkler r=CC/2, lik banelengde / ingen Y-splits,
 > `sweepMargin = margin + CC/2`) gjelder uavhengig av motor.
 
@@ -188,7 +206,20 @@ Auto-fill kjører motorene i kaskade og returnerer ved første treff. V6 er
 
 SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 
-### 3.4 Platesystem med kabelspor (Fase 5) ⬜ Ikke startet
+### 3.4 Platesystem med kabelspor (Fase 5) ✅ Implementert
+
+| Funksjon | Status | Detaljer |
+|----------|--------|----------|
+| Plate-datamodell | ✅ | `S.plates[]` med x_cm, y_cm, width_cm, length_cm, roomId, productId |
+| Plasseringsmeny | ✅ | `showPlatePlacePanel()` |
+| Auto-fyll | ✅ | `_autoFillPlates()` — rutenett-pakking i rommet |
+| Rendering | ✅ | `drawPlates()` + `drawPlateMoveGizmo()` |
+| Drag & drop | ✅ | Gizmo (fri/X/Y), `_clampPlateToRoom()` |
+| Hit detection | ✅ | `hitPlate()` (AABB) + gizmo-håndtak |
+| Cache | ✅ | `_platesForRoom()` versjonert lazy cache |
+
+> Trapp-modul (`S.stairs[]`, `generateStairCable()`, `_stairBounds()`,
+> `drawStairs()`) finnes også som egen kabel-basert modul for trappetrinn.
 
 ---
 
@@ -245,7 +276,7 @@ SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 | **Topbar** | Verktøy-chips (Flytt/Angre/Snap/90°/45°), fargevelger, tema, lagre |
 | **Sidebar** | Prosjektnavn, etasje/rom-tre, vegg-liste, objekt-info |
 | **Canvas** | Hoved-tegneflate med pan/zoom |
-| **Ctxbar** | Kontekstbar nederst — dynamisk basert på seleksjon |
+| **Ctxbar** | Flytende kontekstbar — dynamisk basert på seleksjon; `_positionCtxBar()` plasserer den ~40px over valgt objekt (faller til øverst-midt for rom/ingen seleksjon) |
 | **Statusbar** | Koordinater, snap-status, modus, rom-antall |
 
 ### 7.2 Widgets (flyttbare)
@@ -288,6 +319,10 @@ SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 |----------|--------|----------|
 | Lagre til fil | ✅ | File System Access API (`.arqely` JSON) |
 | Åpne fra fil | ✅ | `_restoreProject()` med bakoverkompatibilitet |
+| Supabase-lagring | ✅ | Prosjekt lagres som JSON i `romtegner_projects` (org-scopet via RLS), `_fetchProjectList()` med kandidat-fallback for kolonnenavn |
+| Papirkurv (soft-delete) | ✅ | `deleted_at`-kolonne (timestamptz). Alle org-medlemmer kan slette (UPDATE → `deleted_at=now()`) og gjenopprette (`_restoreTrashedProject`). Permanent sletting (`_confirmPurgeProject`/DELETE) kun owner/admin/superadmin (RLS håndhever). Statusfilter «🗑️ Papirkurv» i prosjektlista, batch-handlinger kontekst-avhengige |
+| Kunde-synk | ✅ | `_resolveCustomerName()`/`_syncProjectCustomerName()` — når `customer_id` finnes er kunde-raden sannhetskilde; omdøpt kunde gir nytt navn, slettet kunde markeres «(slettet)». Fri tekst beholdes når ingen kunde valgt |
+| PDF-eksport | ✅ | jsPDF — én side pr rom, tvunget hvit bakgrunn + lyst tema under capture (`_renderRoomToImage` komposit på hvitt før JPEG), CC-info, produkt-/effektliste |
 | Prosjektnavn | ✅ | Redigerbart i topbar |
 | Undo/redo | ✅ | 50-nivå stack med dyp kopi |
 | Quit-dialog | ✅ | Advarsel ved ulagrede endringer |
@@ -349,14 +384,14 @@ SQL-migrasjon: `supabase-migration-mats.sql` (kjøres i Supabase SQL Editor)
 
 ### 11.1 Dirty-flag rendering (aktiv)
 
-Render-loopen kjører ikke lenger ubetinget. Mekanismen (linje 31990–32022):
+Render-loopen kjører ikke lenger ubetinget (søk på navn — linjenr drifter):
 
-- `let _needsRender = true;` (linje 2381) — global flagg
-- `function markDirty() { _needsRender = true; }` (linje 2384) — settes ved mutasjon
-- Betinget rAF-loop (linje 31999–32022): `if (_needsRender) { render(); }` hver frame,
+- `let _needsRender = true;` — global flagg
+- `function markDirty() { _needsRender = true; }` — settes ved mutasjon
+- Betinget rAF-loop: `if (_needsRender) { render(); }` hver frame,
   ellers hoppes render over → sparer ~60fps tomgangs-CPU
-- `render()` nullstiller `_needsRender = false` (linje 2440) når tegningen er ferdig
-- 16 `markDirty()`-kall i mutasjons-handlere, pluss direkte `render()`-kall der det trengs
+- `render()` nullstiller `_needsRender = false` når tegningen er ferdig
+- Mange `markDirty()`-kall i mutasjons-handlere, pluss direkte `render()`-kall der det trengs
 - `_anyInteractionActive()` i mousemove fungerer som sikkerhetsnett under aktiv drag
 - FPS måles og vises i render-stats-widget (`_renderFps`, `_updateRenderStatsWidget()`)
 
@@ -366,12 +401,12 @@ Render-loopen kjører ikke lenger ubetinget. Mekanismen (linje 31990–32022):
 
 | Metrikk | Antall |
 |---------|--------|
-| Kodelinjer totalt | 32 025 |
-| Funksjoner (`function` + arrow) | ~1 032 (958 + 74) |
-| Seksjons-headers (`// ───`) | 285 |
-| Rendering-funksjoner (draw*) | 40 |
+| Kodelinjer totalt | 33 356 |
+| `function`-deklarasjoner | ~995 (+ mange arrow-callbacks) |
+| Seksjons-headers (`// ───`) | 165 |
+| Rendering-funksjoner (draw*) | 42 |
 | Hit-test funksjoner (hit*) | 49 |
-| Kabel-layout-motorer | 5 (V6 primær) |
+| Kabel-layout-motorer | 7 (Skew + Boustrophedon primære, V6/V5/V4/length-driven fallback, Serpentine forarbeid) |
 | S.ui properties | 82 |
 | Modal-IDer (`modal-*`) | 10 |
 | Widgets | 4 |
@@ -388,5 +423,5 @@ Render-loopen kjører ikke lenger ubetinget. Mekanismen (linje 31990–32022):
 | Fase 2 | Layout-forbedringer (symmetri, auto-retning, beam search) | ✅ |
 | Fase 3 | Varmekabel-modul | ✅ |
 | Fase 4 | Varmematte-modul | ✅ |
-| Fase 5 | Platesystem med kabelspor | ⬜ |
-| Fase 6 | Avanserte funksjoner (PDF-eksport, dokumentasjon, etc.) | ⬜ |
+| Fase 5 | Platesystem med kabelspor + trapp-modul | ✅ |
+| Fase 6 | Avanserte funksjoner (PDF-eksport ✅, papirkurv ✅, kunde-synk ✅, dokumentasjon ⬜) | 🟡 |
