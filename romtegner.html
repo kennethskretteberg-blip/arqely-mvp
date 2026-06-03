@@ -31083,24 +31083,28 @@ initSupabase();
 async function _fetchProjectList() {
   if (!_db) return [];
   try {
-    // Only pull data->project (the metadata the list needs), not the full data
-    // blob (room geometry / background images) — that heavy payload can stall/time out.
-    const _cols = 'id, name, description, created_at, updated_at, status, proj:data->project';
-    const _colsNoStatus = 'id, name, description, created_at, updated_at, proj:data->project';
-    // Try with status column first; fall back without it if migration not run yet
-    let res = await _db.from('romtegner_projects')
-      .select(_cols)
-      .order('updated_at', { ascending: false });
+    const _run = (cols) => _db.from('romtegner_projects').select(cols).order('updated_at', { ascending: false });
+    // Preferred: pull only data->project (the metadata the list needs), not the
+    // full data blob (room geometry / background images) — that heavy payload
+    // can stall/time out. Fall back gracefully if the column/syntax isn't available.
+    let res = await _run('id, name, description, created_at, updated_at, status, proj:data->project');
     if (res.error && res.error.message.includes('status')) {
-      res = await _db.from('romtegner_projects')
-        .select(_colsNoStatus)
-        .order('updated_at', { ascending: false });
+      res = await _run('id, name, description, created_at, updated_at, proj:data->project');
+    }
+    // If the data->project selection itself failed (older PostgREST / syntax),
+    // fall back to the proven full-data query so the list still loads.
+    if (res.error) {
+      console.warn('Lean project fetch failed, falling back to full data:', res.error.message);
+      res = await _run('id, name, description, created_at, updated_at, status, data');
+      if (res.error && res.error.message.includes('status')) {
+        res = await _run('id, name, description, created_at, updated_at, data');
+      }
     }
     // Return null (not []) on error so the caller can keep showing the last good
     // list instead of blanking it out.
     if (res.error) { console.warn('Fetch projects failed:', res.error.message); return null; }
     return (res.data || []).map(p => {
-      const proj = p.proj || {};
+      const proj = p.proj || p.data?.project || {};
       return {
         ...p,
         parts: proj.parts || [],
@@ -31109,6 +31113,7 @@ async function _fetchProjectList() {
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
         proj: undefined,
+        data: undefined,
       };
     });
   } catch(e) { console.warn('Fetch projects error:', e.message); return null; }
