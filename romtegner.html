@@ -2484,6 +2484,7 @@ function render() {
   drawScaleBar();
   if (S.ui.widgetMinimapVisible) drawMinimap();
   drawSnapDot();
+  _positionCtxBar();   // keep the floating ctxbar glued to its object during pan/zoom/edits
 }
 
 // ─── FLOOR FILTERING HELPER ─────────────────────────────────
@@ -25258,7 +25259,146 @@ function updateCtxBar() {
   _updateVfDirVisibility();
   _updateStairSettingsPanel();
   updHint();
+  _positionCtxBar();   // follow the selected object (or fall back to top-center)
   markDirty();   // ctx bar updates correlate with selection state — canvas often needs refresh
+}
+
+/**
+ * World-space bounding box of the currently selected CONCRETE object, or null.
+ * Returns null when nothing concrete is selected, or only a room/wall is selected
+ * (large/ambiguous targets fall back to the top-center bar position).
+ */
+function _selectedObjectWorldBBox() {
+  const ui = S.ui;
+  const ext = (bb, x, y) => {
+    if (x < bb.minX) bb.minX = x; if (x > bb.maxX) bb.maxX = x;
+    if (y < bb.minY) bb.minY = y; if (y > bb.maxY) bb.maxY = y;
+  };
+
+  // ── Strips (single or group) ──
+  const stripIds = new Set();
+  if (ui.selectedStripId != null) stripIds.add(ui.selectedStripId);
+  if (ui.selectedStripIds && ui.selectedStripIds.size) for (const id of ui.selectedStripIds) stripIds.add(id);
+  if (stripIds.size) {
+    const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const id of stripIds) {
+      const s = S.strips.find(st => st.id === id);
+      if (!s) continue;
+      const nc = _stripNettoCm(s); if (nc <= 0) continue;
+      if (s.direction === 'v') { ext(bb, s.pos_cm, s.start_cm); ext(bb, s.pos_cm + nc, s.start_cm + s.length_cm); }
+      else { ext(bb, s.start_cm, s.pos_cm); ext(bb, s.start_cm + s.length_cm, s.pos_cm + nc); }
+    }
+    if (bb.minX !== Infinity) return bb;
+  }
+
+  // ── Cable ──
+  if (ui.selectedCableId != null) {
+    const cable = S.cables.find(c => c.id === ui.selectedCableId);
+    if (cable) {
+      const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+      if (cable.pathEls && cable.pathEls.length) {
+        for (const el of cable.pathEls) {
+          const a = el.kind === 'run' ? el.a : el.from;
+          const b = el.kind === 'run' ? el.b : el.to;
+          if (a) ext(bb, a.x, a.y); if (b) ext(bb, b.x, b.y);
+        }
+      } else if (cable.runs) {
+        for (const run of cable.runs) for (const seg of (run.segments || [])) {
+          if (cable.direction === 'v') { ext(bb, run.pos_cm, seg.start_cm); ext(bb, run.pos_cm, seg.end_cm); }
+          else { ext(bb, seg.start_cm, run.pos_cm); ext(bb, seg.end_cm, run.pos_cm); }
+        }
+      }
+      if (bb.minX !== Infinity) return bb;
+    }
+  }
+
+  // ── Zone ──
+  if (ui.selectedZoneId != null) {
+    const z = S.zones.find(zz => zz.id === ui.selectedZoneId);
+    if (z) {
+      if (z.points && z.points.length) return _zoneBBox(z);
+      if (z.pinPos) {
+        const half = (z.sizeCm || 20) / 2;
+        return { minX: z.pinPos.x - half, maxX: z.pinPos.x + half, minY: z.pinPos.y - half, maxY: z.pinPos.y + half };
+      }
+    }
+  }
+
+  // ── Mat (approx: unrotated extent) ──
+  if (ui.selectedMatId != null) {
+    const m = S.mats.find(mm => mm.id === ui.selectedMatId);
+    if (m) {
+      const totalW = (typeof _matTotalWidthCm === 'function') ? _matTotalWidthCm(m) : (m.width_cm || 0);
+      return { minX: m.x_cm, maxX: m.x_cm + totalW, minY: m.y_cm, maxY: m.y_cm + m.length_cm };
+    }
+  }
+
+  // ── Plate ──
+  if (ui.selectedPlateId != null) {
+    const p = S.plates.find(pp => pp.id === ui.selectedPlateId);
+    if (p) return { minX: p.x_cm, maxX: p.x_cm + p.width_cm, minY: p.y_cm, maxY: p.y_cm + p.length_cm };
+  }
+
+  // ── Stair ──
+  if (ui.selectedStairId != null) {
+    const st = S.stairs && S.stairs.find(s => s.id === ui.selectedStairId);
+    if (st && typeof _stairBounds === 'function') {
+      const b = _stairBounds(st);
+      return { minX: b.x, maxX: b.x + b.w, minY: b.y, maxY: b.y + b.h };
+    }
+  }
+
+  // ── Hindring (obstacle) ──
+  if (ui.selectedHindringId != null) {
+    const h = S.hindrings.find(hh => hh.id === ui.selectedHindringId);
+    if (h && h.points && h.points.length) {
+      const xs = h.points.map(p => p.x), ys = h.points.map(p => p.y);
+      return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    }
+  }
+
+  // Room / wall / nothing → no concrete anchor (fall back to top-center).
+  return null;
+}
+
+/**
+ * Position the floating #ctxbar ~40px above the selected object's top edge,
+ * clamped to the canvas. Falls back to fixed top-center when no concrete object
+ * is selected (room/wall/placement modes). Called from updateCtxBar() and render().
+ */
+function _positionCtxBar() {
+  const bar = document.getElementById('ctxbar');
+  if (!bar || !canvas) return;
+  // Only reposition while visible — keeps reflow cost off the hidden state.
+  if (!bar.classList.contains('show')) return;
+
+  const bb = _selectedObjectWorldBBox();
+  if (!bb) {
+    // Fallback: fixed top-center (restore the CSS default).
+    bar.style.left = '50%';
+    bar.style.top = '12px';
+    bar.style.transform = 'translateX(-50%)';
+    return;
+  }
+
+  // Top-center and bottom-center of the object in screen pixels.
+  const topPt = w2s((bb.minX + bb.maxX) / 2, bb.minY);
+  const botPt = w2s((bb.minX + bb.maxX) / 2, bb.maxY);
+  const bw = bar.offsetWidth || 200;
+  const bh = bar.offsetHeight || 40;
+  const pad = 8;
+  const gap = 40;
+
+  let left = topPt.x - bw / 2;
+  let top = topPt.y - bh - gap;        // above the object
+  if (top < pad) top = botPt.y + gap;  // not enough room above → place below
+
+  left = Math.max(pad, Math.min(left, canvas.width - bw - pad));
+  top = Math.max(pad, Math.min(top, canvas.height - bh - pad));
+
+  bar.style.left = left + 'px';
+  bar.style.top = top + 'px';
+  bar.style.transform = 'none';
 }
 
 function _ctxBarItems() {
