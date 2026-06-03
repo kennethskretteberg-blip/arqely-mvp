@@ -21962,20 +21962,54 @@ function clipStripToRoom(pos_cm, nettoCm, direction, roomPoly, margin) {
   return merged;
 }
 
-// Subtract hindring polygons from valid strip intervals.
-// Uses 3 scanlines (edges + center) to catch obstacles fully inside the band.
-function clipStripAroundHindrings(intervals, pos_cm, nettoCm, direction, hindrings, margin) {
+// Dense union of an obstacle/zone polygon's sweep-axis (length) extent across the
+// strip's full width-band. A foil strip is a SOLID rectangle: if its width-band
+// overlaps the polygon at all, the polygon's full length-extent in the overlap MUST
+// be subtracted — a strip can't lie partially over a column. The old 3-scanline
+// sampling (left edge, right edge, center) missed a narrow obstacle that fell
+// BETWEEN those lines. This samples densely across the band plus the polygon's own
+// vertices, with a bbox fallback so the strip can NEVER end up over the obstacle.
+function _obstacleUnionInBand(pos_cm, nettoCm, direction, poly) {
   const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perp = p => direction === 'v' ? p.x : p.y;   // axis across the strip
+  const sweep = p => direction === 'v' ? p.y : p.x;  // axis along the strip (length)
+  const bandLo = pos_cm, bandHi = pos_cm + nettoCm;
+  const perpVals = poly.map(perp);
+  const oMin = Math.min(...perpVals), oMax = Math.max(...perpVals);
+  const lo = Math.max(bandLo, oMin), hi = Math.min(bandHi, oMax);
+  if (hi <= lo) return [];
+  // Dense scan positions across the overlap band (tight enough for thin columns),
+  // plus the polygon's own vertex perp-coords (exact for thin/skewed shapes),
+  // plus the band endpoints.
+  const step = Math.min(2, Math.max(0.5, nettoCm / 30));
+  const positions = new Set([lo, hi]);
+  for (let x = lo; x < hi; x += step) positions.add(x);
+  for (const v of perpVals) { if (v > lo && v < hi) positions.add(v); }
+  let union = [];
+  for (const posn of positions) {
+    const iv = clipScanlineToPolygon(sweepAxis, posn, poly);
+    if (iv.length) union = unionIntervalSets(union, iv);
+  }
+  // Robustness: a very thin obstacle can yield no scanline intervals even though
+  // its band overlaps the strip — fall back to its sweep-axis bbox so the strip
+  // never covers it.
+  if (!union.length) {
+    const sweepVals = poly.map(sweep);
+    union = [[Math.min(...sweepVals), Math.max(...sweepVals)]];
+  }
+  return union;
+}
+
+// Subtract hindring polygons from valid strip intervals.
+// Dense band-sampling so even a narrow obstacle inside the band is fully cut.
+function clipStripAroundHindrings(intervals, pos_cm, nettoCm, direction, hindrings, margin) {
   let result = intervals;
   for (const h of hindrings) {
     if (!h.points || h.points.length < 3) continue;
     const perpVals = h.points.map(p => direction === 'v' ? p.x : p.y);
     const hMin = Math.min(...perpVals), hMax = Math.max(...perpVals);
     if (hMax <= pos_cm || hMin >= pos_cm + nettoCm) continue;
-    const h1 = clipScanlineToPolygon(sweepAxis, pos_cm, h.points);
-    const h2 = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm, h.points);
-    const hMid = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm / 2, h.points);
-    const hUnion = unionIntervalSets(unionIntervalSets(h1, h2), hMid);
+    const hUnion = _obstacleUnionInBand(pos_cm, nettoCm, direction, h.points);
     const hExpanded = hUnion.map(([lo, hi]) => [lo - margin, hi + margin]);
     result = subtractIntervalSets(result, hExpanded);
   }
@@ -21983,19 +22017,15 @@ function clipStripAroundHindrings(intervals, pos_cm, nettoCm, direction, hindrin
 }
 
 // Subtract forbidden zone polygons from valid strip intervals (same pattern as hindrings).
-// Uses 3 scanlines (edges + center) to catch zones fully inside the band.
+// Dense band-sampling so even a narrow zone inside the band is fully cut.
 function _clipStripAroundZones(intervals, pos_cm, nettoCm, direction, zones, margin) {
-  const sweepAxis = direction === 'v' ? 'y' : 'x';
   let result = intervals;
   for (const z of zones) {
     if (!z.points || z.points.length < 3) continue;
     const perpVals = z.points.map(p => direction === 'v' ? p.x : p.y);
     const zMin = Math.min(...perpVals), zMax = Math.max(...perpVals);
     if (zMax <= pos_cm || zMin >= pos_cm + nettoCm) continue;
-    const z1 = clipScanlineToPolygon(sweepAxis, pos_cm, z.points);
-    const z2 = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm, z.points);
-    const zMid = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm / 2, z.points);
-    const zUnion = unionIntervalSets(unionIntervalSets(z1, z2), zMid);
+    const zUnion = _obstacleUnionInBand(pos_cm, nettoCm, direction, z.points);
     const zExpanded = zUnion.map(([lo, hi]) => [lo - margin, hi + margin]);
     result = subtractIntervalSets(result, zExpanded);
   }
