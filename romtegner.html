@@ -31083,18 +31083,24 @@ initSupabase();
 async function _fetchProjectList() {
   if (!_db) return [];
   try {
+    // Only pull data->project (the metadata the list needs), not the full data
+    // blob (room geometry / background images) — that heavy payload can stall/time out.
+    const _cols = 'id, name, description, created_at, updated_at, status, proj:data->project';
+    const _colsNoStatus = 'id, name, description, created_at, updated_at, proj:data->project';
     // Try with status column first; fall back without it if migration not run yet
     let res = await _db.from('romtegner_projects')
-      .select('id, name, description, created_at, updated_at, status, data')
+      .select(_cols)
       .order('updated_at', { ascending: false });
     if (res.error && res.error.message.includes('status')) {
       res = await _db.from('romtegner_projects')
-        .select('id, name, description, created_at, updated_at, data')
+        .select(_colsNoStatus)
         .order('updated_at', { ascending: false });
     }
-    if (res.error) { console.warn('Fetch projects failed:', res.error.message); return []; }
+    // Return null (not []) on error so the caller can keep showing the last good
+    // list instead of blanking it out.
+    if (res.error) { console.warn('Fetch projects failed:', res.error.message); return null; }
     return (res.data || []).map(p => {
-      const proj = p.data?.project || {};
+      const proj = p.proj || {};
       return {
         ...p,
         parts: proj.parts || [],
@@ -31102,10 +31108,10 @@ async function _fetchProjectList() {
         _type: proj.type || 'indoor',
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
-        data: undefined,
+        proj: undefined,
       };
     });
-  } catch(e) { console.warn('Fetch projects error:', e.message); return []; }
+  } catch(e) { console.warn('Fetch projects error:', e.message); return null; }
 }
 
 async function _saveToSupabase() {
@@ -31170,19 +31176,25 @@ async function _loadFromSupabase(projectId) {
 }
 
 async function _deleteFromSupabase(projectId) {
-  if (!_db) return;
+  if (!_db) return { ok:false, reason:'no-db' };
   try {
     // Claim orphan project if user_id is NULL
     await _db.from('romtegner_projects').update({ user_id: _currentUser?.id, org_id: _userOrg?.id }).eq('id', projectId).is('user_id', null);
     // Delete version history first (may have RLS restrictions)
     try { await _db.from('project_versions').delete().eq('project_id', projectId); } catch(e) {}
-    // Delete project
-    const { error } = await _db.from('romtegner_projects').delete().eq('id', projectId);
+    // Delete project — .select() so we know how many rows were actually removed.
+    // RLS silently filters rows the user may not delete: no error, but 0 rows affected.
+    const { data: deleted, error } = await _db.from('romtegner_projects').delete().eq('id', projectId).select('id');
     if (error) {
       console.error('Delete failed:', error.message, error.code, error.details);
-      alert('Sletting feilet: ' + error.message);
+      return { ok:false, reason:'error', message:error.message };
     }
-  } catch(e) { console.error('Delete error:', e.message); alert('Sletting feilet: ' + e.message); }
+    if (!deleted || deleted.length === 0) {
+      console.warn('Delete affected 0 rows (RLS-blokkert eller finnes ikke):', projectId);
+      return { ok:false, reason:'no-permission' };
+    }
+    return { ok:true };
+  } catch(e) { console.error('Delete error:', e.message); return { ok:false, reason:'error', message:e.message }; }
 }
 
 // ─── INDEXEDDB RECOVERY STORE ─────────────────────────────────
@@ -31584,7 +31596,16 @@ async function _batchAction(action) {
   switch(action) {
     case 'delete': {
       if (!confirm(`Slette ${ids.length} prosjekt(er)? Dette kan ikke angres.`)) return;
-      for (const id of ids) { await _deleteFromSupabase(id); }
+      let _delOk = 0; const _delFail = [];
+      for (const id of ids) {
+        const r = await _deleteFromSupabase(id);
+        if (r && r.ok) _delOk++; else _delFail.push(r);
+      }
+      if (_delFail.length) {
+        const noPerm = _delFail.some(f => f && f.reason === 'no-permission');
+        alert(`${_delOk} av ${ids.length} prosjekt(er) slettet.\n\n${_delFail.length} kunne ikke slettes` +
+          (noPerm ? ' — du har ikke tilgang til å slette disse (de eies av en annen bruker/organisasjon, og du er ikke owner/admin).' : '.'));
+      }
       break;
     }
     case 'archive': {
@@ -31776,8 +31797,19 @@ async function _renderProjectList() {
 
   // Fetch or use cache
   if (_projectListDirty || !_cachedProjects) {
-    _cachedProjects = await _fetchProjectList();
-    _projectListDirty = false;
+    const fetched = await _fetchProjectList();
+    if (fetched === null) {
+      // Henting feilet — ikke blank ut lista. Behold forrige gode resultat.
+      if (_cachedProjects) {
+        _showToast('Kunne ikke oppdatere prosjektlista (nettverksfeil). Viser forrige liste.');
+      } else {
+        tbody.innerHTML = '<tr><td colspan="8" class="pl-loading" style="color:#ff6b6b">Kunne ikke laste prosjekter. Sjekk nettforbindelsen og last siden på nytt.</td></tr>';
+        return;
+      }
+    } else {
+      _cachedProjects = fetched;
+      _projectListDirty = false;
+    }
   }
   let projects = _cachedProjects;
 
@@ -31990,7 +32022,12 @@ async function _execDeleteProject() {
   const id = _pendingDeleteId;
   _pendingDeleteId = null;
   document.getElementById('del-proj-overlay').style.display = 'none';
-  await _deleteFromSupabase(id);
+  const _r = await _deleteFromSupabase(id);
+  if (_r && !_r.ok) {
+    alert(_r.reason === 'no-permission'
+      ? 'Du har ikke tilgang til å slette dette prosjektet (det eies av en annen bruker/organisasjon, og du er ikke owner/admin).'
+      : 'Sletting feilet: ' + (_r.message || 'ukjent feil'));
+  }
   _invalidateProjectCache();
   _renderProjectList();
 }
