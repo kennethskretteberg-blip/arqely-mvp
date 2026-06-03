@@ -5154,83 +5154,14 @@ document.addEventListener('mousedown', e => {
   if (m && m.style.display !== 'none' && !m.contains(e.target)) hideProduktMenu();
 }, true);
 
-// ─── AUTO-FILL (alle bredder, bredeste først) ─────────────────
-// maxWidthMm: cap products at this netto width (null = use all)
-function startAutoFill(familyName, categoryId, maxWidthMm) {
-  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (!room) { alert('Velg et rom først'); return; }
-  let prods = HEATING_PRODUCTS
-    .filter(p => p.category_id === categoryId && p.active !== false &&
-      (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
-    .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
-  if (maxWidthMm != null) {
-    prods = prods.filter(p => (p.netto_width_mm || p.width_mm) <= maxWidthMm + 0.01);
-  }
-  if (!prods.length) { alert('Ingen produkter funnet for ' + familyName); return; }
-  // Direction + corner already chosen in the placement panel — use directly
-  const direction = S.varmefolie.direction || 'v';
-  const sc = S.varmefolie.startCorner || 'bl';
-  const fromHigh = direction === 'v' ? (sc[1] === 'r') : (sc[0] === 'b');
-  const newStripDefs = autoFillRoom(room, prods, direction, fromHigh);
-  if (!newStripDefs.length) { renderSidebar(); updateObjInfo(); return; }
-  for (let i = 0; i < newStripDefs.length; i++) {
-    pushUndo();
-    if (i === 0) {
-      S.strips = S.strips.filter(s => {
-        const sp = _stripProduct(s);
-        return !(s.roomId === room.id && sp && sp.category_id === categoryId);
-      });
-    }
-    S.strips.push({ ...newStripDefs[i], id: S.counters.nextStripId++ });
-  }
-  _invalidateStripCache();
-  // Track product usage for learning system
-  const _usedIds = new Set(newStripDefs.map(d => d.productId));
-  _usedIds.forEach(pid => _trackProductUsage(pid));
-  hideVfPlacePanel();
-  renderSidebar(); updateObjInfo();
-  showAddRoomModal();
-}
-
-function confirmAutoFill(direction, fromHigh) {
-  const pending = S.ui.autoFillPending;
-  if (!pending) return;
-  const room = S.rooms.find(r => r.id === pending.roomId);
-  if (!room) { cancelAutoFill(); return; }
-
-  S.varmefolie.direction = direction;
-  // Sync startCorner: preserve secondary axis, update primary from fromHigh
-  // Corner format: [t|b][l|r] — index 0 = top/bottom row, index 1 = left/right column
-  const _sc = S.varmefolie.startCorner || 'bl';
-  S.varmefolie.startCorner = direction === 'v'
-    ? _sc[0] + (fromHigh ? 'r' : 'l')   // V: fromHigh→right column
-    : (fromHigh ? 'b' : 't') + _sc[1];  // H: fromHigh→bottom row
-  S.ui.autoFillPending = null;
-
-  // Collect all strips to add (without modifying S.strips yet)
-  const newStripDefs = autoFillRoom(room, pending.prods, direction, fromHigh);
-  if (!newStripDefs.length) { renderSidebar(); updateObjInfo(); return; }
-
-  // Add each strip with its own undo snapshot so Angre removes one at a time.
-  // The very first pushUndo also captures the state before old strips are removed.
-  for (let i = 0; i < newStripDefs.length; i++) {
-    pushUndo();
-    if (i === 0) {
-      // Remove old strips from this room/category as part of the first step
-      S.strips = S.strips.filter(s => {
-        const sp = _stripProduct(s);
-        return !(s.roomId === room.id && sp && sp.category_id === pending.categoryId);
-      });
-    }
-    S.strips.push({ ...newStripDefs[i], id: S.counters.nextStripId++ });
-  }
-  _invalidateStripCache();
-  const _usedIds2 = new Set(newStripDefs.map(d => d.productId));
-  _usedIds2.forEach(pid => _trackProductUsage(pid));
-  renderSidebar(); updateObjInfo();
-  showAddRoomModal();
-}
-
+// ─── AUTO-FILL ────────────────────────────────────────────────
+// The live folie auto-fill path is the comparison panel:
+//   showAutoFillComparison / _runWidthPickerAutoFill
+//     → _autoFillBothDirections → _applyAutoFillOption.
+// The old startAutoFill / confirmAutoFill / autoFillRoom pipeline (with a
+// divergent scoring and no gap-pack post-pass) was removed as dead code — it
+// had no UI callers and S.ui.autoFillPending was never set. cancelAutoFill is
+// kept because it is still wired to Escape / the "✕ Avbryt" chip.
 function cancelAutoFill() {
   S.ui.autoFillPending = null;
   updateCtxBar();
@@ -6078,84 +6009,13 @@ function _rotateSelectedStrip() {
   _showToast('Folie rotert ' + (strip.direction === 'h' ? 'horisontalt' : 'vertikalt'), 'ok');
 }
 
-// Wrapper: tries both fill sides and both orientations, picks the best coverage.
-function autoFillRoom(room, sortedProds, direction, fromHigh) {
-  // Multi-factor scoring: area, strip count, short strips, width uniformity
-  const score = defs => {
-    if (!defs.length) return 0;
-    let totalArea = 0;
-    const widthSet = new Set();
-    let shortPenalty = 0;
-    for (const st of defs) {
-      const p = HEATING_PRODUCTS.find(pp => pp.id === st.productId);
-      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
-      totalArea += nc * st.length_cm;
-      widthSet.add(nc);
-      if (st.length_cm < 50) shortPenalty += (50 - st.length_cm) * nc * 0.5;
-    }
-    // Penalties: fewer strips = simpler installation, fewer widths = easier logistics
-    const stripCountPenalty = defs.length * 200; // 200 cm² penalty per strip
-    const widthDiversityPenalty = (widthSet.size - 1) * 500; // 500 cm² per extra width type
-    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.02 : 0;
-    return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
-  };
-
-  // Check if room has obstacles — if so, try zone-based and obstacle-aware fills
-  const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
-  let zoneDefs = [], obsAwareDefs = [];
-  if (hasObstacles) {
-    zoneDefs = _zoneFillRoom(room, sortedProds, direction);
-    zoneDefs = zoneDefs.filter(d => d.length_cm >= 50);
-    // Obstacle-aware: fits strips to gap zones + spans obstacles with covering widths
-    obsAwareDefs = _obstacleAwareFill(room, sortedProds, direction);
-    obsAwareDefs = obsAwareDefs.filter(d => d.length_cm >= 20);
-    // Try alternate direction for obstacle-aware fill too
-    const obsAwareAlt = _obstacleAwareFill(room, sortedProds, direction === 'v' ? 'h' : 'v');
-    if (score(obsAwareAlt) > score(obsAwareDefs)) obsAwareDefs = obsAwareAlt;
-  }
-
-  // Classic fill: greedy + beam search in both directions
-  const a = _autoFillRoomOnce(room, sortedProds, direction, false);
-  const b = _autoFillRoomOnce(room, sortedProds, direction, true);
-  const bestGreedy = score(a) >= score(b) ? a : b;
-  const beamResult = _beamSearchFill(room, sortedProds, direction);
-  const bestChosen = score(beamResult) > score(bestGreedy) ? beamResult : bestGreedy;
-  // Try alternate orientation: greedy + beam search
-  const altDir = direction === 'v' ? 'h' : 'v';
-  const c = _autoFillRoomOnce(room, sortedProds, altDir, false);
-  const d = _autoFillRoomOnce(room, sortedProds, altDir, true);
-  const bestAltGreedy = score(c) >= score(d) ? c : d;
-  const beamAlt = _beamSearchFill(room, sortedProds, altDir);
-  const bestAlt = score(beamAlt) > score(bestAltGreedy) ? beamAlt : bestAltGreedy;
-  // Only switch orientation if alt gives >10% more coverage
-  const chosenScore = score(bestChosen), altScore = score(bestAlt);
-  let classicBest;
-  if (altScore > chosenScore * 1.10 && altScore > 0) {
-    classicBest = bestAlt;
-  } else {
-    classicBest = bestChosen;
-  }
-
-  // Pick winner: obstacle-aware vs zone-based vs classic
-  const zoneScore = score(zoneDefs);
-  const obsAwareScore = score(obsAwareDefs);
-  const classicScore = score(classicBest);
-  let best;
-  // Obstacle-aware strategy gets priority when it produces valid results
-  const bestObstacleScore = Math.max(zoneScore, obsAwareScore);
-  const bestObstacleDefs = obsAwareScore >= zoneScore ? obsAwareDefs : zoneDefs;
-  if (hasObstacles && bestObstacleScore > classicScore && bestObstacleScore > 0) {
-    best = bestObstacleDefs;
-    if (best.length) S.varmefolie.direction = best[0].direction;
-  } else {
-    best = classicBest;
-    const dir = best.length ? best[0].direction : direction;
-    if (altScore > chosenScore * 1.10 && altScore > 0) S.varmefolie.direction = altDir;
-    best = _centerStripDefs(best, room, dir);
-  }
-
-  return best;
-}
+// NOTE: The old `autoFillRoom` wrapper (greedy/beam/zone/obstacle scoring rollup)
+// was removed as dead code — it was only reachable via the deleted
+// startAutoFill/confirmAutoFill pipeline. The live folie auto-fill path uses the
+// comparison panel: showAutoFillComparison / _runWidthPickerAutoFill →
+// _autoFillBothDirections → _applyAutoFillOption. The shared helpers below
+// (_autoFillRoomOnce, _beamSearchFill, _centerStripDefs, _zoneFillRoom,
+// _obstacleAwareFill) are still used by that live path.
 
 // Core fill: single pass, single direction. Optional startCursor overrides default start position.
 function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) {
