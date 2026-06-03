@@ -5420,21 +5420,60 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
 }
 
 /** Score a layout: higher is better. Balances coverage, strip count, waste, and uniformity. */
-function _scoreLayout(defs) {
-  if (!defs.length) return -1;
-  let totalArea = 0, totalStrips = 0;
+/**
+ * Canonical scorer for a folie (foil) layout — a list of strip `defs`.
+ * Higher is better. This is the SINGLE place a materialised layout is ranked,
+ * so the winning solution is chosen by one documented rule instead of several
+ * scattered, accidentally-divergent score expressions.
+ *
+ * Factors (all derived from the same defs):
+ *   - covered area      : Σ width_cm × length_cm   (primary — maximise)
+ *   - strip count       : fewer strips = cleaner installation (penalty)
+ *   - width-type count  : fewer distinct widths = tidier (penalty / bonus)
+ *   - very short strips  : strips < 50cm are partly wasted (penalty)
+ *
+ * Two weight PROFILES exist on purpose (centralised + documented here):
+ *   'select' (default) — AUTHORITATIVE profile used to pick the layout the user
+ *       actually sees (greedy vs beam vs zone vs obstacle vs packed, and H vs V).
+ *       Empty layout → 0.
+ *   'zone' — used only for the per-zone H/V tie-break inside _zoneFillRoom,
+ *       whose ratio test (altScore > preferredScore*1.10 && altScore > 0) needs
+ *       an area-dominant, strictly-positive score. Empty layout → -1.
+ * Keeping both profiles here preserves today's exact ranking while ending the
+ * ad-hoc score math that used to live in _scoreLayout / _autoFillBothDirections.
+ */
+function _scoreFoilLayout(defs, ctx) {
+  const profile = (ctx && ctx.profile) || 'select';
+
+  if (profile === 'zone') {
+    if (!defs.length) return -1;
+    let totalArea = 0;
+    const widthSet = new Set();
+    for (const d of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      totalArea += nc * d.length_cm;
+      widthSet.add(nc);
+    }
+    const uniformity = 1 / widthSet.size;       // fewer distinct widths → closer to 1
+    return totalArea * 1.0 - defs.length * 5 + uniformity * 50;
+  }
+
+  // 'select' profile (authoritative)
+  if (!defs.length) return 0;
+  let totalArea = 0, shortPenalty = 0;
   const widthSet = new Set();
   for (const d of defs) {
     const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
     const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
     totalArea += nc * d.length_cm;
     widthSet.add(nc);
-    totalStrips++;
+    if (d.length_cm < 50) shortPenalty += (50 - d.length_cm) * nc * 0.5;
   }
-  // Uniformity bonus: fewer distinct widths = cleaner installation
-  const uniformity = 1 / widthSet.size;
-  // Score: area (primary) - strip penalty - diversity penalty
-  return totalArea * 1.0 - totalStrips * 5 + uniformity * 50;
+  const stripCountPenalty     = defs.length * 50;
+  const widthDiversityPenalty = (widthSet.size - 1) * 100;
+  const uniformBonus          = widthSet.size <= 1 ? totalArea * 0.01 : 0;
+  return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
 }
 
 /** Obstacle-aware fill: projects obstacles onto placement axis, creates gap zones
@@ -5554,8 +5593,8 @@ function _zoneFillRoom(room, sortedProds, direction) {
     // Try both directions per zone
     const defsH = _fillZone(room, zone, sortedProds, 'h', GAP, MARGIN);
     const defsV = _fillZone(room, zone, sortedProds, 'v', GAP, MARGIN);
-    const scoreH = _scoreLayout(defsH);
-    const scoreV = _scoreLayout(defsV);
+    const scoreH = _scoreFoilLayout(defsH, { profile: 'zone' });
+    const scoreV = _scoreFoilLayout(defsV, { profile: 'zone' });
 
     // Prefer user's chosen direction unless other scores significantly better
     const preferredScore = direction === 'h' ? scoreH : scoreV;
@@ -5695,23 +5734,9 @@ function _gapPackDefs(defs, room, sortedProds, direction) {
 }
 
 function _autoFillBothDirections(room, sortedProds) {
-  const score = defs => {
-    if (!defs.length) return 0;
-    let totalArea = 0;
-    const widthSet = new Set();
-    let shortPenalty = 0;
-    for (const st of defs) {
-      const p = HEATING_PRODUCTS.find(pp => pp.id === st.productId);
-      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
-      totalArea += nc * st.length_cm;
-      widthSet.add(nc);
-      if (st.length_cm < 50) shortPenalty += (50 - st.length_cm) * nc * 0.5;
-    }
-    const stripCountPenalty = defs.length * 50;
-    const widthDiversityPenalty = (widthSet.size - 1) * 100;
-    const uniformBonus = widthSet.size <= 1 ? totalArea * 0.01 : 0;
-    return totalArea - shortPenalty - stripCountPenalty - widthDiversityPenalty + uniformBonus;
-  };
+  // Authoritative layout scorer (covered area · strip count · width types ·
+  // short-strip penalty). Single source of truth — see _scoreFoilLayout.
+  const score = defs => _scoreFoilLayout(defs);
 
   const hasObstacles = S.hindrings.some(h => h.roomId === room.id && h.points && h.points.length >= 3);
   const results = {};
