@@ -6,6 +6,11 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ## 2026-06-04 — UX: seleksjons-drevet kontekst-handlingsmeny
 
+- **`fefdabd` — Klikk hele rom-raden for å velge rommet.** Navne-spennet i sidebar
+  hadde egen onclick som startet omdøping (med stopPropagation), så klikk på navnet
+  valgte ikke rommet. Fjernet den → hele raden kaller `selRoom`. Omdøping flyttet til
+  en tydelig ✏️-knapp (i tillegg til dobbeltklikk + høyreklikk «Gi nytt navn»).
+
 - **`40f9e08` — Rydd opp i `#ctxbar` (rom-tilstand).** Rom-valgt viste ~12 knapper
   samtidig. Nå seleksjons-drevet: primær «+ Produkt» (fylt aksent) + 4 sekundære
   (+ Hindring, + Sone, Auto-soner, Mål); resten (Skillevegg, Fyll fra punkt, Sentrer,
