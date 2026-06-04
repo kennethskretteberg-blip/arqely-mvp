@@ -5940,6 +5940,82 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
       working = working.concat(_buildNarrowStaircase(room, direction, zLo, zHi, narrow, working, GAP));
     }
   }
+
+  // ── CORE BAND: pack the full-height middle (between slant zones) optimally ──
+  // The greedy main fill leaves redundant narrow strips + slack bunched at one end.
+  // Repack each full-height core band (the complement of the slant zones) with the
+  // exhaustive _bestMixedWidthFit (fewest strips / best width combo) and spread the
+  // slack EVENLY between strips. Only swap when it is no worse: ≤ as many strips and
+  // ≥ the coverage. Narrow strips stay in slant zones only — the core uses the chosen
+  // (mostly wide) combo. Validated against the staircases so no overlap is introduced.
+  const areaOf = defs => defs.reduce((s, d) => s + ncOf(d.productId) * d.length_cm, 0);
+  const _coreOverlaps = (cand, list) => {
+    const anc = ncOf(cand.productId), aS = cand.start_cm, aE = cand.start_cm + cand.length_cm;
+    for (const o of list) {
+      if (o.direction !== cand.direction) continue;
+      const onc = ncOf(o.productId);
+      const g = _effectiveGapCmPair(cand.productId, o.productId);
+      const pg = cand.pos_cm >= o.pos_cm ? cand.pos_cm - (o.pos_cm + onc) : o.pos_cm - (cand.pos_cm + anc);
+      if (pg >= g - 0.01) continue;
+      if (Math.min(aE, o.start_cm + o.length_cm) - Math.max(aS, o.start_cm) > 0.01) return true;
+    }
+    return false;
+  };
+  // Core bands = [basePos+MARGIN, baseMax-MARGIN] minus the slant zones. A band edge
+  // that abuts a slant zone is inset by GAP (clean transition to the staircase).
+  const sortedZones = zones.slice().sort((a, b) => a[0] - b[0]);
+  const edgeLo = basePos + MARGIN, edgeHi = baseMax - MARGIN;
+  const coreBands = [];
+  let cz = edgeLo;
+  for (const [zLo, zHi] of sortedZones) {
+    if (zLo > cz + 0.01) coreBands.push([cz, zLo, cz > edgeLo + 0.01, true]);
+    cz = Math.max(cz, zHi);
+  }
+  if (edgeHi > cz + 0.01) coreBands.push([cz, edgeHi, cz > edgeLo + 0.01, false]);
+
+  for (const [rawLo, rawHi, abutLo, abutHi] of coreBands) {
+    let cLo = abutLo ? rawLo + GAP : rawLo;
+    let cHi = abutHi ? rawHi - GAP : rawHi;
+    // Existing strips that live entirely inside this core band (the greedy core).
+    const oldCore = working.filter(d => d.pos_cm >= rawLo - 0.01 && d.pos_cm + ncOf(d.productId) <= rawHi + 0.01);
+    const keep = working.filter(d => oldCore.indexOf(d) < 0);
+    // Staircase strips can extend a little past a zone edge (region was widened to
+    // cover a cut strip). Shrink the band past any kept strip that intrudes, so the
+    // core strips fit with a clean gap instead of being dropped at the ends.
+    const mid = (rawLo + rawHi) / 2;
+    for (const d of keep) {
+      const dLo = d.pos_cm, dHi = d.pos_cm + ncOf(d.productId);
+      if (dHi <= cLo || dLo >= cHi) continue;          // not intruding
+      if (dLo < mid) cLo = Math.max(cLo, dHi + GAP);   // intrudes from the low side
+      else cHi = Math.min(cHi, dLo - GAP);             // intrudes from the high side
+    }
+    const available = cHi - cLo;
+    if (available < 30) continue;
+    // Core uses WIDE products only (> 40cm) — narrow strips belong in slant zones, not
+    // the full-height middle. Fall back to all widths if no wide product exists.
+    const coreProds = sortedProds.filter(p => (p.netto_width_mm || p.width_mm) / 10 > 40);
+    const fit = _bestMixedWidthFit(available, coreProds.length ? coreProds : sortedProds, GAP);
+    if (!fit || !fit.strips.length) continue;
+    const n = fit.strips.length;
+    const sumNc = fit.strips.reduce((s, w) => s + w.nc, 0);
+    const evenGap = n > 1 ? (available - sumNc) / (n - 1) : 0;   // slack spread evenly
+    let cursor = n > 1 ? cLo : cLo + (available - sumNc) / 2;     // flush ends / centre one
+    const newCore = [];
+    for (const strip of fit.strips) {
+      const segs = computeClippedSegments(room.id, direction, cursor, strip.id);
+      for (const seg of segs) {
+        if (seg.length_cm < 30) continue;                        // no dust
+        const def = { roomId: room.id, productId: strip.id, direction, pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm };
+        if (!_coreOverlaps(def, keep) && !_coreOverlaps(def, newCore)) newCore.push(def);
+      }
+      cursor += strip.nc + evenGap;
+    }
+    // Swap only when the repack is no worse: not more strips, not less coverage.
+    if (newCore.length && newCore.length <= oldCore.length && areaOf(newCore) >= areaOf(oldCore) - 1) {
+      working = keep.concat(newCore);
+    }
+  }
+
   // Final tidy: drop dust strips (< 30cm) that sit entirely inside a slant zone — the
   // unavoidable apex bits. Only inside slant zones, so straight-room strips are untouched.
   const inAnyZone = d => zones.some(([lo, hi]) => d.pos_cm >= lo - 0.01 && d.pos_cm + ncOf(d.productId) <= hi + 0.01);
