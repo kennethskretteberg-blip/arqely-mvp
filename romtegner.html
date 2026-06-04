@@ -5829,10 +5829,10 @@ function _freeSweepRanges(seg, pos_cm, nc, productId, direction, defs) {
  *  the wide 40cm in the body and the finer 20cm near the apex (where 40cm is clipped
  *  short), giving tight steps that follow the diagonal. Advances by exactly the
  *  placed width + GAP so consecutive steps sit one gap apart (no large glimpses).
- *  Dust filter: steps shorter than MIN_LEN or smaller than MIN_AREA are skipped. */
+ *  Dust filter: steps shorter than MIN_LEN are skipped (keeps finer 20cm steps that
+ *  still follow the diagonal, but never tiny 0.2 m bits). */
 function _buildNarrowStaircase(room, direction, zLo, zHi, narrow, otherDefs, GAP) {
   const MIN_LEN = 30;                   // no dust: skip steps shorter than 30 cm
-  const MIN_AREA = 1200;                // and skip steps under 0.12 m² (nc·len, cm²)
   const smallestNc = narrow[narrow.length - 1].nc;
   const result = [];
   const ref = otherDefs.slice();        // grows so steps avoid kept strips + each other
@@ -5847,7 +5847,7 @@ function _buildNarrowStaircase(room, direction, zLo, zHi, narrow, otherDefs, GAP
       let area = 0;
       for (const seg of segs) {
         for (const fr of _freeSweepRanges(seg, cursor, nw.nc, nw.id, direction, ref)) {
-          if (fr.length_cm >= MIN_LEN && nw.nc * fr.length_cm >= MIN_AREA) { ok.push(fr); area += nw.nc * fr.length_cm; }
+          if (fr.length_cm >= MIN_LEN) { ok.push(fr); area += nw.nc * fr.length_cm; }
         }
       }
       if (ok.length && (!best || area > best.area + 0.01)) best = { nc: nw.nc, id: nw.id, segs: ok, area };
@@ -5866,16 +5866,29 @@ function _buildNarrowStaircase(room, direction, zLo, zHi, narrow, otherDefs, GAP
   return result;
 }
 
-/** Give EVERY slanted wall its own clean 40/20cm staircase that follows the
- *  diagonal — not just the side that happened to be open. Runs once per slanted
- *  edge ("slant zone" = the edge's perp-span). Per zone:
- *    1. Prefer a CLEAN swap: drop the base strips that sit entirely inside the
- *       zone and rebuild the zone as a full-height narrow staircase reaching the
- *       diagonal. Commit it as long as it covers at least as much as the wide
- *       coverage it removes (so coverage never drops, and no ugly double layers).
- *    2. If the clean swap would lose coverage (a wide strip there is genuinely
- *       efficient), fall back to ADDITIVE: keep the base and add narrow steps in
- *       the leftover cold triangle. The zone is never left empty.
+/** How fully a strip uses its potential — actual length / the length it could reach
+ *  at its tallest edge. < 1 means the diagonal is clipping it flat. A wide strip with
+ *  a low ratio is the "cheat" the user dislikes: a broad strip cut flat at the slant
+ *  with an empty triangle above it, instead of a staircase that follows the diagonal. */
+function _stripCutRatio(room, direction, strip) {
+  const p = HEATING_PRODUCTS.find(pp => pp.id === strip.productId);
+  const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+  if (nc <= 0) return 1;
+  const pL = computePotentialLength(room.id, direction, strip.pos_cm + 0.5, strip.productId);
+  const pR = computePotentialLength(room.id, direction, strip.pos_cm + nc - 0.5, strip.productId);
+  const high = Math.max(pL, pR);
+  return high > 0 ? strip.length_cm / high : 1;
+}
+
+/** Give EVERY slanted wall its own clean 40/20cm staircase that follows the diagonal.
+ *  Runs once per slanted edge ("slant zone" = the edge's perp-span). In each zone any
+ *  WIDE base strip (> 40cm) that the diagonal clips flat (cut ratio < 0.85) is the
+ *  "cheat" — it is removed and the zone (extended to cover its full span) is rebuilt
+ *  as a narrow staircase that follows the diagonal. Full-height wide strips (not cut)
+ *  and existing narrow strips are kept. When a zone has no flat-cut wide strip we only
+ *  ADD narrow steps in the leftover cold triangle. The clean staircase is preferred on
+ *  BOTH sides even when a flat wide strip would cover marginally more raw area — that
+ *  flat cut is exactly what the user rejects (user choice: clean staircase first).
  *  No-op when the room has no slanted wall → straight rooms (rect/L/T) unchanged. */
 function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
   if (!_roomHasSlantedWall(room)) return baseDefs;
@@ -5889,7 +5902,6 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
   const perpVals = room.points.map(perp);
   const basePos = Math.min(...perpVals), baseMax = Math.max(...perpVals);
   const ncOf = id => { const p = HEATING_PRODUCTS.find(pp => pp.id === id); return p ? (p.netto_width_mm || p.width_mm) / 10 : 0; };
-  const areaOf = defs => defs.reduce((s, d) => s + ncOf(d.productId) * d.length_cm, 0);
 
   // One slant zone per non-axis-aligned edge (its perp-span, clamped to the room).
   const pts = room.points;
@@ -5906,29 +5918,32 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
 
   let working = baseDefs.slice();
   for (const [zLo, zHi] of zones) {
-    // Base strips entirely inside this slant zone (candidates to replace).
-    const inZone = [], keep = [];
-    for (const d of working) {
-      const lo = d.pos_cm, hi = d.pos_cm + ncOf(d.productId);
-      if (lo >= zLo - 0.01 && hi <= zHi + 0.01) inZone.push(d); else keep.push(d);
-    }
-    // 1. Clean swap candidate: full-height narrow staircase, base removed.
-    const replaceStairs = _buildNarrowStaircase(room, direction, zLo, zHi, narrow, keep, GAP);
-    if (replaceStairs.length && areaOf(replaceStairs) >= areaOf(inZone)) {
-      working = keep.concat(replaceStairs);                 // clean staircase, coverage ↑
+    // Flat-cut WIDE strips overlapping this zone (the "cheat") → replace with a staircase.
+    const candidates = working.filter(d => {
+      const nc = ncOf(d.productId);
+      const lo = d.pos_cm, hi = d.pos_cm + nc;
+      const overlaps = lo < zHi - 0.01 && hi > zLo + 0.01;
+      return overlaps && nc > 40 && _stripCutRatio(room, direction, d) < 0.85;
+    });
+    if (candidates.length) {
+      // Region = the zone extended to cover the removed strips' full span, so the
+      // staircase also re-covers their full-height part with tall narrow steps.
+      let regionLo = zLo, regionHi = zHi;
+      for (const d of candidates) { regionLo = Math.min(regionLo, d.pos_cm); regionHi = Math.max(regionHi, d.pos_cm + ncOf(d.productId)); }
+      regionLo = Math.max(basePos + MARGIN, regionLo);
+      regionHi = Math.min(baseMax - MARGIN, regionHi);
+      const keep = working.filter(d => candidates.indexOf(d) < 0);
+      const stairs = _buildNarrowStaircase(room, direction, regionLo, regionHi, narrow, keep, GAP);
+      if (stairs.length) working = keep.concat(stairs);
     } else {
-      // 2. Additive fallback: keep base, add narrow steps in the leftover triangle.
+      // No flat-cut wide strip → just add narrow steps in any leftover cold triangle.
       working = working.concat(_buildNarrowStaircase(room, direction, zLo, zHi, narrow, working, GAP));
     }
   }
-  // Final tidy: drop dust strips (< 30cm or < 0.12 m²) that sit entirely inside a
-  // slant zone — the unavoidable apex bits that only add clutter + warnings. Only
-  // inside slant zones, so straight-room base strips are never touched.
+  // Final tidy: drop dust strips (< 30cm) that sit entirely inside a slant zone — the
+  // unavoidable apex bits. Only inside slant zones, so straight-room strips are untouched.
   const inAnyZone = d => zones.some(([lo, hi]) => d.pos_cm >= lo - 0.01 && d.pos_cm + ncOf(d.productId) <= hi + 0.01);
-  working = working.filter(d => {
-    const isDust = d.length_cm < 30 || ncOf(d.productId) * d.length_cm < 1200;
-    return !(isDust && inAnyZone(d));
-  });
+  working = working.filter(d => !(d.length_cm < 30 && inAnyZone(d)));
   return working;
 }
 
