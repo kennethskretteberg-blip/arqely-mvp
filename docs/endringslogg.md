@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-04 — UX: seleksjons-drevet kontekst-handlingsmeny
+
+- **`40f9e08` — Rydd opp i `#ctxbar` (rom-tilstand).** Rom-valgt viste ~12 knapper
+  samtidig. Nå seleksjons-drevet: primær «+ Produkt» (fylt aksent) + 4 sekundære
+  (+ Hindring, + Sone, Auto-soner, Mål); resten (Skillevegg, Fyll fra punkt, Sentrer,
+  Folie-avstand, Tøm, Dokumentasjon, Rom-label, Målsett rom/folie/kabel, Slett rom)
+  under én «⋯ Mer»-popover (`_showCtxMore`, gjenbruker `#produkt-menu` + `.ctx-item`).
+  Ny `.snap-chip.primary`-stil, 44px-trykkflater beholdt, `#topbar` uendret. Alle
+  onclick-handlere gjenbrukt — ingenting mistet, la til «Slett rom». None-state:
+  «Rektangel» markert som primær.
+
+---
+
 ## 2026-06-04 — Folie skråvegg-motor + onboarding/multi-org
 
 Økt som ryddet folie-auto-fill-scoringen, bygde skråvegg-trapper, og forbedret
