@@ -5816,9 +5816,53 @@ function _subtractCoveredSweep(seg, pos_cm, nc, direction, defs, _gap) {
                .filter(r => r.length_cm > 0.01);
 }
 
-/** Pack a staircase of narrow strips into the triangular cold zone along slanted
- *  walls. Returns baseDefs plus the added staircase strips. No-op when the room
- *  has no slanted wall, so straight rooms are guaranteed unchanged. */
+/** Build a clean staircase of narrow strips across a perp range [zLo, zHi], each
+ *  strip clipped to the room (so it reaches all the way to the diagonal). Fine
+ *  stepping (advance by the placed width); strips never double-cover the sweep
+ *  already taken by `otherDefs` (kept strips outside the zone). Returns the new
+ *  staircase defs. ZONE_MIN_LEN is low so even short top-of-triangle steps survive. */
+function _buildNarrowStaircase(room, direction, zLo, zHi, narrow, otherDefs, GAP) {
+  const ZONE_MIN_LEN = 10;             // keep short steps near the apex of the triangle
+  const smallestNc = narrow[narrow.length - 1].nc;
+  const result = [];
+  const ref = otherDefs.slice();       // grows so steps avoid kept strips + each other
+  let cursor = zLo, guard = 0;
+  while (cursor + smallestNc <= zHi + 0.01 && guard++ < 2000) {
+    let placed = false;
+    for (const nw of narrow) {                       // widest narrow first (40 → 20)
+      if (cursor + nw.nc > zHi + 0.01) continue;
+      const segs = computeClippedSegments(room.id, direction, cursor, nw.id);
+      const newSegs = [];
+      for (const seg of segs) {
+        for (const fr of _subtractCoveredSweep(seg, cursor, nw.nc, direction, ref, GAP)) {
+          if (fr.length_cm >= ZONE_MIN_LEN) newSegs.push(fr);
+        }
+      }
+      if (newSegs.length) {
+        for (const fr of newSegs) {
+          const def = { roomId: room.id, productId: nw.id, direction,
+            pos_cm: cursor, start_cm: fr.start_cm, length_cm: fr.length_cm };
+          result.push(def); ref.push(def);
+        }
+        cursor += nw.nc + GAP; placed = true; break;
+      }
+    }
+    if (!placed) cursor += smallestNc;
+  }
+  return result;
+}
+
+/** Give EVERY slanted wall its own clean 40/20cm staircase that follows the
+ *  diagonal — not just the side that happened to be open. Runs once per slanted
+ *  edge ("slant zone" = the edge's perp-span). Per zone:
+ *    1. Prefer a CLEAN swap: drop the base strips that sit entirely inside the
+ *       zone and rebuild the zone as a full-height narrow staircase reaching the
+ *       diagonal. Commit it as long as it covers at least as much as the wide
+ *       coverage it removes (so coverage never drops, and no ugly double layers).
+ *    2. If the clean swap would lose coverage (a wide strip there is genuinely
+ *       efficient), fall back to ADDITIVE: keep the base and add narrow steps in
+ *       the leftover cold triangle. The zone is never left empty.
+ *  No-op when the room has no slanted wall → straight rooms (rect/L/T) unchanged. */
 function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
   if (!_roomHasSlantedWall(room)) return baseDefs;
   const narrow = _narrowEdgeFillProducts(sortedProds);
@@ -5826,42 +5870,44 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
 
   const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
   const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
-  const SLANT_MIN_LEN = 15;            // keep short edge strips down to 15cm at the slant
-  const smallestNc = narrow[narrow.length - 1].nc;
-
   const isV = direction === 'v';
-  const perpVals = room.points.map(p => isV ? p.x : p.y);
+  const perp = p => (isV ? p.x : p.y);
+  const perpVals = room.points.map(perp);
   const basePos = Math.min(...perpVals), baseMax = Math.max(...perpVals);
+  const ncOf = id => { const p = HEATING_PRODUCTS.find(pp => pp.id === id); return p ? (p.netto_width_mm || p.width_mm) / 10 : 0; };
+  const areaOf = defs => defs.reduce((s, d) => s + ncOf(d.productId) * d.length_cm, 0);
 
-  const additions = [];
-  const allDefs = baseDefs.slice();    // grows so steps avoid each other + base strips
-
-  let cursor = basePos + MARGIN;
-  let guard = 0;
-  while (cursor + smallestNc <= baseMax - MARGIN + 0.01 && guard++ < 1000) {
-    if (!_posNearSlant(room, direction, cursor, smallestNc)) { cursor += smallestNc; continue; }
-    let placed = false;
-    for (const nw of narrow) {                       // widest narrow first (40 → 20)
-      if (cursor + nw.nc > baseMax - MARGIN + 0.01) continue;
-      const segs = computeClippedSegments(room.id, direction, cursor, nw.id);
-      const newSegs = [];
-      for (const seg of segs) {
-        for (const fr of _subtractCoveredSweep(seg, cursor, nw.nc, direction, allDefs, GAP)) {
-          if (fr.length_cm >= SLANT_MIN_LEN) newSegs.push(fr);
-        }
-      }
-      if (newSegs.length) {
-        for (const fr of newSegs) {
-          const def = { roomId: room.id, productId: nw.id, direction,
-            pos_cm: cursor, start_cm: fr.start_cm, length_cm: fr.length_cm };
-          additions.push(def); allDefs.push(def);
-        }
-        cursor += nw.nc + GAP; placed = true; break;
-      }
+  // One slant zone per non-axis-aligned edge (its perp-span, clamped to the room).
+  const pts = room.points;
+  const zones = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    if (Math.abs(b.x - a.x) > 0.5 && Math.abs(b.y - a.y) > 0.5) {
+      const lo = Math.max(basePos + MARGIN, Math.min(perp(a), perp(b)));
+      const hi = Math.min(baseMax - MARGIN, Math.max(perp(a), perp(b)));
+      if (hi - lo > narrow[narrow.length - 1].nc) zones.push([lo, hi]);
     }
-    if (!placed) cursor += smallestNc;
   }
-  return additions.length ? baseDefs.concat(additions) : baseDefs;
+  if (!zones.length) return baseDefs;
+
+  let working = baseDefs.slice();
+  for (const [zLo, zHi] of zones) {
+    // Base strips entirely inside this slant zone (candidates to replace).
+    const inZone = [], keep = [];
+    for (const d of working) {
+      const lo = d.pos_cm, hi = d.pos_cm + ncOf(d.productId);
+      if (lo >= zLo - 0.01 && hi <= zHi + 0.01) inZone.push(d); else keep.push(d);
+    }
+    // 1. Clean swap candidate: full-height narrow staircase, base removed.
+    const replaceStairs = _buildNarrowStaircase(room, direction, zLo, zHi, narrow, keep, GAP);
+    if (replaceStairs.length && areaOf(replaceStairs) >= areaOf(inZone)) {
+      working = keep.concat(replaceStairs);                 // clean staircase, coverage ↑
+    } else {
+      // 2. Additive fallback: keep base, add narrow steps in the leftover triangle.
+      working = working.concat(_buildNarrowStaircase(room, direction, zLo, zHi, narrow, working, GAP));
+    }
+  }
+  return working;
 }
 
 function _autoFillBothDirections(room, sortedProds) {
