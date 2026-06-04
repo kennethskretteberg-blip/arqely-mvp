@@ -5790,19 +5790,25 @@ function _narrowEdgeFillProducts(sortedProds) {
   return out;
 }
 
-/** Of a candidate strip's sweep range, return the sub-ranges NOT already covered
- *  by existing defs that share this perp band. Two strips in the same lane but at
- *  different along-ranges are allowed (they sit end-to-end), so we only carve out
- *  the genuinely already-covered sweep. */
-function _subtractCoveredSweep(seg, pos_cm, nc, direction, defs, _gap) {
+/** Of a candidate strip's sweep range, return the sub-ranges that are GAP-VALID
+ *  against every existing def — i.e. carve out the sweep of any neighbour that is
+ *  not separated by at least the supplier gap in the perp axis. A neighbour far
+ *  enough across (perp-gap ≥ required) never blocks; a neighbour within the gap
+ *  (overlapping OR too close) carves out its sweep so the candidate can never sit
+ *  on top of / hard against it. This is what keeps the staircase from triggering
+ *  the overlap/margin warning, while still letting strips sit end-to-end along a
+ *  lane (a neighbour whose sweep doesn't overlap leaves the candidate untouched). */
+function _freeSweepRanges(seg, pos_cm, nc, productId, direction, defs) {
   let ranges = [[seg.start_cm, seg.start_cm + seg.length_cm]];
-  const bandLo = pos_cm, bandHi = pos_cm + nc;
   for (const d of defs) {
     if (d.direction !== direction) continue;
     const dp = HEATING_PRODUCTS.find(p => p.id === d.productId);
     const dnc = dp ? (dp.netto_width_mm || dp.width_mm) / 10 : 0;
-    // perp overlap? (same lane)
-    if (d.pos_cm + dnc <= bandLo + 0.01 || d.pos_cm >= bandHi - 0.01) continue;
+    const gapCm = _effectiveGapCmPair(productId, d.productId);
+    // Perp distance between candidate band and this neighbour.
+    const perpGap = pos_cm >= d.pos_cm ? pos_cm - (d.pos_cm + dnc) : d.pos_cm - (pos_cm + nc);
+    if (perpGap >= gapCm - 0.01) continue;          // far enough across → no conflict
+    // Too close in perp → its sweep (plus a hair) blocks the candidate there.
     const cLo = d.start_cm - 0.01, cHi = d.start_cm + d.length_cm + 0.01;
     const next = [];
     for (const [lo, hi] of ranges) {
@@ -5816,38 +5822,46 @@ function _subtractCoveredSweep(seg, pos_cm, nc, direction, defs, _gap) {
                .filter(r => r.length_cm > 0.01);
 }
 
-/** Build a clean staircase of narrow strips across a perp range [zLo, zHi], each
- *  strip clipped to the room (so it reaches all the way to the diagonal). Fine
- *  stepping (advance by the placed width); strips never double-cover the sweep
- *  already taken by `otherDefs` (kept strips outside the zone). Returns the new
- *  staircase defs. ZONE_MIN_LEN is low so even short top-of-triangle steps survive. */
+/** Build a clean staircase of narrow strips across a perp range [zLo, zHi]. At each
+ *  cursor it evaluates every narrow width, keeps only GAP-VALID, non-dust segments
+ *  (via _freeSweepRanges so nothing ever sits hard against a base strip → no overlap
+ *  warning), and commits the width that COVERS THE MOST there. That naturally puts
+ *  the wide 40cm in the body and the finer 20cm near the apex (where 40cm is clipped
+ *  short), giving tight steps that follow the diagonal. Advances by exactly the
+ *  placed width + GAP so consecutive steps sit one gap apart (no large glimpses).
+ *  Dust filter: steps shorter than MIN_LEN or smaller than MIN_AREA are skipped. */
 function _buildNarrowStaircase(room, direction, zLo, zHi, narrow, otherDefs, GAP) {
-  const ZONE_MIN_LEN = 10;             // keep short steps near the apex of the triangle
+  const MIN_LEN = 30;                   // no dust: skip steps shorter than 30 cm
+  const MIN_AREA = 1200;                // and skip steps under 0.12 m² (nc·len, cm²)
   const smallestNc = narrow[narrow.length - 1].nc;
   const result = [];
-  const ref = otherDefs.slice();       // grows so steps avoid kept strips + each other
+  const ref = otherDefs.slice();        // grows so steps avoid kept strips + each other
   let cursor = zLo, guard = 0;
   while (cursor + smallestNc <= zHi + 0.01 && guard++ < 2000) {
-    let placed = false;
-    for (const nw of narrow) {                       // widest narrow first (40 → 20)
+    // Evaluate each narrow width; pick the one that covers the most usable area here.
+    let best = null;                    // { nc, id, segs:[...], area }
+    for (const nw of narrow) {
       if (cursor + nw.nc > zHi + 0.01) continue;
       const segs = computeClippedSegments(room.id, direction, cursor, nw.id);
-      const newSegs = [];
+      const ok = [];
+      let area = 0;
       for (const seg of segs) {
-        for (const fr of _subtractCoveredSweep(seg, cursor, nw.nc, direction, ref, GAP)) {
-          if (fr.length_cm >= ZONE_MIN_LEN) newSegs.push(fr);
+        for (const fr of _freeSweepRanges(seg, cursor, nw.nc, nw.id, direction, ref)) {
+          if (fr.length_cm >= MIN_LEN && nw.nc * fr.length_cm >= MIN_AREA) { ok.push(fr); area += nw.nc * fr.length_cm; }
         }
       }
-      if (newSegs.length) {
-        for (const fr of newSegs) {
-          const def = { roomId: room.id, productId: nw.id, direction,
-            pos_cm: cursor, start_cm: fr.start_cm, length_cm: fr.length_cm };
-          result.push(def); ref.push(def);
-        }
-        cursor += nw.nc + GAP; placed = true; break;
-      }
+      if (ok.length && (!best || area > best.area + 0.01)) best = { nc: nw.nc, id: nw.id, segs: ok, area };
     }
-    if (!placed) cursor += smallestNc;
+    if (best) {
+      for (const fr of best.segs) {
+        const def = { roomId: room.id, productId: best.id, direction,
+          pos_cm: cursor, start_cm: fr.start_cm, length_cm: fr.length_cm };
+        result.push(def); ref.push(def);
+      }
+      cursor += best.nc + GAP;          // exact one-gap step to the next lane
+    } else {
+      cursor += smallestNc;             // nothing valid here → small step forward
+    }
   }
   return result;
 }
@@ -5907,6 +5921,14 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
       working = working.concat(_buildNarrowStaircase(room, direction, zLo, zHi, narrow, working, GAP));
     }
   }
+  // Final tidy: drop dust strips (< 30cm or < 0.12 m²) that sit entirely inside a
+  // slant zone — the unavoidable apex bits that only add clutter + warnings. Only
+  // inside slant zones, so straight-room base strips are never touched.
+  const inAnyZone = d => zones.some(([lo, hi]) => d.pos_cm >= lo - 0.01 && d.pos_cm + ncOf(d.productId) <= hi + 0.01);
+  working = working.filter(d => {
+    const isDust = d.length_cm < 30 || ncOf(d.productId) * d.length_cm < 1200;
+    return !(isDust && inAnyZone(d));
+  });
   return working;
 }
 
