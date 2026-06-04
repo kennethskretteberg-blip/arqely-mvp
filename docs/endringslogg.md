@@ -6,6 +6,11 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ## 2026-06-04 — UX: seleksjons-drevet kontekst-handlingsmeny
 
+- **`fe327c1` — Samme prinsipp overalt: klikk rad = velg/åpne, ✏️ = navn.** Utvidet
+  rom-fiksen til etasje-headere (klikk → toggle, ✏️ omdøp), prosjektliste-rader på
+  dashbordet (klikk → åpne prosjekt, ✏️ omdøp) og hindring-rader (fjernet villedende
+  cursor:text, ✏️ lagt til). Alle eksisterende rename-handlere gjenbrukt; dobbeltklikk
+  + høyreklikk «Gi nytt navn» beholdt.
 - **`fefdabd` — Klikk hele rom-raden for å velge rommet.** Navne-spennet i sidebar
   hadde egen onclick som startet omdøping (med stopPropagation), så klikk på navnet
   valgte ikke rommet. Fjernet den → hele raden kaller `selRoom`. Omdøping flyttet til
