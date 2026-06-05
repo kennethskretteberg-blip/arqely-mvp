@@ -4609,7 +4609,49 @@ function _updateCableSelection(familyName, categoryId) {
       }
     }
   }
+
+  // ── Manual: free choice of product + count (always available, not just the auto picks) ──
+  const _mRoom = S.rooms.find(r => r.id === roomId);
+  const _mSel = (_mRoom && _mRoom._cableManualSel) || {};
+  const _defProdId = _mSel.productId != null ? _mSel.productId
+    : (multiResult && multiResult.bestMulti ? multiResult.bestMulti.product.id
+      : (result.closest ? result.closest.product.id : prods[0].id));
+  const _defCount = _mSel.count || (multiResult && multiResult.cableCount ? multiResult.cableCount : 1);
+  html += `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+    <div style="color:var(--accent);font-weight:600;font-size:11px;margin-bottom:5px">✋ Manuelt — velg type + antall fritt</div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <select id="cable-manual-prod" onclick="event.stopPropagation()" style="flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:4px 6px;font-size:11px">
+        ${prods.map(p => `<option value="${p.id}"${String(p.id) === String(_defProdId) ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+      </select>
+      <div style="display:flex;align-items:center">
+        <button class="floor-choice-btn" style="padding:2px 9px;font-size:14px;border-radius:5px 0 0 5px" onclick="_cableManualCount(-1)" title="Færre kabler">−</button>
+        <input id="cable-manual-count" type="number" min="1" max="16" value="${_defCount}" onclick="event.stopPropagation()" style="width:38px;text-align:center;background:var(--surface2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);border-left:none;border-right:none;color:var(--text);padding:3px 2px;font-size:12px">
+        <button class="floor-choice-btn" style="padding:2px 9px;font-size:14px;border-radius:0 5px 5px 0" onclick="_cableManualCount(1)" title="Flere kabler">+</button>
+      </div>
+      <button class="floor-choice-btn" style="padding:4px 10px;font-size:11px;font-weight:600;background:var(--accent);color:#0d0e10" onclick="_cableManualPreview(${sq(familyName)},${categoryId})">Forhåndsvis ›</button>
+    </div>
+    <div style="font-size:10px;color:var(--dim);margin-top:3px">Setter du f.eks. 3 → nøyaktig 3 kabler tegnes.</div>
+  </div>`;
+
   container.innerHTML = html;
+}
+// Manual cable count stepper (in the cable selection panel).
+function _cableManualCount(delta) {
+  const inp = document.getElementById('cable-manual-count');
+  if (!inp) return;
+  inp.value = Math.max(1, Math.min(16, (parseInt(inp.value, 10) || 1) + delta));
+}
+// Manual: build + live-preview the user's freely chosen product + count.
+function _cableManualPreview(familyName, categoryId) {
+  const sel = document.getElementById('cable-manual-prod');
+  const cnt = document.getElementById('cable-manual-count');
+  if (!sel || !cnt) return;
+  const prod = HEATING_PRODUCTS.find(p => String(p.id) === sel.value);
+  if (!prod) return;
+  const count = Math.max(1, Math.min(16, parseInt(cnt.value, 10) || 1));
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (room) room._cableManualSel = { productId: prod.id, count };
+  _cablePreviewPlace(prod.id, count, familyName, categoryId);
 }
 function nettoM2Label(result) { return result.nettoM2 ? result.nettoM2.toFixed(1) : '?'; }
 
@@ -10729,9 +10771,27 @@ function _autoFillNCables(roomId, productId, nCables) {
       dims: [], roomType: room.roomType, targetWm2: room.targetWm2 };
     S.rooms.push(tempRoom);
     let cable = null;
-    try { cable = autoFillCable(tempRoom.id, productId); }
-    finally { S.rooms = S.rooms.filter(r => r !== tempRoom); }
-    if (!cable || !cable.runs || !cable.runs.length) continue;
+    try {
+      cable = autoFillCable(tempRoom.id, productId);
+      // NEVER drop a sub-room silently. If the good engine returns nothing (e.g. a very
+      // irregular sliver), fall back to the simple serpentine so this part is still covered
+      // and the cable count always matches the user's choice.
+      if (!cable || !cable.runs || !cable.runs.length) {
+        const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
+        const subSp = Math.max(minSp, Math.min(maxSp, ((compArea(sub) / 10000) / prod.cable_length_m) * 100));
+        const sdir = _suggestDirection(tempRoom);
+        const raw = generateCableSerpentine(tempRoom.id, productId, sdir, subSp, 'bl', null);
+        if (raw && raw.runs && raw.runs.length) {
+          cable = { id: S.counters.nextCableId++, roomId, productId, direction: sdir,
+            spacing_cm: subSp, startCorner: 'bl', runs: raw.runs,
+            totalLength_cm: prod.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
+        }
+      }
+    } finally { S.rooms = S.rooms.filter(r => r !== tempRoom); }
+    if (!cable || !cable.runs || !cable.runs.length) {
+      console.warn('_autoFillNCables: sub-room ' + i + ' could not be filled — coverage gap', sub);
+      continue;   // truly degenerate sub-polygon (rare); warned, not silent
+    }
     cable.roomId = roomId;               // re-key to the real room
     cable.multiCableIndex = i;
     cable.multiCableGroup = null;
