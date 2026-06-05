@@ -4,6 +4,18 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-04 — Varmekabel: ubegrenset antall kabler
+
+- **`07032b0` — Store rom kan nå prosjekteres med så mange kabler som trengs.**
+  `selectMultiCables` var hardkodet til maks 2× — nå effekt-drevet: N ≈ ønsket effekt /
+  kabel-effekt, med gyldig CC. Ny `_autoFillNCables` splitter perp-aksen i N like bånd
+  og legger én serpentin per bånd (indre bånd: ny `boundaryEdge='both'` → halv-CC mot
+  begge nabokabler, uniform CC). Alle kabel-paneler viser «N×» og plasserer N.
+  2-kabel-veien (delt start + lead-run) uendret; ny vei kun for N≥3. Tak 16 (praktisk
+  ubegrenset). Verifisert ekte InSnow (64 m²): 200 W/m²→13 kabler, 300→16, 0 overlapp.
+
+---
+
 ## 2026-06-04 — UX: seleksjons-drevet kontekst-handlingsmeny
 
 - **`fe327c1` — Samme prinsipp overalt: klikk rad = velg/åpne, ✏️ = navn.** Utvidet
