@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-04 — Varmekabel multi = N delrom × den gode motoren
+
+- **`7f63800` — Multi-kabel deler rommet i N reelle DELROM og kjører én-kabel-motoren i
+  hvert.** `_autoFillNCables` kjørte før den enkle serpentinen i et perp-BÅND av hele rom-
+  polygonet → «rektangulært bånd»-problem på L/hakk (udekket). Nå klipper `_clipPolygonToSlab`
+  rom-polygonet til hver like-areal slab → reelt sub-polygon, og `autoFillCable`
+  (boustrophedon/V6, full dekning + hjørne-til-hjørne) kjøres på et midlertidig delrom og
+  re-keyes til ekte rom. Hver kabel arver single-kabel-kvalitet; nabokabler møtes med ~én CC.
+  Verifisert: L-form 74 m² → 3 delrom à likt areal, alle boustrophedon, 91% (= single-kvalitet,
+  opp fra 88%). Manuell velger + forhåndsvisning (forrige økt) bruker nå denne motoren.
+
+---
+
 ## 2026-06-04 — Varmekabel: færre/store, bedre layout, manuell velger
 
 - **`6f8bf6f` — Punkt 3: manuelt valg + dekning% + live forhåndsvisning.** Kabel-velgeren
