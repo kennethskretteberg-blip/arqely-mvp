@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — ØKT-OPPSUMMERING: multi-kabel-motor (varmekabel)
+
+Samlet arbeid på multi-kabel-utlegg denne økta (detaljer i oppføringene under). Commits:
+`96dd460`, `825940d`, `0b06e87`, `6d006d9`, `e6906bd`, `4e51fa2`, `b08072d`, `f129876`.
+
+- **Retning etter dekning** + picker-bias; **↻ Retning** snur hele gruppa.
+- **Delt sone (hakk/døråpning) = ugyldig løsning** — auto velger den aldri, tvang nektes.
+- **Full gavl-dekning** i vertikal modus (skew-kabler godtas, ikke lenger forkastet).
+- **Lengde-klamp**: ingen kabel > produktlengde (trimmer sveip, aldri CC).
+- **Tette half-CC-sømmer** mellom soner.
+- **NØYAKTIG lik CC i alle soner** (felles CC → lik flateeffekt i hele rommet).
+- **Manuelt valg «Like soner» / «Korridor»** for 2 kabler; samme motor/regler for alle 2+.
+
+Status: alt deployet via Vercel. Restpunkt: ingen kjente. Merk testrom `__TESTGARD__` kan
+ligge igjen i BIV6-prosjektet (slettes manuelt).
+
+---
+
 ## 2026-06-05 — Multi-kabel: manuelt valg «Like soner» / «Korridor» (2+)
 
 Brukerønske: ha BEGGE multi-kabel-layoutene med et manuelt valg. Tidligere brukte 2 kabler en
