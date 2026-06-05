@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: NØYAKTIG lik CC i alle soner (lik flateeffekt)
+
+Kenneths prioritering: lik CC i alle soner (lik W/m²) > eksakt veggmargin. CC spriket før
+mellom sonene (14,2/11,7/13,2) fordi hver sone regnet sin EGEN CC, og vertex-snapping
+ubalanserte arealene.
+
+- **Én felles CC** regnes én gang i `_buildNCableZones`:
+  `sharedCC = clamp(nettoTotal_m2 / (N·cable_length_m) · 100, minSp, maxSp)`, og settes som
+  `tempRoom._forcedSpacingCm` på hver sone.
+- **Motorene tvinges til felles CC:** `generateCableBoustrophedon._solve`, `generateCableSkew`
+  og `generateCableV6` (inkl. V6 stage-7 lengde-opt hoppes over) bruker `_forcedSpacingCm` i
+  stedet for å utlede CC fra delroms-arealet.
+- **Like arealer:** droppet `_snapBoundsToVertices` for multi-kabel — like-areal-kuttet er nå
+  styrende (lik areal → lik lengde → lik CC virker). Motorene takler uregelmessige delrom.
+- **Resten absorberes i sveip-margin, aldri i CC:** `_trimCableToLength` trimmer sveip-
+  utstrekningen (sving-til-vegg) ned til produktlengden; half-CC-pinning ved sømmene beholdes.
+
+Verifisert (Garderobe herrer, vertikalt): alle tre kabler **CC 13,21 cm** (var
+14,2/11,7/13,2), lengder 182,7/183/183 m (alle ≤ 183), ~128 W/m² ≈ måltall 129. Enkeltkabel
++ 2-kabel + rektangulære rom upåvirket. LOCKED kabelregler urørt.
+
+---
+
 ## 2026-06-05 — Multi-kabel: godta skew-kabler (full gavl-dekning i vertikal modus)
 
 Gavl-sona i vertikal modus ble underfylt (serpentin-fallback ~130 m av 183 m). Årsak:

@@ -9584,6 +9584,11 @@ function generateCableSkew(roomId, productId) {
     };
   };
 
+  // Multi-cable zone: a shared CC is forced so every zone has IDENTICAL spacing (equal W/m²).
+  // Skip the per-zone bisection; the caller trims length via sweep margin, never CC.
+  if (room._forcedSpacingCm) {
+    return _run(Math.max(minSpEff, Math.min(maxSp, room._forcedSpacingCm)));
+  }
   // Fixed-length products: bisect CC to hit target length (smaller CC → more cable).
   if (!prod.cable_length_m) {
     const sp = Math.max(minSpEff, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
@@ -9774,6 +9779,11 @@ function generateCableBoustrophedon(roomId, productId, direction, startCorner) {
 
   // Spacing selection: fixed-length products bisect CC to hit target length.
   function _solve(dir) {
+    // Multi-cable zone: shared CC forced so all zones get IDENTICAL spacing (equal W/m²). Skip
+    // bisection and lay this zone at the shared CC; length is trimmed via sweep margin, never CC.
+    if (room._forcedSpacingCm) {
+      return _layout(dir, Math.max(minSpEff, Math.min(maxSp, room._forcedSpacingCm)));
+    }
     if (!prod.cable_length_m) {
       const sp = Math.max(minSpEff, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
       return _layout(dir, sp);
@@ -9815,7 +9825,10 @@ function generateCableV6(roomId, productId, direction, startCorner) {
   const minSp = (prod.min_spacing_mm || 50) / 10;
   const maxSp = (prod.max_spacing_mm || 200) / 10;
   let spacing;
-  if (prod.cable_length_m) {
+  if (room._forcedSpacingCm) {
+    // Multi-cable zone: shared CC forced → identical spacing in every zone (equal W/m²).
+    spacing = Math.max(minSp, Math.min(maxSp, room._forcedSpacingCm));
+  } else if (prod.cable_length_m) {
     const areas = roomAreas(room);
     const nettoM2 = areas.net / 10000;
     spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
@@ -9876,8 +9889,9 @@ function generateCableV6(roomId, productId, direction, startCorner) {
 
   let result;
 
-  // Stage 7: Length optimization
-  if (prod.cable_length_m) {
+  // Stage 7: Length optimization — SKIPPED when a shared CC is forced (multi-cable), since it
+  // would re-tune CC; here length is matched via sweep trim by the caller, keeping CC identical.
+  if (prod.cable_length_m && !room._forcedSpacingCm) {
     const optimized = _v6OptimizeLength(roomId, productId, direction, startCorner, prod.cable_length_m * 100, ha);
     if (optimized && optimized.runs.length > 0) {
       result = optimized;
@@ -10955,10 +10969,17 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
   const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
   const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
   const margin = _effectiveMarginCm(productId);
+  const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
+  const netM2 = roomAreas(room).net / 10000;
+  // ONE shared CC for ALL zones → identical W/m² across the whole room (Kenneth's priority).
+  // Each zone is forced to this spacing; small length differences are absorbed by the sweep
+  // trim (sweep-to-wall margin), never by varying CC.
+  const sharedCC = Math.max(minSp, Math.min(maxSp, (netM2 / (nCables * prod.cable_length_m)) * 100));
+  // (1) EQUAL-AREA cuts are authoritative (equal area → equal length → equal CC works). Do NOT
+  // vertex-snap here: snapping moved cuts onto notches and unbalanced the areas → unequal CC. The
+  // engines (skew/boustrophedon) handle irregular sub-rooms, so equal area beats "clean" cuts.
   let bounds = _equalAreaBandBounds(room, dir, nCables);
   if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
-  // (1) Snap cuts to clean vertex positions → rectangular sub-rooms, no uncovered triangle.
-  bounds = _snapBoundsToVertices(room, axis, bounds);
 
   const cables = [];
   let tmpId = -1;
@@ -10975,7 +10996,8 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       const seam = { min: i > 0, max: i < nCables - 1 };
       const tempRoom = { id: 'tmpcab_' + (tmpId--), name: '', floorId: room.floorId, partId: room.partId,
         shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
-        dims: [], roomType: room.roomType, targetWm2: room.targetWm2, _cableSeam: seam };
+        dims: [], roomType: room.roomType, targetWm2: room.targetWm2, _cableSeam: seam,
+        _forcedSpacingCm: sharedCC };   // identical CC in every zone (equal W/m²)
       S.rooms.push(tempRoom);
       let cable = null;
       try {
@@ -10986,13 +11008,11 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
         // path in pathEls, not runs — e.g. the slanted gable zone, where skew gives ~full coverage
         // while plain serpentine under-fills). Only fall back to the simple serpentine if NEITHER.
         if (!_cableHasGeom(cable)) {
-          const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
-          const subSp = Math.max(minSp, Math.min(maxSp, (subAreaM2 / prod.cable_length_m) * 100));
-          const raw = generateCableSerpentine(tempRoom.id, productId, dir, subSp, 'bl', null);
+          const raw = generateCableSerpentine(tempRoom.id, productId, dir, sharedCC, 'bl', null);
           if (raw && raw.runs && raw.runs.length) {
             cable = { id: S.counters.nextCableId++, roomId, productId, direction: dir,
-              spacing_cm: subSp, startCorner: 'bl', runs: raw.runs,
-              totalLength_cm: prod.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
+              spacing_cm: sharedCC, startCorner: 'bl', runs: raw.runs,
+              totalLength_cm: raw.totalLength_cm || prod.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
           }
         }
       } finally { S.varmefolie.direction = _savedDir; S.rooms = S.rooms.filter(r => r !== tempRoom); }
