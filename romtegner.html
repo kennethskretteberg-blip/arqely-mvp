@@ -10671,11 +10671,39 @@ function _equalAreaBandBounds(room, direction, nBands) {
   return bounds.length === nBands + 1 ? bounds : null;
 }
 
-/** Generic N-cable fill: split the room's perpendicular axis into N EQUAL-AREA bands and
- *  lay one serpentine per band (interior bands use half-CC on both shared boundaries, so
- *  neighbours meet with exactly one CC — no double-CC cold seam). Each cable is an
- *  independent circuit in its band. Returns an array of N cable objects (or null if it
- *  cannot produce at least 2). Used for 3+ cables; 2 keeps the dedicated lead-run path. */
+/** Clip a polygon to an axis-aligned slab lo ≤ coord ≤ hi (Sutherland–Hodgman against
+ *  two half-planes). Returns the REAL sub-polygon — for an L/notch/slant room the slab
+ *  cut yields the actual part of the room in that band. Returns null if degenerate. */
+function _clipPolygonToSlab(points, axis, lo, hi) {
+  const coord = p => axis === 'x' ? p.x : p.y;
+  const clipHalf = (poly, keepGE, bound) => {
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const ca = coord(a), cb = coord(b);
+      const inA = keepGE ? ca >= bound - 1e-9 : ca <= bound + 1e-9;
+      const inB = keepGE ? cb >= bound - 1e-9 : cb <= bound + 1e-9;
+      if (inA) out.push(a);
+      if (inA !== inB) {
+        const t = (bound - ca) / ((cb - ca) || 1e-9);
+        out.push({ x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) });
+      }
+    }
+    return out;
+  };
+  let poly = clipHalf(points, true, lo);
+  if (poly.length < 3) return null;
+  poly = clipHalf(poly, false, hi);
+  return poly.length >= 3 ? poly : null;
+}
+
+/** Generic N-cable fill — Kenneth's model: split the room into N REAL sub-rooms (equal-area
+ *  slab cuts of the actual polygon, so L/notch/slant shapes are handled) and run the SAME
+ *  good single-cable engine (autoFillCable → boustrophedon/V6, full coverage + corner-to-
+ *  corner + per-cell equalisation) in each sub-room. Each cable thus inherits the quality of
+ *  "one cable per room". Neighbours meet at a cut line with ~one CC (the engine keeps a wall
+ *  margin on each side). Returns N cable objects (or null if < 2). For 3+ cables; 2 keeps the
+ *  dedicated lead-run path. */
 function _autoFillNCables(roomId, productId, nCables) {
   const room = S.rooms.find(r => r.id === roomId);
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -10683,39 +10711,32 @@ function _autoFillNCables(roomId, productId, nCables) {
   nCables = Math.max(2, Math.floor(nCables));
 
   const dir = _suggestDirection(room);
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
-  const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
-  // Equal-AREA band boundaries (falls back to equal-width if the scan fails).
+  const axis = dir === 'v' ? 'x' : 'y';   // perpendicular axis the cuts run across
+  const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
+  const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
   let bounds = _equalAreaBandBounds(room, dir, nCables);
   if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
 
-  // Spacing so each cable covers roughly area/nCables, clamped to the product limits.
-  const areas = roomAreas(room);
-  const areaPerCableM2 = (areas.net / 10000) / nCables;
-  const minSp = (prod.min_spacing_mm || 50) / 10;
-  const maxSp = (prod.max_spacing_mm || 200) / 10;
-  const spacing = Math.max(minSp, Math.min(maxSp, (areaPerCableM2 / prod.cable_length_m) * 100));
-  const startCorner = 'bl';
-
   const cables = [];
+  let tmpId = -1;
   for (let i = 0; i < nCables; i++) {
-    const zone = {
-      perpMin: bounds[i],
-      perpMax: bounds[i + 1],
-      boundaryEdge: i === 0 ? 'max' : (i === nCables - 1 ? 'min' : 'both')
-    };
-    const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone);
-    if (!raw || !raw.runs || raw.runs.length === 0) continue;   // skip a band too thin to fit a run
-    cables.push({
-      id: S.counters.nextCableId++, roomId, productId,
-      direction: dir, spacing_cm: spacing, startCorner,
-      runs: raw.runs,
-      totalLength_cm: prod.cable_length_m ? prod.cable_length_m * 100 : raw.totalLength_cm,
-      lockedEnd: !!prod.cable_length_m,
-      multiCableIndex: i, multiCableGroup: null,
-      zoneBounds: zone
-    });
+    const sub = _clipPolygonToSlab(room.points, axis, bounds[i], bounds[i + 1]);
+    if (!sub) continue;
+    // Temporary sub-room so the single-cable engine runs on the real sub-polygon. No
+    // hindrings/zones inherit (different id) — acceptable; obstacles are rare in multi-rooms.
+    const tempRoom = { id: 'tmpcab_' + (tmpId--), name: '', floorId: room.floorId, partId: room.partId,
+      shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
+      dims: [], roomType: room.roomType, targetWm2: room.targetWm2 };
+    S.rooms.push(tempRoom);
+    let cable = null;
+    try { cable = autoFillCable(tempRoom.id, productId); }
+    finally { S.rooms = S.rooms.filter(r => r !== tempRoom); }
+    if (!cable || !cable.runs || !cable.runs.length) continue;
+    cable.roomId = roomId;               // re-key to the real room
+    cable.multiCableIndex = i;
+    cable.multiCableGroup = null;
+    cable.zoneBounds = { perpMin: bounds[i], perpMax: bounds[i + 1] };
+    cables.push(cable);
   }
   if (cables.length < 2) return null;
   const groupId = cables[0].id;
