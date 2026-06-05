@@ -10958,7 +10958,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
 
   const cables = [];
   let tmpId = -1;
-  let covSum = 0, areaSum = 0;
+  let covSum = 0, areaSum = 0, splitRuns = 0, totalRuns = 0;
   const _savedDir = S.varmefolie.direction;     // (2) force this run direction for ALL sub-rooms
   try {
     for (let i = 0; i < nCables; i++) {
@@ -11000,6 +11000,11 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       // (4) Coverage book-keeping per sub-room → direction score for the caller.
       areaSum += subAreaM2;
       covSum += (cable ? _cableCoverageFrac(cable, subAreaM2) : 0) * subAreaM2;
+      // SPLIT-ZONE signal: a run broken into ≥2 segments means a void (notch/doorway) physically
+      // splits the zone and the cable has to bridge across it — an ugly layout. Count split runs
+      // so the caller can prefer the direction whose zones stay in one piece (e.g. vertical zones
+      // when a doorway notch would split a horizontal top band).
+      if (cable && cable.runs) for (const r of cable.runs) { totalRuns++; if ((r.segments || []).length > 1) splitRuns++; }
       if (!cable || !cable.runs || !cable.runs.length) {
         console.warn('_buildNCableZones: sub-room ' + i + ' (' + dir + ') could not be filled — coverage gap', sub);
         continue;   // truly degenerate sub-polygon (rare); warned, not silent
@@ -11012,10 +11017,12 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
     }
   } finally { S.varmefolie.direction = _savedDir; }
   if (cables.length < 2) return null;
-  return { cables, score: areaSum ? covSum / areaSum : 0, dir };
+  const splitFrac = totalRuns ? splitRuns / totalRuns : 0;
+  // Coverage minus a split penalty: a direction whose zones get cut in two by a void scores lower.
+  return { cables, score: (areaSum ? covSum / areaSum : 0) - 0.6 * splitFrac, dir };
 }
 
-function _autoFillNCables(roomId, productId, nCables) {
+function _autoFillNCables(roomId, productId, nCables, forcedDir) {
   const room = S.rooms.find(r => r.id === roomId);
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!room || !prod || !prod.cable_length_m) return null;
@@ -11029,9 +11036,13 @@ function _autoFillNCables(roomId, productId, nCables) {
   // Bias toward the picker direction (S.varmefolie.direction), but always try both and switch
   // only on a clear coverage win (>2%). So a deliberate pick (or a tie, e.g. a rectangle) is
   // honoured, while a default 'v' that would leave a gable uncovered still flips to 'h'.
-  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+  // forcedDir (from the "↻ Retning" toggle) overrides everything → only that direction is built,
+  // so the user always gets the orientation they asked for (e.g. vertical zones when a doorway
+  // notch would split a horizontal top band). Otherwise bias toward the picker and switch only on
+  // a clear coverage-minus-split win.
+  const userDir = forcedDir || ((S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null);
   const primary = userDir || _suggestDirection(room);
-  const dirs = primary === 'v' ? ['v', 'h'] : ['h', 'v'];
+  const dirs = forcedDir ? [forcedDir] : (primary === 'v' ? ['v', 'h'] : ['h', 'v']);
   let best = null;
   for (const dir of dirs) {
     const res = _buildNCableZones(room, productId, prod, nCables, dir);
@@ -11046,8 +11057,8 @@ function _autoFillNCables(roomId, productId, nCables) {
   return cables;
 }
 
-function autoFillMultiCable(roomId, productId, nCables) {
-  if (nCables && nCables > 2) return _autoFillNCables(roomId, productId, nCables);
+function autoFillMultiCable(roomId, productId, nCables, forcedDir) {
+  if (nCables && nCables > 2) return _autoFillNCables(roomId, productId, nCables, forcedDir);
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -16476,6 +16487,27 @@ function _cableSpacingDelta(deltaMm) {
 function _cableFlipDirection() {
   const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
   if (!cable) return;
+  // Multi-cable group: flipping ONE cable would break the shared zoning. Re-run the WHOLE group
+  // in the opposite direction (forced) so the zones reorient together — e.g. switch from
+  // horizontal bands (split by a doorway notch) to clean vertical zones.
+  if (cable.multiCableGroup != null) {
+    const group = S.cables.filter(c => c.multiCableGroup === cable.multiCableGroup && c.roomId === cable.roomId);
+    const newDir = cable.direction === 'v' ? 'h' : 'v';
+    const fresh = autoFillMultiCable(cable.roomId, cable.productId, group.length, newDir);
+    if (fresh && fresh.length >= 2) {
+      pushUndo();
+      const oldIds = new Set(group.map(c => c.id));
+      S.cables = S.cables.filter(c => !oldIds.has(c.id));
+      S.cables.push(...fresh);
+      S.ui.selectedCableId = fresh[0].id;
+      S.varmefolie.direction = newDir;
+      _cableViolationsDirty = true;
+      renderSidebar(); updateCtxBar(); render();
+    } else {
+      _showToast('Kunne ikke snu retningen for denne kabelgruppen', 'warn');
+    }
+    return;
+  }
   pushUndo();
   const newDir = cable.direction === 'v' ? 'h' : 'v';
   let spacing = cable.spacing_cm;

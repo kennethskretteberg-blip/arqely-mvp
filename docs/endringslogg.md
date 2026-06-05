@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: retningskontroll + split-sone-straff
+
+Bruker meldte at horisontale soner var uegnet der en døråpning/hakk fysisk DELER den øverste
+sona i to (kabelen må bro over hakket), og at man ikke fikk valgt retning.
+
+- **Split-sone-straff i `_buildNCableZones`-scoren.** Teller strenger som er brutt i ≥2
+  segmenter (= en void/hakk deler sona). Auto-retningsvalget trekker fra `0.6 × split-andel`
+  fra dekningsscoren → for et rom der et hakk deler det horisontale topp-båndet (mange
+  splittede strenger) velger auto nå VERTIKALE soner i stedet. Verifisert på Garderobe herrer:
+  'h' gir K1 med 20/31 splittede strenger (score 0,88→0,69), 'v' gir 0 splittede (0,86) → auto
+  velger 'v'.
+- **Tvunget retning:** `autoFillMultiCable(roomId, productId, n, forcedDir)` →
+  `_autoFillNCables(..., forcedDir)` bygger kun den retningen (hopper over auto-valget).
+- **`↻ Retning`-knappen** (`_cableFlipDirection`) håndterer nå multi-kabel-grupper: i stedet
+  for å flippe én kabel kjøres HELE gruppa på nytt i motsatt retning (tvunget) og erstattes,
+  så sonene re-orienteres samlet. Verifisert: v→h→v gir samme layout tilbake, ingen feil.
+
+LOCKED kabelregler urørt; enkeltkabel + 2-kabel upåvirket.
+
+---
+
 ## 2026-06-05 — Multi-kabel: lengde-klamp (≤ produktlengde) + V6-søm-pinning
 
 Avdekket på det FAKTISKE rommet (Garderobe herrer, H7 gt5) at multi-kabel-utlegget hadde
