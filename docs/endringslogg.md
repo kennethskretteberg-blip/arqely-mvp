@@ -4,6 +4,18 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-04 — Bakgrunn: alltid-synlig hurtigkontroll
+
+- **`cb4a778` — Synlighets-/dimme-kontroll for bakgrunn tilbake på toppen.** Kontrollen
+  lå kun i none-state-ctxbaren (kun når ingenting var valgt) → forsvant når et rom ble
+  valgt. Ny `_bgCtxGroupHtml()` prepende i `updateCtxBar` for alle hvile-tilstander
+  (skjult i transiente moduser + før kalibrering): Vis-toggle + dimme-slider + «…»-meny
+  (målestokk/bytt/fjern), bundet til det aktive laget (synket med sidebar-lista). Fjernet
+  none-state-duplikatet + død flytende `#bg-panel`-HTML. Rendering og prosjektdata urørt
+  (trygg fiks — full S.bgs→bgLayers-migrering droppet pga. lav gevinst/høy risiko).
+
+---
+
 ## 2026-06-04 — Varmekabel: ubegrenset antall kabler
 
 - **`07032b0` — Store rom kan nå prosjekteres med så mange kabler som trengs.**
