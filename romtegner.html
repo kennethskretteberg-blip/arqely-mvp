@@ -10863,14 +10863,14 @@ function _cableCoverageFrac(cable, areaM2) {
   return (len * (cable.spacing_cm || 0) / 10000) / areaM2;
 }
 
-function _autoFillNCables(roomId, productId, nCables) {
-  const room = S.rooms.find(r => r.id === roomId);
-  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!room || !prod || !prod.cable_length_m) return null;
-  nCables = Math.max(2, Math.floor(nCables));
-
-  const dir = _suggestDirection(room);
-  const altDir = dir === 'v' ? 'h' : 'v';
+// Build N equal-area sub-rooms for ONE run direction and fill each with the good single-cable
+// engine. Returns { cables, score } where score = area-weighted coverage fraction (0..1), or
+// null if < 2 sub-rooms could be filled. The caller tries both directions and keeps the best
+// — for irregular rooms (gable/notch) the dominant direction is NOT always the best coverage:
+// e.g. a slanted gable defeats vertical cuts (sub-room 0 → skew/0%) but horizontal top/middle/
+// bottom bands isolate the gable in one band and tile the rest cleanly.
+function _buildNCableZones(room, productId, prod, nCables, dir) {
+  const roomId = room.id;
   const axis = dir === 'v' ? 'x' : 'y';   // perpendicular axis the cuts run across
   const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
   const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
@@ -10881,7 +10881,8 @@ function _autoFillNCables(roomId, productId, nCables) {
 
   const cables = [];
   let tmpId = -1;
-  const _savedDir = S.varmefolie.direction;     // (2) force a consistent run direction
+  let covSum = 0, areaSum = 0;
+  const _savedDir = S.varmefolie.direction;     // (2) force this run direction for ALL sub-rooms
   try {
     for (let i = 0; i < nCables; i++) {
       const sub = _clipPolygonToSlab(room.points, axis, bounds[i], bounds[i + 1]);
@@ -10891,19 +10892,11 @@ function _autoFillNCables(roomId, productId, nCables) {
         shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
         dims: [], roomType: room.roomType, targetWm2: room.targetWm2 };
       S.rooms.push(tempRoom);
-      let cable = null, usedDir = dir;
+      let cable = null;
       try {
-        // (2) Run the dominant direction for ALL sub-rooms so the strings are parallel.
+        // (2) Same direction for every sub-room → all strings parallel, cables tile evenly.
         S.varmefolie.direction = dir;
         cable = autoFillCable(tempRoom.id, productId);
-        let cov = _cableCoverageFrac(cable, subAreaM2);
-        // (4) Coverage check — if a sub-room is badly covered, try the other direction.
-        if (!cable || cov < 0.90) {
-          S.varmefolie.direction = altDir;
-          const alt = autoFillCable(tempRoom.id, productId);
-          const altCov = _cableCoverageFrac(alt, subAreaM2);
-          if (alt && altCov > cov) { cable = alt; cov = altCov; usedDir = altDir; }
-        }
         // NEVER drop a sub-room: fall back to the simple serpentine so it is still covered.
         if (!cable || !cable.runs || !cable.runs.length) {
           const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
@@ -10916,8 +10909,11 @@ function _autoFillNCables(roomId, productId, nCables) {
           }
         }
       } finally { S.varmefolie.direction = _savedDir; S.rooms = S.rooms.filter(r => r !== tempRoom); }
+      // (4) Coverage book-keeping per sub-room → direction score for the caller.
+      areaSum += subAreaM2;
+      covSum += (cable ? _cableCoverageFrac(cable, subAreaM2) : 0) * subAreaM2;
       if (!cable || !cable.runs || !cable.runs.length) {
-        console.warn('_autoFillNCables: sub-room ' + i + ' could not be filled — coverage gap', sub);
+        console.warn('_buildNCableZones: sub-room ' + i + ' (' + dir + ') could not be filled — coverage gap', sub);
         continue;   // truly degenerate sub-polygon (rare); warned, not silent
       }
       cable.roomId = roomId;               // re-key to the real room
@@ -10928,6 +10924,29 @@ function _autoFillNCables(roomId, productId, nCables) {
     }
   } finally { S.varmefolie.direction = _savedDir; }
   if (cables.length < 2) return null;
+  return { cables, score: areaSum ? covSum / areaSum : 0, dir };
+}
+
+function _autoFillNCables(roomId, productId, nCables) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod || !prod.cable_length_m) return null;
+  nCables = Math.max(2, Math.floor(nCables));
+
+  // (4) DIRECTION BY COVERAGE: try both run directions, keep whichever tiles the room best.
+  // The dominant-direction heuristic alone fails on gable/notch rooms (vertical cuts through a
+  // slanted gable leave a whole sub-room uncovered); measuring total coverage picks the winner.
+  const primary = _suggestDirection(room);
+  const dirs = primary === 'v' ? ['v', 'h'] : ['h', 'v'];
+  let best = null;
+  for (const dir of dirs) {
+    const res = _buildNCableZones(room, productId, prod, nCables, dir);
+    if (!res) continue;
+    // Prefer the most complete fill; only switch off the primary direction on a clear win.
+    if (!best || res.score > best.score + (res.dir === primary ? -1e-6 : 0.02)) best = res;
+  }
+  if (!best || best.cables.length < 2) return null;
+  const cables = best.cables;
   const groupId = cables[0].id;
   cables.forEach(c => c.multiCableGroup = groupId);
   return cables;

@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: velg retning etter dekning (gavl/hakk-rom)
+
+- **`_autoFillNCables` velger nå kjøreretning etter total dekning, ikke bare
+  `_suggestDirection`.** Den gamle koden låste alltid dominansretningen. På et rom med
+  skrå gavl (f.eks. Garderobe herrer, 72,5 m²) ga VERTIKALE kutt et helt udekket delrom
+  (gavlen → motoren «skew» → 0 %, samlet 61 %), mens HORISONTALE topp/midt/bunn-bånd
+  isolerer gavlen i ett bånd og tiler resten rent (80 % / 94 % / 97 % → samlet **93 %**).
+  Refaktorert: ny `_buildNCableZones(room, productId, prod, n, dir)` bygger N like-areal
+  delrom for ÉN retning og returnerer `{cables, score}` (areal-vektet dekningsgrad);
+  `_autoFillNCables` kjører den for BEGGE retninger og beholder den beste (med liten
+  hysterese mot dominansretningen så vi bare bytter ved klar gevinst). Beholder snapping
+  til verteks, konsistent retning for alle delrom, serpentin-fallback og aldri-dropp.
+  Verifisert på den eksakte Garderobe-geometrien: 61 % → 93 %, 3 kabler, alle 'h'.
+  RESTPUNKT: tynne kalde sømmer mellom båndene (hvert bånd holder veggmargin mot kuttet);
+  halv-CC-stramming ved sømmene gjenstår som egen oppgave. LOCKED kabelregler urørt;
+  enkeltkabel + rektangulære rom uendret.
+
+---
+
 ## 2026-06-05 — Multi-kabel: rene delrom uten udekket trekant
 
 - **Rene delrom — snap kutt til verteks + konsistent retning + deknings-retry.**
