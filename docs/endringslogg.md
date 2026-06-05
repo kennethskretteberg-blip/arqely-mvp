@@ -4,6 +4,31 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: tette sømmer (halv-CC delte vegger) + picker-retning
+
+Etter Kenneths modell: 3 like soner, hver kabel legges normalt, men **veggen som deles
+med nabosona er halv-CC** → full CC mellom siste streng i sone N og første streng i sone
+N+1 (ingen kald stripe). Samme prinsipp som to-kabel-stien allerede bruker (`boundaryEdge`).
+
+- **Seam-bevisst streng-plassering i `generateCableBoustrophedon`.** Nytt `room._cableSeam`
+  `{min,max}` (settes kun på midlertidige delrom). En kant som deles med en nabokabel er
+  IKKE vegg: ytterste streng pinnes eksakt halv-CC fra kuttet, og resten (slack) legges mot
+  ekte vegg. **Kantsoner** (én søm) pinnes; **midtsona** (to sømmer) beholder liten
+  veggmargin + sentrering — halv-CC-margin på begge sider der ville droppet en streng og
+  blåst opp resten (løsere sømmer). Enkeltkabel uendret (`_cableSeam` udefinert → identisk
+  sentrert layout).
+- **`_buildNCableZones`** markerer hver delroms-kant som søm (`min: i>0`, `max: i<N-1`).
+- **Retning følger picker:** `_autoFillNCables` biaser mot `S.varmefolie.direction`
+  (retningsvelgeren) men prøver fortsatt begge og bytter kun ved klar deknings-gevinst
+  (>2 %) — så et bevisst valg/uavgjort (rektangel) æres, mens default 'v' som ville latt en
+  gavl stå udekket likevel flipper til 'h'.
+
+Målt: GABLE-rommet K2|K3-søm **19 → 14 cm** (ideal 13), K1|K2 14 cm; RECT 15/15 (ideal
+13,1) — ~1,5–2 cm over ideal (uunngåelig hårfin rest når sonebredde ≠ multiplum av CC ved
+låst kabellengde). Dekning 93–96 %. LOCKED kabelregler urørt; enkeltkabel + 2-kabel uendret.
+
+---
+
 ## 2026-06-05 — Multi-kabel: velg retning etter dekning (gavl/hakk-rom)
 
 - **`_autoFillNCables` velger nå kjøreretning etter total dekning, ikke bare

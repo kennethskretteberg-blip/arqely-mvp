@@ -9636,13 +9636,31 @@ function generateCableBoustrophedon(roomId, productId, direction, startCorner) {
 
     const perpVals = room.points.map(p => p[perpAxis]);
     const rawPerpMin = Math.min(...perpVals), rawPerpMax = Math.max(...perpVals);
-    const perpMin = rawPerpMin + margin, perpMax = rawPerpMax - margin;
-    const usable = perpMax - perpMin;
-    if (usable <= 0) return null;
+    // Seam-aware run placement: an edge shared with a neighbour cable (room._cableSeam, set only
+    // on multi-cable sub-rooms) is NOT a wall — pin the outermost run exactly half-CC from the
+    // cut so the gap across the seam ≈ one CC (continuous coverage, no cold stripe). Wall edges
+    // keep the supplier margin and absorb the leftover slack. Single-cable rooms: seam undefined
+    // → identical centred layout as before.
+    const seam = room._cableSeam;
+    const sMin = !!(seam && seam.min), sMax = !!(seam && seam.max);
+    const bothSeam = sMin && sMax;
+    const hc = spacing / 2;
+    // Pin half-CC ONLY on a sole-seam edge (boundary zone). A both-seam middle zone keeps the
+    // small wall margin on both edges + centres: half-CC margins there would drop a run and
+    // bloat the leftover (looser seams). With centring its leftover is minimal and the tight
+    // neighbour (pinned) carries the seam.
+    const loBound = rawPerpMin + ((sMin && !bothSeam) ? hc : margin);
+    const hiBound = rawPerpMax - ((sMax && !bothSeam) ? hc : margin);
+    const usable = hiBound - loBound;
+    if (usable < -1e-6) return null;
     const N = Math.max(1, Math.floor(usable / spacing + 1e-9) + 1);
-    const sideGap = (usable - (N - 1) * spacing) / 2;
+    const leftover = usable - (N - 1) * spacing;
+    let firstPos;
+    if (sMin && !sMax)      firstPos = loBound;                       // boundary zone: pin lo seam, leftover → hi wall
+    else if (sMax && !sMin) firstPos = hiBound - (N - 1) * spacing;   // boundary zone: pin hi seam, leftover → lo wall
+    else                    firstPos = loBound + leftover / 2;        // middle/single: centre
     const runUs = [];
-    for (let i = 0; i < N; i++) runUs.push(perpMin + sideGap + i * spacing);
+    for (let i = 0; i < N; i++) runUs.push(firstPos + i * spacing);
 
     const roomH = S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3);
     const roomFZ = (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3);
@@ -10888,9 +10906,13 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       const sub = _clipPolygonToSlab(room.points, axis, bounds[i], bounds[i + 1]);
       if (!sub) continue;
       const subAreaM2 = compArea(sub) / 10000;
+      // (3) Tight seams: mark which perp edges are shared cuts (not walls) so the engine pins
+      // the outermost run half-CC from them → full CC across each seam, no cold stripe. The
+      // min cut = bounds[i] (lower perp), max cut = bounds[i+1] (upper perp).
+      const seam = { min: i > 0, max: i < nCables - 1 };
       const tempRoom = { id: 'tmpcab_' + (tmpId--), name: '', floorId: room.floorId, partId: room.partId,
         shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
-        dims: [], roomType: room.roomType, targetWm2: room.targetWm2 };
+        dims: [], roomType: room.roomType, targetWm2: room.targetWm2, _cableSeam: seam };
       S.rooms.push(tempRoom);
       let cable = null;
       try {
@@ -10933,10 +10955,16 @@ function _autoFillNCables(roomId, productId, nCables) {
   if (!room || !prod || !prod.cable_length_m) return null;
   nCables = Math.max(2, Math.floor(nCables));
 
-  // (4) DIRECTION BY COVERAGE: try both run directions, keep whichever tiles the room best.
-  // The dominant-direction heuristic alone fails on gable/notch rooms (vertical cuts through a
-  // slanted gable leave a whole sub-room uncovered); measuring total coverage picks the winner.
-  const primary = _suggestDirection(room);
+  // DIRECTION: honour the direction picker (S.varmefolie.direction) exactly like the single-cable
+  // engine — if the user explicitly chose a direction, the zones (and runs) follow it. When no
+  // direction is set (auto), try BOTH and keep whichever tiles the room best: the dominant-
+  // direction heuristic alone fails on gable/notch rooms (vertical cuts through a slanted gable
+  // leave a whole sub-room uncovered), so coverage picks the winner.
+  // Bias toward the picker direction (S.varmefolie.direction), but always try both and switch
+  // only on a clear coverage win (>2%). So a deliberate pick (or a tie, e.g. a rectangle) is
+  // honoured, while a default 'v' that would leave a gable uncovered still flips to 'h'.
+  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+  const primary = userDir || _suggestDirection(room);
   const dirs = primary === 'v' ? ['v', 'h'] : ['h', 'v'];
   let best = null;
   for (const dir of dirs) {
