@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: godta skew-kabler (full gavl-dekning i vertikal modus)
+
+Gavl-sona i vertikal modus ble underfylt (serpentin-fallback ~130 m av 183 m). Årsak:
+`_buildNCableZones` sjekket kun `cable.runs.length`, men **skew-motoren lagrer banen i
+`pathEls`, ikke `runs`** — så en gyldig skew-kabel ble forkastet og falt til serpentin.
+
+- Ny `_cableHasGeom(cable)` = har `runs` ELLER `pathEls`. Brukt i alle tre stedene
+  `_buildNCableZones` sjekket «har kabelen geometri» (fallback-trigger, sluttsjekk).
+- Dekningsscoren bruker `cable.coverage` for skew-kabler (ingen runs å summere).
+- Split-deteksjon/pin/trim hopper trygt over runs-løse skew-kabler.
+
+Verifisert (Garderobe herrer, vertikalt): gavl-sona K1 = skew **181,6 m** (var serpentin
+130 m), K2/K3 boustrophedon 182,3/183 m — alle ≤ 183 m, full gavl-dekning, fargekodet riktig.
+LOCKED kabelregler urørt.
+
+---
+
 ## 2026-06-05 — Multi-kabel: delt sone = ugyldig løsning (ikke bare straffet)
 
 Etter brukerkrav: «hvis en sone blir delt i to, så må det bli et ugyldig løsning». Oppgraderte
