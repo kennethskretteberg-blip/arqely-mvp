@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: rene delrom uten udekket trekant
+
+- **Rene delrom — snap kutt til verteks + konsistent retning + deknings-retry.**
+  `_autoFillNCables` forbedret etter prompt-kabel-multi-rene-soner: (1) **Smartere
+  kuttlinjer** — ny `_snapBoundsToVertices` snapper hvert like-areal-kutt til nærmeste
+  rom-verteks-perp-koordinat innenfor toleranse, så hvert delrom blir mest mulig
+  REKTANGULÆRT (isolerer hakk/skråvegg i ett delrom i stedet for å kutte tvers gjennom
+  → fjerner den udekkede trekanten i midten). (2) **Konsistent retning** — kjøreretningen
+  låses til rommets dominansretning for ALLE delrom via `S.varmefolie.direction` (forced
+  dir), så `autoFillCable` ikke re-velger pr. delrom → alle strenger parallelle. (3)
+  **Deknings-sjekk** — ny `_cableCoverageFrac`; hvis et delrom dekker <90 %, prøv alt-
+  retning og behold den beste; serpentin-fallback hvis fortsatt tomt (aldri stille dropp).
+  Verifisert: L-hakk/notch → 3 kabler, samme retning, ~96 % dekning, kutt snappet til
+  notch-verteks; skråvegg-gavl → rene rektangler + isolert trapes-rest (uunngåelig pr.
+  LOCKED lik-strenglengde). LOCKED kabelregler urørt; enkeltkabel + rektangulære rom
+  uendret.
+
+---
+
 ## 2026-06-04 — Varmekabel: manuelt valg i RIKTIG panel
 
 - **`55d4a8c` — Manuell-seksjon + dekning% + preview lagt i det LIVE panelet.** Forrige
