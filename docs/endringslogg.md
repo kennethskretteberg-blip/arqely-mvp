@@ -6,6 +6,15 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ## 2026-06-04 — Varmekabel multi = N delrom × den gode motoren
 
+- **`85e9c8c` — Aldri dropp en kabel + fri manuell type/antall.** (1) `_autoFillNCables`
+  droppet et delrom stille hvis den gode motoren ga ingen runs på en uregelmessig del
+  (skrå gavl/hakk) → 3 valgt ble 2 tegnet, en del udekket. Nå: fallback til serpentin på
+  sub-polygonet (`_engine='serpentine-fallback'`) → kabelen plasseres alltid; kun ekte
+  slivere droppes (med `console.warn`). Verifisert: skrå-gavl → 3 kabler (2 boustrophedon +
+  1 fallback), L/T → 3 boustrophedon. (2) Ny «Manuelt»-seksjon i kabel-velgeren: type-
+  dropdown (alle familie-varianter) + antall-stepper (1–16) + «Forhåndsvis» → bygger
+  N-delrom-layout + live preview (Bruk/Avbryt), valg huskes. Verifisert: antall=4 → 4 kabler.
+
 - **`7f63800` — Multi-kabel deler rommet i N reelle DELROM og kjører én-kabel-motoren i
   hvert.** `_autoFillNCables` kjørte før den enkle serpentinen i et perp-BÅND av hele rom-
   polygonet → «rektangulært bånd»-problem på L/hakk (udekket). Nå klipper `_clipPolygonToSlab`
