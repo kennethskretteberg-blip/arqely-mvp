@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: lengde-klamp (≤ produktlengde) + V6-søm-pinning
+
+Avdekket på det FAKTISKE rommet (Garderobe herrer, H7 gt5) at multi-kabel-utlegget hadde
+to feil som det syntetiske testrommet ikke fanget: (1) K2/K3 krevde **186,6/186,5 m** av en
+**183 m**-kabel — fysisk umulig; (2) gavl-sona (V6) sin søm-kant lå **22 cm** fra kuttet.
+
+- **`_trimCableToLength(cable, targetCm)`** — ingen kabel kan kreve mer enn produktlengden.
+  Ved overskudd (diskret strengantall bommer oppover) kortes strengene ved å trimme sweep-
+  endene, fordelt PROPORSJONALT med hver strengs kapasitet (lange strenger gir mest, korte
+  gavl/topp-strenger urørt → like-spenn-strenger trimmes likt, så celle-lik-lengde beholdes).
+  Perp-posisjoner urørt → sømmene flytter seg ikke.
+- **`_pinCableSeamToCut(...)`** — for motorer som ignorerer `_cableSeam` (V6/skew/serpentin på
+  en uregelmessig yttersone): skyv ALLE strenger likt langs perp-aksen så søm-kanten havner
+  halv-CC fra kuttet → én CC over sømmen. Kun yttersoner (én søm), klampet så veggsiden
+  beholder ≥ margin.
+- Begge kalles i `_buildNCableZones` etter at hver kabel er bygd (før push/dekningsmåling).
+
+Verifisert: Garderobe herrer → K1 182,8 / K2 183 / K3 183 m (alle ≤ 183), sømmer 13/14 cm
+(K1|K2 22→13), dekning 88 %. Rektangel → 179,4 m hver, sømmer 15/15, 96 %. Enkeltkabel +
+2-kabel upåvirket (klamp/pin kjører kun i N≥3-stien). LOCKED kabelregler urørt.
+
+---
+
 ## 2026-06-05 — Multi-kabel: tette sømmer (halv-CC delte vegger) + picker-retning
 
 Etter Kenneths modell: 3 like soner, hver kabel legges normalt, men **veggen som deles

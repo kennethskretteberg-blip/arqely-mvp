@@ -10881,6 +10881,64 @@ function _cableCoverageFrac(cable, areaM2) {
   return (len * (cable.spacing_cm || 0) / 10000) / areaM2;
 }
 
+// LENGTH CLAMP: a fixed-length cable can never need MORE than its product length. When the
+// discrete run count overshoots the target (e.g. 186.6 m for a 183 m product), shorten ALL runs
+// equally by trimming their sweep ends symmetrically (the LOCKED overshoot method) until the
+// total is exactly the product length. Perp run positions are untouched → seams stay flush.
+function _trimCableToLength(cable, targetCm) {
+  if (!cable || !cable.runs || !cable.runs.length || !targetCm) return;
+  const minRun = 4;   // cm — never shrink a run below this
+  for (let iter = 0; iter < 8; iter++) {
+    const cur = _calcTotalCableLength(cable.runs, cable.spacing_cm);
+    if (cur <= targetCm + 0.5) { cable.totalLength_cm = cur; return; }
+    const needed = cur - targetCm;
+    const live = cable.runs.filter(r => r.segments && r.segments.length);
+    // Trim each run PROPORTIONALLY to its spare capacity (long runs give more, short gable/peak
+    // runs stay) → equal-span runs lose the same amount, so per-cell equal length is preserved.
+    const caps = live.map(r => Math.max(0, (r.segments[r.segments.length - 1].end_cm - r.segments[0].start_cm) - minRun));
+    const totalCap = caps.reduce((a, b) => a + b, 0);
+    if (totalCap < 1) { cable.totalLength_cm = cur; return; }
+    const frac = Math.min(1, needed / totalCap);
+    for (let j = 0; j < live.length; j++) {
+      const d = (caps[j] * frac) / 2;       // half off each end
+      if (d <= 0) continue;
+      const segs = live[j].segments;
+      segs.sort((a, b) => a.start_cm - b.start_cm);
+      segs[0].start_cm += d;
+      segs[segs.length - 1].end_cm -= d;
+    }
+  }
+  cable.totalLength_cm = _calcTotalCableLength(cable.runs, cable.spacing_cm);
+}
+
+// SEAM PIN for engines that ignore _cableSeam (V6/skew/serpentine on an irregular outer zone):
+// shift ALL runs uniformly along the perp axis so the seam-side outermost run sits half-CC from
+// the shared cut → one CC across the seam. Only for single-seam (outer) zones; clamped so the
+// wall-side run keeps ≥ margin. Sweep segments are unchanged (the cable just slides toward the
+// cut over an equal-or-wider part of the polygon, so it stays inside).
+function _pinCableSeamToCut(cable, dir, seam, loCut, hiCut, room, margin) {
+  if (!cable || !cable.runs || !cable.runs.length) return;
+  if (seam.min === seam.max) return;               // only outer (single-seam) zones
+  const hc = (cable.spacing_cm || 0) / 2;
+  const ps = cable.runs.map(r => r.pos_cm);
+  const rMin = Math.min(...ps), rMax = Math.max(...ps);
+  const axis = dir === 'v' ? 'x' : 'y';
+  const pv = room.points.map(p => axis === 'x' ? p.x : p.y);
+  const wallMin = Math.min(...pv), wallMax = Math.max(...pv);
+  let shift = 0;
+  if (seam.max) {                                   // shared cut on the max side
+    shift = (hiCut - hc) - rMax;
+    if (rMin + shift < wallMin + margin) shift = (wallMin + margin) - rMin;
+  } else {                                          // shared cut on the min side
+    shift = (loCut + hc) - rMin;
+    if (rMax + shift > wallMax - margin) shift = (wallMax - margin) - rMax;
+  }
+  if (Math.abs(shift) < 0.5) return;
+  for (const r of cable.runs) r.pos_cm += shift;
+  if (cable.start) { if (dir === 'v') cable.start.x += shift; else cable.start.y += shift; }
+  if (cable.end) { if (dir === 'v') cable.end.x += shift; else cable.end.y += shift; }
+}
+
 // Build N equal-area sub-rooms for ONE run direction and fill each with the good single-cable
 // engine. Returns { cables, score } where score = area-weighted coverage fraction (0..1), or
 // null if < 2 sub-rooms could be filled. The caller tries both directions and keeps the best
@@ -10892,6 +10950,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
   const axis = dir === 'v' ? 'x' : 'y';   // perpendicular axis the cuts run across
   const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
   const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
+  const margin = _effectiveMarginCm(productId);
   let bounds = _equalAreaBandBounds(room, dir, nCables);
   if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
   // (1) Snap cuts to clean vertex positions → rectangular sub-rooms, no uncovered triangle.
@@ -10931,6 +10990,13 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
           }
         }
       } finally { S.varmefolie.direction = _savedDir; S.rooms = S.rooms.filter(r => r !== tempRoom); }
+      if (cable && cable.runs && cable.runs.length) {
+        // (5) Pin the seam for engines that ignored _cableSeam (V6/skew on the gable), so the
+        // outer zone's shared edge sits half-CC from the cut → one CC over the seam.
+        _pinCableSeamToCut(cable, dir, seam, bounds[i], bounds[i + 1], room, margin);
+        // (6) Clamp length: never require more cable than the physical product length.
+        _trimCableToLength(cable, prod.cable_length_m * 100);
+      }
       // (4) Coverage book-keeping per sub-room → direction score for the caller.
       areaSum += subAreaM2;
       covSum += (cable ? _cableCoverageFrac(cable, subAreaM2) : 0) * subAreaM2;
