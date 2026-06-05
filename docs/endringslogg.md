@@ -4,7 +4,15 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## 2026-06-04 — Varmekabel multi = N delrom × den gode motoren
+## 2026-06-04 — Varmekabel: synlig manuelt valg + fargekoding
+
+- **`4f0e52f` — Manuell-seksjon flyttet opp + fargekod hver kabel.** (A) «✋ Manuelt — velg
+  type + antall»-boksen flyttet OPP (rett etter «Nærmest», før den lange «Flere kabler»-
+  lista) → synlig uten å scrolle. (B) Ny `INDOOR_CABLE_COLORS`-palett (6 distinkte) +
+  `_cableStroke`/`_cableBaseColor`: hver kabel i en multi-gruppe får sin egen farge på
+  serpentin/connections/lead-run/etikett, label K1/K2/K3… (ikke bare K1/K2). Fargelegende i
+  romkortet (prikk + K# + produkt · lengde · effekt). Enkeltkabel uendret (oransje),
+  LOCKED-regler urørt.
 
 - **`85e9c8c` — Aldri dropp en kabel + fri manuell type/antall.** (1) `_autoFillNCables`
   droppet et delrom stille hvis den gode motoren ga ingen runs på en uregelmessig del
