@@ -10958,7 +10958,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
 
   const cables = [];
   let tmpId = -1;
-  let covSum = 0, areaSum = 0, splitRuns = 0, totalRuns = 0;
+  let covSum = 0, areaSum = 0, maxSplitFrac = 0;
   const _savedDir = S.varmefolie.direction;     // (2) force this run direction for ALL sub-rooms
   try {
     for (let i = 0; i < nCables; i++) {
@@ -11000,11 +11000,15 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       // (4) Coverage book-keeping per sub-room → direction score for the caller.
       areaSum += subAreaM2;
       covSum += (cable ? _cableCoverageFrac(cable, subAreaM2) : 0) * subAreaM2;
-      // SPLIT-ZONE signal: a run broken into ≥2 segments means a void (notch/doorway) physically
-      // splits the zone and the cable has to bridge across it — an ugly layout. Count split runs
-      // so the caller can prefer the direction whose zones stay in one piece (e.g. vertical zones
-      // when a doorway notch would split a horizontal top band).
-      if (cable && cable.runs) for (const r of cable.runs) { totalRuns++; if ((r.segments || []).length > 1) splitRuns++; }
+      // SPLIT-ZONE detection: a run broken into ≥2 segments means a void (notch/doorway) cuts the
+      // zone, and the cable must bridge across it. Sub-rooms carry no hindrings, so a split here is
+      // always caused by the room polygon (a real notch). Track the worst zone's split fraction —
+      // if a zone is substantially divided in two, the whole DIRECTION is invalid (see caller).
+      if (cable && cable.runs && cable.runs.length) {
+        let zSplit = 0;
+        for (const r of cable.runs) if ((r.segments || []).length > 1) zSplit++;
+        maxSplitFrac = Math.max(maxSplitFrac, zSplit / cable.runs.length);
+      }
       if (!cable || !cable.runs || !cable.runs.length) {
         console.warn('_buildNCableZones: sub-room ' + i + ' (' + dir + ') could not be filled — coverage gap', sub);
         continue;   // truly degenerate sub-polygon (rare); warned, not silent
@@ -11017,9 +11021,11 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
     }
   } finally { S.varmefolie.direction = _savedDir; }
   if (cables.length < 2) return null;
-  const splitFrac = totalRuns ? splitRuns / totalRuns : 0;
-  // Coverage minus a split penalty: a direction whose zones get cut in two by a void scores lower.
-  return { cables, score: (areaSum ? covSum / areaSum : 0) - 0.6 * splitFrac, dir };
+  // A zone divided in two by a void is an INVALID solution (caller rejects this direction). The
+  // threshold (≥30 % of a zone's runs split) distinguishes a real split from a tiny notch a cable
+  // can cleanly skirt.
+  const invalid = maxSplitFrac >= 0.30;
+  return { cables, score: (areaSum ? covSum / areaSum : 0) - 0.6 * maxSplitFrac, dir, invalid, maxSplitFrac };
 }
 
 function _autoFillNCables(roomId, productId, nCables, forcedDir) {
@@ -11043,11 +11049,20 @@ function _autoFillNCables(roomId, productId, nCables, forcedDir) {
   const userDir = forcedDir || ((S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null);
   const primary = userDir || _suggestDirection(room);
   const dirs = forcedDir ? [forcedDir] : (primary === 'v' ? ['v', 'h'] : ['h', 'v']);
-  let best = null;
+  const results = [];
   for (const dir of dirs) {
     const res = _buildNCableZones(room, productId, prod, nCables, dir);
-    if (!res) continue;
-    // Prefer the most complete fill; only switch off the primary direction on a clear win.
+    if (res && res.cables.length >= 2) results.push(res);
+  }
+  if (!results.length) return null;
+  // A direction that divides a zone in two is INVALID. Drop all invalid directions; if NONE
+  // remain valid, there is no acceptable N-cable solution in either orientation → return null
+  // (auto-fill upstream can then try fewer/larger cables; the "↻ Retning" toggle reports it
+  // can't switch to a splitting direction).
+  const valid = results.filter(r => !r.invalid);
+  if (!valid.length) return null;
+  let best = null;
+  for (const res of valid) {
     if (!best || res.score > best.score + (res.dir === primary ? -1e-6 : 0.02)) best = res;
   }
   if (!best || best.cables.length < 2) return null;

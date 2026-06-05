@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: delt sone = ugyldig løsning (ikke bare straffet)
+
+Etter brukerkrav: «hvis en sone blir delt i to, så må det bli et ugyldig løsning». Oppgraderte
+split-håndteringen fra en myk score-straff til en HARD ugyldighet.
+
+- `_buildNCableZones` måler nå split-andelen PER SONE (verste sone) og returnerer `invalid:true`
+  når en sone har ≥30 % strenger brutt i ≥2 segmenter (en void/hakk deler sona fysisk).
+- `_autoFillNCables` dropper alle ugyldige retninger. Finnes ingen gyldig retning → returnerer
+  null (ingen fallback til en delt layout; auto-fyll kan da prøve færre/større kabler oppstrøms).
+  Tvinger man en delt retning (↻ Retning), returneres null → knappen nekter med toast.
+
+Verifisert (Garderobe herrer): auto → 'v', tvunget 'v' → 'v', tvunget 'h' → null (toppsona
+deles av døråpningen). LOCKED kabelregler urørt.
+
+---
+
 ## 2026-06-05 — Multi-kabel: retningskontroll + split-sone-straff
 
 Bruker meldte at horisontale soner var uegnet der en døråpning/hakk fysisk DELER den øverste
