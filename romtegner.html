@@ -2070,7 +2070,7 @@ const S = {
   counters : { nextPartId:1, nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextPlateId:1, nextStairId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
-  varmekabel: { targetWm2: 130, screedThicknessCm: 4 },
+  varmekabel: { targetWm2: 130, screedThicknessCm: 4, multiCableMode: 'soner' },
   varmematte: { gapCm: 0 },   // gap between mats (cm). User-controlled, 0-5cm range.
   documentation: {},  // keyed by roomId: {checklist, measurements, photos, signature, notes}
   bgs: {}   // keyed by floor id (number) or '__global__'
@@ -11099,8 +11099,16 @@ function _autoFillNCables(roomId, productId, nCables, forcedDir) {
   return cables;
 }
 
-function autoFillMultiCable(roomId, productId, nCables, forcedDir) {
-  if (nCables && nCables > 2) return _autoFillNCables(roomId, productId, nCables, forcedDir);
+function autoFillMultiCable(roomId, productId, nCables, forcedDir, mode) {
+  // Two multi-cable layouts: 'soner' (equal zones, shared CC — the default, handles 2+) and
+  // 'korridor' (common start point at the thermostat + lead-run, only available for exactly 2
+  // cables). Anything that isn't a 2-cable korridor request goes through the unified zone engine.
+  const m = mode || (S.varmekabel && S.varmekabel.multiCableMode) || 'soner';
+  if (!(m === 'korridor' && nCables === 2)) {
+    const cs = _autoFillNCables(roomId, productId, nCables, forcedDir);
+    if (cs) cs.forEach(c => { c.multiCableMode = 'soner'; });
+    return cs;
+  }
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -11204,6 +11212,8 @@ function autoFillMultiCable(roomId, productId, nCables, forcedDir) {
   const groupId = cable1.id;
   cable1.multiCableGroup = groupId;
   cable2.multiCableGroup = groupId;
+  cable1.multiCableMode = 'korridor';
+  cable2.multiCableMode = 'korridor';
 
   return [cable1, cable2];
 }
@@ -16535,7 +16545,7 @@ function _cableFlipDirection() {
   if (cable.multiCableGroup != null) {
     const group = S.cables.filter(c => c.multiCableGroup === cable.multiCableGroup && c.roomId === cable.roomId);
     const newDir = cable.direction === 'v' ? 'h' : 'v';
-    const fresh = autoFillMultiCable(cable.roomId, cable.productId, group.length, newDir);
+    const fresh = autoFillMultiCable(cable.roomId, cable.productId, group.length, newDir, cable.multiCableMode);
     if (fresh && fresh.length >= 2) {
       pushUndo();
       const oldIds = new Set(group.map(c => c.id));
@@ -16577,6 +16587,31 @@ function _cableFlipDirection() {
   }
   _cableViolationsDirty = true;
   renderSidebar(); updateCtxBar(); render();
+}
+
+/** Toggle a 2-cable group between 'soner' (equal zones, shared CC) and 'korridor' (common
+ *  start at the thermostat + lead-run). Korridor is only available for exactly 2 cables; the
+ *  toggle is hidden for 3+ groups. Re-runs the whole group in the chosen mode. */
+function _cableToggleMultiMode() {
+  const cable = S.cables.find(c => c.id === S.ui.selectedCableId);
+  if (!cable || cable.multiCableGroup == null) return;
+  const group = S.cables.filter(c => c.multiCableGroup === cable.multiCableGroup && c.roomId === cable.roomId);
+  if (group.length !== 2) { _showToast('Korridor er kun for 2 kabler', 'warn'); return; }
+  const newMode = (cable.multiCableMode || 'soner') === 'korridor' ? 'soner' : 'korridor';
+  const fresh = autoFillMultiCable(cable.roomId, cable.productId, group.length, null, newMode);
+  if (fresh && fresh.length >= 2) {
+    pushUndo();
+    const oldIds = new Set(group.map(c => c.id));
+    S.cables = S.cables.filter(c => !oldIds.has(c.id));
+    S.cables.push(...fresh);
+    S.ui.selectedCableId = fresh[0].id;
+    if (S.varmekabel) S.varmekabel.multiCableMode = newMode;   // remember as the session default
+    _cableViolationsDirty = true;
+    renderSidebar(); updateCtxBar(); render();
+    _showToast(newMode === 'korridor' ? 'Korridor: felles startpunkt' : 'Like soner: lik CC', 'ok');
+  } else {
+    _showToast('Kunne ikke bytte modus for denne kabelgruppen', 'warn');
+  }
 }
 
 /** Set screed thickness and revalidate cables */
@@ -26388,6 +26423,13 @@ function _ctxBarItems() {
       <button class="snap-chip${cable?.lockedEnd?' on':''}" onclick="_toggleCableLock('end')" title="${cable?.lockedEnd?'Lås opp slutt':'Lås sluttposisjon'}">${cable?.lockedEnd?'🔒':'🔓'} Slutt</button>
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="_cableFlipDirection()" title="Bytt retning (V↔H)">↻ Retning</button>
+      ${(function(){
+        if (cable?.multiCableGroup == null) return '';
+        const gsz = S.cables.filter(c => c.multiCableGroup === cable.multiCableGroup).length;
+        if (gsz !== 2) return '';   // korridor only for 2 cables; 3+ is always 'soner'
+        const km = (cable.multiCableMode || 'soner') === 'korridor';
+        return `<button class="snap-chip${km ? ' on' : ''}" onclick="_cableToggleMultiMode()" title="Bytt mellom like soner (lik CC) og korridor (felles startpunkt ved termostat)">${km ? '🚇 Korridor' : '▦ Like soner'}</button>`;
+      })()}
       <button class="snap-chip" onclick="deleteCable(${ui.selectedCableId})" title="Slett kabel">🗑 Slett</button>
       <span class="tc-sep"></span>
       <button class="snap-chip${S.rooms.find(r=>r.id===cable?.roomId)?.cableDimSnap?' on':''}" id="chip-dim-kabel" onclick="toggleCableDimSnap()"><span class="snap-dot"></span>Målsett Kabel</button>`;

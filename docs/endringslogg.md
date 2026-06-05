@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-05 — Multi-kabel: manuelt valg «Like soner» / «Korridor» (2+)
+
+Brukerønske: ha BEGGE multi-kabel-layoutene med et manuelt valg. Tidligere brukte 2 kabler en
+egen korridor-sti (felles startpunkt + lead-run) og 3+ en annen (like soner) — inkonsistent.
+
+- **To moduser** via `autoFillMultiCable(roomId, productId, n, forcedDir, mode)`:
+  - **`soner`** (standard) → den forente `_buildNCableZones`-motoren, håndterer nå **2+**
+    (felles CC, like soner, split-ugyldig, retningskontroll, lengde-klamp, søm-pinning, skew).
+  - **`korridor`** → lead-run-sti med felles startpunkt ved termostat. **Kun for 2 kabler**;
+    3+ med korridor-forespørsel faller automatisk til soner.
+- `S.varmekabel.multiCableMode = 'soner'` (standard, huskes pr. økt). Kablene tagges
+  `multiCableMode`.
+- **UI:** ny ctxbar-toggle «▦ Like soner» / «🚇 Korridor» ved siden av «↻ Retning», vises KUN
+  for 2-kabel-grupper (skjult ved 3+). `_cableToggleMultiMode()` kjører gruppa på nytt i valgt
+  modus. `_cableFlipDirection` bevarer nå modus.
+
+Verifisert (Garderobe herrer): 2-soner → lik CC 19,81, ingen lead-run; 2-korridor → lik CC
+19,81 + felles startpunkt + lead-run; 3-korridor → faller til soner (CC 13,21). Enkeltkabel
+uendret. LOCKED kabelregler urørt.
+
+---
+
 ## 2026-06-05 — Multi-kabel: NØYAKTIG lik CC i alle soner (lik flateeffekt)
 
 Kenneths prioritering: lik CC i alle soner (lik W/m²) > eksakt veggmargin. CC spriket før
