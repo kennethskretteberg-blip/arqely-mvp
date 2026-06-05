@@ -4,6 +4,17 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-04 — Varmekabel: manuelt valg i RIKTIG panel
+
+- **`55d4a8c` — Manuell-seksjon + dekning% + preview lagt i det LIVE panelet.** Forrige
+  runde la manuell-valget i `_updateCableSelection`, men panelet brukeren faktisk ser (RWP
+  unified product picker) er `_upcRenderCableResults` (`#upc-results`) — derfor var det
+  «borte». Nå i `_upcRenderCableResults`: «✋ Manuelt»-seksjon (type-dropdown + antall-
+  stepper + Forhåndsvis) høyt (etter forslag, før «Flere kabler»), dekning% + effekt-merke
+  på opsjonene, og preview-før-commit. Ny `_refreshCablePanel` oppdaterer riktig panel.
+
+---
+
 ## 2026-06-04 — Varmekabel: synlig manuelt valg + fargekoding
 
 - **`4f0e52f` — Manuell-seksjon flyttet opp + fargekod hver kabel.** (A) «✋ Manuelt — velg
