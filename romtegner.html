@@ -10463,39 +10463,48 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
     // so the UI can offer the 2× option alongside the existing single picks.
   }
 
-  // Try N× identical cable (N ≥ 2). N is power-driven (≈ desiredW / productW) so big
-  // rooms get as many cables as the power/CC actually needs — not capped at 2. Each
-  // cable covers area/N at a CC that must stay within the product's spacing limits.
-  const MAX_CABLES = 16;        // sane upper bound (still effectively "unlimited" for real rooms)
-  const multiCandidates = [];
-  for (const prod of familyProducts) {
-    if (!prod.cable_length_m || !prod.watt_per_m) continue;
-    const productW = prod.watt_per_m * prod.cable_length_m;
-    if (productW <= 0) continue;
-    const minSp = (prod.min_spacing_mm || 50) / 10;
-    const maxSp = (prod.max_spacing_mm || 200) / 10;
-    const minBend = (prod.min_bend_radius_mm || 0) / 10;
-    const idealN = Math.round(desiredW / productW);
-    for (let N = Math.max(2, idealN - 2); N <= Math.min(MAX_CABLES, Math.max(2, idealN) + 2); N++) {
-      const cc_cm = (nettoM2 / (N * prod.cable_length_m)) * 100;   // CC with N cables in the room
-      const ccValid = cc_cm >= minSp && cc_cm <= maxSp;
-      const bendOk = minBend <= 0 || (cc_cm / 2) >= minBend;
-      if (!ccValid || !bendOk) continue;
+  // N× identical cable (N ≥ 2). For EACH cable count N, pick the product whose N cables
+  // best match the desired power with a valid CC — one candidate per N. The catalog
+  // usually has long cables too, so e.g. a 72 m² room can be 3× big OR 7× small.
+  const MAX_CABLES = 16;        // sane upper bound (still effectively "unlimited")
+  const TOL = 0.12;            // ±12% power tolerance — "good enough" power match
+  const byN = [];              // best candidate per cable count N
+  for (let N = 2; N <= MAX_CABLES; N++) {
+    let bestForN = null;
+    for (const prod of familyProducts) {
+      if (!prod.cable_length_m || !prod.watt_per_m) continue;
+      const productW = prod.watt_per_m * prod.cable_length_m;
+      if (productW <= 0) continue;
+      const cc_cm = (nettoM2 / (N * prod.cable_length_m)) * 100;     // CC with N cables in the room
+      const minSp = (prod.min_spacing_mm || 50) / 10;
+      const maxSp = (prod.max_spacing_mm || 200) / 10;
+      const minBend = (prod.min_bend_radius_mm || 0) / 10;
+      if (cc_cm < minSp || cc_cm > maxSp) continue;                  // CC out of product range
+      if (minBend > 0 && (cc_cm / 2) < minBend) continue;            // bend radius too tight
       const totalW = N * productW;
-      multiCandidates.push({
-        product: prod, productW, totalW, cableCount: N, cc_cm,
-        wm2: totalW / nettoM2, deviation: Math.abs(totalW - desiredW), valid: true
-      });
+      const deviation = Math.abs(totalW - desiredW);
+      const cand = { product: prod, productW, totalW, cableCount: N, cc_cm,
+        wm2: totalW / nettoM2, deviation, valid: true };
+      // Prefer the LARGEST cable (=highest productW) that best matches power for this N.
+      if (!bestForN || deviation < bestForN.deviation - 0.01 ||
+          (Math.abs(deviation - bestForN.deviation) <= 0.01 && productW > bestForN.productW)) {
+        bestForN = cand;
+      }
     }
+    if (bestForN) byN.push(bestForN);
   }
-  // Best = closest power; prefer fewer cables on ties.
-  multiCandidates.sort((a, b) => a.deviation - b.deviation || a.cableCount - b.cableCount);
 
-  if (multiCandidates.length === 0) {
+  if (byN.length === 0) {
     return { strategy: 'none', cables: [], desiredW, nettoM2, singleResult };
   }
 
-  const best = multiCandidates[0];
+  // Rank: FEWEST cables wins (fewer joints/thermostats = simpler install) as long as the
+  // power is within tolerance; only then by closest power. Candidates outside tolerance
+  // rank after those within. This makes "3× large" beat "7× small" at the same total W.
+  const _within = c => c.deviation <= TOL * desiredW ? 0 : 1;
+  byN.sort((a, b) => _within(a) - _within(b) || a.cableCount - b.cableCount || a.deviation - b.deviation);
+
+  const best = byN[0];
   const dir = _suggestDirection(room);
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
@@ -10505,7 +10514,7 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
     strategy: 'multi', cableCount: best.cableCount, desiredW, nettoM2,
     direction: dir,
     singleResult,
-    cables: multiCandidates.slice(0, 3),
+    cables: byN.slice(0, 5),
     bestMulti: best,
     zoneSplit: { perpMin, perpMax }
   };
