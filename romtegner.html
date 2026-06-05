@@ -10561,11 +10561,44 @@ function _generateLeadRun(room, fromPos, toPerp, direction, margin) {
  */
 const CABLE_CORRIDOR_CM = 5; // routing corridor width for multi-cable lead-run
 
-/** Generic N-cable fill: split the room's perpendicular axis into N equal bands and
- *  lay one serpentine per band (interior bands use half-CC on both shared boundaries).
- *  Each cable is an independent circuit in its band. Returns an array of N cable objects
- *  (or null if it cannot produce at least 2). Used for 3+ cables; 2 keeps the dedicated
- *  shared-start/lead-run path below. */
+/** Split a room's perpendicular axis into nBands bands of EQUAL cross-section AREA
+ *  (not equal width). On irregular rooms (L/T/trapezoid) equal-width bands give cables
+ *  unequal area → poor tiling/coverage; equal-area bands let each fixed-length cable
+ *  fill its band edge-to-edge. Returns nBands+1 monotone perp boundaries, or null. */
+function _equalAreaBandBounds(room, direction, nBands) {
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perpVals = room.points.map(p => direction === 'v' ? p.x : p.y);
+  const lo = Math.min(...perpVals), hi = Math.max(...perpVals);
+  const steps = 240, dp = (hi - lo) / steps;
+  if (dp <= 0) return null;
+  const cum = new Array(steps + 1); cum[0] = 0;
+  for (let i = 0; i < steps; i++) {
+    const p = lo + (i + 0.5) * dp;
+    const iv = clipScanlineToPolygon(sweepAxis, p, room.points);
+    const w = iv.reduce((s, seg) => s + (seg[1] - seg[0]), 0);   // room cross-section here
+    cum[i + 1] = cum[i] + w * dp;
+  }
+  const total = cum[steps];
+  if (total <= 0) return null;
+  const bounds = [lo];
+  let k = 1;
+  for (let i = 1; i <= steps && k < nBands; i++) {
+    while (k < nBands && cum[i] >= (k / nBands) * total - 1e-9) {
+      const target = (k / nBands) * total;
+      const t = (target - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1);   // interpolate exact crossing
+      bounds.push(lo + (i - 1 + t) * dp);
+      k++;
+    }
+  }
+  bounds.push(hi);
+  return bounds.length === nBands + 1 ? bounds : null;
+}
+
+/** Generic N-cable fill: split the room's perpendicular axis into N EQUAL-AREA bands and
+ *  lay one serpentine per band (interior bands use half-CC on both shared boundaries, so
+ *  neighbours meet with exactly one CC — no double-CC cold seam). Each cable is an
+ *  independent circuit in its band. Returns an array of N cable objects (or null if it
+ *  cannot produce at least 2). Used for 3+ cables; 2 keeps the dedicated lead-run path. */
 function _autoFillNCables(roomId, productId, nCables) {
   const room = S.rooms.find(r => r.id === roomId);
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -10576,7 +10609,9 @@ function _autoFillNCables(roomId, productId, nCables) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
   const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
-  const band = (perpMax - perpMin) / nCables;
+  // Equal-AREA band boundaries (falls back to equal-width if the scan fails).
+  let bounds = _equalAreaBandBounds(room, dir, nCables);
+  if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
 
   // Spacing so each cable covers roughly area/nCables, clamped to the product limits.
   const areas = roomAreas(room);
@@ -10589,8 +10624,8 @@ function _autoFillNCables(roomId, productId, nCables) {
   const cables = [];
   for (let i = 0; i < nCables; i++) {
     const zone = {
-      perpMin: perpMin + i * band,
-      perpMax: perpMin + (i + 1) * band,
+      perpMin: bounds[i],
+      perpMax: bounds[i + 1],
       boundaryEdge: i === 0 ? 'max' : (i === nCables - 1 ? 'min' : 'both')
     };
     const raw = generateCableSerpentine(roomId, productId, dir, spacing, startCorner, zone);
