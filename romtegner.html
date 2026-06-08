@@ -521,6 +521,11 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
 #transform-chips{position:fixed;z-index:1100;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:3px;display:none;flex-direction:row;gap:2px;box-shadow:0 8px 24px rgba(0,0,0,.6)}
 .tc-chip{display:flex;align-items:center;gap:6px;padding:7px 16px;background:transparent;border:none;color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;border-radius:16px;white-space:nowrap}
 .tc-chip:hover{background:var(--surface2);color:var(--text)}.tc-chip.active{background:rgba(34,211,238,.2);color:#22d3ee;font-weight:700;box-shadow:inset 0 0 0 1.5px rgba(34,211,238,.55)}
+/* Produktvelger-chips (hybrid: chips for få/korte valg, nedtrekk for lange lister) */
+.upc-chiprow{display:flex;flex-wrap:wrap;gap:5px}
+.upc-chip{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:14px;color:var(--muted);font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;transition:all .12s;font-family:inherit}
+.upc-chip:hover{color:var(--text);border-color:var(--accent)}
+.upc-chip.active{background:rgba(34,211,238,.18);color:#22d3ee;font-weight:700;border-color:rgba(34,211,238,.6)}
 .canvas-hint{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:rgba(144,151,168,0.4);font-size:15px;pointer-events:none;user-select:none;text-align:center;line-height:1.6}
 
 /* ── HINDRING SIDEBAR ITEMS ── */
@@ -3485,7 +3490,87 @@ function openPlacementMenu(e, familyName, categoryId) {
 
 // ── Unified Product Panel (indoor) ──
 // State for the unified product chooser
-let _upcState = { modType: null, categoryId: null, familyName: null };
+let _upcState = { modType: null, categoryId: null, familyName: null, klasse: null, voltage: null };
+
+// ── Produktvelger-chips (Produkttype / Effekt-klasse / Spenning) ──
+// Effekt-klasse = produktfamilie uten spennings-suffiks ("InSnow 30T 400V" → "InSnow 30T").
+function _familyKlasse(fam) { return (fam || '').replace(/\s*(230V|400V)\s*$/i, '').trim(); }
+function _upcChip(label, active, onclick) {
+  return `<button class="upc-chip${active ? ' active' : ''}" onclick="${onclick}">${label}</button>`;
+}
+function _famKeyOf(p, hasFamily) {
+  if (hasFamily) return p.product_family || p.name;
+  const parts = p.name.trim().split(/\s+/);
+  return parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0];
+}
+// Products in scope for a module type (snow: outdoor only; indoor: exclude outdoor).
+function _upcScopeProducts(modType) {
+  const snow = _isSnowModule();
+  const cats = _filteredProductCategories().filter(c =>
+    (c.module_type || 'foil') === modType && (snow || !c.name?.toLowerCase().includes('utendørs')));
+  const catIds = new Set(cats.map(c => c.id));
+  return HEATING_PRODUCTS.filter(p => catIds.has(p.category_id) && p.active !== false);
+}
+function _upcRenderTypeChips() {
+  const el = document.getElementById('upc-type-chips');
+  if (!el) return;
+  const snow = _isSnowModule();
+  const labels = { cable: '🔌 Kabel', mat: '🟦 Matte', foil: '📄 Folie', plate: '🔲 Plate' };
+  const seen = new Set(); const types = [];
+  for (const c of _filteredProductCategories()) {
+    const mt = c.module_type || 'foil';
+    if (!seen.has(mt) && (snow || !c.name?.toLowerCase().includes('utendørs'))) { seen.add(mt); types.push(mt); }
+  }
+  el.innerHTML = types.map(t => _upcChip(labels[t] || t, t === _upcState.modType, `_upcProductTypeChanged('${t}')`)).join('');
+}
+function _upcRenderUsageChips() {
+  const el = document.getElementById('upc-usage-chips');
+  if (!el) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  const cur = room ? (room._snowUsage || '') : '';
+  const short = { gangvei: 'Gangvei', oppkjorsel: 'Oppkjørsel', kaldt: 'Kaldt' };
+  el.innerHTML = _upcChip('Egendefinert', cur === '', `_upcSnowUsageChanged('')`) +
+    SNOW_USAGE.map(u => _upcChip(`${short[u.key] || u.label} ${u.wm2}`, u.key === cur, `_upcSnowUsageChanged('${u.key}')`)).join('');
+}
+// Apply a selected effect-class: render voltage chips (if >1), resolve familyName, refresh.
+function _upcApplyKlasse(klasse) {
+  _upcState.klasse = klasse;
+  const prods = _upcScopeProducts(_upcState.modType);
+  const hasFamily = prods.some(p => p.product_family);
+  const forKlasse = prods.filter(p => _familyKlasse(_famKeyOf(p, hasFamily)) === klasse);
+  const vWrap = document.getElementById('upc-volt-wrap');
+  const vEl = document.getElementById('upc-volt-chips');
+  const volts = [...new Set(forKlasse.map(p => p.voltage || 230))].sort((a, b) => a - b);
+  let voltage = null;
+  if (volts.length > 1) {
+    voltage = volts.includes(_upcState.voltage) ? _upcState.voltage : (volts.includes(230) ? 230 : volts[0]);
+    if (vWrap) vWrap.style.display = 'flex';
+    if (vEl) vEl.innerHTML = volts.map(v => _upcChip(v + 'V', v === voltage, `_upcSetVoltage(${v})`)).join('');
+  } else {
+    voltage = null; // single voltage → no filter, hide chips
+    if (vWrap) vWrap.style.display = 'none';
+    if (vEl) vEl.innerHTML = '';
+  }
+  _upcState.voltage = voltage;
+  const match = forKlasse.filter(p => voltage == null || (p.voltage || 230) === voltage)[0] || forKlasse[0];
+  if (match) { _upcState.familyName = match.product_family || _famKeyOf(match, true); _upcState.categoryId = match.category_id; }
+  _upcRefreshResults();
+}
+function _upcSetKlasse(klasse) {
+  _upcState.voltage = null; // reset; _upcApplyKlasse picks default (230)
+  _upcPopulateFamilies(_upcState.modType, klasse); // re-renders klasse chips (active) + voltage chips
+}
+function _upcSetVoltage(v) {
+  _upcState.voltage = v;
+  const vEl = document.getElementById('upc-volt-chips');
+  if (vEl) [...vEl.children].forEach(b => b.classList.toggle('active', b.textContent.trim() === v + 'V'));
+  const prods = _upcScopeProducts(_upcState.modType);
+  const hasFamily = prods.some(p => p.product_family);
+  const forKlasse = prods.filter(p => _familyKlasse(_famKeyOf(p, hasFamily)) === _upcState.klasse);
+  const match = forKlasse.filter(p => (p.voltage || 230) === v)[0] || forKlasse[0];
+  if (match) { _upcState.familyName = match.product_family || _famKeyOf(match, true); _upcState.categoryId = match.category_id; }
+  _upcRefreshResults();
+}
 
 function showUnifiedProductPanel() {
   const roomId = S.ui.selectedRoomId;
@@ -3566,10 +3651,7 @@ function showUnifiedProductPanel() {
   // Header-velger er modul-data: innendørs=Romtype, snø=Bruksområde (effektbehov §2).
   const _headerLabel = _snowMod ? 'Bruksområde' : 'Romtype';
   const _headerSelect = _snowMod
-    ? `<select id="upc-room-type" style="${_sel}" onchange="_upcSnowUsageChanged(this.value)">
-        <option value="">Egendefinert</option>
-        ${SNOW_USAGE.map(u => `<option value="${u.key}"${room._snowUsage === u.key ? ' selected' : ''}>${esc(u.label)} (${u.wm2} W/m²)</option>`).join('')}
-       </select>`
+    ? `<div id="upc-usage-chips" class="upc-chiprow"></div>`
     : `<select id="upc-room-type" style="${_sel}" onchange="_upcRoomTypeChanged(this.value)">
         <option value="">— Velg romtype —</option>
         ${rtOptions}
@@ -3582,13 +3664,15 @@ function showUnifiedProductPanel() {
       ${_headerSelect}
 
       <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:-4px">Produkttype</label>
-      <select id="upc-product-type" style="${_sel}" onchange="_upcProductTypeChanged(this.value)">
-        ${modOptions}
-      </select>
+      <div id="upc-type-chips" class="upc-chiprow"></div>
 
-      <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:-4px">Produktfamilie</label>
-      <select id="upc-family" style="${_sel}" onchange="_upcFamilyChanged()">
-      </select>
+      <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:-4px">Effekt</label>
+      <div id="upc-klasse-chips" class="upc-chiprow"></div>
+
+      <div id="upc-volt-wrap" style="display:none;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:-4px">Spenning</label>
+        <div id="upc-volt-chips" class="upc-chiprow"></div>
+      </div>
 
       <div style="display:flex;gap:8px;align-items:center">
         <div style="flex:1">
@@ -3608,12 +3692,16 @@ function showUnifiedProductPanel() {
 
   // Store state
   _upcState.modType = defaultModType;
-  _upcState.categoryId = defaultCatId;
-  _upcState.familyName = defaultFamily;
+  _upcState.categoryId = null;
+  _upcState.familyName = null;
+  _upcState.klasse = null;
+  _upcState.voltage = null;
 
   showRoomWorkflowPanel();
-  // Populate family dropdown and results
-  _upcPopulateFamilies(defaultModType, defaultFamily);
+  if (_snowMod) _upcRenderUsageChips();
+  _upcRenderTypeChips();
+  // Render effect-class chips (preselect class from any already-placed product) + results
+  _upcPopulateFamilies(defaultModType, defaultFamily ? _familyKlasse(defaultFamily) : null);
 }
 
 function _upcRoomTypeChanged(typeId) {
@@ -3639,6 +3727,9 @@ function _upcProductTypeChanged(modType) {
   _upcState.modType = modType;
   _upcState.categoryId = null;
   _upcState.familyName = null;
+  _upcState.klasse = null;
+  _upcState.voltage = null;
+  _upcRenderTypeChips();
   _upcPopulateFamilies(modType, null);
 }
 
@@ -3651,68 +3742,35 @@ function _upcSnowUsageChanged(key) {
   if (key) room.targetWm2 = _snowUsageWm2(key);
   const upcWm2 = document.getElementById('upc-wm2');
   if (upcWm2 && key) upcWm2.value = room.targetWm2;
+  _upcRenderUsageChips();
   _upcRefreshResults();
   renderSidebar(); render();
 }
 
-function _upcPopulateFamilies(modType, preselect) {
-  const sel = document.getElementById('upc-family');
-  if (!sel) return;
-  // Categories for this module type. Snow: outdoor only (already scoped by
-  // _filteredProductCategories); indoor: exclude outdoor.
-  const _snowMod = _isSnowModule();
-  const cats = _filteredProductCategories().filter(c =>
-    (c.module_type || 'foil') === modType && (_snowMod || !c.name?.toLowerCase().includes('utendørs'))
-  );
-  // Get all products in those categories, group by family
-  const catIds = new Set(cats.map(c => c.id));
-  const prods = HEATING_PRODUCTS.filter(p => catIds.has(p.category_id) && p.active !== false);
+// Render the Effekt-klasse chips for a module type, then apply the chosen class.
+function _upcPopulateFamilies(modType, preselectKlasse) {
+  const kEl = document.getElementById('upc-klasse-chips');
+  if (!kEl) return;
+  const prods = _upcScopeProducts(modType);
   const hasFamily = prods.some(p => p.product_family);
-  let famKey;
-  if (hasFamily) {
-    famKey = p => p.product_family || p.name;
-  } else {
-    famKey = p => {
-      const parts = p.name.trim().split(/\s+/);
-      return parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0];
-    };
-  }
-  const seen = new Set();
-  const families = [];
+  const klasses = []; const byKlasse = {};
   for (const p of prods) {
-    const fam = famKey(p);
-    if (!seen.has(fam)) {
-      seen.add(fam);
-      // Find the category this family belongs to
-      const cat = cats.find(c => c.id === p.category_id);
-      families.push({name: fam, categoryId: p.category_id});
-    }
+    const k = _familyKlasse(_famKeyOf(p, hasFamily));
+    if (!byKlasse[k]) { byKlasse[k] = true; klasses.push(k); }
   }
-  sel.innerHTML = families.map(f =>
-    `<option value="${esc(f.name)}" data-catid="${f.categoryId}"${preselect === f.name ? ' selected' : ''}>${esc(f.name)}</option>`
-  ).join('');
-
-  // Auto-select first or preselected
-  if (families.length > 0) {
-    const chosen = preselect && families.find(f => f.name === preselect) ? preselect : families[0].name;
-    const chosenFam = families.find(f => f.name === chosen) || families[0];
-    sel.value = chosenFam.name;
-    _upcState.familyName = chosenFam.name;
-    _upcState.categoryId = chosenFam.categoryId;
-    _upcRefreshResults();
-  } else {
-    sel.innerHTML = '<option>Ingen produkter</option>';
-    document.getElementById('upc-results').innerHTML = '';
+  const vWrap = document.getElementById('upc-volt-wrap');
+  if (!klasses.length) {
+    kEl.innerHTML = '<span style="font-size:11px;color:var(--dim)">Ingen produkter</span>';
+    if (vWrap) vWrap.style.display = 'none';
+    const r = document.getElementById('upc-results'); if (r) r.innerHTML = '';
+    return;
   }
-}
-
-function _upcFamilyChanged() {
-  const sel = document.getElementById('upc-family');
-  if (!sel) return;
-  const opt = sel.options[sel.selectedIndex];
-  _upcState.familyName = sel.value;
-  _upcState.categoryId = parseInt(opt?.dataset?.catid) || _upcState.categoryId;
-  _upcRefreshResults();
+  const klasse = (preselectKlasse && byKlasse[preselectKlasse]) ? preselectKlasse
+    : (byKlasse[_upcState.klasse] ? _upcState.klasse : klasses[0]);
+  const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  const shortK = k => k.includes(' ') ? k.slice(k.indexOf(' ') + 1) : k;  // drop brand word
+  kEl.innerHTML = klasses.map(k => _upcChip(shortK(k), k === klasse, `_upcSetKlasse(${sq(k)})`)).join('');
+  _upcApplyKlasse(klasse);
 }
 
 function _upcWm2Changed(val) {
@@ -3749,7 +3807,8 @@ function _upcRefreshResults() {
 function _upcRenderCableResults(container, familyName, categoryId, roomId) {
   const prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false
-      && (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
+      && (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName))
+      && (_upcState.voltage == null || (p.voltage || 230) === _upcState.voltage))
     .sort((a, b) => (a.cable_length_m || 999) - (b.cable_length_m || 999));
   if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen produkter</div>'; return; }
 
@@ -3910,7 +3969,8 @@ function _upcPlaceCable(productId, mode, nCables) {
 function _upcRenderMatResults(container, familyName, categoryId, roomId) {
   const prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false
-      && (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName)))
+      && (p.product_family ? p.product_family === familyName : p.name.startsWith(familyName))
+      && (_upcState.voltage == null || (p.voltage || 230) === _upcState.voltage))
     .sort((a, b) => (_matTotalLengthMm(a) || 0) - (_matTotalLengthMm(b) || 0));
   if (!prods.length) { container.innerHTML = '<div style="color:var(--warn)">Ingen matter</div>'; return; }
 
