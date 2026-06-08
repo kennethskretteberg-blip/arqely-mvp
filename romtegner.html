@@ -1884,11 +1884,9 @@ async function _loadRoomTypeDefaults() {
 function _roomTargetWm2(roomId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (room && room.targetWm2) return room.targetWm2;
-  // Snow module: default 300 W/m² unless room has explicit override
+  // Default per module (snow: 300; indoor: user/global → 130). Via module context.
   const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
-  if (modType === 'snow') return 300;
-  if (S.varmekabel.targetWm2) return S.varmekabel.targetWm2;
-  return 130;
+  return _moduleContext(modType).wm2Default;
 }
 function _setRoomOrGlobalWm2(val) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
@@ -2083,12 +2081,44 @@ function _activeModuleType() {
 }
 function _activePartId() { return S.ui.activePartId; }
 function _isSnowModule(moduleType) { return (moduleType || _activeModuleType()) === 'snow'; }
-function _roomWord(cap) { return _isSnowModule() ? (cap ? 'Område' : 'område') : (cap ? 'Rom' : 'rom'); }
+function _roomWord(cap) { return _moduleContext().roomWord(cap); }
 function _roomModuleType(roomId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return 'indoor';
   const part = S.project.parts.find(p => p.id === room.partId);
   return part?.moduleType || 'indoor';
+}
+
+// ─── MODULE CONTEXT (datadrevet modul-forskjeller) ───────────
+// ÉN kilde til sannhet for hva som skiller moduler. UI/motor skal lese herfra, slik at
+// forskjellen mellom moduler er DATA — aldri layout/logikk. Når en ny modul legges til,
+// utvides kun dette objektet. (Spec: snøsmelting-grunn §4.1.)
+
+// Snø-effektbehov: faste nivåer (bruksområde → W/m²). Kan vokse til klimasone/snølast senere
+// uten å røre innendørs-flyten. (Spec §2.)
+const SNOW_USAGE = [
+  { key: 'gangvei',    label: 'Gangvei / inngang',    wm2: 250 },
+  { key: 'oppkjorsel', label: 'Oppkjørsel / rampe',   wm2: 300 },
+  { key: 'kaldt',      label: 'Kaldt klima / utsatt', wm2: 350 },
+];
+function _snowUsageWm2(key) {
+  const u = SNOW_USAGE.find(x => x.key === key);
+  return u ? u.wm2 : 300;
+}
+
+function _moduleContext(moduleType) {
+  const mt = moduleType || _activeModuleType();
+  const snow = (mt === 'snow');
+  return {
+    moduleType: mt,
+    isSnow: snow,
+    roomWord: (cap) => snow ? (cap ? 'Område' : 'område') : (cap ? 'Rom' : 'rom'),
+    wm2Default: snow ? 300 : (S.varmekabel.targetWm2 || 130),
+    wm2Usage: snow ? SNOW_USAGE : null,
+    ccMaxCm: snow ? 30 : 3 * (S.varmekabel.screedThicknessCm || 4), // utendørs: 300mm maks CC
+    hindringTypes: snow ? HINDRING_TYPES_SNOW : HINDRING_TYPES,
+    hasScreed: !snow,            // ingen påstøp/veggtykkelse utendørs
+  };
 }
 
 // ─── BG HELPERS ──────────────────────────────────────────────
@@ -4530,7 +4560,7 @@ function _updateCableSelection(familyName, categoryId) {
   const result = selectCableByPower(roomId, prods, _tw);
   if (!result) { container.innerHTML = '<div style="color:var(--warn)">Kan ikke beregne</div>'; return; }
 
-  const maxCC = _isSnowModule() ? 30 : 3 * (S.varmekabel.screedThicknessCm || 4); // outdoor: 300mm max CC
+  const maxCC = _moduleContext().ccMaxCm; // snow: 300mm max CC; indoor: 3×screed
   const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
 
   // If user specified a CC, filter/rank by CC proximity
@@ -4856,6 +4886,13 @@ function _renderSnowSettingsPanel(roomId) {
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <span>Bruksområde</span>
+        <select onchange="_setSnowUsage(${roomId},this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:160px" onclick="event.stopPropagation()">
+          <option value=""${!room._snowUsage ? ' selected' : ''}>Egendefinert</option>
+          ${SNOW_USAGE.map(u => `<option value="${u.key}"${u.key === room._snowUsage ? ' selected' : ''}>${esc(u.label)} (${u.wm2})</option>`).join('')}
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span>Ønsket W/m²</span>
         <input type="number" min="100" max="500" step="10" value="${targetWm2}" style="width:60px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'DM Mono',monospace" onchange="_setSnowTargetWm2(${roomId},this.value)" onclick="event.stopPropagation()">
       </div>
@@ -4905,7 +4942,15 @@ function _updateSnowSettingsPanel() {
 
 function _setSnowTargetWm2(roomId, val) {
   const room = S.rooms.find(r => r.id === roomId);
-  if (room) room.targetWm2 = parseInt(val) || 300;
+  if (room) { room.targetWm2 = parseInt(val) || 300; room._snowUsage = ''; } // manuell → Egendefinert
+  _updateSnowSettingsPanel();
+}
+// Bruksområde → fast W/m² (Spec §2). Setter target og lar bruker overstyre manuelt etterpå.
+function _setSnowUsage(roomId, key) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  room._snowUsage = key || '';
+  if (key) room.targetWm2 = _snowUsageWm2(key);
   _updateSnowSettingsPanel();
 }
 function _setSnowTargetCC(roomId, val) {
@@ -33730,7 +33775,7 @@ function _ensureMatTestProducts() {
 function _ensureOutdoorMatProducts() {
   let outdoorMatCat = PRODUCT_CATEGORIES.find(c => c.name === 'Varmematte utendørs');
   if (!outdoorMatCat) {
-    const hasOutdoorMats = HEATING_PRODUCTS.some(p => p.article_no && p.article_no.startsWith('CVA200'));
+    const hasOutdoorMats = HEATING_PRODUCTS.some(p => p.article_no && p.article_no.startsWith('CVA106'));
     if (hasOutdoorMats) return;
     const catId = 9650;
     PRODUCT_CATEGORIES.push({
@@ -33744,33 +33789,44 @@ function _ensureOutdoorMatProducts() {
   }
   const catId = outdoorMatCat.id;
   let sortIdx = 0;
-  const add = (art, name, wm2, widthMm, minLen, maxLen, stepMm, ccMm, cutMm) => {
+  // InSnow 300T — FASTE størrelser (300 W/m²). Hver art.nr er én fysisk matte som brukes i sin
+  // helhet; matte-motoren «slanger» den faste lengden ut i parallelle bredder (klipp bærematte,
+  // snu 180°, ~5 cm mellom bredder) via mat_total_length_mm → isFixedLength. mat_cc_mm/
+  // mat_cut_interval_mm er rimelige visuelle standarder — verifiser eksakte verdier mot Cenika.
+  const add = (art, name, widthMm, lengthMm, areaM2, effW, voltage) => {
     HEATING_PRODUCTS.push({
       id: 96500 + (++sortIdx), category_id: catId, article_no: art, name,
       active: true, sort_order: sortIdx, supplier: 'Cenika AS',
-      product_family: 'InSnow Matte',
-      watt_per_m2: wm2,
-      mat_width_mm: widthMm, mat_min_length_mm: minLen, mat_max_length_mm: maxLen,
-      mat_length_step_mm: stepMm, mat_cc_mm: ccMm, mat_cut_interval_mm: cutMm,
+      product_family: 'InSnow 300T',
+      watt_per_m2: 300, voltage: voltage, total_effect_w: effW, mat_area_m2: areaM2,
+      mat_width_mm: widthMm, mat_total_length_mm: lengthMm, mat_length_step_mm: 10,
+      mat_cc_mm: 80, mat_cut_interval_mm: 160,
       min_gap_mm: 50, min_wall_margin_mm: 0, min_obstacle_distance_mm: 50
     });
   };
-  // InSnow Matte 300W/m² — 50cm bredde
-  add('CVA20001', 'InSnow Matte 300W 50×100cm',  300, 500, 1000, 10000, 500, 80, 160);
-  add('CVA20002', 'InSnow Matte 300W 50×200cm',  300, 500, 2000, 10000, 500, 80, 160);
-  add('CVA20003', 'InSnow Matte 300W 50×300cm',  300, 500, 3000, 10000, 500, 80, 160);
-  add('CVA20004', 'InSnow Matte 300W 50×400cm',  300, 500, 4000, 10000, 500, 80, 160);
-  add('CVA20005', 'InSnow Matte 300W 50×500cm',  300, 500, 5000, 10000, 500, 80, 160);
-  add('CVA20006', 'InSnow Matte 300W 50×600cm',  300, 500, 6000, 10000, 500, 80, 160);
-  // InSnow Matte 300W/m² — 80cm bredde
-  add('CVA20011', 'InSnow Matte 300W 80×100cm',  300, 800, 1000, 10000, 500, 120, 240);
-  add('CVA20012', 'InSnow Matte 300W 80×200cm',  300, 800, 2000, 10000, 500, 120, 240);
-  add('CVA20013', 'InSnow Matte 300W 80×300cm',  300, 800, 3000, 10000, 500, 120, 240);
-  add('CVA20014', 'InSnow Matte 300W 80×400cm',  300, 800, 4000, 10000, 500, 120, 240);
-  add('CVA20015', 'InSnow Matte 300W 80×500cm',  300, 800, 5000, 10000, 500, 120, 240);
-  add('CVA20016', 'InSnow Matte 300W 80×600cm',  300, 800, 6000, 10000, 500, 120, 240);
+  // ── InSnow 300T 230V — 0,5 m bredde ──
+  add('CVA10600', 'InSnow 300T 0,5×2m 300W',    500,  2000,  1,  300, 230);
+  add('CVA10601', 'InSnow 300T 0,5×4m 600W',    500,  4000,  2,  600, 230);
+  add('CVA10615', 'InSnow 300T 0,5×6m 900W',    500,  6000,  3,  900, 230);
+  add('CVA10602', 'InSnow 300T 0,5×8m 1200W',   500,  8000,  4, 1200, 230);
+  add('CVA10603', 'InSnow 300T 0,5×10m 1500W',  500, 10000,  5, 1500, 230);
+  add('CVA10604', 'InSnow 300T 0,5×12m 1800W',  500, 12000,  6, 1800, 230);
+  add('CVA10605', 'InSnow 300T 0,5×14m 2100W',  500, 14000,  7, 2100, 230);
+  add('CVA10606', 'InSnow 300T 0,5×16m 2400W',  500, 16000,  8, 2400, 230);
+  add('CVA10616', 'InSnow 300T 0,5×18m 2700W',  500, 18000,  9, 2700, 230);
+  add('CVA10607', 'InSnow 300T 0,5×20m 3000W',  500, 20000, 10, 3000, 230);
+  add('CVA10608', 'InSnow 300T 0,5×24m 3600W',  500, 24000, 12, 3600, 230);
+  // ── InSnow 300T 230V — 1,0 m bredde ──
+  add('CVA10609', 'InSnow 300T 1×10m 3000W',   1000, 10000, 10, 3000, 230);
+  add('CVA10610', 'InSnow 300T 1×12m 3600W',   1000, 12000, 12, 3600, 230);
+  add('CVA10611', 'InSnow 300T 1×14m 4200W',   1000, 14000, 14, 4200, 230);
+  add('CVA10612', 'InSnow 300T 1×16m 4800W',   1000, 16000, 16, 4800, 230);
+  add('CVA10613', 'InSnow 300T 1×18m 5400W',   1000, 18000, 18, 5400, 230);
+  add('CVA10614', 'InSnow 300T 1×20m 6000W',   1000, 20000, 20, 6000, 230);
+  // TODO: InSnow 300T 400V-varianter (CVA10620–10622, CVA10632/10633 …) — legges inn når
+  // full art.nr/mål-liste er bekreftet mot Cenika.
 
-  console.log(`Romtegner: la til ${sortIdx} InSnow utendørs-matteprodukter`);
+  console.log(`Romtegner: la til ${sortIdx} InSnow 300T utendørs-matteprodukter (230V, faste størrelser)`);
 }
 
 /** Inject test plate products if no plate products exist in Supabase yet */
