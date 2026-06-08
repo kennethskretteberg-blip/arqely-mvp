@@ -2750,9 +2750,8 @@ function _computeRoomStats(room) {
   for (const mat of _matsForRoom(room.id)) {
     const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
     const n = mat.num_runs || 1;
-    const areaM2 = (n * mat.width_cm * mat.length_cm) / 10000;
-    matAreaM2 += areaM2;
-    matW += (mp?.watt_per_m2 || 0) * areaM2;
+    matAreaM2 += (n * mat.width_cm * mat.length_cm) / 10000; // coverage = laid geometry
+    matW += _matRatedW(mp, mat);                              // power = product rated per physical mat
   }
   let plateW = 0, plateAreaM2 = 0, plateCount = 0;
   for (const plate of _platesForRoom(room.id)) {
@@ -3970,10 +3969,11 @@ function _upcPlaceCable(productId, mode, nCables) {
 function _snowMatSummaryHtml(roomId) {
   const mats = S.mats.filter(m => m.roomId === roomId);
   if (!mats.length) return '';
-  const byProd = {}; let areaCm2 = 0;
+  const byProd = {}; let areaCm2 = 0, ratedW = 0;
   for (const m of mats) {
     byProd[m.productId] = (byProd[m.productId] || 0) + 1;
     areaCm2 += (m.num_runs || 1) * m.width_cm * m.length_cm;
+    ratedW += _matRatedW(HEATING_PRODUCTS.find(p => p.id === m.productId), m);
   }
   const room = S.rooms.find(r => r.id === roomId);
   const netM2 = room ? roomAreas(room).net / 10000 : 0;
@@ -3985,7 +3985,7 @@ function _snowMatSummaryHtml(roomId) {
   }).join(' + ');
   return `<div style="margin:6px 0;padding:7px 9px;background:rgba(34,211,238,0.08);border:1px solid var(--accent);border-radius:7px;font-size:11px;color:var(--text)">
     <div style="font-weight:700;color:var(--accent);margin-bottom:2px">📋 Materialliste</div>
-    ${parts}<br><span style="color:var(--dim)">${mats.length} matter · dekning ~${coverPct}%</span>
+    ${parts}<br><span style="color:var(--dim)">${mats.length} matter · ${Math.round(ratedW)} W · dekning ~${coverPct}%</span>
   </div>`;
 }
 
@@ -4269,6 +4269,17 @@ function _startMatPlacement(productId) {
 // Total mat length in mm. Prefers the explicit DB field, falls back to
 // deriving from area + width since Supabase catalogs often have area
 // filled in but not the length column.
+// Rated power of ONE physical mat = the product's nominal effect (fixed snow mats), NOT the
+// laid geometry (a partly-folded remainder still consumes the whole product). Falls back to
+// watt_per_m2 × nominal area, then to placed geometry for cuttable mats without a nominal area.
+function _matRatedW(prod, mat) {
+  if (!prod) return 0;
+  if (prod.total_effect_w) return prod.total_effect_w;
+  if (prod.watt_per_m2 && prod.mat_area_m2) return Math.round(prod.watt_per_m2 * prod.mat_area_m2);
+  const n = (mat && mat.num_runs) || 1;
+  const areaM2 = mat ? (n * mat.width_cm * mat.length_cm) / 10000 : 0;
+  return Math.round((prod.watt_per_m2 || 0) * areaM2);
+}
 function _matTotalLengthMm(prod) {
   if (!prod) return null;
   if (prod.mat_total_length_mm) return prod.mat_total_length_mm;
@@ -20580,8 +20591,7 @@ function _renderDetailPanel(roomId) {
       const msel = S.ui.selectedMatId === m.id ? ' sel' : '';
       const mp = HEATING_PRODUCTS.find(p => p.id === m.productId);
       const mnm = mp ? esc(mp.name) : 'Matte';
-      const wm2 = mp?.watt_per_m2 || 0;
-      const watt = Math.round(wm2 * m.width_cm * m.length_cm / 10000);
+      const watt = _matRatedW(mp, m); // rated power of the physical mat (not per-run geometry)
       return `<div class="strip-item${msel}"
         onclick="selectMat(${m.id});event.stopPropagation()">
         <span class="strip-ico">\u{1F7EB}</span>
@@ -27921,16 +27931,18 @@ async function exportPDF(opts) {
     const matByProd = {};
     for (const m of _matsForRoom(room.id)) {
       const k = m.productId;
-      if (!matByProd[k]) matByProd[k] = { count: 0, totalLen: 0, totalArea: 0 };
+      const mp = HEATING_PRODUCTS.find(pr => pr.id === k);
+      if (!matByProd[k]) matByProd[k] = { count: 0, totalLen: 0, totalArea: 0, watt: 0 };
       const nRuns = m.num_runs || 1;
       const totLen = nRuns * m.length_cm;
       matByProd[k].count++;
       matByProd[k].totalLen += totLen;
       matByProd[k].totalArea += (m.width_cm * totLen) / 10000;
+      matByProd[k].watt += _matRatedW(mp, m); // rated power per physical mat
     }
     for (const [pid, info] of Object.entries(matByProd)) {
       const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      const watt = Math.round((p?.watt_per_m2 || 0) * info.totalArea);
+      const watt = Math.round(info.watt);
       specRows.push({
         type: 'Matte', name: p?.name || 'Matte',
         antall: info.count + ' stk',
@@ -28189,7 +28201,7 @@ async function exportPDF(opts) {
     const matAreaM2 = (m.width_cm * nRuns * m.length_cm) / 10000;
     matList[k].areaM2 += matAreaM2;
     const p = HEATING_PRODUCTS.find(pr => pr.id === k);
-    if (p?.watt_per_m2) matList[k].watt += p.watt_per_m2 * matAreaM2;
+    matList[k].watt += _matRatedW(p, m); // rated power per physical mat (not laid geometry)
   }
   for (const pl of S.plates) {
     const k = pl.productId;
