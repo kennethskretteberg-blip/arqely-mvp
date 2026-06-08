@@ -2052,7 +2052,8 @@ const S = {
     theme: 'light',              // always light
     activeFloorId: null,         // floor whose bg is being edited
     drawColor: '#22d3ee',        // active drawing/cursor color
-    wallColor: '#22d3ee'         // active wall color for selected room
+    wallColor: '#22d3ee',        // active wall color for selected room
+    cycle: null                  // click-cycling state {sx,sy,key,idx} for overlapping objects
   },
   view     : { zoom:1, panX:0, panY:0 },
   drawing  : {
@@ -19544,6 +19545,7 @@ let _sammeButtonRect = null;
 
 function exitDrawing() {
   // draw-toolbar stays visible — persistent quick-action bar
+  _resetCycle();
   S.ui.drawMode = null;
   S.ui.spacePan = false;
   S.ui.hindringChoice = null;
@@ -21854,6 +21856,7 @@ function createHindringFromPolygon(pts) {
 
 // ─── DRAWING MODES ───────────────────────────────────────────
 function startDrawMode(mode, name, floorId) {
+  _resetCycle();
   S.ui.drawMode=mode;
   S.ui.pendingRoomName=name;
   S.ui.pendingFloorId=floorId;
@@ -23219,6 +23222,15 @@ let _sgOrigPos=0, _sgOrigStart=0, _sgOrigMouse={x:0,y:0};
 let _sgEndDragging=false, _sgEndWhich=''; // 'start'|'end'
 let _sgOrigLength=0, _sgOrigStartCm=0;
 let _dragging=false, _panning=false;
+// Click-cycling: did the previous press move (drag) vs. a clean click? Used to
+// decide whether a repeated click at the same spot advances the selection cycle.
+// _pressMoved is set only when the pointer is dragged beyond CYCLE_MOVE_PX from
+// the press-down point — arming a drag without actually moving still counts as a
+// clean click (so cycling survives the tiny stray move events a click can emit).
+let _pressMoved=false;
+let _pressDownPt=null;        // {x,y} client coords of the current/last press-down
+const CYCLE_MOVE_PX=4;        // displacement beyond this = a real drag, not a click
+let _cycleBadgeEl=null;       // lazily-created "1/3" counter element near the cursor
 let _panStart={x:0,y:0}, _panSV={x:0,y:0};
 let _movingWall=false, _mwStart={x:0,y:0}, _mwOrigStart={x:0,y:0}, _mwOrigPts=null;
 let _mwRoomId=-1, _mwWallIdx=-1;
@@ -23425,6 +23437,83 @@ function drawRoomDragOverlay() {
   window.addEventListener('resize', _dockRwp);
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Click-cycling through overlapping objects (selection cycling)
+// Repeated clicks at (approximately) the same spot cycle through ALL objects
+// stacked under the cursor, in the same priority order as a normal click,
+// with the room as the terminal candidate before wrapping back to the top.
+// ────────────────────────────────────────────────────────────────────────
+const CYCLE_TOL_PX = 6; // screen-px tolerance: a click within this of the last counts as "same spot"
+
+/**
+ * Build the ordered list of ALL body-hit candidates under a point.
+ * Order MUST match the existing mousedown fall-through priority so that
+ * index 0 always equals what a plain click would select:
+ *   strip → cable → zone → mat → plate → stair → hindring → room.
+ * Walls/vertices are intentionally excluded (their selection depends on the
+ * room already being active, which would destabilise the candidate set).
+ * Reuses the existing hit-testers — no parallel hit-test logic.
+ */
+function _buildCycleCandidates(wx, wy) {
+  const list = [];
+  const hs = hitStrip(wx, wy);            if (hs)            list.push({type:'strip',    id:hs.id});
+  const hc = hitCable(wx, wy);            if (hc)            list.push({type:'cable',    id:hc.id});
+  const hz = hitZone(wx, wy);             if (hz)            list.push({type:'zone',     id:hz.id});
+  const hm = hitMat(wx, wy);              if (hm !== null)   list.push({type:'mat',      id:hm});
+  const hp = hitPlate(wx, wy);            if (hp !== null)   list.push({type:'plate',    id:hp});
+  const hst = hitStair(wx, wy);           if (hst)           list.push({type:'stair',    id:hst.id});
+  const hh = hitHindring(wx, wy);         if (hh !== null)   list.push({type:'hindring', id:hh});
+  const hr = hitTest(wx, wy);             if (hr?.roomId)    list.push({type:'room',     id:hr.roomId});
+  return list;
+}
+
+/** Select a single cycle candidate (no drag) — reuses existing select flows. */
+function _applyCycleSelection(cand) {
+  if (cand.type === 'strip')  { selStrip(cand.id, false); updateCtxBar(); render(); return; }
+  if (cand.type === 'cable')  { selectCable(cand.id); return; }
+  if (cand.type === 'zone')   { selectZone(cand.id); renderSidebar(); return; }
+  if (cand.type === 'mat')    { selectMat(cand.id); renderSidebar(); return; }
+  if (cand.type === 'stair')  { selectStair(cand.id); renderSidebar(); return; }
+  // plate / hindring / room — replicate the inline selection from mousedown
+  S.ui.selectedStripId=null; S.ui.selectedStripIds=new Set();
+  S.ui.selectedCableId=null; S.ui.selectedZoneId=null;
+  S.ui.selectedMatId=null; S.ui.selectedPlateId=null;
+  S.ui.selectedStairId=null; S.ui.selectedHindringId=null;
+  S.ui.selectedHindringWallIdx=null; S.ui.selectedWallId=null;
+  S.ui.selectedVertexIdx=null; S.ui.movingWall=false;
+  if (cand.type === 'plate') {
+    const p=S.plates.find(x=>x.id===cand.id);
+    S.ui.selectedPlateId=cand.id; if (p) S.ui.selectedRoomId=p.roomId;
+  } else if (cand.type === 'hindring') {
+    const h=S.hindrings.find(x=>x.id===cand.id);
+    S.ui.selectedHindringId=cand.id; if (h) S.ui.selectedRoomId=h.roomId;
+  } else if (cand.type === 'room') {
+    S.ui.selectedRoomId=cand.id;
+  }
+  renderSidebar(); updateObjInfo(); updateCtxBar(); render();
+}
+
+/** Reset the click-cycle state (call on pan/zoom/mode-change/Esc/empty-click). */
+function _resetCycle() { S.ui.cycle = null; _hideCycleBadge(); }
+
+/** Small "1/3" counter near the cursor when more than one object is stacked. */
+function _showCycleBadge(clientX, clientY, idx, total) {
+  if (!_cycleBadgeEl) {
+    _cycleBadgeEl = document.createElement('div');
+    _cycleBadgeEl.className = 'cycle-badge';
+    _cycleBadgeEl.style.cssText =
+      'position:fixed;z-index:9999;pointer-events:none;font:600 11px system-ui,sans-serif;'+
+      'background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;'+
+      'padding:2px 6px;box-shadow:0 2px 6px rgba(0,0,0,.3);white-space:nowrap;';
+    document.body.appendChild(_cycleBadgeEl);
+  }
+  _cycleBadgeEl.textContent = `${idx+1}/${total}`;
+  _cycleBadgeEl.style.left = (clientX + 12) + 'px';
+  _cycleBadgeEl.style.top  = (clientY - 8) + 'px';
+  _cycleBadgeEl.style.display = 'block';
+}
+function _hideCycleBadge() { if (_cycleBadgeEl) _cycleBadgeEl.style.display = 'none'; }
+
 canvas.addEventListener('mousedown', e=>{
   // Pan triggers (in priority order):
   //   - spacePan: explicit temporary pan toggled with Space during draw mode
@@ -23434,7 +23523,7 @@ canvas.addEventListener('mousedown', e=>{
   if (e.button===0 && (S.ui.spacePan
       || (e.shiftKey && S.ui.drawMode)
       || (S.ui.toolMode==='hand' && !S.ui.drawMode))) {
-    _panning=true;
+    _panning=true; _resetCycle();
     _panStart={x:e.clientX,y:e.clientY};
     _panSV={x:S.view.panX,y:S.view.panY};
     canvas.style.cursor='grabbing';
@@ -23442,7 +23531,7 @@ canvas.addEventListener('mousedown', e=>{
   }
   // Pan: middle mouse or Alt+left
   if (e.button===1 || (e.button===0&&e.altKey)) {
-    _panning=true;
+    _panning=true; _resetCycle();
     _panStart={x:e.clientX,y:e.clientY};
     _panSV={x:S.view.panX,y:S.view.panY};
     canvas.style.cursor='grabbing';
@@ -23856,7 +23945,7 @@ canvas.addEventListener('mousedown', e=>{
     if (e.shiftKey) {
       // Shift+click anywhere = pan view
       S.ui.selectedVertexIdx=null;
-      _roomDragging=true;
+      _roomDragging=true; _resetCycle();
       _rdStart={x:e.clientX,y:e.clientY}; _rdMoved=false;
       canvas.style.cursor='grabbing';
       return;
@@ -23864,6 +23953,7 @@ canvas.addEventListener('mousedown', e=>{
     const cRect=canvas.getBoundingClientRect();
     const sx0=e.clientX-cRect.left, sy0=e.clientY-cRect.top;
     const rawWp0=s2w(sx0,sy0); // raw unsnapped world pos for hit tests
+    _pressDownPt={x:e.clientX,y:e.clientY}; // reference for click-vs-drag detection
     hideTransformChips();
     // ── Cable label drag ──
     const clHit = hitCableLabel(sx0, sy0);
@@ -24118,6 +24208,37 @@ canvas.addEventListener('mousedown', e=>{
           canvas.style.cursor='crosshair';
         }
         return;
+      }
+    }
+
+    // ── Click-cycling: resolve which stacked object this click targets ──
+    // Build the full candidate stack under the point. On a repeated clean
+    // click at (~)the same spot, advance through the stack; otherwise start
+    // fresh at the top-most. idx 0 falls through to the normal select+drag
+    // flow below (preserving drag); idx > 0 selects the buried object only.
+    {
+      const _cyc = _buildCycleCandidates(rawWp0.x, rawWp0.y);
+      if (_cyc.length === 0) {
+        _resetCycle();
+      } else {
+        const _key = _cyc.map(c => c.type + ':' + c.id).join('|');
+        const _movedLast = _pressMoved;
+        _pressMoved = false;
+        let _idx = 0;
+        const _cy = S.ui.cycle;
+        if (_cy && _cy.key === _key && !_movedLast &&
+            Math.hypot(sx0 - _cy.sx, sy0 - _cy.sy) < CYCLE_TOL_PX) {
+          _idx = (_cy.idx + 1) % _cyc.length;
+        }
+        S.ui.cycle = { sx: sx0, sy: sy0, key: _key, idx: _idx };
+        if (_cyc.length > 1) _showCycleBadge(e.clientX, e.clientY, _idx, _cyc.length);
+        else _hideCycleBadge();
+        if (_idx > 0) {
+          // Cycling to a buried object → select only (no drag), then stop.
+          _applyCycleSelection(_cyc[_idx]);
+          return;
+        }
+        // _idx === 0 → fall through to the normal top-most select+drag below.
       }
     }
 
@@ -24491,7 +24612,12 @@ canvas.addEventListener('mousemove', e=>{
   // Safety net: any active drag/interaction triggers a re-render this frame,
   // regardless of whether the specific branch below calls render()/markDirty().
   // This is what makes the conditional rAF loop safe — see _anyInteractionActive().
-  if (_anyInteractionActive()) markDirty();
+  if (_anyInteractionActive()) {
+    markDirty();
+    if (_pressDownPt && Math.hypot(e.clientX-_pressDownPt.x, e.clientY-_pressDownPt.y) > CYCLE_MOVE_PX) {
+      _pressMoved = true;
+    }
+  }
 
   // Cable label drag
   if (_cableLabelDragging && _cableLabelDragId !== null) {
@@ -25394,6 +25520,7 @@ canvas.addEventListener('dblclick', e=>{
 
 canvas.addEventListener('wheel', e=>{
   e.preventDefault();
+  _resetCycle();
   const factor=e.deltaY>0?0.9:1.1;
   const nz=Math.max(0.2,Math.min(8,S.view.zoom*factor));
   const rect=canvas.getBoundingClientRect();
@@ -25558,6 +25685,7 @@ document.addEventListener('keydown', e=>{
   markDirty();
 
   if (e.key==='Escape') {
+    _resetCycle();
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.stairPlaceMode) { S.ui.stairPlaceMode=false; S.ui.stairPlaceParams=null; canvas.style.cursor='default'; return; }
     if (S.ui.platePlaceMode) { S.ui.platePlaceMode=false; S.ui.platePlaceProductId=null; canvas.style.cursor='default'; return; }
