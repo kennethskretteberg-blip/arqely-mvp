@@ -4001,6 +4001,15 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
   const wm2 = prods[0].watt_per_m2 || 100;
   let html = `<div style="color:var(--dim);margin-bottom:4px;font-size:11px">Bredde: ${widthCm} cm · ${wm2} W/m²</div>`;
   html += _snowMatSummaryHtml(roomId);
+  // Preview footer (shown while a packed result is previewed, not yet committed).
+  const _prevRoom = S.rooms.find(r => r.id === roomId);
+  if (_prevRoom && _prevRoom._matPreviewMeta) {
+    html += `<div style="display:flex;gap:6px;align-items:center;background:rgba(34,211,238,0.12);border:1px solid var(--accent);border-radius:7px;padding:7px 9px;margin:6px 0">
+      <span style="flex:1;font-size:11px;color:var(--accent);font-weight:600">● Forhåndsvises — eller velg et annet</span>
+      <button class="floor-choice-btn" style="font-size:11px;padding:3px 9px;background:var(--accent);color:#0d0e10;font-weight:600" onclick="_confirmMatPreview()">✓ Bruk</button>
+      <button class="floor-choice-btn" style="font-size:11px;padding:3px 9px" onclick="_cancelMatPreview()">✕ Avbryt</button>
+    </div>`;
+  }
   html += '<div style="display:flex;flex-direction:column;gap:3px">';
 
   // Auto-fill option
@@ -4029,23 +4038,40 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
 function _upcPlaceMat(productId, mode) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) return;
+  const room = S.rooms.find(r => r.id === roomId);
+
+  // Snow: packing engine + preview-before-commit (Bruk/Avbryt), mirroring the cable flow.
+  // auto = longest mat (fewest pieces); variant = the exact clicked product. Nothing is
+  // committed until the user clicks «Bruk»; switching product swaps the preview.
+  if (_isSnowModule()) {
+    const sessionStart = !(room && room._matPreviewIds && room._matPreviewIds.length);
+    if (sessionStart) {
+      pushUndo(); // one undo step for the whole preview→commit session
+      S.cables = S.cables.filter(c => c.roomId !== roomId);
+      S.strips = S.strips.filter(s => s.roomId !== roomId);
+      S.mats = S.mats.filter(m => m.roomId !== roomId);
+      S.plates = S.plates.filter(p => p.roomId !== roomId);
+    } else {
+      _removeMatPreview(); // swap: drop the previous preview mats
+    }
+    const pid = (mode === 'auto')
+      ? (_snowLongestMat(HEATING_PRODUCTS.find(p => p.id === productId))?.id || productId)
+      : productId;
+    const res = _packSnowMats(roomId, pid);
+    if (room) {
+      room._matPreviewIds = (res && res.placedIds) || [];
+      room._matPreviewMeta = res ? { productId: pid } : null;
+    }
+    _upcRefreshResults();
+    return;
+  }
+
   pushUndo();
-  // Clear existing products
+  // Clear existing products (indoor)
   S.cables = S.cables.filter(c => c.roomId !== roomId);
   S.strips = S.strips.filter(s => s.roomId !== roomId);
   S.mats = S.mats.filter(m => m.roomId !== roomId);
   S.plates = S.plates.filter(p => p.roomId !== roomId);
-
-  // Snow: use the packing engine (lengthwise mats + end-to-end + crosswise remainder).
-  // auto = longest mat (fewest pieces); variant = the exact clicked product.
-  if (_isSnowModule()) {
-    const pid = (mode === 'auto')
-      ? (_snowLongestMat(HEATING_PRODUCTS.find(p => p.id === productId))?.id || productId)
-      : productId;
-    _packSnowMats(roomId, pid);
-    _upcRefreshResults();
-    return;
-  }
 
   if (mode === 'auto') {
     autoFillMatSerpentine(productId);
@@ -4391,8 +4417,7 @@ function _packSnowMats(roomId, productId) {
   }
 
   if (!mats.length) return null;
-  pushUndo();
-  for (const m of mats) S.mats.push(m);
+  for (const m of mats) S.mats.push(m); // undo handled by caller (preview→commit session)
   _invalidateMatCache();
   _trackProductUsage(productId);
   S.ui.selectedMatId = mats[0].id;
@@ -5080,6 +5105,32 @@ function _cancelCablePreview(familyName, categoryId) {
   if (room) room._cablePreviewMeta = null;
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);
+}
+
+// Snow mat preview (mirrors the cable preview): packed mats live in S.mats so they render,
+// but are tracked on room._matPreviewIds and only "committed" on «Bruk». «Avbryt» removes them.
+function _removeMatPreview() {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room || !room._matPreviewIds || !room._matPreviewIds.length) return;
+  if (room._matPreviewIds.includes(S.ui.selectedMatId)) S.ui.selectedMatId = null; // avoid dangling selection
+  S.mats = S.mats.filter(m => !room._matPreviewIds.includes(m.id));
+  _invalidateMatCache();
+  room._matPreviewIds = [];
+}
+function _confirmMatPreview() {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  const n = room && room._matPreviewIds ? room._matPreviewIds.length : 0;
+  if (room) { room._matPreviewIds = []; room._matPreviewMeta = null; }
+  if (typeof _showToast === 'function') _showToast(n + ' matter plassert', 'ok');
+  renderSidebar(); updateCtxBar(); render();
+  if (typeof _upcRefreshResults === 'function') _upcRefreshResults();
+}
+function _cancelMatPreview() {
+  _removeMatPreview();
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (room) room._matPreviewMeta = null;
+  renderSidebar(); updateCtxBar(); render();
+  if (typeof _upcRefreshResults === 'function') _upcRefreshResults();
 }
 
 // Snø konsolidert inn i den delte produktvelgeren (showUnifiedProductPanel). Det gamle flytende
