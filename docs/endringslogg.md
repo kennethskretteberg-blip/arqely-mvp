@@ -4,6 +4,64 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-08 — ØKT-OPPSUMMERING: snøsmelting fullført + matte-pakkemotor
+
+Stor økt: fullførte utendørs snøsmelte-modulen (steg 1–8), konsoliderte produktvelgeren
+(snø + innendørs deler nå én UI + én motor), og bygde en matte-pakkemotor for InSnow 300T.
+Alt verifisert i preview-server `romtegner` (dev-login `?dev`) og **deployet via Vercel**.
+Commits: `06b2acf`, `92d682c`, `57d74be`, `a80652b`, `81d79c4`, `48bdc93`, `6242729`,
+`49f54aa`, `536947b`, `0c97e0b`, `7db1513`, `05d0efb`, `e36a335`.
+
+### Snøsmelting-modul fullført (steg 1–8)
+- **Ekte InSnow 300T-matter i DB** (`_ensureOutdoorMatProducts`): erstattet placeholder
+  `CVA20001–20016` med 32 ekte faste-størrelse-matter (17× 230V `CVA106xx` + 15× 400V fra
+  Cenika produktblad 05/2025), bredder 0,5/1,0 m, `mat_total_length_mm` → fast-lengde-modell.
+- **`_moduleContext()`** — datadrevet modul-forskjell (wm2Default, ccMaxCm, roomWord,
+  hindringTypes, hasScreed). `_roomWord`/`_roomTargetWm2`/maks-CC rutet gjennom det.
+- **Effektbehov** (`SNOW_USAGE` 250/300/350 + `_snowUsageWm2` + bruksområde-velger).
+- **Delt produktvelger (UPC):** snø ruter nå til `showUnifiedProductPanel` (samme som
+  innendørs) via `openProduktMenu`/`showCablePlacePanel`/auto-åpning. UPC modul-bevisst
+  (snø=kun utendørs InSnow, innendørs=ekskluder utendørs). Header «Bruksområde» (snø) vs
+  «Romtype» (inne). Gammelt flytende snø-panel nøytralisert.
+- **Multi-kabel via `_buildNCableZones`** (samme motor som innendørs; LOCKED-regler).
+- **Spenningsfilter** rettet (6 steder buggy `name.startsWith` → trygt `product_family`-
+  mønster); «InSnow 30T» drar ikke lenger inn 400V.
+- **Bugfix:** `maxCCmm is not defined` krasjet info-panelet ved valg av snø-kabel; rettet +
+  korrekt snø-maks-CC 300mm via modul-kontekst. Fjernet foreldet «Avretning»-input i snø.
+- **Steg 8:** fjernet 465 linjer død gammel snø-sti (`_renderSnowSettingsPanel`,
+  `showSnowProposals`, `_snow*`-forslag/preview). Beholdt `_updateSnowSettingsPanel` som shim.
+
+### Produktvelger UX (begge moduler, delt)
+- **Dokket panel** (`_dockRwp`): `#room-workflow-panel` ligger nå eksakt over venstre sidebar
+  (position:fixed, følger sidebar-bredden) i stedet for oppå griddet → forhåndsvisning fri.
+- **Chip/nedtrekk-hybrid:** Produkttype + Effekt-klasse + Spenning + Bruksområde som chips;
+  Romtype beholdt som nedtrekk. Splittet familie-nedtrekket i klasse+spenning (`_familyKlasse`,
+  `_upcState.klasse/voltage`, voltage-filter i resultatrenderne).
+- **Matte-variant forhåndsviser areal:** klikk en variant → eksakt matte legges ut (byttbar),
+  via `autoFillMatSerpentine(productId, {exact, keepPanel})`.
+
+### Matte-pakkemotor (`_packSnowMats`) + 4 oppfølgingspunkter
+- **Pakkemotor:** legger InSnow 300T-matter i LENGDERETNINGEN, kombinerer ende-til-ende
+  per kolonne (k=floor(L/ℓ)), N kolonner på tvers med ~10cm gap + 15cm udekket kant, og
+  fyller rest på tvers (rotert 90°). Hver fysiske matte = ett `S.mats`-objekt. Auto velger
+  bredeste+lengste (færrest stk). Verifisert mot Cenika-fasit: Sone 1 (4,6×25, 1×20m) →
+  5× 1×20m; Kenneths variant (kun 1×12m) → 8× 1×12m + 1× 0,5×8m.
+- **Punkt 1 — watt-fix:** `_matRatedW` = produktets ratede effekt pr. fysisk matte (ikke
+  laid geometri × num_runs). Brukt i `_computeRoomStats`, sidebar-tre, specRows, PDF-eksport,
+  materialliste. Sone 1 = 30000W korrekt (var feilaktig per-løp).
+- **Punkt 2 — Bruk/Avbryt:** snø-matter legges som preview (`room._matPreviewIds`); «Bruk»
+  committer, «Avbryt» fjerner, bytte swapper. Speiler kabel-preview-flyten.
+- **Punkt 3 — rekursiv rest:** rest fylles med flere tverr-bånd til leftover < 40cm. Sone 2
+  (4,6×26,5) → 5× 1×20m + 1× 0,5×12m, full dekning.
+- **Punkt 4 — fargekoding:** `MAT_COLORS` (8 farger) pr. fysisk matte i `drawMats`;
+  materialliste med matchende fargeprikker. Enkeltmatte-rom uendret (`_matColor` → null).
+
+Status: alt deployet. **Restpunkter/notater:** Sone 2-rest er forenklet (ett lengde-ish +
+ett kryss-bånd, ~PDF men ikke byte-identisk Cenika-kombo); trapp-modulen + klimasone-tabell +
+auto-spenning + styring/følere er utenfor scope (ikke startet).
+
+---
+
 ## 2026-06-05 — ØKT-OPPSUMMERING: multi-kabel-motor (varmekabel)
 
 Samlet arbeid på multi-kabel-utlegg denne økta (detaljer i oppføringene under). Commits:
