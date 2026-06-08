@@ -3966,6 +3966,29 @@ function _upcPlaceCable(productId, mode, nCables) {
   renderSidebar(); updateCtxBar(); render();
 }
 
+// Material list for the mats currently placed in a room: "N× product + M× product, dekning %".
+function _snowMatSummaryHtml(roomId) {
+  const mats = S.mats.filter(m => m.roomId === roomId);
+  if (!mats.length) return '';
+  const byProd = {}; let areaCm2 = 0;
+  for (const m of mats) {
+    byProd[m.productId] = (byProd[m.productId] || 0) + 1;
+    areaCm2 += (m.num_runs || 1) * m.width_cm * m.length_cm;
+  }
+  const room = S.rooms.find(r => r.id === roomId);
+  const netM2 = room ? roomAreas(room).net / 10000 : 0;
+  const coverPct = netM2 > 0 ? Math.round((areaCm2 / 10000) / netM2 * 100) : 0;
+  const parts = Object.entries(byProd).map(([pid, c]) => {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
+    const short = p ? p.name.replace(/^InSnow 300T /, '').replace(/\s+\d+W.*/, '') : '#' + pid;
+    return `${c}× ${esc(short)}`;
+  }).join(' + ');
+  return `<div style="margin:6px 0;padding:7px 9px;background:rgba(34,211,238,0.08);border:1px solid var(--accent);border-radius:7px;font-size:11px;color:var(--text)">
+    <div style="font-weight:700;color:var(--accent);margin-bottom:2px">📋 Materialliste</div>
+    ${parts}<br><span style="color:var(--dim)">${mats.length} matter · dekning ~${coverPct}%</span>
+  </div>`;
+}
+
 function _upcRenderMatResults(container, familyName, categoryId, roomId) {
   const prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false
@@ -3977,6 +4000,7 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
   const widthCm = Math.round((prods[0].mat_width_mm || 500) / 10);
   const wm2 = prods[0].watt_per_m2 || 100;
   let html = `<div style="color:var(--dim);margin-bottom:4px;font-size:11px">Bredde: ${widthCm} cm · ${wm2} W/m²</div>`;
+  html += _snowMatSummaryHtml(roomId);
   html += '<div style="display:flex;flex-direction:column;gap:3px">';
 
   // Auto-fill option
@@ -4011,6 +4035,17 @@ function _upcPlaceMat(productId, mode) {
   S.strips = S.strips.filter(s => s.roomId !== roomId);
   S.mats = S.mats.filter(m => m.roomId !== roomId);
   S.plates = S.plates.filter(p => p.roomId !== roomId);
+
+  // Snow: use the packing engine (lengthwise mats + end-to-end + crosswise remainder).
+  // auto = longest mat (fewest pieces); variant = the exact clicked product.
+  if (_isSnowModule()) {
+    const pid = (mode === 'auto')
+      ? (_snowLongestMat(HEATING_PRODUCTS.find(p => p.id === productId))?.id || productId)
+      : productId;
+    _packSnowMats(roomId, pid);
+    _upcRefreshResults();
+    return;
+  }
 
   if (mode === 'auto') {
     autoFillMatSerpentine(productId);
@@ -4241,6 +4276,124 @@ function _matTotalLengthMm(prod) {
     return Math.round(prod.mat_area_m2 * 1000000 / prod.mat_width_mm);
   }
   return null;
+}
+
+// Mat giving the FEWEST pieces for auto-fill: widest first (fewer columns), then longest
+// (fewer end-to-end). Same family/voltage.
+function _snowLongestMat(prod) {
+  if (!prod) return null;
+  const volt = prod.voltage || 230;
+  const cands = HEATING_PRODUCTS.filter(p => p.category_id === prod.category_id
+    && (p.voltage || 230) === volt && p.product_family === prod.product_family
+    && p.active !== false && _matTotalLengthMm(p) > 0);
+  cands.sort((a, b) =>
+    ((b.mat_width_mm || 0) - (a.mat_width_mm || 0)) ||
+    ((_matTotalLengthMm(b) || 0) - (_matTotalLengthMm(a) || 0)));
+  return cands[0] || prod;
+}
+
+// SNOW MAT PACKING ENGINE
+// Lays mats along the LONG axis, combines them end-to-end per column, and fills the
+// far-end remainder with a crosswise (rotated 90°) mat. Each physical mat = one S.mats
+// object, so the material list aggregates to "N× product". Returns { placedIds, summary,
+// N, k, remainder } or null. Geometry verified against Cenika PDF (Sone 1 + Kenneth's variant).
+function _packSnowMats(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const mainProd = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!mainProd) return null;
+  const w = (mainProd.mat_width_mm || 500) / 10;       // mat width (cm)
+  const ell = (_matTotalLengthMm(mainProd) || 0) / 10; // mat length (cm)
+  if (ell <= 0) return null;
+
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const Wx = maxX - minX, Wy = maxY - minY;
+  // Default: mats run along the LONG axis. Honor the direction override (v=along Y, h=along X).
+  const dirOverride = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+  const runAlongY = dirOverride ? (dirOverride === 'v') : (Wy >= Wx);
+  const Lalong = runAlongY ? Wy : Wx;
+  const Wacross = runAlongY ? Wx : Wy;
+  const alongMin = runAlongY ? minY : minX;
+  const acrossMin = runAlongY ? minX : minY;
+
+  const gap = (S.varmematte && S.varmematte.gapCm > 0) ? S.varmematte.gapCm : 10; // ~10cm between mats
+  const N = Math.max(1, Math.floor((Wacross + gap) / (w + gap)));   // columns across
+  const usedAcross = N * w + (N - 1) * gap;
+  const acrossStart = acrossMin + (Wacross - usedAcross) / 2;        // even edges = (Wacross-usedAcross)/2
+  const k = Math.max(0, Math.floor(Lalong / ell));                  // mats end-to-end per column
+  const coveredAlong = k * ell;
+
+  // Build a mat object centered at (acrossCenter, alongCenter); rotation maps local→world.
+  const _mk = (aC, lC, widthCm, lengthCm, nruns, mgap, rotation, pid) => {
+    const totalW = nruns * widthCm + Math.max(0, nruns - 1) * mgap;
+    const WCX = runAlongY ? aC : lC;
+    const WCY = runAlongY ? lC : aC;
+    return {
+      id: S.counters.nextMatId++, roomId, productId: pid,
+      x_cm: WCX - totalW / 2, y_cm: WCY - lengthCm / 2,
+      width_cm: widthCm, length_cm: lengthCm, num_runs: nruns, gap_cm: mgap,
+      rotation_deg: rotation
+    };
+  };
+
+  const mats = [];
+  const rotMain = runAlongY ? 0 : 90;
+  for (let i = 0; i < N; i++) {
+    const aC = acrossStart + i * (w + gap) + w / 2;
+    for (let j = 0; j < k; j++) {
+      const lC = alongMin + j * ell + ell / 2;
+      mats.push(_mk(aC, lC, w, ell, 1, 0, rotMain, productId));
+    }
+  }
+
+  // Remainder strip at the far end of the long axis → crosswise fill (rotated 90° from main).
+  const remLen = Lalong - coveredAlong;
+  let remainderName = null;
+  if (remLen >= 40) {
+    const runLen_r = N * w; // crosswise run spans the width covered by the lengthwise mats
+    const cat = mainProd.category_id, volt = mainProd.voltage || 230;
+    const cands = HEATING_PRODUCTS.filter(p => p.category_id === cat && (p.voltage || 230) === volt
+      && p.active !== false && _matTotalLengthMm(p) > 0);
+    let best = null;
+    for (const p of cands) {
+      const wr = (p.mat_width_mm || 500) / 10;
+      const pl = (_matTotalLengthMm(p)) / 10;
+      const wantRuns = Math.max(1, Math.floor(remLen / wr));  // runs to fill the remainder length
+      const maxRuns = Math.floor(pl / runLen_r);              // runs the mat's length allows
+      const runs = Math.min(wantRuns, maxRuns);
+      if (runs < 1) continue;
+      const cover = Math.min(runs * wr, remLen);
+      const lenWaste = pl - runs * runLen_r;
+      // Prefer: more coverage, then narrower mat ("mindre matte"), then less leftover.
+      const score = cover * 100 - wr * 8 - lenWaste * 0.5;
+      if (!best || score > best.score) best = { p, wr, runs, score };
+    }
+    if (best) {
+      const rotRem = runAlongY ? 90 : 0;
+      const aC = acrossStart + usedAcross / 2;
+      const lC = (alongMin + coveredAlong) + (best.runs * best.wr) / 2;
+      mats.push(_mk(aC, lC, best.wr, runLen_r, best.runs, 0, rotRem, best.p.id));
+      remainderName = best.p.name;
+    }
+  }
+
+  if (!mats.length) return null;
+  pushUndo();
+  for (const m of mats) S.mats.push(m);
+  _invalidateMatCache();
+  _trackProductUsage(productId);
+  S.ui.selectedMatId = mats[0].id;
+  const byProd = {};
+  for (const m of mats) byProd[m.productId] = (byProd[m.productId] || 0) + 1;
+  const summary = Object.entries(byProd).map(([pid, count]) => {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
+    return { productId: +pid, name: p ? p.name : ('#' + pid), count };
+  });
+  renderSidebar(); updateCtxBar(); render();
+  console.log(`_packSnowMats: ${N}×${k} hovedmatter + rest=${remainderName || 'ingen'} (${mats.length} stk totalt)`);
+  return { placedIds: mats.map(m => m.id), summary, N, k, remainderName };
 }
 
 // opts.exact: place exactly the given product (skip best-fit variant swap).
