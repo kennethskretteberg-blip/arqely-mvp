@@ -8057,7 +8057,7 @@ function _connectCellPathsV5(cellResults, direction, startCorner, roomPoly, marg
       const nextFirstRun = nextCell.runs[0];
       const nextLastRun = nextCell.runs[nextCell.runs.length - 1];
       const cands = [nextFirstRun, nextLastRun];
-      let bestEntry = null, bestDist = Infinity;
+      let bestEntry = null, bestDist = Infinity, bestEntryRun = null;
       for (let ci2 = 0; ci2 < cands.length; ci2++) {
         const r = cands[ci2];
         for (const useHigh of [true, false]) {
@@ -8066,18 +8066,42 @@ function _connectCellPathsV5(cellResults, direction, startCorner, roomPoly, marg
             : r.segments[0].start_cm;
           const pt = direction === 'v' ? { x: r.pos_cm, y: sw } : { x: sw, y: r.pos_cm };
           const d = Math.hypot(pt.x - exitPt.x, pt.y - exitPt.y);
-          if (d < bestDist) { bestDist = d; bestEntry = pt; }
+          if (d < bestDist) { bestDist = d; bestEntry = pt; bestEntryRun = r; }
         }
       }
 
       if (bestEntry) {
-        connections.push({
-          fromCell: cell.id,
-          toCell: nextCell.id,
-          path: [exitPt, bestEntry],
-          length_cm: bestDist
-        });
-        totalLength += bestDist;
+        // Default: straight 2-point connection.
+        let path = [exitPt, bestEntry];
+        // When the two cells sit at OFFSET sweep levels (L/T inner corner), a straight
+        // line is a diagonal across the runs (LOCKED: no shortcut). Route ORTHOGONALLY
+        // along the shared boundary instead: perp hop → sweep leg in the margin gap of
+        // whichever cell spans the full sweep range (between its boundary run and the
+        // inner wall → inside the room, no run there → no doubling) → perp hop.
+        const exitSweepV  = direction === 'v' ? exitPt.y    : exitPt.x;
+        const entrySweepV = direction === 'v' ? bestEntry.y : bestEntry.x;
+        const exitPerpV   = direction === 'v' ? exitPt.x    : exitPt.y;
+        const entryPerpV  = direction === 'v' ? bestEntry.x : bestEntry.y;
+        if (Math.abs(exitSweepV - entrySweepV) >= 1) {
+          const lo = Math.min(exitSweepV, entrySweepV), hi = Math.max(exitSweepV, entrySweepV);
+          const _covers = (r) => {
+            const s = r.segments[0].start_cm, e = r.segments[r.segments.length - 1].end_cm;
+            return s <= lo + 0.5 && e >= hi - 0.5;
+          };
+          let biasPerp = null, otherPerp = null;
+          if (_covers(lastRun))           { biasPerp = exitPerpV;  otherPerp = entryPerpV; } // A spans
+          else if (_covers(bestEntryRun)) { biasPerp = entryPerpV; otherPerp = exitPerpV;  } // B spans
+          if (biasPerp !== null) {
+            // 70% toward the spanning cell's boundary run → inside it, off the run.
+            const bPerp = biasPerp * 0.7 + otherPerp * 0.3;
+            const mk = (perp, sweep) => direction === 'v' ? { x: perp, y: sweep } : { x: sweep, y: perp };
+            path = [exitPt, mk(bPerp, exitSweepV), mk(bPerp, entrySweepV), bestEntry];
+          }
+        }
+        let len = 0;
+        for (let i = 1; i < path.length; i++) len += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
+        connections.push({ fromCell: cell.id, toCell: nextCell.id, path, length_cm: len });
+        totalLength += len;
       }
     }
     runCountSoFar += cellRuns.length;
@@ -8886,13 +8910,13 @@ function _v6ConnectCells(cellSweeps, ha, roomId, startCorner) {
         : { x: exitSweep, y: lastRun.pos_cm };
 
       // Find best entry in next cell
-      let bestEntry = null, bestDist = Infinity;
+      let bestEntry = null, bestDist = Infinity, bestEntryRun = null;
       for (const r of [nextCell.runs[0], nextCell.runs[nextCell.runs.length - 1]]) {
         for (const useHigh of [true, false]) {
           const sw = useHigh ? r.segments[r.segments.length - 1].end_cm : r.segments[0].start_cm;
           const pt = nextCell.direction === 'v' ? { x: r.pos_cm, y: sw } : { x: sw, y: r.pos_cm };
           const d = Math.hypot(pt.x - exitPt.x, pt.y - exitPt.y);
-          if (d < bestDist) { bestDist = d; bestEntry = pt; }
+          if (d < bestDist) { bestDist = d; bestEntry = pt; bestEntryRun = r; }
         }
       }
 
@@ -8909,9 +8933,46 @@ function _v6ConnectCells(cellSweeps, ha, roomId, startCorner) {
         }
       }
 
-      // If blocked, try wall-following route (simplified: add midpoint on room boundary)
       let path = [exitPt, bestEntry];
-      if (!pathValid && room && bestEntry) {
+      let orthoApplied = false;
+      // INNER-CORNER ORTHOGONAL ROUTING (L/T diagonal fix): when the two cells sit at
+      // OFFSET sweep levels, a straight exit→entry line cuts diagonally across the runs
+      // (LOCKED: no shortcut). Route along the shared boundary instead — perp hop, a sweep
+      // leg in the margin gap of whichever cell SPANS the full sweep range (between its
+      // boundary run and the inner wall → inside the room, no run there → no doubling),
+      // then a perp hop. Validate against obstacles; fall back to straight if not clean.
+      if (bestEntry) {
+        const exitSweepV  = cell.direction === 'v' ? exitPt.y    : exitPt.x;
+        const entrySweepV = cell.direction === 'v' ? bestEntry.y : bestEntry.x;
+        const exitPerpV   = cell.direction === 'v' ? exitPt.x    : exitPt.y;
+        const entryPerpV  = cell.direction === 'v' ? bestEntry.x : bestEntry.y;
+        if (Math.abs(exitSweepV - entrySweepV) >= 1) {
+          const lo = Math.min(exitSweepV, entrySweepV), hi = Math.max(exitSweepV, entrySweepV);
+          const _covers = (r) => {
+            const s = r.segments[0].start_cm, e = r.segments[r.segments.length - 1].end_cm;
+            return s <= lo + 0.5 && e >= hi - 0.5;
+          };
+          let biasPerp = null, otherPerp = null;
+          if (_covers(lastRun))                        { biasPerp = exitPerpV;  otherPerp = entryPerpV; }
+          else if (bestEntryRun && _covers(bestEntryRun)) { biasPerp = entryPerpV; otherPerp = exitPerpV;  }
+          if (biasPerp !== null) {
+            const bPerp = biasPerp * 0.7 + otherPerp * 0.3; // inside the spanning cell, off its run
+            const mk = (perp, sweep) => cell.direction === 'v' ? { x: perp, y: sweep } : { x: sweep, y: perp };
+            const oPath = [exitPt, mk(bPerp, exitSweepV), mk(bPerp, entrySweepV), bestEntry];
+            // Obstacle check on the sweep leg (sampled).
+            let oOk = true;
+            if (obstacles.length) {
+              for (let t = 0; t <= 1 && oOk; t += 0.1) {
+                const p = mk(bPerp, exitSweepV + (entrySweepV - exitSweepV) * t);
+                for (const obs of obstacles) if (ptInPoly(p.x, p.y, obs.points)) { oOk = false; break; }
+              }
+            }
+            if (oOk) { path = oPath; orthoApplied = true; pathValid = true; }
+          }
+        }
+      }
+      // If still a straight line blocked by an obstacle, try wall-following route.
+      if (!orthoApplied && !pathValid && room && bestEntry) {
         const midX = (exitPt.x + bestEntry.x) / 2;
         const midY = (exitPt.y + bestEntry.y) / 2;
         const proj = _projectToRoomWall({ x: midX, y: midY }, room, 100);
