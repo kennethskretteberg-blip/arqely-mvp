@@ -10515,6 +10515,9 @@ function _autoFillCableImpl(roomId, productId) {
     }
   }
 
+  // Holds a boustrophedon result that badly under-fills a fixed-length cable, so V6
+  // can be tried and the better-filling engine chosen (fixes L/T-room under-fill).
+  let _boustFallback = null;
   // Try boustrophedon corner-to-corner engine (primary — clean rooms only).
   // It self-selects start corner + side to guarantee corner-to-corner landing and
   // clean cell handoffs; returns null for holes/stacked cells → falls through to V6.
@@ -10543,7 +10546,7 @@ function _autoFillCableImpl(roomId, productId) {
       if (score > bBestScore) { bBestScore = score; bBest = res; }
     }
     if (bBest && bBest.runs.length > 0) {
-      return {
+      const boustCable = {
         id: S.counters.nextCableId++,
         roomId, productId,
         direction: bBest.direction,
@@ -10557,6 +10560,13 @@ function _autoFillCableImpl(roomId, productId) {
         connections: [],
         _engine: 'boustrophedon'
       };
+      // Clean rooms: boustrophedon fills the cable well → return now (unchanged).
+      // L/T-rooms: boustrophedon drops short runs and badly under-fills a fixed-length
+      // cable (e.g. uses 15.6 m of 50 m). Don't accept that blindly — keep it as a
+      // fallback and let V6 (cell-based) try; the better-filling engine wins below.
+      const fillOk = !prod.cable_length_m || bBest.totalLength_cm >= prod.cable_length_m * 100 * 0.9;
+      if (fillOk) return boustCable;
+      _boustFallback = boustCable;
     }
   }
 
@@ -10585,7 +10595,7 @@ function _autoFillCableImpl(roomId, productId) {
       }
     }
     if (v6Best && v6Best.runs.length > 0) {
-      return {
+      const v6Cable = {
         id: S.counters.nextCableId++,
         roomId, productId,
         direction: v6Best.direction || v6BestDir,
@@ -10600,8 +10610,18 @@ function _autoFillCableImpl(roomId, productId) {
         _engine: 'v6',
         _v6Debug: v6Best._v6Debug
       };
+      // If boustrophedon under-filled a fixed-length cable, keep whichever engine
+      // fills the cable length better (V6 typically fills L/T-rooms via cells).
+      if (_boustFallback && prod.cable_length_m) {
+        const tgt = prod.cable_length_m * 100;
+        return (Math.abs(v6Best.totalLength_cm - tgt) <= Math.abs(_boustFallback.totalLength_cm - tgt))
+          ? v6Cable : _boustFallback;
+      }
+      return v6Cable;
     }
   }
+  // V6 produced nothing but boustrophedon had an (under-filling) result → use it.
+  if (_boustFallback) return _boustFallback;
 
   // P1 (2026-06-03): V5 (generateCablePolygonV5), V4 (generateCablePolygonAware) and the
   // length-driven generator (generateCableLayoutLengthDriven) engines were removed here.
