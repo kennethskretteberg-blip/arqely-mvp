@@ -4,6 +4,46 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-09 — Varmekabel: retningsvelger reapply + L-diagonal + rektangel-hjørne
+
+Tre sammenhengende kabel-forbedringer rundt retnings-/hjørnevalg. Commits: `bc0d773`,
+`6dee009`, + denne (rektangel-hjørne). Verifisert in-memory i autentisert fane.
+
+### Del A — retningsvelger re-kjører eksisterende/forhåndsvist kabel (`bc0d773`)
+- Ny `_reapplyCableDirection` (nær `_cableFlipDirection`): når brukeren endrer retning/hjørne
+  i pickeren, re-kjøres umiddelbart aktiv forhåndsvisning (`_cablePreviewPlace`), commitet
+  enkelt-kabel (`autoFillCable`) eller multi-kabel-gruppe (`autoFillMultiCable`) i den nye
+  retningen.
+- Wiret inn i begge pickere (`_vfDirEvt`, `_vfPickEvt`) via en endrings-guard:
+  re-kjør bare når `snap.dir`/`snap.corner` faktisk endret seg.
+- `_cablePreviewMeta` utvidet med `familyName`, `categoryId`.
+
+### Del B — fjernet vertikal L-diagonal (ortogonal kobling langs innerveggen) (`6dee009`)
+- I `_v6ConnectCells` (live V6-cellekobling): når exit/entry ligger på forskjøvne sweep-nivåer
+  rutes koblingen nå **ortogonalt** langs innerhjørnet i stedet for en diagonal snarvei.
+  `_covers` finner cellen som spenner hele sweep-området; bias 0.7 mot dens grenseløp;
+  `mk(bPerp, sweep)` bygger en 4-punkts ortogonal sti; obstacle-validert med fallback til
+  rett `[exitPt, bestEntry]`. Bevart 50 m, ingen regresjon på horisontal (dx:0/dy:13),
+  rektangel fortsatt boustrophedon (49,4 m).
+- Samme fiks også speilet i den døde `_connectCellPathsV5` (uskadelig, ikke i live-cascade).
+
+### Punkt (a) — rektangel-boustrophedon honorerer valgt starthjørne (denne commit)
+- I `generateCableBoustrophedon` → `_layout()` (variant-utvelgelsen): når
+  `S.varmefolie.dirExplicit && startCorner` er satt, **hard-filtreres** de fire traverserings-
+  variantene (`perpAsc × startHigh`) til den som lander på valgt hjørne — i stedet for det
+  gamle myke +0,5-tiebreaker-nudget. Tracker `bestForced` ved siden av `best`; bruker
+  `bestForced` når det finnes, ellers trygg fallback til ufiltrerte beste.
+- Auto-modus (ingen bevisst valg) helt uendret — motorens selvvalg beholdes.
+- Bakgrunn: rektangler bruker boustrophedon, som internt selv-velger starthjørnet i
+  `_layout`s 4-variant-søk. Tidligere talte picker-hjørnet bare som +0,5 og ble overdøvet av
+  hjørne-landing-bonus (opptil 8/ende) → valgt hjørne ble ignorert på rektangel. Nå honoreres
+  det. Samme `dirExplicit && userCorner`-mønster som V6-fiksen (`a2ee83e`).
+- **Verifisert:** parser OK; alle 8 hjørne×retning-kombinasjoner gir nøyaktig valgt hjørne;
+  overstyring bevist (motorens naturlige selvvalg `tl` → eksplisitt `tr` gir `tr`, `br` gir
+  `br`); kabellengde stabil (~59,9 m), ingen LOCKED-regel berørt.
+
+---
+
 ## 2026-06-08 — ØKT-OPPSUMMERING: snøsmelting fullført + matte-pakkemotor
 
 Stor økt: fullførte utendørs snøsmelte-modulen (steg 1–8), konsoliderte produktvelgeren
