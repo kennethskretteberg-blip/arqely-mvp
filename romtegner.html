@@ -2076,6 +2076,7 @@ const S = {
     selectedVertexIdx: null,     // index into selected room's points array
     selectedHindringWallIdx: null, // index into selected hindring's wall list
     selectedDimId: null,         // selected user dimension line id
+    selectedBg: null,            // selected background/floor-plan layer (object ref, transient)
     selectedAnnot: null,         // selected wall annotation {roomId, wallId}
     skilleveggRoomId: null,       // room being split by inner wall
     skilleveggThicknessCm: 10,    // default inner wall thickness (persists between operations)
@@ -2213,9 +2214,11 @@ function _moduleContext(moduleType) {
 }
 
 // ─── BG HELPERS ──────────────────────────────────────────────
+let _bgIdSeq = 1;
 function _newBgObj() {
-  return { img:null, dataUrl:null, fileName:null, originX:0, originY:0, widthCm:0, heightCm:0,
-           opacity:1.0, visible:true, calibrating:false, calPts:[] };
+  return { id:'bg'+(_bgIdSeq++), img:null, dataUrl:null, fileName:null, originX:0, originY:0, widthCm:0, heightCm:0,
+           opacity:1.0, visible:true, calibrating:false, calPts:[],
+           locked:false, rotation:0, flipX:false, flipY:false };
 }
 function activeBg() {
   const k = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
@@ -2495,7 +2498,7 @@ function _anyInteractionActive() {
     _vdDragging || _vdPending ||
     _dimOffDragging || _annotDragging ||
     _cardDragging || _cableLabelDragging || _cableGizmoDragging ||
-    _thDragging || _mmDragging || _vfPickDrag
+    _thDragging || _mmDragging || _vfPickDrag || _bgDragging
   );
 }
 
@@ -2565,6 +2568,7 @@ function render() {
   }
   drawUserDimLines();
   if (S.ui.selectedDimId!==null) drawDimMoveGizmo();
+  if (S.ui.selectedBg) drawBgGizmo();
   _drawDebugCableCells();
   drawRoomCards();
   drawScaleBar();
@@ -13904,6 +13908,7 @@ function hitStair(wx, wy) {
 }
 
 function selectStair(id) {
+  S.ui.selectedBg=null;
   S.ui.selectedStairId = id;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
@@ -14490,6 +14495,7 @@ function _isInForbiddenZone(roomId, wx, wy) {
 
 /** Select a zone */
 function selectZone(id) {
+  S.ui.selectedBg=null;
   S.ui.selectedZoneId = id;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
@@ -14522,6 +14528,7 @@ function deleteZone(id) {
 
 // ── Mat selection, deletion and helpers ──
 function selectMat(id) {
+  S.ui.selectedBg=null;
   S.ui.selectedMatId = id;
   S.ui.selectedPlateId = null;
   S.ui.selectedStripId = null;
@@ -14916,6 +14923,7 @@ let _cableGizmoDragType = null; // 'start' or 'end'
 let _cableGizmoDragCable = null;
 
 function selectCable(id) {
+  S.ui.selectedBg=null;
   S.ui.selectedCableId = id;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
@@ -16437,6 +16445,7 @@ function setWallColor(hex) {
 }
 
 function selStrip(id, addToMulti) {
+  S.ui.selectedBg=null;
   if (addToMulti && id !== null) {
     if (S.ui.selectedStripIds.has(id)) {
       S.ui.selectedStripIds.delete(id);
@@ -19862,9 +19871,16 @@ function drawBgImage() {
     const sw = bg.widthCm  * sc;
     const sh = bg.heightCm * sc;
     ctx.save();
+    // Image with per-layer rotation + flip (about its centre). Calibration UI
+    // below is drawn untransformed (uses absolute screen coords via w2s).
+    ctx.save();
     ctx.globalAlpha = bg.opacity;
-    ctx.drawImage(bg.img, sx, sy, sw, sh);
-    ctx.globalAlpha = 1;
+    const _bcx = sx + sw / 2, _bcy = sy + sh / 2;
+    ctx.translate(_bcx, _bcy);
+    if (bg.rotation) ctx.rotate(bg.rotation * Math.PI / 180);
+    if (bg.flipX || bg.flipY) ctx.scale(bg.flipX ? -1 : 1, bg.flipY ? -1 : 1);
+    ctx.drawImage(bg.img, -sw / 2, -sh / 2, sw, sh);
+    ctx.restore();
 
     if (bg.calibrating) {
       const ARM = 14;
@@ -19905,6 +19921,145 @@ function drawBgImage() {
     }
     ctx.restore();
   }
+}
+
+// Background/floor-plan layers visible on the active floor, in draw order
+// (bottom → top), matching drawBgImage's collection logic.
+function _bgsOnActiveFloor() {
+  const activeFloor = S.ui.activeFloorId;
+  const list = [];
+  if (S.bgLayers) for (const [key, layers] of Object.entries(S.bgLayers)) {
+    if (activeFloor != null && key !== '__global__' && key !== String(activeFloor)) continue;
+    for (const bg of layers) list.push(bg);
+  }
+  for (const [key, bg] of Object.entries(S.bgs)) {
+    if (list.includes(bg)) continue;
+    if (activeFloor != null && key !== '__global__' && key !== String(activeFloor)) continue;
+    list.push(bg);
+  }
+  return list;
+}
+
+// Topmost selectable background under a world point. Excludes hidden, empty and
+// LOCKED layers (locked = not click-selectable, so drawing on top is undisturbed).
+// includeLocked=true bypasses the lock filter (used by "Velg plantegning").
+function _hitBgLayer(wx, wy, includeLocked) {
+  const list = _bgsOnActiveFloor();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const bg = list[i];
+    if (!bg.img || bg.visible === false || bg.widthCm <= 0) continue;
+    if (bg.locked && !includeLocked) continue;
+    // Inverse-transform the point into image-local (unrotated) space about centre.
+    const cx = bg.originX + bg.widthCm / 2, cy = bg.originY + bg.heightCm / 2;
+    let dx = wx - cx, dy = wy - cy;
+    if (bg.rotation) {
+      const a = -bg.rotation * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+      const rx = dx * ca - dy * sa, ry = dx * sa + dy * ca; dx = rx; dy = ry;
+    }
+    if (bg.flipX) dx = -dx;
+    if (bg.flipY) dy = -dy;
+    if (Math.abs(dx) <= bg.widthCm / 2 && Math.abs(dy) <= bg.heightCm / 2) return bg;
+  }
+  return null;
+}
+
+// Select a background layer (clears other selections), enter transform mode.
+function selectBgLayer(bg) {
+  if (!bg) return;
+  S.ui.selectedBg = bg;
+  S.ui.selectedStripId = null; S.ui.selectedStripIds = new Set();
+  S.ui.selectedCableId = null; S.ui.selectedZoneId = null; S.ui.selectedMatId = null;
+  S.ui.selectedPlateId = null; S.ui.selectedStairId = null; S.ui.selectedHindringId = null;
+  S.ui.selectedHindringWallIdx = null; S.ui.selectedWallId = null; S.ui.selectedVertexIdx = null;
+  S.ui.selectedDimId = null; S.ui.selectedRoomId = null; S.ui.selectedAnnot = null;
+  // Make this layer the active one for its floor so quick-controls target it.
+  const fk = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
+  S.bgs[fk] = bg;
+  renderSidebar(); updateCtxBar(); render();
+}
+function deselectBg() { S.ui.selectedBg = null; updateCtxBar(); render(); }
+
+// ── Background action-menu operations (operate on the selected/active layer) ──
+function _ctxBg() { return S.ui.selectedBg || (S.bgs && activeBg()); }
+function toggleBgLock() {
+  const bg = _ctxBg(); if (!bg) return;
+  bg.locked = !bg.locked;
+  if (bg.locked && S.ui.selectedBg === bg) S.ui.selectedBg = null; // locked = not click-selectable
+  renderSidebar(); updateCtxBar(); render();
+}
+function rotateBg(delta) {
+  const bg = _ctxBg(); if (!bg || !bg.img) return;
+  pushUndo();
+  let r = ((bg.rotation || 0) + delta) % 360; if (r < 0) r += 360;
+  bg.rotation = r;
+  updateCtxBar(); render();
+}
+function flipBg(axis) {
+  const bg = _ctxBg(); if (!bg || !bg.img) return;
+  pushUndo();
+  if (axis === 'x') bg.flipX = !bg.flipX; else bg.flipY = !bg.flipY;
+  updateCtxBar(); render();
+}
+function fitBgToView() {
+  const bg = _ctxBg(); if (!bg || !bg.img || bg.widthCm <= 0) return;
+  S.view.panX = bg.originX + bg.widthCm / 2;
+  S.view.panY = bg.originY + bg.heightCm / 2;
+  const zx = canvas.width  * 0.85 / (bg.widthCm  * BASE_SCALE);
+  const zy = canvas.height * 0.85 / (bg.heightCm * BASE_SCALE);
+  S.view.zoom = Math.max(0.05, Math.min(zx, zy, 8));
+  const zb = document.getElementById('zoom-badge'); if (zb) zb.textContent = Math.round(S.view.zoom*100)+'%';
+  render();
+}
+
+// World position of a background corner (idx: 0=TL,1=TR,2=BR,3=BL) given its
+// originX/originY/widthCm/heightCm/rotation (rotation about centre).
+function _bgCornerWorld(o, idx) {
+  const cx = o.originX + o.widthCm / 2, cy = o.originY + o.heightCm / 2;
+  const hw = o.widthCm / 2, hh = o.heightCm / 2;
+  const L = [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]][idx];
+  const a = (o.rotation || 0) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+  return { x: cx + L[0]*ca - L[1]*sa, y: cy + L[0]*sa + L[1]*ca };
+}
+// Screen geometry of the selected-bg transform gizmo.
+function _bgGizmoGeom(bg) {
+  const corners = [0,1,2,3].map(i => { const w = _bgCornerWorld(bg, i); return w2s(w.x, w.y); });
+  const cs = w2s(bg.originX + bg.widthCm/2, bg.originY + bg.heightCm/2);
+  const tm = { x:(corners[0].x+corners[1].x)/2, y:(corners[0].y+corners[1].y)/2 }; // top-edge midpoint
+  let ux = tm.x - cs.x, uy = tm.y - cs.y; const ul = Math.hypot(ux,uy) || 1; ux/=ul; uy/=ul;
+  const rot = { x: tm.x + ux*26, y: tm.y + uy*26 };
+  return { corners, cs, tm, rot };
+}
+// Draw the transform frame + handles for the selected background.
+function drawBgGizmo() {
+  const bg = S.ui.selectedBg;
+  if (!bg || !bg.img || bg.visible === false) return;
+  if (S.ui.drawMode === 'bg-calibrate') return; // unngå rot under kalibrering
+  const g = _bgGizmoGeom(bg);
+  const acc = _lc('#0891b2', '#22d3ee');
+  ctx.save();
+  ctx.strokeStyle = acc; ctx.lineWidth = 1.5; ctx.setLineDash([5,4]);
+  ctx.beginPath(); ctx.moveTo(g.corners[0].x, g.corners[0].y);
+  for (let i=1;i<4;i++) ctx.lineTo(g.corners[i].x, g.corners[i].y);
+  ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+  // rotation handle
+  ctx.beginPath(); ctx.moveTo(g.tm.x, g.tm.y); ctx.lineTo(g.rot.x, g.rot.y); ctx.stroke();
+  ctx.beginPath(); ctx.arc(g.rot.x, g.rot.y, 5, 0, Math.PI*2); ctx.fillStyle = acc; ctx.fill();
+  // corner scale handles
+  for (const c of g.corners) {
+    ctx.beginPath(); ctx.rect(c.x-4, c.y-4, 8, 8);
+    ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = acc; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  ctx.restore();
+}
+// Hit-test the gizmo handles (screen px). Returns {type:'rotate'|'scale'|'move', corner?}.
+function _hitBgGizmo(sx, sy) {
+  const bg = S.ui.selectedBg;
+  if (!bg || !bg.img || bg.visible === false) return null;
+  const g = _bgGizmoGeom(bg);
+  if (Math.hypot(sx-g.rot.x, sy-g.rot.y) <= 9) return { type:'rotate' };
+  for (let i=0;i<4;i++) if (Math.hypot(sx-g.corners[i].x, sy-g.corners[i].y) <= 8) return { type:'scale', corner:i };
+  if (ptInPoly(sx, sy, g.corners)) return { type:'move' };
+  return null;
 }
 
 function setActiveBgFloor(id) {
@@ -19977,7 +20132,9 @@ async function _renderPdfPage(file, fileName) {
 
 function _installBgImage(img, dataUrl, fileName) {
   const bg = activeBg();
-  const sameFile = fileName && bg.fileName && bg.fileName === fileName && bg.img;
+  // "Bytt bilde" fra handlingsmenyen: behold scale/x/y/rotasjon, bare nytt bilde.
+  const keepTransform = _bgReplaceKeepTransform; _bgReplaceKeepTransform = false;
+  const sameFile = (keepTransform && bg.img) || (fileName && bg.fileName && bg.fileName === fileName && bg.img);
 
   bg.img      = img;
   bg.dataUrl  = dataUrl;
@@ -20036,6 +20193,11 @@ function toggleBgVisible(checked) {
 }
 function removeBgImage() {
   const bg = activeBg();
+  // Remove this layer from the floor's layer array (multi-layer model).
+  if (S.bgLayers) for (const k in S.bgLayers) {
+    const arr = S.bgLayers[k]; const i = arr.indexOf(bg); if (i >= 0) arr.splice(i, 1);
+  }
+  if (S.ui.selectedBg === bg) S.ui.selectedBg = null;
   bg.img = null; bg.dataUrl = null;
   bg.widthCm = 0; bg.heightCm = 0;
   bg.calibrating = false; bg.calPts = [];
@@ -20044,6 +20206,7 @@ function removeBgImage() {
   const calOv = document.getElementById('bg-calib-overlay');
   if (calOv) calOv.style.display = 'none';
   hideBgPanel();
+  renderSidebar();
   updateCtxBar();
   render();
 }
@@ -20410,7 +20573,16 @@ function _addBgToFloor(floorId) {
 }
 function _selectBgLayer(floorId, idx) {
   const layers = _getBgLayersForFloor(floorId);
-  if (layers[idx]) { S.bgs[floorId] = layers[idx]; render(); renderSidebar(); }
+  const bg = layers[idx]; if (!bg) return;
+  S.bgs[floorId] = bg;
+  selectBgLayer(bg); // «Velg plantegning»: går i transform-modus (virker selv om låst)
+}
+function _toggleBgLayerLock(floorId, idx) {
+  const layers = _getBgLayersForFloor(floorId);
+  const bg = layers[idx]; if (!bg) return;
+  bg.locked = !bg.locked;
+  if (bg.locked && S.ui.selectedBg === bg) S.ui.selectedBg = null;
+  renderSidebar(); updateCtxBar(); render();
 }
 function _floorBgItemsHtml(floorId) {
   const layers = _getBgLayersForFloor(floorId);
@@ -20419,16 +20591,21 @@ function _floorBgItemsHtml(floorId) {
     const bg = layers[i];
     const fn = bg.fileName || 'Plantegning';
     const sn = fn.length > 22 ? fn.substring(0, 20) + '…' : fn;
-    const isActive = bg === S.bgs[floorId];
-    html += `<div class="room-item indented" style="padding:3px 8px 3px 22px;font-size:11px;gap:6px;opacity:${bg.visible!==false?1:0.45}" onclick="event.stopPropagation();_selectBgLayer(${floorId},${i})">
-      <span style="color:${isActive?'var(--accent)':'var(--dim)'}"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg></span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${isActive?'var(--accent)':'var(--text)'}" title="${esc(fn)}">${esc(sn)}</span>
+    const isSel = bg === S.ui.selectedBg;
+    const hi = isSel || bg === S.bgs[floorId];
+    const lockIco = bg.locked
+      ? '<svg class="ic ic-lock" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
+      : '<svg class="ic ic-lock-open" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.6-1.6"/></svg>';
+    html += `<div class="room-item indented${isSel?' active':''}" style="padding:3px 8px 3px 22px;font-size:11px;gap:6px;opacity:${bg.visible!==false?1:0.45}${isSel?';background:rgba(34,211,238,0.10)':''}" onclick="event.stopPropagation();_selectBgLayer(${floorId},${i})" title="Velg plantegning (transform)">
+      <span style="color:${hi?'var(--accent)':'var(--dim)'}"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg></span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${hi?'var(--accent)':'var(--text)'}" title="${esc(fn)}">${esc(sn)}</span>
+      <button onclick="event.stopPropagation();_toggleBgLayerLock(${floorId},${i})" title="${bg.locked?'Låst — klikk for å låse opp':'Lås mot utilsiktet flytting'}" style="background:none;border:none;padding:0;cursor:pointer;color:${bg.locked?'var(--accent)':'var(--dim)'};display:inline-flex">${lockIco}</button>
       <input type="checkbox" ${bg.visible!==false?'checked':''} onchange="_toggleBgLayerVisible(${floorId},${i},this.checked);event.stopPropagation()" style="width:13px;height:13px;accent-color:var(--accent)" title="Synlig" onclick="event.stopPropagation()">
       <input type="range" min="5" max="100" value="${Math.round((bg.opacity??1)*100)}" style="width:48px;height:12px;accent-color:var(--accent)" oninput="_setBgLayerOpacity(${floorId},${i},this.value/100)" title="Dimming" onclick="event.stopPropagation()">
     </div>`;
   }
   html += `<div class="room-item indented" style="padding:3px 8px 3px 22px;font-size:11px;cursor:pointer;color:var(--dim)" onclick="event.stopPropagation();_addBgToFloor(${floorId})">
-    <span>➕</span><span>Legg til plantegning</span>
+    ${IC('plus',13)}<span>Legg til plantegning</span>
   </div>`;
   return html;
 }
@@ -23333,6 +23510,8 @@ let _dragging=false, _panning=false;
 // the press-down point — arming a drag without actually moving still counts as a
 // clean click (so cycling survives the tiny stray move events a click can emit).
 let _pressMoved=false;
+// Background/floor-plan transform-gizmo drag state
+let _bgDragging=null, _bgDragOrig=null, _bgDragStartW=null, _bgDragCenter=null, _bgDragStartAng=0, _bgScaleCorner0=null;
 let _pressDownPt=null;        // {x,y} client coords of the current/last press-down
 const CYCLE_MOVE_PX=4;        // displacement beyond this = a real drag, not a click
 let _cycleBadgeEl=null;       // lazily-created "1/3" counter element near the cursor
@@ -23571,6 +23750,7 @@ function _buildCycleCandidates(wx, wy) {
   const _sp = w2s(wx, wy);
   const hd = _hitDimLine(wx, wy, _sp.x, _sp.y); if (hd !== null) list.push({type:'dim', id:hd}); // mellom objekter og rom
   const hr = hitTest(wx, wy);             if (hr?.roomId)    list.push({type:'room',     id:hr.roomId});
+  const hb = _hitBgLayer(wx, wy);         if (hb)            list.push({type:'bg', id:hb.id, ref:hb}); // SISTE: underlaget
   return list;
 }
 
@@ -23581,6 +23761,7 @@ function _applyCycleSelection(cand) {
   if (cand.type === 'zone')   { selectZone(cand.id); renderSidebar(); return; }
   if (cand.type === 'mat')    { selectMat(cand.id); renderSidebar(); return; }
   if (cand.type === 'stair')  { selectStair(cand.id); renderSidebar(); return; }
+  if (cand.type === 'bg')     { selectBgLayer(cand.ref); return; }
   if (cand.type === 'dim')    {
     // Behold selectedRoomId så rommet fortsatt vises (som dagens dim-klikk)
     S.ui.selectedStripId=null; S.ui.selectedStripIds=new Set();
@@ -24328,6 +24509,23 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
 
+    // ── Background transform-gizmo (when a floor-plan layer is selected) ──
+    if (S.ui.selectedBg) {
+      const _bgg = _hitBgGizmo(sx0, sy0);
+      if (_bgg) {
+        pushUndo();
+        const bg = S.ui.selectedBg;
+        _bgDragging = _bgg.type;
+        _bgDragOrig = { originX:bg.originX, originY:bg.originY, widthCm:bg.widthCm, heightCm:bg.heightCm, rotation:bg.rotation||0 };
+        _bgDragStartW = s2w(sx0, sy0);
+        _bgDragCenter = { x: bg.originX + bg.widthCm/2, y: bg.originY + bg.heightCm/2 };
+        if (_bgg.type === 'rotate') _bgDragStartAng = Math.atan2(_bgDragStartW.y-_bgDragCenter.y, _bgDragStartW.x-_bgDragCenter.x);
+        if (_bgg.type === 'scale') _bgScaleCorner0 = _bgCornerWorld(_bgDragOrig, _bgg.corner);
+        canvas.style.cursor = _bgg.type==='rotate' ? 'crosshair' : _bgg.type==='scale' ? 'nwse-resize' : 'move';
+        return;
+      }
+    }
+
     // ── Click-cycling: resolve which stacked object this click targets ──
     // Build the full candidate stack under the point. On a repeated clean
     // click at (~)the same spot, advance through the stack; otherwise start
@@ -24350,12 +24548,20 @@ canvas.addEventListener('mousedown', e=>{
         S.ui.cycle = { sx: sx0, sy: sy0, key: _key, idx: _idx };
         if (_cyc.length > 1) _showCycleBadge(e.clientX, e.clientY, _idx, _cyc.length);
         else _hideCycleBadge();
-        if (_idx > 0) {
-          // Cycling to a buried object → select only (no drag), then stop.
-          _applyCycleSelection(_cyc[_idx]);
+        const _chosen = _cyc[_idx];
+        if (_chosen.type === 'bg') {
+          // Background has no inline select+drag handler below — handle it here
+          // for any idx (incl. 0). The transform gizmo drives its dragging.
+          _applyCycleSelection(_chosen);
           return;
         }
-        // _idx === 0 → fall through to the normal top-most select+drag below.
+        if (_idx > 0) {
+          // Cycling to a buried object → select only (no drag), then stop.
+          _applyCycleSelection(_chosen);
+          return;
+        }
+        // _idx === 0 (non-bg) → fall through to the normal top-most select+drag.
+        S.ui.selectedBg = null; // a non-bg object is taking selection
       }
     }
 
@@ -24710,6 +24916,7 @@ canvas.addEventListener('mousedown', e=>{
         S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
         S.ui.selectedVertexIdx=null; S.ui.selectedDimId=null;
         S.ui.selectedAnnot=null; S.ui.selectedZoneId=null;
+        S.ui.selectedBg=null;
         S.ui.movingWall=false;
       } else {
         // Different room — select it and clear sub-selections
@@ -24734,6 +24941,34 @@ canvas.addEventListener('mousemove', e=>{
     if (_pressDownPt && Math.hypot(e.clientX-_pressDownPt.x, e.clientY-_pressDownPt.y) > CYCLE_MOVE_PX) {
       _pressMoved = true;
     }
+  }
+
+  // Background transform-gizmo drag (move / scale-about-centre / rotate)
+  if (_bgDragging) {
+    const bg = S.ui.selectedBg;
+    if (!bg) { _bgDragging = null; return; }
+    const _r = canvas.getBoundingClientRect();
+    const mw = s2w(e.clientX - _r.left, e.clientY - _r.top);
+    const C = _bgDragCenter;
+    if (_bgDragging === 'move') {
+      bg.originX = _bgDragOrig.originX + (mw.x - _bgDragStartW.x);
+      bg.originY = _bgDragOrig.originY + (mw.y - _bgDragStartW.y);
+    } else if (_bgDragging === 'scale') {
+      const d0 = Math.hypot(_bgScaleCorner0.x - C.x, _bgScaleCorner0.y - C.y) || 1;
+      let f = Math.hypot(mw.x - C.x, mw.y - C.y) / d0;
+      if (f < 0.05) f = 0.05;
+      bg.widthCm = _bgDragOrig.widthCm * f;
+      bg.heightCm = _bgDragOrig.heightCm * f;
+      bg.originX = C.x - bg.widthCm / 2;
+      bg.originY = C.y - bg.heightCm / 2;
+    } else if (_bgDragging === 'rotate') {
+      const angNow = Math.atan2(mw.y - C.y, mw.x - C.x);
+      let deg = _bgDragOrig.rotation + (angNow - _bgDragStartAng) * 180 / Math.PI;
+      if (e.shiftKey) deg = Math.round(deg / 15) * 15; // snap 15° med Shift
+      bg.rotation = deg;
+    }
+    markDirty();
+    return;
   }
 
   // Cable label drag
@@ -25504,6 +25739,10 @@ canvas.addEventListener('mouseleave', () => {
 });
 
 canvas.addEventListener('mouseup', e=>{
+  if (_bgDragging) {
+    _bgDragging=null; _bgDragOrig=null; _bgScaleCorner0=null;
+    canvas.style.cursor='default'; updateCtxBar(); render(); return;
+  }
   if (_cableLabelDragging) {
     _cableLabelDragging=false; _cableLabelDragId=null; canvas.style.cursor='default'; return;
   }
@@ -25803,6 +26042,7 @@ document.addEventListener('keydown', e=>{
 
   if (e.key==='Escape') {
     _resetCycle();
+    if (S.ui.selectedBg) { deselectBg(); return; }
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.stairPlaceMode) { S.ui.stairPlaceMode=false; S.ui.stairPlaceParams=null; canvas.style.cursor='default'; return; }
     if (S.ui.platePlaceMode) { S.ui.platePlaceMode=false; S.ui.platePlaceProductId=null; canvas.style.cursor='default'; return; }
@@ -25873,6 +26113,16 @@ document.addEventListener('keydown', e=>{
   if (e.key==='Delete'&&S.ui.selectedMatId!==null) { deleteMat(S.ui.selectedMatId); return; }
   if (e.key==='Delete'&&S.ui.selectedPlateId!==null) { deletePlate(S.ui.selectedPlateId); return; }
   if (e.key==='Delete'&&S.ui.selectedStairId!==null) { deleteStair(S.ui.selectedStairId); return; }
+  // Arrow keys nudge the selected background; Shift = larger step.
+  if (S.ui.selectedBg && !S.ui.drawMode && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+    e.preventDefault(); pushUndo();
+    const bg = S.ui.selectedBg, step = e.shiftKey ? 25 : 5;
+    if (e.key==='ArrowLeft')  bg.originX -= step;
+    if (e.key==='ArrowRight') bg.originX += step;
+    if (e.key==='ArrowUp')    bg.originY -= step;
+    if (e.key==='ArrowDown')  bg.originY += step;
+    render(); return;
+  }
   // Edit 6: Arrow keys move selected strip (no modifier = 10cm step)
   if (S.ui.selectedStripId!==null && !S.ui.drawMode && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
     if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
@@ -26464,6 +26714,8 @@ function _bgCtxGroupHtml() {
   return `<span class="ctxbar-lbl" style="border:none;padding:0 6px 0 0"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg> Bakgrunn</span>
     <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul bakgrunn"><input type="checkbox" ${vis} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
     <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
+    <button class="snap-chip" onclick="selectBgLayer(_activeBgLayer())" title="Velg plantegning for flytting/skalering/rotasjon">${IC('move',14)} Velg</button>
+    <button class="snap-chip${bg.locked?' on':''}" onclick="toggleBgLock();renderSidebar()" title="${bg.locked?'Lås opp underlaget':'Lås underlaget mot utilsiktet flytting'}">${bg.locked?IC('lock',14):IC('lock-open',14)}</button>
     <button class="snap-chip more" onclick="_bgCtxMore(event)" title="Bakgrunn: målestokk, bytt bilde, fjern">⋯</button>
     <span class="tc-sep"></span>`;
 }
@@ -26473,9 +26725,26 @@ function _bgCtxMore(e) {
   e.stopPropagation();
   const I = (onclick, label, danger) => `<div class="ctx-item${danger ? ' danger' : ''}" onclick="hideProduktMenu();${onclick}">${label}</div>`;
   let items = I(`startBgCalibrate()`, '<svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Sett målestokk på nytt');
-  items += I(`document.getElementById('bg-file-inp').click()`, '🔄 Bytt bilde');
+  items += I(`_bgReplaceKeepTransform=true;document.getElementById('bg-file-inp').click()`, IC('camera',14)+' Bytt bilde');
   items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
   items += I(`removeBgImage()`, '<svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Fjern bakgrunn', true);
+  showProduktDropdown(items, e.clientX, e.clientY);
+}
+
+// "⋯ Mer" for a SELECTED background layer (transform-gizmo state).
+let _bgReplaceKeepTransform = false;
+function _bgSelMore(e) {
+  e.stopPropagation();
+  const I = (onclick, label, danger) => `<div class="ctx-item${danger ? ' danger' : ''}" onclick="hideProduktMenu();${onclick}">${label}</div>`;
+  let items = I(`rotateBg(90)`, IC('rotate-cw',14)+' Roter 90°');
+  items += I(`flipBg('x')`, IC('move-h',14)+' Speilvend vannrett');
+  items += I(`flipBg('y')`, '↕ Speilvend loddrett');
+  items += I(`fitBgToView()`, IC('map',14)+' Tilpass til visning');
+  items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
+  items += I(`_bgReplaceKeepTransform=true;document.getElementById('bg-file-inp').click()`, IC('camera',14)+' Bytt bilde');
+  items += I(`_addBgToFloor(S.ui.activeFloorId)`, IC('plus',14)+' Last inn ny');
+  items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
+  items += I(`removeBgImage()`, IC('trash',14)+' Fjern', true);
   showProduktDropdown(items, e.clientX, e.clientY);
 }
 
@@ -26489,6 +26758,24 @@ function _ctxBarTransient() {
 function _ctxBarItems() {
   const ui = S.ui;
   const moduleType = _activeModuleType();
+
+  // Background / floor-plan layer selected — transform + action menu
+  if (ui.selectedBg) {
+    const bg = ui.selectedBg;
+    const opVal = Math.round((bg.opacity ?? 1) * 100);
+    const calHint = bg._needsCalibration
+      ? `<span style="font-size:11px;color:var(--warn);padding:0 4px">⚠ ikke kalibrert</span>`
+      : `<span style="font-size:11px;color:var(--dim);padding:0 4px;font-family:var(--font-mono)">${Math.round(bg.widthCm)}×${Math.round(bg.heightCm)} cm</span>`;
+    return `<span class="ctxbar-lbl">${IC('map',14)} Plantegning</span>
+      ${calHint}
+      <button class="snap-chip" onclick="startBgCalibrate()" title="To-punkts kalibrering på nytt">${IC('ruler',14)} Skaler på nytt</button>
+      <span class="tc-sep"></span>
+      <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul"><input type="checkbox" ${bg.visible!==false?'checked':''} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
+      <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
+      <button class="snap-chip${bg.locked?' on':''}" onclick="toggleBgLock()" title="${bg.locked?'Lås opp':'Lås mot utilsiktet flytting'}">${bg.locked?IC('lock',14)+' Låst':IC('lock-open',14)+' Lås'}</button>
+      <span class="tc-sep"></span>
+      <button class="snap-chip more" onclick="_bgSelMore(event)" title="Roter, speilvend, tilpass, bytt bilde, fjern">⋯</button>`;
+  }
 
   // Pin placement mode (thermostat, drain, etc.)
   if (ui.pinPlaceMode) {
@@ -27060,6 +27347,8 @@ function _buildSaveData() {
           originX: bg.originX, originY: bg.originY,
           widthCm: bg.widthCm, heightCm: bg.heightCm,
           opacity: bg.opacity, visible: bg.visible,
+          locked: bg.locked || false, rotation: bg.rotation || 0,
+          flipX: bg.flipX || false, flipY: bg.flipY || false,
         }])
     ),
     documentation: JSON.parse(JSON.stringify(S.documentation || {})),
