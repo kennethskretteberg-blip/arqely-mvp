@@ -11966,6 +11966,21 @@ function _getDropPosition(e) {
   return s2w(sx, sy);
 }
 
+// Pick the clipped segment that contains a sweep coordinate (or the nearest one
+// if the point falls in a gap/on a hindring). Used for manual drop so a single
+// strip lands where the user points — not the whole column.
+function _segAtSweep(segments, sweep) {
+  if (!segments || !segments.length) return null;
+  for (const s of segments) if (sweep >= s.start_cm - 0.01 && sweep <= s.start_cm + s.length_cm + 0.01) return s;
+  let best = segments[0], bd = Infinity;
+  for (const s of segments) {
+    const d = sweep < s.start_cm ? s.start_cm - sweep
+            : sweep > s.start_cm + s.length_cm ? sweep - (s.start_cm + s.length_cm) : 0;
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
 canvas.addEventListener('dragover', e => {
   if (!S.ui.dragWidth) return;
   e.preventDefault();
@@ -11987,7 +12002,10 @@ canvas.addEventListener('dragover', e => {
   }
   // Compute actual segments the drop would create — preview matches the
   // commit path (clipped around hindringer + zones, snapped to cut-interval).
-  const segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  let segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  // Manual placement: keep ONLY the segment under the drop point (the piece the
+  // user points at), so dropping over a hindring previews only the over-piece.
+  { const sweep = dir === 'v' ? wp.y : wp.x; const _s = _segAtSweep(segments, sweep); segments = _s ? [_s] : []; }
   // Perp-axis overlap against existing strips (preview turns red on real
   // collision; same along-axis fix as _stripOverlapsAny so split-strips
   // sharing pos_cm don't flag falsely).
@@ -12055,7 +12073,11 @@ canvas.addEventListener('drop', e => {
   } else {
     pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
   }
-  const segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  let segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  // Manual placement: place ONE strip in the segment under the drop point (not the
+  // whole column). Dropping over a hindring places only the over-piece; an existing
+  // piece under it is left untouched. Free stretch/move afterwards via the gizmo.
+  { const sweep = dir === 'v' ? wp.y : wp.x; const _s = _segAtSweep(segments, sweep); segments = _s ? [_s] : []; }
   if (!segments.length) { S.ui.dropPreviewStrip = null; S.ui.dragWidth = null; render(); return; }
   pushUndo();
   let placed = false;
@@ -12072,12 +12094,11 @@ canvas.addEventListener('drop', e => {
       const snappedPos = _snapStripToNearest(newStrip);
       if (snappedPos !== null) {
         newStrip.pos_cm = snappedPos;
-        // Re-compute clipped segments for new position (hindrings may differ)
+        // Re-compute clipped segments for new position (hindrings may differ);
+        // keep the piece under the drop point, consistent with single-segment drop.
         const reSegs = computeClippedSegments(room.id, dir, snappedPos, prod.id);
-        if (reSegs.length > 0) {
-          newStrip.start_cm = reSegs[0].start_cm;
-          newStrip.length_cm = reSegs[0].length_cm;
-        }
+        const reSeg = _segAtSweep(reSegs, dir === 'v' ? wp.y : wp.x);
+        if (reSeg) { newStrip.start_cm = reSeg.start_cm; newStrip.length_cm = reSeg.length_cm; }
       } else {
         S.strips.pop(); _invalidateStripCache();
         S.counters.nextStripId--;
@@ -16080,9 +16101,16 @@ function _clampStripToRoom(strip, origPos) {
   const refPos = (origPos !== undefined) ? origPos : strip.pos_cm;
   const others = _stripsForRoomDir(strip.roomId, strip.direction).filter(s => s.id !== strip.id);
   let lo = posMin, hi = posMax;
+  const aStart = strip.start_cm, aEnd = strip.start_cm + strip.length_cm;
   for (const o of others) {
     const onc = _stripNettoCm(o);
     const gapCm = _effectiveGapCmPair(strip.productId, o.productId);
+    // ALONG-AXIS GUARD: only perp-clamp against neighbours that actually overlap
+    // the moved strip along the sweep axis. Strips separated along sweep (e.g. one
+    // above and one below a hindring) sit end-to-end, not side-by-side, so they must
+    // NOT block the whole perp band. Mirrors _stripOverlapsAny's along check.
+    const alongOverlap = Math.min(aEnd, o.start_cm + o.length_cm) - Math.max(aStart, o.start_cm);
+    if (alongOverlap <= 0.01) continue;
     if (refPos + nc/2 <= o.pos_cm + onc/2) {
       hi = Math.min(hi, o.pos_cm - nc - gapCm);   // started left of other → stay left
     } else {
