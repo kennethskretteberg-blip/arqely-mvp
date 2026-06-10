@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Hindring: fri plassering + mykt vegg-snap (clampHindringToRoom omskrevet)
+
+- **Symptom:** hindringer (f.eks. kjøkkenøy i Rom 6) kunne ikke plasseres fritt — de ble dratt mot
+  en vegg «midt i rommet», som om det fantes forbudte soner. Reprodusert: en hindring midt i Rom 6
+  (42-punkts, konkavt, langt fra alle vegger) ble flyttet **233 cm** for å snappe mot en vegg.
+- **Rotårsak:** `clampHindringToRoom` (~19788) snappet flush ut fra signert avstand til veggens
+  UENDELIGE LINJE og valgte veggen med STØRST avstand innenfor rekkevidde → falskt snap i
+  komplekse/konkave rom. Containment og snap var sammenblandet i ett steg.
+- **Fiks — to ATSKILTE steg:**
+  1. **Containment (alltid):** ekte polygon-test — `ptInPoly` på hindringens hjørner + nærmeste
+     punkt på rom-grensen; translerer hele hindringen minimalt inn kun når et hjørne faktisk er
+     utenfor (itererer for flere brudd). Ikke per-vegg-linjeavstand.
+  2. **Mykt vegg-snap (kun ≤5 cm fra segmentet):** krever tangentiell overlapp med vegg-SEGMENTET
+     (hindringen ligger langs segmentet, ikke nær dens forlengede linje), velger FAKTISK NÆRMESTE
+     vegg (minste avstand, ikke størst), og snapper flush kun når 0 < avstand < HINDRING_SNAP_CM
+     (5 cm). Ellers fri plassering.
+  - Ingen snap til andre hindringer/soner (kun `room.walls`). Grid-snap i `_dhDragging` og
+    `_hwMoving`-kallerne uendret.
+- **Verifisert (ekte Rom 6 + rektangel, numerisk + visuelt):** midt i rommet → 0 cm (var 233);
+  3 cm fra vegg → snap flush; 8 cm fra vegg → fri; 200 cm utenfor → contained inn; rektangel
+  3/8 cm → snap/fri. Skjermbilder: øy fritt mellom benkene + øy snappet flush mot vegg.
+
+---
+
 ## 2026-06-10 — Varmekabel: auto-retning foretrekker den RENE retningen (boustrophedon-fyll)
 
 Lett alternativ til en risikabel V6-vertikal-omskriving: i stedet for å pusse på den delte

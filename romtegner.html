@@ -19786,33 +19786,75 @@ function currentRoom() { return S.rooms.find(r=>r.id===S.ui.selectedRoomId)||nul
 // movement in the main room body.
 const HINDRING_SNAP_CM = 5;
 function clampHindringToRoom(h,room) {
-  // Pick the wall with the LARGEST inward-distance that is still within snap
-  // range (i.e. the wall the hindring is closest to from the inside, or the
-  // least-violated wall when outside).  This prevents the inner concave corner
-  // of an L-room (V3/V4) from pulling the hindring to the shared endpoint: the
-  // wall with d=−1 wins over the adjacent wall with d=−5.
-  if(!room||!room.walls||!room.points) return;
-  let bestD=-Infinity, bestInNx=0, bestInNy=0, found=false;
+  // Hindrings place FREELY anywhere in the room. Two SEPARATE steps:
+  //   (1) Containment — keep the hindring inside the room polygon (always).
+  //   (2) Soft wall-snap — flush to the NEAREST wall ONLY when the hindring's nearest edge is
+  //       within HINDRING_SNAP_CM of the actual wall SEGMENT (true distance + tangential overlap).
+  // The old code snapped flush from the signed distance to each wall's INFINITE LINE and picked
+  // the LARGEST in-range distance, which yanked the hindring to a far wall "mid-room" in
+  // complex/concave rooms (Rom 6). Never snaps to other hindrings or zones.
+  if(!room||!room.points||room.points.length<3) return;
+
+  // ── (1) CONTAINMENT — real polygon test, NOT per-wall line distance. If a vertex is OUTSIDE,
+  // translate the whole hindring by the worst-outside vertex's correction toward the boundary;
+  // iterate so multiple violations resolve. Free placement is the default — this only acts when
+  // the hindring actually pokes out of the room.
+  const _nearestOnBoundary = (px,py) => {
+    const P=room.points, n=P.length; let bx=px, by=py, bd=Infinity;
+    for(let i=0;i<n;i++){
+      const a=P[i], b=P[(i+1)%n];
+      const dx=b.x-a.x, dy=b.y-a.y, L=dx*dx+dy*dy;
+      let t=L?((px-a.x)*dx+(py-a.y)*dy)/L:0; t=Math.max(0,Math.min(1,t));
+      const cx=a.x+t*dx, cy=a.y+t*dy, d=Math.hypot(px-cx,py-cy);
+      if(d<bd){ bd=d; bx=cx; by=cy; }
+    }
+    return {x:bx,y:by,d:bd};
+  };
+  for(let iter=0;iter<8;iter++){
+    let worst=null, worstDepth=1e-6;
+    for(const hp of h.points){
+      if(ptInPoly(hp.x,hp.y,room.points)) continue;
+      const np=_nearestOnBoundary(hp.x,hp.y);
+      if(np.d>worstDepth){ worstDepth=np.d; worst={dx:np.x-hp.x,dy:np.y-hp.y}; }
+    }
+    if(!worst) break;
+    h.points=h.points.map(p=>({x:p.x+worst.dx,y:p.y+worst.dy}));
+  }
+
+  // ── (2) SOFT WALL-SNAP — true distance to the wall SEGMENT + tangential-overlap requirement.
+  if(!room.walls) return;
+  let best=null; // {d, nx, ny} for the NEAREST wall the hindring sits just inside of
   for(const wl of room.walls){
     const wdx=wl.x2-wl.x1,wdy=wl.y2-wl.y1,wLen=Math.hypot(wdx,wdy);
     if(wLen<1) continue;
     const wtx=wdx/wLen,wty=wdy/wLen;
-    const wnx=-wdy/wLen,wny=wdx/wLen;
+    let wnx=-wdy/wLen,wny=wdx/wLen;
     const mx=(wl.x1+wl.x2)/2,my=(wl.y1+wl.y2)/2;
-    const inward=ptInPoly(mx+wnx,my+wny,room.points)?1:-1;
-    const inNx=wnx*inward,inNy=wny*inward;
+    if(!ptInPoly(mx+wnx,my+wny,room.points)){ wnx=-wnx; wny=-wny; } // inward normal
+    // Require the hindring's tangential span to OVERLAP this segment [0,wLen] — i.e. the hindring
+    // actually lies ALONG the segment, not merely near its infinite-line extension.
+    let tmin=Infinity,tmax=-Infinity;
+    for(const hp of h.points){
+      const t=(hp.x-wl.x1)*wtx+(hp.y-wl.y1)*wty;
+      if(t<tmin) tmin=t; if(t>tmax) tmax=t;
+    }
+    if(tmax<=0||tmin>=wLen) continue;
+    // Nearest inward (perpendicular) distance among hindring points that project ONTO the segment.
     let minD=Infinity;
     for(const hp of h.points){
       const t=(hp.x-wl.x1)*wtx+(hp.y-wl.y1)*wty;
-      if(t<=0||t>=wLen) continue; // open interval — exclude shared endpoints
-      const d=(hp.x-wl.x1)*inNx+(hp.y-wl.y1)*inNy;
-      minD=Math.min(minD,d);
+      if(t<=0||t>=wLen) continue; // exclude shared endpoints / off-segment points
+      const d=(hp.x-wl.x1)*wnx+(hp.y-wl.y1)*wny;
+      if(d<minD) minD=d;
     }
-    // Candidate only when within snap range; prefer largest d (least violated)
-    if(minD<HINDRING_SNAP_CM && minD>bestD){ bestD=minD; bestInNx=inNx; bestInNy=inNy; found=true; }
+    // Snap only when the hindring sits just INSIDE this segment, within the soft range — pick the
+    // FACTUALLY NEAREST wall (smallest distance), not the largest in-range distance.
+    if(minD>0 && minD<HINDRING_SNAP_CM){
+      if(!best || minD<best.d) best={d:minD,nx:wnx,ny:wny};
+    }
   }
-  if(found)
-    h.points=h.points.map(p=>({x:p.x-bestD*bestInNx,y:p.y-bestD*bestInNy}));
+  if(best)
+    h.points=h.points.map(p=>({x:p.x-best.d*best.nx,y:p.y-best.d*best.ny}));
 }
 
 function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=null) {
