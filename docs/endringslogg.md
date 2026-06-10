@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmekabel: «Del i N like soner» med eksplisitt horisontal/vertikal-valg
+
+Kenneth: del et stort rom (~37 m²) i 2–3 HELT LIKE soner → like kabler med jevn CC, og velg
+eksplisitt om rommet deles horisontalt eller vertikalt. Motoren fantes (`_buildNCableZones`:
+equal-area-soner + felles CC + like kabler); manglet UI + hard styring av retning.
+
+- **UI:** delretning-toggle [Auto] [Horisontalt] [Vertikalt] i kabel-panelets manuell-/«Flere
+  kabler»-seksjon (`_cableSplitToggleHtml`/`_setCableSplitDir`, modul-var `_cableSplitDir`).
+  Antall = eksisterende count-input. «Forhåndsvis ›» bygger forslaget.
+- **Hard honorering:** `_cableManualPreview` → `_cablePreviewPlace(...,splitDir)` →
+  `autoFillMultiCable(roomId, productId, n, splitDir)` → `_autoFillNCables(forcedDir)`. forcedDir
+  bygger KUN valgt retning (samme harde override som dirExplicit). Map: Horisontalt→'h'
+  (horisontale delelinjer, soner stablet), Vertikalt→'v' (vertikale delelinjer, soner side om
+  side). De power-drevne multi-kabel-knappene honorerer også toggelen (default `_cableSplitDir`).
+  Auto (null) = motoren velger som før.
+- **Beholdt:** equal-area-kutt (`_equalAreaBandBounds`), felles `sharedCC`, half-CC-sømmer → N
+  identiske kabler med jevn CC også over sone-grensene.
+- **Verifisert (37 m² rom, prod InFloor 10T 50m):** 3 vertikalt → 3 kabler alle 'v', soner
+  [0–247][247–493][493–740], CC 24,7 cm identisk, 50 m hver; 3 horisontalt → alle 'h', samme CC;
+  2 vertikalt → 2 like; Auto → motoren velger. Visuelt bekreftet (K1/K2/K3 side om side, identiske).
+  Ingen regresjon på énkabel. Ingen konsoll-feil.
+
+---
+
 ## 2026-06-10 — Varmefolie: ALDRI folie over folie (hard invariant)
 
 Symptom: en folie (lang strimmel) la seg OVER andre folier. Krav: folie skal aldri overlappe
