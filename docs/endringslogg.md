@@ -4,6 +4,37 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmekabel: rene multi-kabel-soner i komplekse rom (Gang) — betinget vertex-snap + ingen skew i soner
+
+Symptom: Gang (~37 m²) delt i 2 like soner — sone 1 ren serpentin, sone 2 (irregulær equal-area-
+halvdel) fikk «rare former» (skew-løp, skrå/ujevne U-svinger) og fylte ikke til veggene.
+
+### Rotårsak
+`_buildNCableZones` kuttet med `_equalAreaBandBounds` (lik areal → lik CC), men på et komplekst rom
+ble sone 2 IRREGULÆR → `_autoFillCableImpl` sin `needSkew = !rectilinear || …` falt til
+`generateCableSkew` → skrå løp / rare former.
+
+### Fix (to prong)
+1. **Betinget vertex-snap** (`_buildNCableZones`): re-innført `_snapBoundsToVertices` — snapper hvert
+   indre kutt til nærmeste rom-hjørne/innhakk, MEN bruker det kun når sonene holder seg ~like store
+   (areal-avvik ≤ 10 %); ellers beholdes equal-area-kuttet. Gir mest mulig REKTANGULÆRE soner uten å
+   ødelegge lik CC.
+2. **Ingen skew i soner** (`_noSkew`-flagg på sone-temp-rommet): `needSkew` respekterer nå
+   `room._noSkew` → multi-kabel-soner bruker ren aksejustert serpentin (boustrophedon/V6, ortogonal
+   kobling) i stedet for skew. «Heller jevnt udekket inntil vegg enn skrå/rotete løp» (Kenneths regel).
+
+### Verifisert (numerisk; in-memory, ingen konsoll-feil)
+- L-korridor (~35,8 m²) delt i 2, begge retninger: BEGGE soner = **boustrophedon**, `pathEls:0` (ingen
+  skew), `nConn:0` (ingen diagonal kobling), lik CC 12,7 cm, ~140 m kabel hver (≈99 % dekning).
+- Ingen regresjon: rektangel delt i 2 → begge boustrophedon (uendret); enkel kabel i SKRÅTT rom →
+  bruker fortsatt skew (pathEls 51), siden `_noSkew` kun gjelder sone-temp-rom.
+
+> Spec-en anbefaler sterkt en felles «kabel/folie/matte-invariant-spec» med testliste alle motorer
+> må bestå (5 cm margin, lik CC, hjørne-start/stopp, eksplisitt retning hard, aldri overlapp, ingen
+> diagonal/rar form, fyll til vegg). Ikke laget ennå — venter på «si fra».
+
+---
+
 ## 2026-06-10 — Innendørs: tydeligere label + kabel alltid synlig + matte-hindring + matte-gap (4 punkter)
 
 1. **Tydeligere produkt-label, unna romnavn:** font opp (strimmel 7–11 → 12–15 px; kabel 10 → 13;

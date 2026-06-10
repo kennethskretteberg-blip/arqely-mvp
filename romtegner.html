@@ -10821,7 +10821,9 @@ function _autoFillCableImpl(roomId, productId) {
     }
     const hasHindring = S.hindrings.some(h => h.roomId === roomId && h.points && h.points.length >= 3);
     const hasForbidden = forbiddenZones.length > 0;
-    const needSkew = (!rectilinear) || hasHindring || hasForbidden;
+    // Multi-cable zone sub-rooms (_noSkew) prefer a clean axis-aligned serpentine that fills to the
+    // walls over skew's «rare former»; accept a little uniform uncovered edge instead (Kenneths regel).
+    const needSkew = !room._noSkew && ((!rectilinear) || hasHindring || hasForbidden);
     if (needSkew) {
       const res = generateCableSkew(roomId, productId);
       // Accept only if it produced a corner-to-corner path with good coverage and no open jumps.
@@ -11341,11 +11343,25 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
   // Each zone is forced to this spacing; small length differences are absorbed by the sweep
   // trim (sweep-to-wall margin), never by varying CC.
   const sharedCC = Math.max(minSp, Math.min(maxSp, (netM2 / (nCables * prod.cable_length_m)) * 100));
-  // (1) EQUAL-AREA cuts are authoritative (equal area → equal length → equal CC works). Do NOT
-  // vertex-snap here: snapping moved cuts onto notches and unbalanced the areas → unequal CC. The
-  // engines (skew/boustrophedon) handle irregular sub-rooms, so equal area beats "clean" cuts.
+  // (1) EQUAL-AREA cuts are the baseline (equal area → equal length → equal CC). On a complex room
+  // they can slice through the middle and leave an IRREGULAR sub-room → the fill falls to skew and
+  // makes «rare former» (skew runs, irregular U-turns) that don't reach the walls. So: CONDITIONALLY
+  // snap each interior cut to the nearest room vertex (notch/step edge) → sub-rooms become as
+  // RECTANGULAR as possible → clean axis-aligned serpentine. Only adopt the snap when it keeps the
+  // zones ~equal area (≤10% deviation) so lik CC is preserved; otherwise keep the equal-area cut.
   let bounds = _equalAreaBandBounds(room, dir, nCables);
   if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
+  if (bounds && nCables >= 2) {
+    const snapped = _snapBoundsToVertices(room, axis, bounds);
+    let moved = false;
+    for (let i = 1; i < bounds.length - 1; i++) if (Math.abs(snapped[i] - bounds[i]) > 0.5) moved = true;
+    if (moved) {
+      const slabAreas = (b) => { const a = []; for (let i = 0; i < nCables; i++) { const s = _clipPolygonToSlab(room.points, axis, b[i], b[i + 1]); a.push(s ? Math.abs(compArea(s)) : 0); } return a; };
+      const ar = slabAreas(snapped);
+      const tot = ar.reduce((s, x) => s + x, 0), ideal = tot / nCables;
+      if (ideal > 0 && ar.every(a => Math.abs(a - ideal) / ideal <= 0.10)) bounds = snapped;
+    }
+  }
 
   const cables = [];
   let tmpId = -1;
@@ -11363,7 +11379,8 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       const tempRoom = { id: 'tmpcab_' + (tmpId--), name: '', floorId: room.floorId, partId: room.partId,
         shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
         dims: [], roomType: room.roomType, targetWm2: room.targetWm2, _cableSeam: seam,
-        _forcedSpacingCm: sharedCC };   // identical CC in every zone (equal W/m²)
+        _forcedSpacingCm: sharedCC,      // identical CC in every zone (equal W/m²)
+        _noSkew: true };                 // prefer a clean axis-aligned serpentine over skew «rare former»
       S.rooms.push(tempRoom);
       let cable = null;
       try {
