@@ -4,6 +4,39 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmekabel: V6 honorerer valgt RETNING (dirExplicit) — fikser «velger horisontalt, legger vertikalt»
+
+Diagnostisert og fikset på ekte prosjekt **Bloksbergveien → etasje «Hybel» → rom «Vindfang»**
+(T/L-rom: høy høyre-rektangel med horisontal arm til venstre, InFloor 10T 500W 50 m).
+
+### Rotårsak
+`generateCableV6` kjørte sitt interne auto-retningsvalg (`_quickTry('v')` vs `_quickTry('h')`,
+~linje 9925) **ubetinget** og overstyrte den passerte retningen hver gang én retning dekket
+>2 % mer. På Vindfang dekker vertikal litt mer, så et eksplisitt **horisontalt** valg ble
+stille flippet tilbake til **vertikal** → «jeg velger horisontalt, men den legger vertikalt».
+(Den gamle 15,6 m-underfyllingen var en annen sti — boustrophedon — som ikke lenger velges.)
+`_autoFillNCables` respekterte allerede `dirExplicit`; V6 gjorde det ikke.
+
+### Fiks
+- I `generateCableV6`: ny `_dirLocked`-vakt rundt auto-retningsblokken. Retning låses (ingen
+  auto-flip) når brukeren bevisst valgte den (`S.varmefolie.dirExplicit` + gyldig `h`/`v`)
+  ELLER når en multi-kabel-sone tvinger orkestratorens retning (`room._forcedSpacingCm`).
+  Ellers auto-velg ved best dekning som før.
+- Bonus: `_forcedSpacingCm`-låsen gjør multi-kabel-soner retnings-konsistente (en sone kunne
+  før stille rotere via V6s interne flip og bryte parallell-tiling).
+
+### Verifisert (in-memory, autentisert fane, lagring nøytralisert)
+- **Vindfang request 'h' → får 'h'** (v6, lik CC 8,8 cm, 50 m = produktlengde, **86 % dekning**
+  vs vertikal 81 %, 2 ortogonale koblinger, start/slutt i ekte hjørner). Visuelt bekreftet:
+  ren horisontal serpentin, ortogonal innhugging rundt innerhjørnet, ingen diagonal/Y-split.
+- **Vindfang request 'v' → får 'v'** uendret (50 m, 81 %).
+- **Multi-kabel** (rektangel, 2 soner): request 'h' → begge 'h'; request 'v' → begge 'v';
+  lik CC + lik lengde i begge soner. Ingen regresjon.
+- Auto-modus (dirExplicit=false): auto-flip beholdt uendret.
+- LOCKED-regler urørt: halvsirkel-U, lik-lengde innen sone, ingen Y-split.
+
+---
+
 ## 2026-06-09 — Varmekabel: retningsvelger reapply + L-diagonal + rektangel-hjørne
 
 Tre sammenhengende kabel-forbedringer rundt retnings-/hjørnevalg. Commits: `bc0d773`,
