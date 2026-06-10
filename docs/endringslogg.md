@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Plantegning BUGFIX: «henger på skalerings-baren» etter kalibrering
+
+Bruker: «det skjer ikke noe når jeg skalerer eller setter målestokk … nå vises kun topbar for
+skaleringsvalg hele tiden» (tidligere kom rom-innsetting opp etter skalering).
+
+- **Rotårsak:** når skalering trigges fra den VALGTE bakgrunnen (selectedBg satt — f.eks. via
+  «Skaler på nytt»/«Målestokk 1:_» i plantegning-ctxbar-en), nullstilte hverken `confirmBgCalibrate`
+  eller `confirmFixedScale` `S.ui.selectedBg`. Skaleringen BLE utført (widthCm endret), men
+  bakgrunnen forble valgt → ctxbar-en hang igjen på «Plantegning … Skaler på nytt»-baren i stedet
+  for å gå til «Tegn rom». Føltes som «det skjer ikke noe».
+- **Fiks:** begge funksjonene nullstiller nå `S.ui.selectedBg = null` (i tillegg til
+  selectedRoomId/selectedWallId) → ctxbar-en går korrekt til rom-innsetting etter skalering.
+- **Verifisert:** både fast målestokk (1:50) og 2-punkts kalibrering trigget fra valgt bakgrunn gir
+  nå `selectedBg=false` og ctxbar «Tegn rom … Rektangel/Mål/Polygon». Ingen konsoll-feil.
+
+---
+
 ## 2026-06-10 — Plantegning: «Fast målestokk» (1:50) alltid tilgjengelig + eksakt for PDF
 
 Bruker meldte «får ikke skalert tegning lenger» og ønsket målestokk-forhold (1:50) som tillegg.
