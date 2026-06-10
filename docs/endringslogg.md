@@ -4,6 +4,38 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — EcoMat innendørs: matte-utlegg etter Kenneths modell (bredder inntil hverandre, hele matta delt i N)
+
+Spec basert på 3 Cenika-produktblad (EcoMat 60T/100T/150T) + teknisk tegning TPL-ECOMT-CA-2183.
+
+### Produktdata
+- **Supabase hadde allerede ekte EcoMat-rader** (57 stk, laget 2026-03-11) med riktig
+  cc/kutt/bredde/areal/W/art.nr/el.nr. Derfor: ikke dupliser — `_ensureEcoMatProducts()` injiserer
+  hele katalogen (60T/100T/150T, 19 størrelser hver, 0,5×2m…0,5×30m, CVA10100–10158, el 1013743–
+  1013799, fra produktbladene) KUN som fallback hvis ingen finnes.
+- `_normalizeEcoMat()` markerer ALLE EcoMat-produkter (Supabase eller fallback) med
+  `mat_equal_widths=true` (Supabase-radene mangler flagget). CC/kutt fra tegningen: 60T/100T = 120/
+  240 mm, 150T = 80/160 mm; bredde 500 mm; W/m² 60/100/150.
+
+### Matte-motor (`autoFillMatSerpentine`, gated på `mat_equal_widths`)
+- **Bredder INNTIL hverandre:** `gapCm` tvinges til 0 for EcoMat → N = floor(brukbar bredde / 50 cm)
+  eksakt; blokka sentreres → rest = kald sone likt på begge yttervegger (ikke jevn-fordelt gap som
+  før). Seam-klaring kommer fra kant-inntrekket (2,5 cm hver side → ~5 cm kabel-til-kabel).
+- **Størrelsesvalg snudd (Kenneths modell):** velg STØRSTE variant der (mat_total_length / N) ≤
+  brukbar lengde; fordel HELE matta i N like bredder à (total/N), rundet NED til kutt-intervallet.
+  Erstatter «minste matte ≥ behov + snap til rom». Bruker hele matta, minimer svinn, kald sone i
+  lengde-enden.
+- Retning respekterer delt retningsvelger; forhåndsvis-før-godta som ellers.
+
+### Verifisert (numerisk; render 14 ms — ingen freeze)
+- **Spec-eksempel 210×400, 100T:** N=4, velger 0,5×14m (700 W), 4 bredder à 336 cm (3,5m snappet
+  til kutt 24cm), gap 0, **5 cm kald sone hver yttervegg**, brukt 13,4 av 14m. Matcher eksempelet.
+- 260×600 100T → 0,5×28m, N=5. 210×400 150T → 0,5×14m (1050 W), N=4. 300×500 150T → 0,5×24m, N=5.
+- Ikke-EcoMat-matter (InSnow utendørs) uendret (jevn-fordelt gap beholdt).
+- Stats: produktets `total_effect_w` / `mat_area_m2` (ratet effekt), som InSnow.
+
+---
+
 ## 2026-06-10 — Varmekabel: «Del i N like soner» med eksplisitt horisontal/vertikal-valg
 
 Kenneth: del et stort rom (~37 m²) i 2–3 HELT LIKE soner → like kabler med jevn CC, og velg

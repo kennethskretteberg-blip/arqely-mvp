@@ -4562,7 +4562,9 @@ function autoFillMatSerpentine(productId, opts) {
   const marginCm = (prod.min_wall_margin_mm || 50) / 10;
   // Mat gap is user-controlled (0–5 cm), defaults to 0 for max coverage.
   // The supplier's min_gap_mm is treated as a recommendation, not a hard floor.
-  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  // EcoMat: widths lie EDGE-TO-EDGE (gap forced to 0) so N = floor(usableWidth / 50cm) is exact and
+  // the seam clearance comes from the kant-inntrekk, not a mat gap.
+  const gapCm = prod.mat_equal_widths ? 0 : Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
 
   // Respect user's direction choice (set via the workflow-panel direction
@@ -4615,21 +4617,49 @@ function autoFillMatSerpentine(productId, opts) {
       && variantOf(p))
     .map(p => ({ p, lenMm: _matTotalLengthMm(p) }))
     .sort((a,b) => a.lenMm - b.lenMm);
-  if (!opts.exact && candidates.length > 1) {
-    const idealMm = idealLenCm * 10;
-    // Smallest variant whose length >= ideal need (covers all room runs);
-    // if no variant covers, largest available (best partial coverage).
-    const fit = candidates.find(c => c.lenMm >= idealMm)
-             || candidates[candidates.length - 1];
-    if (fit.p.id !== prod.id) {
-      prod = fit.p;
-      productId = fit.p.id;
+  if (!opts.exact && candidates.length >= 1) {
+    if (prod.mat_equal_widths) {
+      // EcoMat «bruk HELE matta delt i N like bredder»: pick the LARGEST variant whose per-width
+      // length (total ÷ N, snapped DOWN to the cut interval) still fits the usable along-span. Go
+      // DOWN a size rather than overshoot the room; the leftover length-end stays a cold zone.
+      const N = maxRuns;
+      let pick = null;
+      for (let i = candidates.length - 1; i >= 0; i--) {       // largest first
+        const perW = (candidates[i].lenMm / 10) / N;           // unsnapped per-width length
+        const snapped = cutCm > 0 ? Math.floor(perW / cutCm) * cutCm : perW;
+        // Spec rule: largest variant where the per-width length (total ÷ N) fits the usable along-
+        // span; then the actual run length snaps DOWN to the cut interval. Min-length guard on the
+        // snapped value so we never pick a mat too short to lay.
+        if (perW <= alongSpan + 0.01 && snapped >= minLenCm - 0.01) { pick = candidates[i]; break; }
+      }
+      if (!pick) pick = candidates[0];      // none fits → smallest (best partial coverage)
+      prod = pick.p; productId = pick.p.id;
+    } else if (candidates.length > 1) {
+      const idealMm = idealLenCm * 10;
+      // Smallest variant whose length >= ideal need (covers all room runs);
+      // if no variant covers, largest available (best partial coverage).
+      const fit = candidates.find(c => c.lenMm >= idealMm)
+               || candidates[candidates.length - 1];
+      if (fit.p.id !== prod.id) {
+        prod = fit.p;
+        productId = fit.p.id;
+      }
     }
   }
 
   const totalLenMm = _matTotalLengthMm(prod);
   const totalLengthCm = totalLenMm ? totalLenMm / 10 : null;
   const isFixedLength = totalLengthCm !== null;
+
+  // EcoMat: divide the WHOLE roll into N equal widths → each width-length = total ÷ N, snapped DOWN
+  // to the cut interval (±tolerance absorbs the remainder). Bounded by the usable along-span.
+  if (prod.mat_equal_widths && isFixedLength) {
+    const N = maxRuns;
+    let rl = cutCm > 0 ? Math.floor((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);
+    if (rl > alongSpan) rl = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;
+    if (rl < minLenCm) rl = Math.min(minLenCm, totalLengthCm / N, alongSpan);
+    runLengthCm = rl;
+  }
 
   // Cap each run to the mat's physical length. Without this a "0.5×2m"
   // product (200 cm total) could end up rendered as 5 runs × 336 cm —
@@ -4657,7 +4687,9 @@ function autoFillMatSerpentine(productId, opts) {
   // gives better heat coverage and looks cleaner). The user's gapCm
   // setting acts as a minimum — if the even-distribute gap would be
   // smaller, we fall back to it.
-  const evenGapCm = actualRuns > 1
+  // EcoMat: widths lie EDGE-TO-EDGE (no even-spread), centred → the leftover is a cold zone split
+  // equally on both walls (cable-to-cable ≈ 5 cm at the seam via the 2.5 cm kant-inntrekk).
+  const evenGapCm = (!prod.mat_equal_widths && actualRuns > 1)
     ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
     : 0;
   const effectiveGapCm = Math.max(gapCm, evenGapCm);
@@ -33483,6 +33515,7 @@ async function _loadProducts() {
   _ensureCableTestProducts();
   _ensureOutdoorCableProducts();
   _ensureOutdoorMatProducts();
+  _ensureEcoMatProducts();
   _ensureMatTestProducts();
   _ensurePlateTestProducts();
 }
@@ -33625,6 +33658,7 @@ async function initSupabase() {
     _ensureCableTestProducts();
     _ensureOutdoorCableProducts();
     _ensureOutdoorMatProducts();
+    _ensureEcoMatProducts();
     _ensureMatTestProducts();
     _ensurePlateTestProducts();
     _showProjectListScreen();
@@ -35069,6 +35103,60 @@ function _ensureMatTestProducts() {
     mat_cc_mm: 80, mat_cut_interval_mm: 160
   });
   console.log('Romtegner: injiserte test-matteprodukter (ingen mat-produkter i DB)');
+}
+
+/** Inject indoor EcoMat mats (Cenika produktblad 05/2025) if not already in DB.
+ *  One physical roll (0.5 m × L) per art.nr; the mat engine folds it into N equal 50 cm widths
+ *  (cut the mesh, flip 180°, widths laid edge-to-edge → cable-to-cable ≈ 5 cm at the seam). */
+function _ensureEcoMatProducts() {
+  // Indoor mat category (NOT «Varmematte utendørs»).
+  let cat = PRODUCT_CATEGORIES.find(c => c.module_type === 'mat' && c.name !== 'Varmematte utendørs');
+  if (!cat) {
+    PRODUCT_CATEGORIES.push({ id: 9800, name: 'Varmematte', module_type: 'mat', sort_order: 200, active: true });
+    cat = PRODUCT_CATEGORIES.find(c => c.id === 9800);
+  }
+  // Inject the full catalogue ONLY as a fallback (Supabase usually already has real EcoMat rows,
+  // created 2026-03-11). The normalisation at the end then applies to whichever set is present.
+  const _haveEco = HEATING_PRODUCTS.some(p => p.product_family && p.product_family.indexOf('EcoMat') === 0);
+  if (_haveEco) { _normalizeEcoMat(); return; }
+  const catId = cat.id;
+  // Area grid (m²) shared by all three types; roll length (m) = 2 × area (0.5 m wide).
+  const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+  // CC / cut / kant-inntrekk from teknisk tegning TPL-ECOMT-CA-2183; art.nr/el.nr/W from produktblad.
+  const types = [
+    { t: '60T',  wm2: 60,  cc: 120, cut: 240, inset: 25, artBase: 10100, elBase: 1013743 },
+    { t: '100T', wm2: 100, cc: 120, cut: 240, inset: 25, artBase: 10120, elBase: 1013762 },
+    { t: '150T', wm2: 150, cc: 80,  cut: 160, inset: 20, artBase: 10140, elBase: 1013781 },
+  ];
+  let pid = 95000, sort = 0;
+  for (const ty of types) {
+    areas.forEach((area, i) => {
+      const lenM = area * 2;                 // 0.5 m wide → length = 2 × area (always integer)
+      const watt = Math.round(ty.wm2 * area);
+      HEATING_PRODUCTS.push({
+        id: ++pid, category_id: catId, sort_order: ++sort, active: true, supplier: 'Cenika AS',
+        article_no: 'CVA' + (ty.artBase + i), el_number: String(ty.elBase + i),
+        product_family: 'EcoMat ' + ty.t,
+        name: `EcoMat ${ty.t} 0,5×${lenM}m ${watt}W`,
+        voltage: 230, watt_per_m2: ty.wm2, total_effect_w: watt, mat_area_m2: area,
+        mat_width_mm: 500, mat_total_length_mm: lenM * 1000,
+        mat_min_length_mm: 1000, mat_max_length_mm: lenM * 1000, mat_length_step_mm: 10,
+        mat_cc_mm: ty.cc, mat_cut_interval_mm: ty.cut,
+        min_wall_margin_mm: ty.inset, min_gap_mm: 0, min_obstacle_distance_mm: 50,
+        mat_equal_widths: true
+      });
+    });
+  }
+  console.log('Romtegner: injiserte 57 EcoMat innendørs-matteprodukter (60T/100T/150T)');
+  _normalizeEcoMat();
+}
+
+// EcoMat uses the «whole roll ÷ N equal widths, edge-to-edge» mat layout. The Supabase rows don't
+// carry the flag, so mark every EcoMat product (Supabase OR fallback) here. Idempotent.
+function _normalizeEcoMat() {
+  for (const p of HEATING_PRODUCTS) {
+    if (p.product_family && p.product_family.indexOf('EcoMat') === 0) p.mat_equal_widths = true;
+  }
 }
 
 /** Inject outdoor heating mat products if not already in DB */
