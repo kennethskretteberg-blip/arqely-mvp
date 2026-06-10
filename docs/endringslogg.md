@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Plantegning BUGFIX 2: lås underlaget etter kalibrering (klikk-felle)
+
+Oppfølger: «jeg kan skalere og den går over til opprett-rom-baren, men hvis jeg klikker i tegningen
+går den tilbake til plantegning-baren — kommer meg ikke ut.»
+
+- **Rotårsak:** et kalibrert, ULÅST bakgrunns-lag er klikk-valgbart (`_hitBgLayer` treffer det).
+  Etter skalering var baren riktig, men ETHVERT klikk i tegningen valgte bakgrunnen igjen →
+  «Plantegning … Skaler på nytt»-baren kom tilbake, og man satt fast.
+- **Fiks:** `confirmBgCalibrate` og `confirmFixedScale` setter nå `bg.locked = true` etter fullført
+  kalibrering. `_hitBgLayer` hopper over låste lag → klikk går GJENNOM underlaget, så man tegner rom
+  fritt. Lås opp igjen via lås-knappen (plantegning-ctxbar eller sidepanelets lag-liste) for å
+  flytte/transformere underlaget. Standard CAD-oppførsel for et referanse-underlag.
+- **Verifisert:** etter både fast målestokk og 2-punkts er `bg.locked=true`, `_hitBgLayer` ved et
+  punkt inne i tegningen returnerer null, og klikk-kandidatlista er tom → ingen utilsiktet
+  bg-seleksjon. `includeLocked`-stien finner det fortsatt for eksplisitte operasjoner.
+- Merk: gjelder NYE kalibreringer. Eksisterende prosjekter med ulåst kalibrert underlag: lås det
+  én gang via «Lås»-knappen i plantegning-baren, så går klikk gjennom.
+
+---
+
 ## 2026-06-10 — Plantegning BUGFIX: «henger på skalerings-baren» etter kalibrering
 
 Bruker: «det skjer ikke noe når jeg skalerer eller setter målestokk … nå vises kun topbar for
