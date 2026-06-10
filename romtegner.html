@@ -6366,7 +6366,12 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
     if (zone) { _fillSoneFoil(zone, prods); return; }
   }
 
-  const results = _autoFillBothDirections(room, prods);
+  // Avoid laying over foils of OTHER categories/zones; the same-category foils are the batch this
+  // fill replaces (see _applyAutoFillOption) → exclude them so the fill doesn't block itself.
+  const _replacedIds = new Set(_stripsForRoom(room.id)
+    .filter(s => { const sp = _stripProduct(s); return sp && sp.category_id === categoryId; })
+    .map(s => s.id));
+  const results = _withFoilAvoid(room.id, _replacedIds, () => _autoFillBothDirections(room, prods));
 
   S.ui.autoFillCompare = results;
   S.ui.autoFillCompareCategoryId = categoryId;
@@ -12288,8 +12293,8 @@ canvas.addEventListener('dragover', e => {
     pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
   }
   // Compute actual segments the drop would create — preview matches the
-  // commit path (clipped around hindringer + zones, snapped to cut-interval).
-  let segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  // commit path (clipped around hindringer + zones + existing foils, snapped to cut-interval).
+  let segments = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
   // Manual placement: keep ONLY the segment under the drop point (the piece the
   // user points at), so dropping over a hindring previews only the over-piece.
   { const sweep = dir === 'v' ? wp.y : wp.x; const _s = _segAtSweep(segments, sweep); segments = _s ? [_s] : []; }
@@ -12360,7 +12365,7 @@ canvas.addEventListener('drop', e => {
   } else {
     pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
   }
-  let segments = computeClippedSegments(room.id, dir, pos, prod.id);
+  let segments = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
   // Manual placement: place ONE strip in the segment under the drop point (not the
   // whole column). Dropping over a hindring places only the over-piece; an existing
   // piece under it is left untouched. Free stretch/move afterwards via the gizmo.
@@ -12405,6 +12410,22 @@ function _stripProduct(strip) {
 function _stripNettoCm(strip) {
   const p = _stripProduct(strip); if (!p) return 0;
   return (p.netto_width_mm || p.width_mm) / 10;
+}
+// World-space footprint rectangle of a strip {x0,y0,x1,y1}. dir 'v': perp=x (pos..pos+nc),
+// sweep=y (start..start+len). dir 'h': perp=y, sweep=x. Used for foil-vs-foil overlap/subtraction.
+function _stripWorldRect(strip) {
+  const nc = _stripNettoCm(strip);
+  const a = strip.start_cm, b = strip.start_cm + (strip.length_cm || 0);
+  if (strip.direction === 'v') return { x0: strip.pos_cm, x1: strip.pos_cm + nc, y0: a, y1: b };
+  return { x0: a, x1: b, y0: strip.pos_cm, y1: strip.pos_cm + nc };
+}
+function _stripWorldRectPoints(strip) {
+  const r = _stripWorldRect(strip);
+  return [{x:r.x0,y:r.y0},{x:r.x1,y:r.y0},{x:r.x1,y:r.y1},{x:r.x0,y:r.y1}];
+}
+// Do two world rects come within `clear` of each other (true rectangle proximity, any direction)?
+function _rectsWithin(a, b, clear) {
+  return (a.x0 - clear < b.x1 && a.x1 + clear > b.x0 && a.y0 - clear < b.y1 && a.y1 + clear > b.y0);
 }
 function _stripBorderCm(strip) {
   const p = _stripProduct(strip); if (!p) return 0;
@@ -15178,13 +15199,15 @@ function _fillSoneFoil(zone, prods){
   try{
     const dir=zone.direction||'h';
     const long=((S.varmefolie&&S.varmefolie.foilStrategy)||'long')==='long';
-    if(long){
-      defs=_longStripsLayout(tmp, prods, dir, 0);
-    } else {
+    // Never overlap foil from OTHER zones / room-level foil. The temp room carries no foils, so
+    // point foil-avoidance at the REAL room and exclude THIS sone's own strips (being replaced).
+    const _zoneExclude = new Set(_stripsForZone(zone.id).map(s=>s.id));
+    defs = _withFoilAvoid(room.id, _zoneExclude, () => {
+      if(long) return _longStripsLayout(tmp, prods, dir, 0);
       const a=_autoFillRoomOnce(tmp, prods, dir, false, undefined, 0);
       const b=_autoFillRoomOnce(tmp, prods, dir, true, undefined, 0);
-      defs=(_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
-    }
+      return (_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
+    });
   } finally { S.rooms=S.rooms.filter(r=>r.id!==TID); }
   if(!defs.length){ _showToast('Fikk ikke lagt folie i sonen','warn'); return; }
   pushUndo();
@@ -16688,6 +16711,15 @@ function _stripOverlapsAny(strip) {
     const oStart = o.start_cm, oEnd = o.start_cm + o.length_cm;
     const alongOverlap = Math.min(aEnd, oEnd) - Math.max(aStart, oStart);
     if (alongOverlap > 0.01) return true;
+  }
+  // CROSS-DIRECTION: a strip must never overlap (or come closer than the foil gap to) a strip of
+  // the OTHER direction. The pos/along logic above only covers same-direction; check true world-
+  // rect proximity against perpendicular foils so e.g. a long vertical strip can't cross horizontals.
+  const myRect = _stripWorldRect(strip);
+  for (const o of _stripsForRoom(strip.roomId)) {
+    if (o.id === strip.id || o.direction === strip.direction) continue;
+    const gapCm = _effectiveGapCmPair(strip.productId, o.productId);
+    if (_rectsWithin(myRect, _stripWorldRect(o), gapCm - 0.1)) return true;
   }
   return false;
 }
@@ -23630,6 +23662,16 @@ function _clipStripAroundZones(intervals, pos_cm, nettoCm, direction, zones, mar
   return result;
 }
 
+// Active foil-avoidance context during a fill: {roomId, excludeIds:Set}. When set,
+// computeClippedSegments subtracts every existing foil in roomId EXCEPT excludeIds (the batch being
+// replaced) so a new strip never lands on another foil. Null outside fills → no change for editors.
+let _foilAvoidCtx = null;
+function _withFoilAvoid(roomId, excludeIds, fn) {
+  const prev = _foilAvoidCtx;
+  _foilAvoidCtx = { roomId, excludeIds: excludeIds instanceof Set ? excludeIds : new Set(excludeIds || []) };
+  try { return fn(); } finally { _foilAvoidCtx = prev; }
+}
+
 // High-level: compute clipped strip segments for a given position.
 // Returns [{start_cm, length_cm}, ...] or [] if strip is entirely outside.
 // Band-clips against room polygon, subtracts hindrings AND forbidden zones,
@@ -23657,6 +23699,19 @@ function computeClippedSegments(roomId, direction, pos_cm, productId, opts) {
   const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden');
   if (forbiddenZones.length > 0) {
     segments = _clipStripAroundZones(segments, pos_cm, nc, direction, forbiddenZones, roomMargin);
+  }
+  // NEVER lay foil over foil: when a fill is active (_foilAvoidCtx set), subtract the footprint of
+  // every EXISTING foil in the room (ALL directions/zones) except those of the batch being replaced
+  // — inflated by the foil gap — so a new strip stops a clearance BEFORE any existing foil. Treated
+  // exactly like an obstacle (rectangle). Opt-in via _foilAvoidCtx so non-fill callers are untouched.
+  if (_foilAvoidCtx) {
+    const foils = _stripsForRoom(_foilAvoidCtx.roomId)
+      .filter(s => s.length_cm > 0 && !_foilAvoidCtx.excludeIds.has(s.id));
+    if (foils.length) {
+      const clear = Math.max(_effectiveGapCm(productId), 0.5);
+      const foilRects = foils.map(s => ({ points: _stripWorldRectPoints(s) }));
+      segments = clipStripAroundHindrings(segments, pos_cm, nc, direction, foilRects, clear);
+    }
   }
   // Merge micro-gaps (< 3cm) from polygon concavities
   segments = _mergeShortGaps(segments, 3);

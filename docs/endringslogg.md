@@ -4,6 +4,38 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmefolie: ALDRI folie over folie (hard invariant)
+
+Symptom: en folie (lang strimmel) la seg OVER andre folier. Krav: folie skal aldri overlappe
+folie — stopp en klaring (≥ folie-gap) før eksisterende folie, uansett retning/sone/fyll-sti.
+
+### Rotårsak
+- Overlapp-vernet (`_stripOverlapsAny`) sjekket bare folier i SAMME retning (`_stripsForRoomDir`).
+- `computeClippedSegments` klippet mot rom-polygon + hindringer + forbudt-soner, men ALDRI mot
+  eksisterende folier → fyll/sone-fyll/lange-strimler kunne legge en folie rett oppå andre.
+
+### Fiks
+- **Footprint-subtraksjon i `computeClippedSegments`** (kjernen): ny modul-kontekst `_foilAvoidCtx`
+  (`{roomId, excludeIds}`), satt via `_withFoilAvoid(roomId, exclude, fn)` rundt hver fyll-operasjon.
+  Når satt, subtraheres footprinten til ALLE eksisterende folier i rommet (alle retninger/soner),
+  inflatert med folie-gap, akkurat som en hindring — UNNTATT batchen som erstattes (unngår
+  selv-blokkering). Opt-in → editorer/ikke-fyll-stier uendret.
+- **Wiret i alle fyll-stier:** auto-fyll-sammenligning (ekskluder samme kategori), sone-fyll
+  (ekskluder samme sone — peker på det EKTE rommet siden sone-fyll bruker temp-rom), manuell
+  drop/preview (ekskluder ingen). «Lange strimler» går gjennom samme `computeClippedSegments`.
+- **Retnings-uavhengig overlapp** i `_stripOverlapsAny`: i tillegg til samme-retning-logikken,
+  ekte verdens-rektangel-nærhet (`_stripWorldRect`/`_rectsWithin`) mot folier av MOTSATT retning →
+  manuell plassering/drag og sikkerhetsnett blokkerer kryssende folier.
+
+### Verifisert (numerisk; ingen konsoll-feil)
+- Eksisterende horisontal folie (y150–169); ny vertikal ved x180: uten vern ett løp y3–297 (overlapp);
+  MED vern splittet y3–147 + y172–296 → stopper 3 cm (gap) før, ingen overlapp. Kryss-retning flagges.
+- Sone-fyll: 0 overlapp mellom nabosoners folie (6 par sjekket).
+- Ingen regresjon: rent rektangel auto-fyll uendret (2 striper/91 %); klaringen = folie-gap (holder
+  SONER-skjøtens half-gap konsistent; «~5 cm ende-mot-side» er tilnærmet med gap — kan økes om ønsket).
+
+---
+
 ## 2026-06-10 — Plantegning BUGFIX 4: bakgrunn «lekket» til andre prosjekter (async race)
 
 Bruker: «bakgrunnstegningen jeg la inn på et prosjekt har lagt seg inn som bakgrunn på alle mine
