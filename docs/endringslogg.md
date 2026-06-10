@@ -4,6 +4,47 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — ØKT-OPPSUMMERING (stor økt: kabel-, folie-, matte-, soner- og plantegning-arbeid)
+
+Detaljerte oppføringer pr. punkt under. Alt verifisert (mest numerisk in-memory pga. treg test-fane
+mot slutten) og pushet til `main`. Commits (nyeste først): `83eeab3`, `438cc2d`, `3762ab9`,
+`3a36364`, `e81773b`, `fd1a8eb`, `0bc8953`, `81626be`, `053b363`, `d18ce32`, `f810848`, `28422d8`,
+`298d11e`, `193e8d6`, `720947a`, `fd78476` (+ tidlig: `616a110`, `6dee009`, `bc0d773`).
+
+**Varmekabel**
+- `fd78476` V6 honorerer valgt RETNING (`dirExplicit`) — slutt på «velger horisontalt, legger vertikalt».
+- `720947a` L/T horisontalt → ren boustrophedon-serpentin; + 5 cm perp-margin fra indre parallelle vegger.
+- `193e8d6` auto-retning foretrekker den rene (godt-fyllende) boustrophedon-retningen.
+- `3a36364` «Del i N like soner» med eksplisitt horisontal/vertikal-toggle (hard honorering, felles CC).
+- `83eeab3` rene multi-kabel-soner i komplekse rom (betinget vertex-snap + ingen skew i soner).
+- (tidlig: retningsvelger-reapply, L-diagonal→ortogonal, rektangel-starthjørne.)
+
+**Varmefolie**
+- `f810848` «lange strimler vegg-til-vegg» som default (mot fragmentering) + bryter «Maks dekning».
+- `e81773b` ALDRI folie over folie (hard invariant: footprint-subtraksjon ved fyll + retnings-uavhengig overlapp).
+
+**SONER (utleggingssoner)**
+- `28422d8` del et rom i navngitte soner via delelinjer; folie pr. sone, per-kant margin (yttervegg vs delt grense).
+
+**Hindring**
+- `298d11e` fri plassering + mykt vegg-snap (`clampHindringToRoom` omskrevet: containment + sann segment-avstand).
+
+**Plantegning / bakgrunn**
+- `d18ce32` «Fast målestokk» (1:50) alltid tilgjengelig + eksakt for PDF.
+- `053b363` deselekter bakgrunn etter skalering (henger på skalerings-baren).
+- `81626be` + `0bc8953` lås kalibrert underlag (klikk-felle), også eksisterende prosjekter.
+- `fd1a8eb` bakgrunn lekket til andre prosjekter (async onload-race) — token-guard.
+
+**Matte (EcoMat innendørs)**
+- `3762ab9` EcoMat 60T/100T/150T-utlegg: bredder inntil hverandre + kald sone, hele matta delt i N like bredder.
+- `438cc2d` innendørs: tydeligere produkt-label (unna romnavn), kabel-label alltid synlig, matter unngår hindringer (5 cm), matte-gap min 0 (folie-modell).
+
+**Anbefalt neste steg (ikke gjort):** felles kabel/folie/matte-INVARIANT-spec + testliste alle motorer
+må bestå (5 cm margin, lik CC, hjørne-start/stopp, eksplisitt retning hard, aldri overlapp, ingen
+diagonal/rar form, fyll til vegg) — fanger samme rot-klasse systematisk. Venter på «si fra».
+
+---
+
 ## 2026-06-10 — Varmekabel: rene multi-kabel-soner i komplekse rom (Gang) — betinget vertex-snap + ingen skew i soner
 
 Symptom: Gang (~37 m²) delt i 2 like soner — sone 1 ren serpentin, sone 2 (irregulær equal-area-
