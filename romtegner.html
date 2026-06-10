@@ -7254,6 +7254,23 @@ function _generatePolygonClippedRuns(roomId, productId, direction, runPositions,
     // Clip to room polygon
     let intervals = clipScanlineToPolygon(sweepAxis, pos, room.points);
     intervals = intervals.map(([lo, hi]) => [lo + sweepMargin, hi - sweepMargin]).filter(([lo, hi]) => hi > lo);
+    // Perp-margin from interior walls PARALLEL to the run. The sweepMargin above only insets the
+    // run's ENDS (sweep-axis walls); it does nothing for a wall the run runs alongside. The outer
+    // perp positions-grid keeps first/last runs >= margin from the OUTER perp walls, but an
+    // INTERIOR step (e.g. an L/T arm's top/bottom edge, which only bounds part of the room) is
+    // invisible to that grid — so a run can land < margin from it (Vindfang: top arm strand 0.7 cm
+    // from the wall). Mask the run with the room clip at pos +/- margin: where the room does not
+    // extend a full margin in perp on a side, that x-region is within margin of a parallel wall →
+    // drop it (fewer runs there, equal CC kept, a little more uncovered next to the wall — OK). An
+    // EMPTY neighbour clip means pos +/- margin exits the room on an OUTER perp extreme (already
+    // handled by the positions grid) → impose no constraint from that side.
+    if (intervals.length > 0) {
+      const lowClip = clipScanlineToPolygon(sweepAxis, pos - margin, room.points);
+      const highClip = clipScanlineToPolygon(sweepAxis, pos + margin, room.points);
+      if (lowClip.length) intervals = intersectIntervalSets(intervals, lowClip);
+      if (highClip.length) intervals = intersectIntervalSets(intervals, highClip);
+      intervals = intervals.filter(([lo, hi]) => hi - lo > 1e-6);
+    }
     // Subtract obstacles
     for (const h of roomH) {
       if (!h.points || h.points.length < 3) continue;
@@ -9858,22 +9875,36 @@ function generateCableBoustrophedon(roomId, productId, direction, startCorner) {
       return _layout(dir, sp);
     }
     const target = prod.cable_length_m * 100;
-    const nettoM2 = net / 10000;
-    let sp = Math.max(minSpEff, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
-    let lo = minSpEff, hi = maxSp, bestRes = null, bestDiff = Infinity;
-    for (let it = 0; it < 24; it++) {
+    // _layout VALIDITY is NON-MONOTONIC in spacing on L/T rooms: the cell-handoff openLen check
+    // rejects some spacings but not finer/coarser ones (Vindfang: valid at 9cm, null at 12cm,
+    // valid at 15cm). A bisection assumes monotonic validity, so on such rooms it diverges to a
+    // coarse spacing that badly under-fills — it picked CC 39.9cm → 15.6m of a 50m cable, which
+    // then lost to V6's (visually messy) cell layout. Instead SCAN the whole CC range (robust to
+    // the null gaps), then refine around the best, always keeping the VALID layout whose length is
+    // closest to target. The clean single-grid boustrophedon serpentine now wins the cascade.
+    let bestRes = null, bestDiff = Infinity, bestSp = null;
+    const _consider = (sp) => {
       const r = _layout(dir, sp);
-      if (r) {
+      if (!r) return;
+      const d = Math.abs(r.totalLength_cm - target);
+      if (d < bestDiff) { bestDiff = d; bestRes = r; bestSp = sp; }
+    };
+    // Coarse sweep across the full CC range.
+    const coarse = 0.25;
+    for (let sp = minSpEff; sp <= maxSp + 1e-9; sp += coarse) _consider(Math.min(sp, maxSp));
+    // Local refine around the best coarse CC for an exact length match (length is locally
+    // monotonic in CC where _layout is valid: smaller CC → more cable).
+    if (bestSp != null) {
+      let lo = Math.max(minSpEff, bestSp - coarse), hi = Math.min(maxSp, bestSp + coarse);
+      for (let it = 0; it < 18 && hi - lo > 1e-3; it++) {
+        const mid = (lo + hi) / 2;
+        const r = _layout(dir, mid);
+        if (!r) { lo = mid; continue; }
         const d = r.totalLength_cm - target;
         if (Math.abs(d) < bestDiff) { bestDiff = Math.abs(d); bestRes = r; }
-        if (Math.abs(d) < 1) break;
-        if (d < 0) hi = sp; else lo = sp;   // smaller spacing → more cable
-      } else {
-        lo = sp;                            // too tight here, try larger spacing
+        if (Math.abs(d) < 0.5) break;
+        if (d < 0) hi = mid; else lo = mid;
       }
-      const nsp = (lo + hi) / 2;
-      if (Math.abs(nsp - sp) < 1e-3) break;
-      sp = nsp;
     }
     return bestRes;
   }

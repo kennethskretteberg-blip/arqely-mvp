@@ -4,6 +4,50 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmekabel: L/T-rom horisontalt blir ren boustrophedon-serpentin + 5 cm perp-margin
+
+Fortsettelse på Vindfang (Bloksbergveien/Hybel). To uavhengige fikser, begge verifisert på ekte
+rom og målt numerisk + visuelt.
+
+### Fiks 1 — boustrophedon `_solve`: robust CC-sveip i stedet for biseksjon
+- **Symptom:** L/T-rom horisontalt ga en stygg V6-celle-layout: ett løp med tettere CC, kantete
+  (ikke-buede) svinger, en Y-split der et koblings-bein lå 4,4 cm fra et løp (<5 cm), og en rar
+  kantet strek før svingen. Rotårsak: V6 deler rommet i 3 bånd med polyline-**koblinger**.
+- **Hvorfor V6 i det hele tatt ble valgt:** den rene motoren (boustrophedon) lager én
+  sammenhengende serpentin med bue-svinger + jevn CC, men `_solve` brukte **biseksjon**, som antar
+  at `_layout`-gyldighet er monoton i CC. På L/T er den **ikke-monoton** (gyldig ved 9 cm, null ved
+  12 cm, gyldig ved 15 cm — celle-handoff `openLen`-sjekken). Biseksjonen spratt da til CC 39,9 cm
+  → bare 15,6 m av 50 m → cascadens `fillOk`-terskel (≥90 %) falt til V6. (Dette var den samme
+  «15,6 m»-underfyllingen fra tidligere økter — nå endelig forklart.)
+- **Fiks:** erstattet biseksjonen med et grovt CC-sveip (0,25 cm steg) over hele området + lokal
+  forfining rundt beste CC. Robust mot de ikke-monotone null-hullene; finner alltid den GYLDIGE
+  layouten nærmest target-lengde.
+- **Resultat (Vindfang H, InFloor 10T 500W 50 m):** boustrophedon vinner nå (var v6), CC jevn
+  9,9 cm overalt, **0 koblinger** → alle U-svinger er halvsirkel-buer, ingen Y-split, ingen
+  tett-løp, ingen kantet koblings-strek; 48,8 m, 87 %, min vegg-avstand 5,49 cm; start/slutt i
+  hjørner. Bekreftet visuelt.
+- **Begrensning:** vertikal retning på dette rommet finnes ikke som ren enkelt-serpentin (armen
+  stikker ut horisontalt → stort `openLen`-hopp), så vertikal bruker fortsatt V6. Horisontal er
+  den naturlige retningen for et slikt rom.
+
+### Fiks 2 — `_generatePolygonClippedRuns`: perp-margin fra indre parallelle vegger
+- **Symptom:** øverste streng i venstre arm lå 0,7 cm fra ytterveggen (brøt hard 5 cm).
+- **Rotårsak:** funksjonen insettet kun løpenes ENDER (sweep-aksen). En INDRE step-vegg parallell
+  med løpene (armens topp/bunn-kant, usynlig for det ytre posisjon-rutenettet) fikk ingen
+  perp-margin. (Promptens `_fillCellSerpentine` var død V5-kode — ikke i live-stien.)
+- **Fiks:** masker hvert løp med rom-klipp ved `pos ± margin` (rå klipp, ingen sweep-inset). Der
+  rommet ikke strekker en full margin i perp på en side, ligger man <margin fra en parallell vegg
+  → klipp bort. Tom-vakt for ytre ekstremer (allerede dekket av posisjon-rutenettet). Lik CC
+  beholdt; litt mer udekket inntil veggen (OK).
+- **Resultat:** global min vegg-avstand 0,7 → 5,03 cm (H) / 9,58 cm (V). Gjelder fortsatt V6-stier
+  (vertikal/hindringer). Rektangler uendret (boustrophedon-stien urørt).
+
+### Verifisering / ingen regresjon
+- Rektangler (300×200/54 m, 250×200/29 m, 400×300/54 m): boustrophedon, jevn CC, lengde nær target.
+- LOCKED-regler urørt (halvsirkel-U, lik-lengde innen serpentin, ingen Y-split, sweepMargin).
+
+---
+
 ## 2026-06-10 — Varmekabel: V6 honorerer valgt RETNING (dirExplicit) — fikser «velger horisontalt, legger vertikalt»
 
 Diagnostisert og fikset på ekte prosjekt **Bloksbergveien → etasje «Hybel» → rom «Vindfang»**
