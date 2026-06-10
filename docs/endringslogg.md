@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Plantegning BUGFIX 4: bakgrunn «lekket» til andre prosjekter (async race)
+
+Bruker: «bakgrunnstegningen jeg la inn på et prosjekt har lagt seg inn som bakgrunn på alle mine
+lagrede prosjekter — ble ok igjen etter en refresh».
+
+- **Rotårsak:** i `_restoreProject` lastes bakgrunns-bildet ASYNKRONT (`bImg.onload`). Åpner du
+  prosjekt A (med bg) og så B, kan A-bildets `onload` fyre ETTER at B har nullstilt `S.bgs` →
+  A-bakgrunnen skrives inn i B sitt `S.bgs`. Rent i minnet (derfor «ok etter refresh»); lekker bare
+  til lagring hvis man lagrer mens den feil-bakgrunnen vises.
+- **Fiks:** innlastings-generasjon `_bgRestoreGen` bumpes ved hver prosjekt-åpning; hver async
+  bg-`onload` fanger generasjonen ved planlegging og skriver KUN hvis den fortsatt er gjeldende
+  (`if (_myBgGen !== _bgRestoreGen) return`). Stale bilder fra et tidligere prosjekt ignoreres.
+- **Verifisert:** to prosjekter åpnet etter hverandre gir konsistent `S.bgs` (ingen lekket bg),
+  ingen feil.
+- **Merk til bruker:** lekkasjen var i minnet → dine LAGREDE prosjekter er trygge (en refresh
+  fjernet den). Hvis et prosjekt likevel viser feil bakgrunn ETTER refresh, si fra — da kan en
+  feil-bakgrunn ha blitt lagret, og jeg rydder den.
+
+---
+
 ## 2026-06-10 — Plantegning BUGFIX 3: auto-lås kalibrert underlag ved innlasting (eksisterende prosjekter)
 
 Oppfølger: bruker fortsatt fast + «vis/skjul gjør ingenting». Reproduserte HELE den ekte flyten
