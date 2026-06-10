@@ -4,6 +4,47 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmefolie: «lange strimler vegg-til-vegg» som default (mot fragmentering)
+
+Snur folie-prioriteringen fra «maks dekning» til **få, lange, ensartede strimler vegg-til-vegg**,
+med en bryter for de som vil ha maks dekning. Løser runde-2-folie-punktet (fragmentering i
+uregelmessige/trappetrinn-rom) — og forbedrer samtidig folie-dekning i uregelmessige SONER.
+
+### Rotårsak (fragmentering)
+- `chooseBestProduct` byttet til SMALERE folie når en kolonne ble klippet <90 % (mot et
+  trappetrinn) → patchwork av bredder.
+- `_autoFillRoomOnce` lagde én strimmel pr. SEGMENT → en kolonne ble delt i hoved + kort topp-bit.
+- `_scoreFoilLayout` maksimerte AREAL (straffet antall svakt) → «maks dekning» vant.
+
+### Fiks
+- **Strategi-flagg** `S.varmefolie.foilStrategy`: `'long'` (default) | `'coverage'`. Bryter i
+  auto-plasserings-panelet («Lange strimler» / «Maks dekning»), `_setFoilStrategy` re-kjører.
+- **`_autoFillRoomOnce(...,longMode)`**: ÉN ensartet bredde for hele rommet (ingen per-kolonne
+  nedskalering), og ÉN strimmel pr. kolonne (lengste sammenhengende segment). Godtar litt udekket
+  langs grunne/uregelmessige kanter.
+- **`_longStripsLayout`**: prøver HVER ensartet bredde × begge sweep-ender, velger beste long-score
+  → bredt for rektangel, smalere der bredt knapt får plass (L/arm-soner) → god dekning med få,
+  lange strimler. Brukt av `_autoFillBothDirections` (default-stien) og `_fillSoneFoil`.
+- **`_scoreFoilLayout` 'long'-profil**: maks dekket areal MINUS reell kostnad pr. strimmel (≈8 % av
+  romarealet) og pr. ekstra breddetype (≈12 %) → en ekstra strimmel/kobling må «fortjene plassen»
+  i dekning. Retning velges av denne scoren (lengste/færreste vinner).
+- Når retning ikke er eksplisitt valgt: scoren foretrekker naturlig retningen med lengst strimler.
+
+### Verifisert (numerisk; ingen konsoll-feil)
+- Rektangel 400×300: long = 2 striper / 1 bredde / 91 % vs coverage = 3 / 2 bredder / 94 %.
+- Trappetrinn-rom: long = 2 / 1 / 87 % vs coverage = 3 / 2 / 94 %.
+- L-formet sone (Vindfang Sone 2): long = **57 %** (2 striper) — bedre enn coverage 43 %, og fikser
+  en mellomliggende 27 %-regresjon (bredeste-uniform alene).
+- «Maks dekning»-bryter gir dagens tettere/mer oppdelte layout (eksisterende motor uendret).
+- Vanlig rom-folie i coverage-modus uberørt; `computeClippedSegments`/`_autoFillRoomOnce`-tillegg
+  bakoverkompatible.
+
+### Ikke gjort (informativt, ikke blokkerende)
+- Eksplisitt markering «trenger tilførsel fra begge ender / skjøt» for svært lange strimler er
+  ikke lagt til (antall striper i panelet = antall tilkoblinger; ingen hard produkt-maks kjent).
+
+---
+
 ## 2026-06-10 — SONER: del et rom i navngitte utleggingssoner (Kjerne)
 
 Ny feature: del ett rom i flere SONER med delelinjer, fyll folie pr. sone med individuell

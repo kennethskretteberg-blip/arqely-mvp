@@ -5628,6 +5628,25 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
 function _scoreFoilLayout(defs, ctx) {
   const profile = (ctx && ctx.profile) || 'select';
 
+  // 'long' profile — «lange strimler vegg-til-vegg»: maximize covered area but charge a real cost
+  // PER strip (≈8% of the room's net area) and per extra width type, so an added strip must earn
+  // its keep in coverage. Net effect: few, long, uniform strips; a little uncovered edge is fine,
+  // but it never collapses to one tiny strip when several substantial ones cover much more.
+  if (profile === 'long') {
+    if (!defs.length) return -Infinity;
+    let coveredArea = 0; const widthSet = new Set();
+    for (const d of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      coveredArea += nc * d.length_cm;        // cm²
+      widthSet.add(nc);
+    }
+    const netCm2 = (ctx && ctx.netCm2) || (coveredArea / 0.85);   // fallback if not supplied
+    return coveredArea
+         - defs.length * netCm2 * 0.08         // each strip (= one connection) costs ~8% of room
+         - (widthSet.size - 1) * netCm2 * 0.12; // extra width type costs ~12%
+  }
+
   if (profile === 'zone') {
     if (!defs.length) return -1;
     let totalArea = 0;
@@ -6206,7 +6225,63 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
   return working;
 }
 
+// Per-direction stats block for a foil layout (shape the compare panel expects).
+function _foilLayoutStats(defs, room, scoreProfile) {
+  const netArea = _calcNetArea(room);
+  let coveredArea = 0, totalW = 0; const widthSet = new Set();
+  for (const d of defs) {
+    const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+    if (!p) continue;
+    const nc = (p.netto_width_mm || p.width_mm) / 10;
+    coveredArea += nc * d.length_cm / 10000;
+    totalW += (p.watt_per_m2 || 60) * nc * d.length_cm / 10000;
+    widthSet.add(p.id);
+  }
+  return {
+    stripCount: defs.length,
+    coveragePct: netArea > 0 ? Math.round(coveredArea / netArea * 100) : 0,
+    totalWatt: Math.round(totalW),
+    wattPerM2: netArea > 0 ? Math.round(totalW / netArea) : 0,
+    widthTypes: widthSet.size,
+    score: _scoreFoilLayout(defs, { profile: scoreProfile })
+  };
+}
+
+// Best «long strips» layout for one direction: try EACH uniform width (× both sweep ends) and keep
+// the highest-scoring one. Trying widths (not just the widest) auto-picks wide foil for rectangles
+// and a narrower uniform width where wide foil would barely fit (e.g. an L/arm sone), keeping good
+// coverage with few, long, uniform strips. marginCm forwarded for layout-zone (pre-inset) fills.
+function _longStripsLayout(room, sortedProds, direction, marginCm) {
+  const netCm2 = Math.abs(compArea(room.points)) || 1;
+  const score = defs => _scoreFoilLayout(defs, { profile: 'long', netCm2 });
+  let best = [], bestS = -Infinity;
+  for (const prod of sortedProds) {
+    for (const fromHigh of [false, true]) {
+      const defs = _autoFillRoomOnce(room, [prod], direction, fromHigh, undefined, marginCm, true);
+      const s = score(defs);
+      if (defs.length && s > bestS) { bestS = s; best = defs; }
+    }
+  }
+  return best;
+}
+
+// «Lange strimler vegg-til-vegg» (default foil strategy): few, long, uniform strips per direction.
+// Skips the coverage-maximizing strategies (beam/obstacle/gap-pack) that fragment into short bits.
+function _longStripsBothDirections(room, sortedProds) {
+  const results = {};
+  for (const dir of ['h', 'v']) {
+    let best = _longStripsLayout(room, sortedProds, dir);
+    best = best.length ? _centerStripDefs(best, room, dir) : [];
+    results[dir] = { defs: best, stats: _foilLayoutStats(best, room, 'long') };
+  }
+  return results;
+}
+
 function _autoFillBothDirections(room, sortedProds) {
+  // Foil strategy: 'long' (default — few, long, wall-to-wall strips) vs 'coverage' (legacy max-fill).
+  const strategy = (S.varmefolie && S.varmefolie.foilStrategy) || 'long';
+  if (strategy === 'long') return _longStripsBothDirections(room, sortedProds);
+
   // Authoritative layout scorer (covered area · strip count · width types ·
   // short-strip penalty). Single source of truth — see _scoreFoilLayout.
   const score = defs => _scoreFoilLayout(defs);
@@ -6272,6 +6347,7 @@ function _autoFillBothDirections(room, sortedProds) {
 function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) { _showToast('Velg et rom først', 'warn'); return; }
+  S.ui.autoFillCtx = { familyName, categoryId, maxWidthMm };   // for the strategy toggle to re-run
 
   let prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false &&
@@ -6345,12 +6421,26 @@ function _renderAutoFillComparePanel(results, selectedDir) {
         <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.v.defs)}</div>
       </div>
     </div>
+    <div style="display:flex;gap:6px;justify-content:center;margin-top:12px">
+      ${(() => { const strat = (S.varmefolie && S.varmefolie.foilStrategy) || 'long';
+        const chip = (id,label,tip) => `<button class="snap-chip${strat===id?' on':''}" title="${tip}" onclick="_setFoilStrategy('${id}')">${strat===id?'● ':''}${label}</button>`;
+        return chip('long','Lange strimler','Få, lange, ensartede strimler vegg-til-vegg (litt udekket langs kanter er OK)')
+             + chip('coverage','Maks dekning','Tettest mulig dekning — flere/kortere strimler ved behov'); })()}
+    </div>
     <div class="af-actions">
       <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':'vertikal'}</button>
       <button class="af-btn-secondary" onclick="_closeAutoFillPanel()">Avbryt</button>
     </div>
   `;
   panel.style.display = '';
+}
+
+// Strategy toggle: persist the choice and re-run the comparison with the same product context.
+function _setFoilStrategy(strat) {
+  if (!S.varmefolie) S.varmefolie = {};
+  S.varmefolie.foilStrategy = strat;
+  const ctx = S.ui.autoFillCtx;
+  if (ctx) showAutoFillComparison(ctx.familyName, ctx.categoryId, ctx.maxWidthMm);
 }
 
 function _selectAutoFillOption(dir) {
@@ -6509,7 +6599,10 @@ function _rotateSelectedStrip() {
 // _obstacleAwareFill) are still used by that live path.
 
 // Core fill: single pass, single direction. Optional startCursor overrides default start position.
-function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, marginCm) {
+// longMode = «lange strimler vegg-til-vegg»: ONE uniform width for every column (no adaptive
+// down-scaling against shallow edges) and ONE strip per column (the longest continuous segment),
+// accepting a little uncovered area along irregular/step edges. Fewer, longer, uniform strips.
+function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, marginCm, longMode) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -6527,54 +6620,79 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, 
   if (!validNcs.length) return result;
   const smallestNc = Math.min(...validNcs);
 
+  // longMode: pick ONE uniform width for the whole room (widest that fits the span). Every column
+  // uses it; we never down-scale per column and we keep only the longest segment per column.
+  let primaryId = null, primaryNc = 0;
+  if (longMode) {
+    const availSpan = (baseMax - MARGIN) - (basePos + MARGIN);
+    for (const prod of sortedProds) {           // widest-first
+      const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+      if (nc > 0 && nc <= availSpan + 0.01) { primaryId = prod.id; primaryNc = nc; break; }
+    }
+    if (!primaryId) {                             // nothing fits → narrowest
+      const np = sortedProds.slice().sort((a, b) => ((a.netto_width_mm || a.width_mm) - (b.netto_width_mm || b.width_mm)))[0];
+      if (np) { primaryId = np.id; primaryNc = (np.netto_width_mm || np.width_mm) / 10; }
+    }
+    if (!primaryId) return result;
+  }
+  // Push the chosen segments for one column. longMode → only the single longest segment.
+  const _pushCol = (pos, chosenId) => {
+    const segs = computeClippedSegments(room.id, direction, pos, chosenId, _ccsOpts);
+    if (!segs.length) return;
+    if (longMode) {
+      const b = segs.reduce((a, c) => (c.length_cm > a.length_cm ? c : a));
+      result.push({ roomId: room.id, productId: chosenId, direction, pos_cm: pos, start_cm: b.start_cm, length_cm: b.length_cm });
+    } else {
+      for (const seg of segs) result.push({ roomId: room.id, productId: chosenId, direction, pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
+    }
+  };
+
   if (!fromHigh) {
     let cursor = startCursor ?? (basePos + MARGIN);
-    while (cursor + smallestNc <= baseMax - MARGIN + 0.01) {
-      // Find widest product that fits in remaining space (sortedProds is widest-first)
-      let requestedProd = null;
-      for (const prod of sortedProds) {
-        const nc = (prod.netto_width_mm || prod.width_mm) / 10;
-        if (nc <= 0) continue;
-        if (cursor + nc <= baseMax - MARGIN + 0.01) { requestedProd = prod; break; }
+    while (cursor + (longMode ? primaryNc : smallestNc) <= baseMax - MARGIN + 0.01) {
+      let chosenId, chosenNc;
+      if (longMode) {
+        chosenId = primaryId; chosenNc = primaryNc;
+      } else {
+        // Find widest product that fits in remaining space (sortedProds is widest-first)
+        let requestedProd = null;
+        for (const prod of sortedProds) {
+          const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+          if (nc <= 0) continue;
+          if (cursor + nc <= baseMax - MARGIN + 0.01) { requestedProd = prod; break; }
+        }
+        if (!requestedProd) break;
+        // Adaptive: switch to narrower product if coverage is poor at this position
+        chosenId = chooseBestProduct(room.id, direction, cursor, requestedProd.id, sortedProds, false);
+        const chosenProd = HEATING_PRODUCTS.find(pp => pp.id === chosenId);
+        chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       }
-      if (!requestedProd) break;
-
-      // Adaptive: switch to narrower product if coverage is poor at this position
-      const chosenId = chooseBestProduct(room.id, direction, cursor, requestedProd.id, sortedProds, false);
-      const chosenProd = HEATING_PRODUCTS.find(pp => pp.id === chosenId);
-      const chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       if (cursor + chosenNc > baseMax - MARGIN + 0.01) break;
-
-      const segs = computeClippedSegments(room.id, direction, cursor, chosenId, _ccsOpts);
-      for (const seg of segs) {
-        result.push({ roomId: room.id, productId: chosenId, direction,
-          pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm });
-      }
+      _pushCol(cursor, chosenId);
       cursor += chosenNc + GAP;
     }
   } else {
     let cursor = startCursor ?? (baseMax - MARGIN);
-    while (cursor - smallestNc >= basePos + MARGIN - 0.01) {
-      // Find widest product that fits (sortedProds is widest-first)
-      let requestedProd = null;
-      for (const prod of sortedProds) {
-        const nc = (prod.netto_width_mm || prod.width_mm) / 10;
-        if (nc <= 0) continue;
-        if (cursor - nc >= basePos + MARGIN - 0.01) { requestedProd = prod; break; }
+    while (cursor - (longMode ? primaryNc : smallestNc) >= basePos + MARGIN - 0.01) {
+      let chosenId, chosenNc;
+      if (longMode) {
+        chosenId = primaryId; chosenNc = primaryNc;
+      } else {
+        // Find widest product that fits (sortedProds is widest-first)
+        let requestedProd = null;
+        for (const prod of sortedProds) {
+          const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+          if (nc <= 0) continue;
+          if (cursor - nc >= basePos + MARGIN - 0.01) { requestedProd = prod; break; }
+        }
+        if (!requestedProd) break;
+        chosenId = chooseBestProduct(room.id, direction, cursor, requestedProd.id, sortedProds, true);
+        const chosenProd = HEATING_PRODUCTS.find(pp => pp.id === chosenId);
+        chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       }
-      if (!requestedProd) break;
-
-      const chosenId = chooseBestProduct(room.id, direction, cursor, requestedProd.id, sortedProds, true);
-      const chosenProd = HEATING_PRODUCTS.find(pp => pp.id === chosenId);
-      const chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       const pos = cursor - chosenNc;
       if (pos < basePos + MARGIN - 0.01) break;
-
-      const segs = computeClippedSegments(room.id, direction, pos, chosenId, _ccsOpts);
-      for (const seg of segs) {
-        result.push({ roomId: room.id, productId: chosenId, direction,
-          pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
-      }
+      _pushCol(pos, chosenId);
       cursor = pos - GAP;
     }
   }
@@ -15059,9 +15177,14 @@ function _fillSoneFoil(zone, prods){
   let defs=[];
   try{
     const dir=zone.direction||'h';
-    const a=_autoFillRoomOnce(tmp, prods, dir, false, undefined, 0);
-    const b=_autoFillRoomOnce(tmp, prods, dir, true, undefined, 0);
-    defs=(_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
+    const long=((S.varmefolie&&S.varmefolie.foilStrategy)||'long')==='long';
+    if(long){
+      defs=_longStripsLayout(tmp, prods, dir, 0);
+    } else {
+      const a=_autoFillRoomOnce(tmp, prods, dir, false, undefined, 0);
+      const b=_autoFillRoomOnce(tmp, prods, dir, true, undefined, 0);
+      defs=(_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
+    }
   } finally { S.rooms=S.rooms.filter(r=>r.id!==TID); }
   if(!defs.length){ _showToast('Fikk ikke lagt folie i sonen','warn'); return; }
   pushUndo();
