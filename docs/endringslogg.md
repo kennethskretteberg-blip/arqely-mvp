@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Plantegning BUGFIX 3: auto-lås kalibrert underlag ved innlasting (eksisterende prosjekter)
+
+Oppfølger: bruker fortsatt fast + «vis/skjul gjør ingenting». Reproduserte HELE den ekte flyten
+interaktivt (importer → «Sett målestokk nå» → 2 klikk → 5 m → fullfør): etter kalibrering kommer
+den kombinerte «BAKGRUNN Vis/opacity … | TEGN ROM Rektangel/Mål/…»-baren, klikk i tegningen holder
+seg der (bg låst), og vis/skjul SKJULER tegningen korrekt. Altså: med gjeldende kode virker alt.
+
+- **Sannsynlig årsak for «fortsatt fast»:** (a) deploy/cache-etterslep (eldre versjon i nettleseren),
+  eller (b) eksisterende prosjekt med en ALLEREDE kalibrert, ULÅST bakgrunn — auto-låsen i bugfix 2
+  gjelder bare NYE kalibreringer.
+- **Fiks (b):** `_restoreProject` låser nå et kalibrert underlag ved innlasting
+  (`if (bg.img && !bg._needsCalibration) bg.locked = true`) → eksisterende prosjekter blir også
+  klikk-trygge (klikk går gjennom underlaget). Lås opp via lås-knappen for å flytte det.
+- **Verifisert:** ulåst bg → klikk treffer; låst bg → klikk går gjennom (`_hitBgLayer` null).
+  Full ekte kalibrerings-flyt gir «Tegn rom»-bar; vis/skjul fungerer.
+- **Til bruker:** symptomene matcher å kjøre eldre kode — gjør en HARD refresh (Cmd/Ctrl+Shift+R)
+  for å hente nyeste versjon.
+
+---
+
 ## 2026-06-10 — Plantegning BUGFIX 2: lås underlaget etter kalibrering (klikk-felle)
 
 Oppfølger: «jeg kan skalere og den går over til opprett-rom-baren, men hvis jeg klikker i tegningen
