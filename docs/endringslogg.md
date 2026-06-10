@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Varmekabel: auto-retning foretrekker den RENE retningen (boustrophedon-fyll)
+
+Lett alternativ til en risikabel V6-vertikal-omskriving: i stedet for å pusse på den delte
+V6-koblingsmotoren, lar vi auto-retning styre brukeren mot den rene retningen.
+
+- **Bakgrunn:** på et utstikker-rom (L/T med horisontal arm, f.eks. Vindfang) finnes en ren
+  enkelt-serpentin (boustrophedon, 0 koblinger) bare langs armen (horisontalt). Vertikalt finnes
+  den ikke (stort `openLen`-hopp) → kun V6 med kobling. Eksplisitt vertikalt valg er brukerens
+  rett, men AUTO bør lande på den rene retningen.
+- **Fiks (cascade, boustrophedon-blokk i `_autoFillCableImpl`):** blant gyldige retninger spores nå
+  `bFill` = beste som også FYLLER kabelen godt (≥90 %), og `bChosen = bFill || bBest` velges. Når
+  en retning gir ren, godt-fyllende boustrophedon, vinner den framfor en underfyllende. Påvirker kun
+  AUTO (uten eksplisitt valg) — `dirs` har da begge retninger; ved eksplisitt valg er `dirs` kun den
+  ene, så brukerens valg overstyres aldri.
+- **Verifisert (Vindfang):** AUTO → boustrophedon 'h', 0 koblinger, ren; eksplisitt 'h' → ren
+  (uendret); eksplisitt 'v' → fortsatt v6 (valg respektert); rektangel AUTO → boustrophedon, ingen
+  regresjon.
+
+---
+
 ## 2026-06-10 — Varmekabel: L/T-rom horisontalt blir ren boustrophedon-serpentin + 5 cm perp-margin
 
 Fortsettelse på Vindfang (Bloksbergveien/Hybel). To uavhengige fikser, begge verifisert på ekte
