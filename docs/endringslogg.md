@@ -4,6 +4,37 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Plantegning: «Fast målestokk» (1:50) alltid tilgjengelig + eksakt for PDF
+
+Bruker meldte «får ikke skalert tegning lenger» og ønsket målestokk-forhold (1:50) som tillegg.
+
+### Funn (bug-undersøkelse)
+- 2-punkts-kalibreringen (`startBgCalibrate` → klikk 2 punkter → `confirmBgCalibrate`) er IKKE brutt:
+  verifisert ende-til-ende i appen (klikk 1 → punkt 1, klikk 2 → modal → skalerer; A4 100 px = 5 m
+  ga riktig faktor). Logikken i både `confirmBgCalibrate` og `confirmFixedScale` er korrekt.
+- Reell mangel: **«Fast målestokk» (forhold) var bare tilgjengelig på en NYIMPORTERT, ukalibrert
+  tegning** (ctxbar-grenen `notCalibrated`). Når tegningen først var kalibrert og du valgte den for
+  å re-skalere, fantes bare «Skaler på nytt» (2-punkts) — ikke forholds-skalering. Det forklarer at
+  man «ikke får skalert» via forhold etterpå.
+
+### Endringer
+- **«Målestokk 1:_»-knapp lagt til i den valgte-plantegning-ctxbar-en** (ved siden av «Skaler på
+  nytt») → forholds-skalering er nå tilgjengelig når som helst, ikke bare ved import.
+- **Eksakt 1:50 for PDF:** ved PDF-import fanges den fysiske sidestørrelsen fra PDF-ens punkt-mål
+  (`vp.width/RENDER_SCALE / 72 * 2.54`) og lagres som `bg.paperWidthCm/paperHeightCm`.
+  `confirmFixedScale` bruker den når den finnes → 1:50 blir nøyaktig (A4-landskap 29,7×21 cm →
+  1485×1050 cm). Raster-bilder (JPG/PNG) har ingen pålitelig fysisk størrelse → faller tilbake til
+  150-DPI-antagelse som før.
+- `_installBgImage(...,meta)` lagrer/nullstiller sidestørrelsen; rastersti uendret.
+
+### Verifisert
+- PDF (A4) 1:50 → 1485×1050 cm eksakt; raster 1:50 → 150-DPI-fallback; knappen vises i bg-ctxbar;
+  2-punkts-kalibrering fungerer fortsatt. Ingen konsoll-feil.
+- Merk: jeg klarte ikke å reprodusere en brutt 2-punkts-flyt — hvis «får ikke skalert» fortsatt
+  skjer, trengs det konkret symptom (hvilken knapp, hva skjer).
+
+---
+
 ## 2026-06-10 — Varmefolie: «lange strimler vegg-til-vegg» som default (mot fragmentering)
 
 Snur folie-prioriteringen fra «maks dekning» til **få, lange, ensartede strimler vegg-til-vegg**,

@@ -20792,18 +20792,23 @@ async function _renderPdfPage(file, fileName) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
     const page = await pdf.getPage(1);
-    const vp = page.getViewport({scale: 2.0});
+    const RENDER_SCALE = 2.0;
+    const vp = page.getViewport({scale: RENDER_SCALE});
     const oc = document.createElement('canvas');
     oc.width = vp.width; oc.height = vp.height;
     await page.render({canvasContext: oc.getContext('2d'), viewport: vp}).promise;
     const dataUrl = oc.toDataURL('image/jpeg', 0.85);
+    // PDF physical page size: viewport units at scale 1 are POINTS (1pt = 1/72"). Capture the
+    // real page size in cm so «Fast målestokk» (1:50 …) can scale exactly, no DPI guess.
+    const ptW = vp.width / RENDER_SCALE, ptH = vp.height / RENDER_SCALE;
+    const meta = { paperWidthCm: ptW / 72 * 2.54, paperHeightCm: ptH / 72 * 2.54 };
     const img = new Image();
-    img.onload = () => _installBgImage(img, dataUrl, fileName);
+    img.onload = () => _installBgImage(img, dataUrl, fileName, meta);
     img.src = dataUrl;
   } catch(err) { alert('Kunne ikke lese PDF: ' + err.message); }
 }
 
-function _installBgImage(img, dataUrl, fileName) {
+function _installBgImage(img, dataUrl, fileName, meta) {
   const bg = activeBg();
   // "Bytt bilde" fra handlingsmenyen: behold scale/x/y/rotasjon, bare nytt bilde.
   const keepTransform = _bgReplaceKeepTransform; _bgReplaceKeepTransform = false;
@@ -20812,6 +20817,9 @@ function _installBgImage(img, dataUrl, fileName) {
   bg.img      = img;
   bg.dataUrl  = dataUrl;
   bg.fileName = fileName || null;
+  // Physical paper size (PDF only) for exact «Fast målestokk». Raster images clear it on new file.
+  if (meta && meta.paperWidthCm > 0) { bg.paperWidthCm = meta.paperWidthCm; bg.paperHeightCm = meta.paperHeightCm; }
+  else if (!sameFile) { delete bg.paperWidthCm; delete bg.paperHeightCm; }
 
   if (!sameFile) {
     // New file: auto-fit to canvas for display, but mark as uncalibrated
@@ -20980,18 +20988,20 @@ function confirmFixedScale() {
   if (scale < 1) { alert('Målestokk må være minst 1.'); return; }
   closeModal();
   const bg = activeBg(); if (!bg.img) return;
-  // Calculate real-world size from image pixel dimensions and scale
-  // At 96 DPI: 1 pixel = 1/96 inch = 0.0254/0.96 m ≈ 0.02646 cm
-  // But for scanned/printed drawings, we use the assumption:
-  // The image represents a physical printed page. At the given scale,
-  // each cm on paper = scale cm in reality.
-  // Standard print DPI is 150 (typical scan). We let user adjust if needed.
-  // Simpler: use image naturalWidth/naturalHeight as "paper pixels"
-  // Assume 150 DPI for scanned docs (1 px = 1/150 inch = 0.01693 cm on paper)
-  const DPI = 150; // assumed scan/print DPI
-  const cmPerPx = 2.54 / DPI; // cm on paper per pixel
-  const paperWidthCm = bg.img.naturalWidth * cmPerPx;
-  const paperHeightCm = bg.img.naturalHeight * cmPerPx;
+  // Real-world size = physical paper size × scale (e.g. 1:50 → paper-cm × 50).
+  // PDFs carry their EXACT physical page size (captured at import from the PDF point size) →
+  // an accurate 1:50. Raster images (JPG/PNG) have no reliable physical size, so we assume a
+  // 150-DPI scan as a best guess.
+  let paperWidthCm, paperHeightCm;
+  if (bg.paperWidthCm > 0 && bg.paperHeightCm > 0) {
+    paperWidthCm = bg.paperWidthCm;        // exact (PDF page size)
+    paperHeightCm = bg.paperHeightCm;
+  } else {
+    const DPI = 150;                       // assumed scan/print DPI for raster images
+    const cmPerPx = 2.54 / DPI;
+    paperWidthCm = bg.img.naturalWidth * cmPerPx;
+    paperHeightCm = bg.img.naturalHeight * cmPerPx;
+  }
   const realWidthCm = paperWidthCm * scale;
   const realHeightCm = paperHeightCm * scale;
   // Keep center position
@@ -27475,7 +27485,8 @@ function _ctxBarItems() {
       : `<span style="font-size:11px;color:var(--dim);padding:0 4px;font-family:var(--font-mono)">${Math.round(bg.widthCm)}×${Math.round(bg.heightCm)} cm</span>`;
     return `<span class="ctxbar-lbl">${IC('map',14)} Plantegning</span>
       ${calHint}
-      <button class="snap-chip" onclick="startBgCalibrate()" title="To-punkts kalibrering på nytt">${IC('ruler',14)} Skaler på nytt</button>
+      <button class="snap-chip" onclick="startBgCalibrate()" title="To-punkts kalibrering: marker en kjent avstand">${IC('ruler',14)} Skaler på nytt</button>
+      <button class="snap-chip" onclick="showFixedScaleModal()" title="Sett målestokk som forhold (f.eks. 1:50) → tegningen skalerer seg selv">${IC('ruler',14)} Målestokk 1:_</button>
       <span class="tc-sep"></span>
       <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul"><input type="checkbox" ${bg.visible!==false?'checked':''} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
       <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
