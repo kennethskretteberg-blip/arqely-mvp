@@ -4562,9 +4562,10 @@ function autoFillMatSerpentine(productId, opts) {
   const marginCm = (prod.min_wall_margin_mm || 50) / 10;
   // Mat gap is user-controlled (0–5 cm), defaults to 0 for max coverage.
   // The supplier's min_gap_mm is treated as a recommendation, not a hard floor.
-  // EcoMat: widths lie EDGE-TO-EDGE (gap forced to 0) so N = floor(usableWidth / 50cm) is exact and
-  // the seam clearance comes from the kant-inntrekk, not a mat gap.
-  const gapCm = prod.mat_equal_widths ? 0 : Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  // Indoor mat gap: user-controlled 0–5 cm, DEFAULT 0 (widths edge-to-edge → max coverage, like the
+  // foil model). The block is centred so the leftover becomes a cold zone split equally on the
+  // walls. EcoMat seam clearance at gap 0 comes from the kant-inntrekk (≈5 cm cable-to-cable).
+  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
 
   // Respect user's direction choice (set via the workflow-panel direction
@@ -4577,15 +4578,43 @@ function autoFillMatSerpentine(productId, opts) {
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
   const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
 
-  const acrossMin = dir === 'h' ? rMinY + marginCm : rMinX + marginCm;
-  const acrossMax = dir === 'h' ? rMaxY - marginCm : rMaxX - marginCm;
-  const acrossSpan = acrossMax - acrossMin;
+  // Usable rectangle = room bbox inset by the wall margin (5 cm). AVOID HINDRINGER: each obstacle
+  // is inflated by the same margin and the usable rect is greedily cut to the largest obstacle-free
+  // side, so no mat ever lands on (or within 5 cm of) a hindring. A single rectangular mat can't
+  // wrap a central obstacle — it sits on the larger free side; per-run clipping around interior
+  // obstacles is a future refinement.
+  let uX0 = rMinX + marginCm, uX1 = rMaxX - marginCm, uY0 = rMinY + marginCm, uY1 = rMaxY - marginCm;
+  {
+    const hinds = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3)
+      .map(h => { const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
+        return { x0: Math.min(...hx) - marginCm, x1: Math.max(...hx) + marginCm,
+                 y0: Math.min(...hy) - marginCm, y1: Math.max(...hy) + marginCm }; });
+    let R = { x0: uX0, x1: uX1, y0: uY0, y1: uY1 };
+    for (let it = 0; it < hinds.length + 2; it++) {
+      const H = hinds.find(h => h.x0 < R.x1 - 0.1 && h.x1 > R.x0 + 0.1 && h.y0 < R.y1 - 0.1 && h.y1 > R.y0 + 0.1);
+      if (!H) break;
+      const cand = [
+        { x0: R.x0, x1: Math.min(R.x1, H.x0), y0: R.y0, y1: R.y1 },   // keep left of obstacle
+        { x0: Math.max(R.x0, H.x1), x1: R.x1, y0: R.y0, y1: R.y1 },   // keep right
+        { x0: R.x0, x1: R.x1, y0: R.y0, y1: Math.min(R.y1, H.y0) },   // keep below
+        { x0: R.x0, x1: R.x1, y0: Math.max(R.y0, H.y1), y1: R.y1 },   // keep above
+      ].map(c => ({ ...c, area: Math.max(0, c.x1 - c.x0) * Math.max(0, c.y1 - c.y0) }))
+       .sort((a, b) => b.area - a.area);
+      if (cand[0].area <= 0) { R = cand[0]; break; }
+      R = cand[0];
+    }
+    uX0 = R.x0; uX1 = R.x1; uY0 = R.y0; uY1 = R.y1;
+  }
+
+  let acrossMin = dir === 'h' ? uY0 : uX0;
+  let acrossMax = dir === 'h' ? uY1 : uX1;
+  let acrossSpan = acrossMax - acrossMin;
   if (acrossSpan < matWidthCm) return;
 
   // Along-axis: how long each run can be
-  const alongMin = dir === 'h' ? rMinX + marginCm : rMinY + marginCm;
-  const alongMax = dir === 'h' ? rMaxX - marginCm : rMaxY - marginCm;
-  const alongSpan = alongMax - alongMin;
+  let alongMin = dir === 'h' ? uX0 : uY0;
+  let alongMax = dir === 'h' ? uX1 : uY1;
+  let alongSpan = alongMax - alongMin;
   if (alongSpan < minLenCm) return;
 
   // Snap run length to cut interval
@@ -11765,21 +11794,26 @@ function hideGapPanel() {
 // varmefolie-avstandsvelgeren. Min 5 cm (hard), standard 10 cm, steg 1 cm.
 function openMatGapPanel(e) {
   e.stopPropagation();
-  if (!(S.varmematte.gapCm >= 5)) S.varmematte.gapCm = 10; // standard 10 cm
-  const cm = Math.max(5, Math.min(20, Math.round(S.varmematte.gapCm)));
+  // Indoor mats use the foil-like gap model (min 0 cm, default 0 = mats edge-to-edge, centred).
+  // Snow (Ute/InSnow) keeps its own min 5 cm / standard 10 cm rule.
+  const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : 5, defG = snow ? 10 : 0;
+  if (snow) { if (!(S.varmematte.gapCm >= 5)) S.varmematte.gapCm = 10; }
+  else if (S.varmematte.gapCm == null) S.varmematte.gapCm = 0;
+  const cm = Math.max(minG, Math.min(maxG, Math.round(S.varmematte.gapCm ?? defG)));
   const panel = document.getElementById('gap-panel');
   panel.innerHTML = `
     <div class="gap-title">Avstand mellom matter</div>
     <div class="gap-custom-row" style="justify-content:center;gap:8px">
       <button class="gap-step-btn" onclick="stepMatGap(-1)" title="Mindre">▼</button>
-      <input id="mat-gap-cm-input" class="gap-mm-input" type="number" min="5" max="20" step="1" value="${cm}"
+      <input id="mat-gap-cm-input" class="gap-mm-input" type="number" min="${minG}" max="${maxG}" step="1" value="${cm}"
         style="font-family:var(--font-mono);width:56px;text-align:center"
         onclick="event.stopPropagation()"
         oninput="setMatGap(parseFloat(this.value), true)" />
       <span class="gap-custom-lbl">cm</span>
       <button class="gap-step-btn" onclick="stepMatGap(1)" title="Mer">▲</button>
     </div>
-    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">Min 5 cm · standard 10 cm</div>`;
+    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">${snow ? 'Min 5 cm · standard 10 cm' : 'Min 0 cm · matter inntil hverandre (sentrert)'}</div>`;
   const W = window.innerWidth, H = window.innerHeight;
   panel.style.display = 'block';
   const pw = panel.offsetWidth || 270, ph = panel.offsetHeight || 120;
@@ -11790,7 +11824,10 @@ function openMatGapPanel(e) {
 // cm: ønsket avstand i cm. Clamp 5–20 cm (aldri under 5). Re-pakker live hvis en
 // snø-matte-forhåndsvisning er aktiv (samme Bruk/Avbryt-flyt som ellers).
 function setMatGap(cm, _live) {
-  S.varmematte.gapCm = Math.max(5, Math.min(20, Math.round(cm || 10)));
+  const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : 5;
+  const v = Number.isFinite(cm) ? cm : (snow ? 10 : 0);
+  S.varmematte.gapCm = Math.max(minG, Math.min(maxG, Math.round(v)));
   _savePrefs();
   const prev = S.rooms.find(r => r._matPreviewMeta && r._matPreviewMeta.productId != null);
   if (prev && prev.id === S.ui.selectedRoomId && typeof _upcPlaceMat === 'function') {
@@ -11803,7 +11840,7 @@ function setMatGap(cm, _live) {
 }
 
 function stepMatGap(delta) {
-  setMatGap((S.varmematte.gapCm || 10) + delta, false);
+  setMatGap((S.varmematte.gapCm ?? 0) + delta, false);
   const inp = document.getElementById('mat-gap-cm-input');
   if (inp) inp.value = S.varmematte.gapCm;
 }
@@ -12644,9 +12681,22 @@ function drawStrips() {
       const prod = _stripProduct(strip);
       const name = prod?.name;
       if (name) {
-        const cx = nx + nw / 2, cy = ny + nh / 2;
+        let cx = nx + nw / 2, cy = ny + nh / 2;
         const narrow = strip.direction === 'v' ? nw : nh;
-        const fontSize = Math.max(7, Math.min(11, narrow * 0.38));
+        const fontSize = Math.max(12, Math.min(15, narrow * 0.5));
+        // Offset the label along the strip's length, away from the room centroid, so it never sits
+        // on the room name (drawn at the centroid). nx/ny/nw/nh are screen px → use screen centroid.
+        const _lblRoom = S.rooms.find(r => r.id === strip.roomId);
+        if (_lblRoom && _lblRoom.points && _lblRoom.points.length) {
+          const rcx = _lblRoom.points.reduce((a, p) => a + p.x, 0) / _lblRoom.points.length;
+          const rcy = _lblRoom.points.reduce((a, p) => a + p.y, 0) / _lblRoom.points.length;
+          const rcS = w2s(rcx, rcy);
+          if (strip.direction === 'v') {
+            cy += ((cy >= rcS.y) ? 1 : -1) * Math.max(0, Math.min(nh * 0.28, nh / 2 - fontSize));
+          } else {
+            cx += ((cx >= rcS.x) ? 1 : -1) * Math.max(0, Math.min(nw * 0.28, nw / 2 - fontSize));
+          }
+        }
         const lineH = fontSize + 3;
         const lengthM = (strip.length_cm / 100).toFixed(1) + ' m';
         const wattPerM2 = prod.watt_per_m2 || prod.watt_per_m || 0;
@@ -12998,8 +13048,10 @@ function drawCables() {
 
     // Violation warnings are shown in sidebar, not on canvas
 
-    // Cable label — movable, hideable
-    if (S.ui.showStripLabels && _hasGeom && cable.labelVisible !== false) {
+    // Cable label — ALWAYS visible (geometry + label show permanently, regardless of which room/
+    // object is selected), unless the user explicitly hid this cable's label. Not gated on the
+    // global showStripLabels toggle (that only governs foil strips).
+    if (_hasGeom && cable.labelVisible !== false) {
       const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
       if (prod) {
         let cPt;
@@ -13014,15 +13066,23 @@ function drawCables() {
           }
           cPt = w2s((Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2);
         } else {
-          // Default: center of cable area
+          // Default: center of cable area, then OFFSET along the sweep axis away from the room
+          // centroid so the label never sits on top of the room name (which is at the centroid).
           const allPos = cable.runs.map(r => r.pos_cm);
           const allSweep = cable.runs.flatMap(r => r.segments.flatMap(s => [s.start_cm, s.end_cm]));
           const cPerp = (Math.min(...allPos) + Math.max(...allPos)) / 2;
-          const cSweep = (Math.min(...allSweep) + Math.max(...allSweep)) / 2;
+          let cSweep = (Math.min(...allSweep) + Math.max(...allSweep)) / 2;
+          const _room = S.rooms.find(r => r.id === cable.roomId);
+          if (_room && _room.points && _room.points.length) {
+            const rcSweep = _room.points.reduce((a, p) => a + (cable.direction === 'v' ? p.y : p.x), 0) / _room.points.length;
+            const span = Math.max(...allSweep) - Math.min(...allSweep);
+            const dir = (cSweep >= rcSweep) ? 1 : -1;
+            cSweep += dir * Math.max(0, Math.min(span * 0.28, span / 2 - 5));
+          }
           cPt = cable.direction === 'v' ? w2s(cPerp, cSweep) : w2s(cSweep, cPerp);
         }
 
-        const fontSize = 10;
+        const fontSize = 13;
         const name = prod.name;
         const lengthM = (cable.totalLength_cm / 100).toFixed(1) + ' m';
         const cableWatt = prod.watt_per_m ? Math.round((cable.totalLength_cm / 100) * prod.watt_per_m) : 0;
@@ -13436,9 +13496,12 @@ function drawMats() {
       const totalUsedM = (numRuns * mat.width_cm * mat.length_cm / 10000).toFixed(1);
       const dims = `${Math.round(mat.width_cm)}\u00d7${Math.round(mat.length_cm)}cm${nR} (${totalUsedM}m\u00b2)`;
       ctx.fillStyle = _lc('rgba(30, 80, 160, 0.9)', 'rgba(140, 195, 255, 0.92)');
-      ctx.font = "600 12px 'IBM Plex Mono',monospace";
+      ctx.font = "600 13px 'IBM Plex Mono',monospace";
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      // Offset toward one end (away from the centred room name). Mats are centred in the room, so
+      // shifting ~half-way to an end clears the room name at the centroid.
+      const offL = -hl * 0.5;
       // Forkort produktnavn til tilgjengelig lengde (px) langs lengde-aksen.
       const availPx = mat.length_cm * sc - 10;
       let label = prod ? prod.name : 'Matte';
@@ -13450,8 +13513,8 @@ function drawMats() {
       // so it reads along that long axis instead of crossing the narrow width.
       ctx.save();
       ctx.rotate(-Math.PI / 2);
-      ctx.fillText(label, 0, -7);
-      ctx.fillText(dims, 0, 7);
+      ctx.fillText(label, offL, -8);
+      ctx.fillText(dims, offL, 8);
       ctx.restore();
     }
 

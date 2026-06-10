@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — Innendørs: tydeligere label + kabel alltid synlig + matte-hindring + matte-gap (4 punkter)
+
+1. **Tydeligere produkt-label, unna romnavn:** font opp (strimmel 7–11 → 12–15 px; kabel 10 → 13;
+   matte 12 → 13) og labelen FORSKYVES langs objektets lengde vekk fra rom-sentroiden (strimmel/
+   kabel: ~28 % mot enden lengst fra sentroiden; matte: ~halvveis mot en ende), så den aldri ligger
+   oppå romnavnet (som tegnes i sentroiden). Rammet 2-linjers-oppsett beholdt.
+2. **Kabel + label ALLTID synlig:** kabel-labelen var gated på `S.ui.showStripLabels` (folie-toggel)
+   → fjernet for kabel. Kabel-geometri OG label vises nå permanent uansett valgt rom/objekt (kun
+   `cable.labelVisible===false` skjuler en enkelt). Valgt kabel uthives fortsatt.
+3. **Matter unngår hindringer (5 cm):** `autoFillMatSerpentine` brukte før kun rom-bbox og rørte
+   ALDRI `S.hindrings`. Nå inflateres hver hindring med veggmarginen (5 cm) og det brukbare
+   rektangelet krympes grådig til største hindrings-frie side → ingen matte på/innen 5 cm av en
+   hindring (verifisert: bunn-hindring y=300 → matte stopper y=282). Sentral hindring → matta havner
+   på den største frie siden; per-løp-klipping rundt indre hindringer er en senere refinement.
+4. **Matte-gap som varmefolie (min 0):** gap-panelet (`openMatGapPanel`/`setMatGap`/`stepMatGap`) er
+   nå modul-bevisst — innendørs: min 0 / default 0 (matter inntil hverandre, sentrert) / max 5; snø
+   (Ute/InSnow): beholder min 5 / standard 10 / max 20. Fikset `cm||10`-bug som gjorde 0→10. Motoren
+   bruker bruker-gapen (default 0), sentrerer blokka → rest = kald sone likt på veggene. EcoMat-
+   tvang-til-0 erstattet med denne (default 0 = samme edge-to-edge).
+
+Verifisert: render m/strip+matte+ny label-kode 3 ms uten feil; hindring-unngåelse + gap 0/3/steg
+numerisk. Items 1–2 (visuelt) bekreftet via kode + feilfri render — fin-justering av label-størrelse/
+plassering kan vurderes visuelt (kunne ikke ta skjermbilde pga. treg test-fane).
+
+---
+
 ## 2026-06-10 — EcoMat innendørs: matte-utlegg etter Kenneths modell (bredder inntil hverandre, hele matta delt i N)
 
 Spec basert på 3 Cenika-produktblad (EcoMat 60T/100T/150T) + teknisk tegning TPL-ECOMT-CA-2183.
