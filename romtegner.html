@@ -2486,7 +2486,7 @@ function markDirty() { _needsRender = true; }
 function _anyInteractionActive() {
   // drawMode/zoneDrawMode/wallThicknessMode: mousemove updates rubber-band
   // previews (angle hints, dim offset, thickness drag) — needs per-frame render.
-  if (S?.ui?.drawMode || S?.ui?.zoneDrawMode || S?.ui?.wallThicknessMode) return true;
+  if (S?.ui?.drawMode || S?.ui?.zoneDrawMode || S?.ui?.zoneSplitMode || S?.ui?.wallThicknessMode) return true;
   return (
     _panning || _dragging ||
     _roomDragging || _movingWall || _hwMoving ||
@@ -4853,6 +4853,7 @@ function _autoFillPlates(productId) {
 }
 
 function showCablePlacePanel(familyName, categoryId) {
+  S.ui.fillTargetZoneId = null;   // sone fill is foil-only; don't carry the flag into cable
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
   hideProduktMenu();
@@ -6281,6 +6282,14 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
   }
   if (!prods.length) { _showToast('Ingen produkter funnet for ' + familyName, 'warn'); return; }
 
+  // Layout-zone fill: a sone was the «+ Produkt» target → fill ONLY that sone, in its own
+  // direction, with per-edge margins. No h/v compare panel (the sone carries its direction).
+  if (S.ui.fillTargetZoneId != null) {
+    const zone = S.zones.find(z => z.id === S.ui.fillTargetZoneId && z.type === 'sone');
+    S.ui.fillTargetZoneId = null;
+    if (zone) { _fillSoneFoil(zone, prods); return; }
+  }
+
   const results = _autoFillBothDirections(room, prods);
 
   S.ui.autoFillCompare = results;
@@ -6500,13 +6509,15 @@ function _rotateSelectedStrip() {
 // _obstacleAwareFill) are still used by that live path.
 
 // Core fill: single pass, single direction. Optional startCursor overrides default start position.
-function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) {
+function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, marginCm) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  // Use strictest margin/gap among all products in this fill family
-  const MARGIN = Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
+  // Use strictest margin/gap among all products in this fill family. marginCm override (used by
+  // layout-zone fill on a pre-inset SONE polygon) bypasses the wall margin → no double inset.
+  const MARGIN = (marginCm != null) ? marginCm : Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
   const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id)));
+  const _ccsOpts = (marginCm != null) ? { marginCm } : undefined;
   const basePos = direction === 'v' ? minX : minY;
   const baseMax = direction === 'v' ? maxX : maxY;
   const result = [];
@@ -6534,7 +6545,7 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) 
       const chosenNc = (chosenProd.netto_width_mm || chosenProd.width_mm) / 10;
       if (cursor + chosenNc > baseMax - MARGIN + 0.01) break;
 
-      const segs = computeClippedSegments(room.id, direction, cursor, chosenId);
+      const segs = computeClippedSegments(room.id, direction, cursor, chosenId, _ccsOpts);
       for (const seg of segs) {
         result.push({ roomId: room.id, productId: chosenId, direction,
           pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm });
@@ -6559,7 +6570,7 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor) 
       const pos = cursor - chosenNc;
       if (pos < basePos + MARGIN - 0.01) break;
 
-      const segs = computeClippedSegments(room.id, direction, pos, chosenId);
+      const segs = computeClippedSegments(room.id, direction, pos, chosenId, _ccsOpts);
       for (const seg of segs) {
         result.push({ roomId: room.id, productId: chosenId, direction,
           pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
@@ -14460,6 +14471,32 @@ function drawZones() {
     const isSel = zone.id === S.ui.selectedZoneId;
     const isForbidden = zone.type === 'forbidden';
 
+    // Layout zone (utleggingssone) — indigo, solid border, name + direction arrow.
+    if (zone.type === 'sone') {
+      ctx.save();
+      ctx.beginPath();
+      const q0 = w2s(zone.points[0].x, zone.points[0].y);
+      ctx.moveTo(q0.x, q0.y);
+      for (let i = 1; i < zone.points.length; i++) { const p = w2s(zone.points[i].x, zone.points[i].y); ctx.lineTo(p.x, p.y); }
+      ctx.closePath();
+      ctx.fillStyle = isSel ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.06)';
+      ctx.fill();
+      ctx.strokeStyle = isSel ? '#6366f1' : 'rgba(99,102,241,0.55)';
+      ctx.lineWidth = isSel ? 2.5 : 1.5;
+      ctx.stroke();
+      // Label: name + direction indicator
+      const cx = zone.points.reduce((s, p) => s + p.x, 0) / zone.points.length;
+      const cy = zone.points.reduce((s, p) => s + p.y, 0) / zone.points.length;
+      const cs = w2s(cx, cy);
+      ctx.font = "600 12px 'Space Grotesk',sans-serif";
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = isSel ? '#4f46e5' : 'rgba(79,70,229,0.85)';
+      const arrow = zone.direction === 'v' ? '↕' : '↔';
+      ctx.fillText(`${zone.name || 'Sone'}  ${arrow}`, cs.x, cs.y);
+      ctx.restore();
+      continue;
+    }
+
     ctx.save();
     // Fill
     ctx.beginPath();
@@ -14636,6 +14673,8 @@ function drawZones() {
     }
     ctx.restore();
   }
+
+  _drawZoneSplitPreview();
 }
 
 function _zoneBBox(zone) {
@@ -14700,6 +14739,12 @@ function _toggleZoneType() {
 /** Delete a zone by id */
 function deleteZone(id) {
   pushUndo();
+  const z = S.zones.find(z => z.id === id);
+  // A layout-zone (sone) owns its foil → remove its strips too.
+  if (z && z.type === 'sone') {
+    S.strips = S.strips.filter(s => s.zoneId !== id);
+    if (typeof _invalidateStripCache === 'function') _invalidateStripCache();
+  }
   S.zones = S.zones.filter(z => z.id !== id);
   if (S.ui.selectedZoneId === id) S.ui.selectedZoneId = null;
   renderSidebar(); updateCtxBar(); updateObjInfo(); render();
@@ -14826,6 +14871,229 @@ function cancelZoneDraw() {
   S.drawing.points = [];
   canvas.style.cursor = 'default';
   updateCtxBar(); render();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SONER — layout zones (utleggingssoner): split a room into named zones with
+// per-zone foil direction + per-edge margin. The new type:'sone' is kept OUT of
+// every forbidden/preferred filter (those test type === 'forbidden'/'preferred'),
+// so cable/foil constraint logic is unaffected.
+// ═══════════════════════════════════════════════════════════════
+function _sonesForRoom(roomId){ return S.zones.filter(z=>z.roomId===roomId && z.type==='sone'); }
+
+// Nearest point on a polygon boundary → {x,y,edge,t,d} (edge = vertex index i, segment i→i+1).
+function _nearestPtOnPolyBoundary(pt, poly){
+  let best={x:poly[0].x,y:poly[0].y,edge:0,t:0,d:Infinity};
+  const n=poly.length;
+  for(let i=0;i<n;i++){
+    const a=poly[i], b=poly[(i+1)%n];
+    const dx=b.x-a.x, dy=b.y-a.y, L=dx*dx+dy*dy;
+    let t=L?((pt.x-a.x)*dx+(pt.y-a.y)*dy)/L:0; t=Math.max(0,Math.min(1,t));
+    const x=a.x+t*dx, y=a.y+t*dy, d=Math.hypot(pt.x-x,pt.y-y);
+    if(d<best.d) best={x,y,edge:i,t,d};
+  }
+  return best;
+}
+
+// Split a simple polygon by a chord between two boundary points a,b ({x,y,edge}).
+// Returns [loopA, loopB] (each {x,y}[]) partitioning the polygon, or null if degenerate.
+function _splitPolygonByChord(poly, a, b){
+  const n=poly.length;
+  if(a.edge===b.edge) return null;            // chord along a single edge → no real split
+  const ptA={x:a.x,y:a.y}, ptB={x:b.x,y:b.y};
+  const loopA=[ptA]; let i=(a.edge+1)%n, g=0;
+  while(g++<=n){ loopA.push({x:poly[i].x,y:poly[i].y}); if(i===b.edge) break; i=(i+1)%n; }
+  loopA.push(ptB);
+  const loopB=[ptB]; i=(b.edge+1)%n; g=0;
+  while(g++<=n){ loopB.push({x:poly[i].x,y:poly[i].y}); if(i===a.edge) break; i=(i+1)%n; }
+  loopB.push(ptA);
+  const _dedup=(L)=>{ const o=[]; for(const p of L){ const q=o[o.length-1]; if(!q||Math.hypot(q.x-p.x,q.y-p.y)>0.5) o.push(p); } while(o.length>1&&Math.hypot(o[0].x-o[o.length-1].x,o[0].y-o[o.length-1].y)<=0.5) o.pop(); return o; };
+  const A=_dedup(loopA), B=_dedup(loopB);
+  if(A.length<3||B.length<3) return null;
+  return [A,B];
+}
+
+function _nextSoneBaseNum(roomId){
+  let max=0; for(const z of _sonesForRoom(roomId)){ const m=/(\d+)\s*$/.exec(z.name||''); if(m) max=Math.max(max,+m[1]); }
+  return max+1;
+}
+
+// Enter «Del i soner» mode: collect two boundary clicks → split.
+function startZoneSplit(roomId){
+  cancelZoneDraw();
+  S.ui.zoneSplitMode=true; S.ui.zoneSplitRoomId=roomId; S.ui.zoneSplitPts=[];
+  S.drawing.mousePos=null;
+  canvas.style.cursor='crosshair'; updateCtxBar(); render();
+}
+function cancelZoneSplit(){
+  S.ui.zoneSplitMode=false; S.ui.zoneSplitRoomId=null; S.ui.zoneSplitPts=[]; S.drawing.mousePos=null;
+  canvas.style.cursor='default'; updateCtxBar(); render();
+}
+
+// Perform a split from two raw click points. Splits the existing sone the line crosses,
+// else the whole room (first split). Both new parts become named 'sone' zones.
+function _performZoneSplit(roomId, rawA, rawB){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return false;
+  const sones=_sonesForRoom(roomId);
+  const mid={x:(rawA.x+rawB.x)/2,y:(rawA.y+rawB.y)/2};
+  const targetZone=sones.find(z=>ptInPoly(mid.x,mid.y,z.points));
+  let basePoly, replaceId=null, baseDir=null, baseCorner=null;
+  if(targetZone){ basePoly=targetZone.points; replaceId=targetZone.id; baseDir=targetZone.direction; baseCorner=targetZone.startCorner; }
+  else basePoly=room.points;
+  const a=_nearestPtOnPolyBoundary(rawA, basePoly), b=_nearestPtOnPolyBoundary(rawB, basePoly);
+  const halves=_splitPolygonByChord(basePoly, a, b);
+  if(!halves || halves.some(h=>Math.abs(compArea(h))<50)){
+    alert('Klarte ikke å dele langs den linjen. Tegn en rett linje fra én vegg til en annen.');
+    return false;
+  }
+  pushUndo();
+  if(replaceId) S.zones=S.zones.filter(z=>z.id!==replaceId);
+  const dir = baseDir || _suggestDirection({points:basePoly}) || 'h';
+  let base=_nextSoneBaseNum(roomId);
+  const created=[];
+  for(const h of halves){
+    const z={ id:S.counters.nextZoneId++, roomId, type:'sone', name:'Sone '+(base++),
+      points:h.map(p=>({x:p.x,y:p.y})), direction:dir, startCorner: baseCorner||'bl' };
+    S.zones.push(z); created.push(z);
+  }
+  if(typeof _invalidateStripCache==='function') _invalidateStripCache();
+  selectZone(created[0].id);
+  renderSidebar();
+  return true;
+}
+
+function renameSone(zoneId){
+  const z=S.zones.find(z=>z.id===zoneId); if(!z||z.type!=='sone') return;
+  const nv=prompt('Sonenavn:', z.name||'Sone'); if(nv==null) return;
+  pushUndo(); z.name=(nv.trim()||z.name); updateCtxBar(); renderSidebar(); render();
+}
+function toggleSoneDirection(zoneId){
+  const z=S.zones.find(z=>z.id===zoneId); if(!z||z.type!=='sone') return;
+  pushUndo(); z.direction=(z.direction==='v'?'h':'v');
+  if(typeof _invalidateStripCache==='function') _invalidateStripCache();
+  // Re-fill the sone in the new direction if it already has foil.
+  if(_stripsForZone(z.id).length){ const pid=_stripsForZone(z.id)[0].productId; const prod=HEATING_PRODUCTS.find(p=>p.id===pid); if(prod) _fillSoneFoil(z, _soneFamilyProds(prod)); }
+  updateCtxBar(); render();
+}
+
+function _stripsForZone(zoneId){ return S.strips.filter(s=>s.zoneId===zoneId); }
+function _distPtSeg(px,py,ax,ay,bx,by){const dx=bx-ax,dy=by-ay,L=dx*dx+dy*dy;let t=L?((px-ax)*dx+(py-ay)*dy)/L:0;t=Math.max(0,Math.min(1,t));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+
+// Is a zone edge (a→b) lying on a ROOM wall (yttervegg)? Midpoint-on-segment test. A split
+// chord's midpoint is interior → false (shared boundary); an original wall sub-edge → true.
+function _zoneEdgeIsWall(a,b,room){
+  const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+  const segs=(room.walls&&room.walls.length)
+    ? room.walls.map(w=>[w.x1,w.y1,w.x2,w.y2])
+    : room.points.map((p,i)=>{const q=room.points[(i+1)%room.points.length]; return [p.x,p.y,q.x,q.y];});
+  for(const [x1,y1,x2,y2] of segs){ if(_distPtSeg(mx,my,x1,y1,x2,y2)<1.5) return true; }
+  return false;
+}
+
+// Inset a polygon by a PER-EDGE distance (dists[i] for edge i→i+1). Used to bake per-edge
+// margins into the SONE polygon before filling (wall edge = wall margin, shared = half-gap).
+function _offsetPolygonPerEdge(pts, dists){
+  const n=pts.length; if(n<3) return [];
+  let area2=0; for(let i=0;i<n;i++){const j=(i+1)%n; area2+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
+  const sign=area2>0?1:-1;
+  const E=[];
+  for(let i=0;i<n;i++){
+    const j=(i+1)%n; const dx=pts[j].x-pts[i].x, dy=pts[j].y-pts[i].y; const len=Math.hypot(dx,dy)||1;
+    const nx=-dy/len*sign*dists[i], ny=dx/len*sign*dists[i];
+    E.push({x1:pts[i].x+nx,y1:pts[i].y+ny,x2:pts[j].x+nx,y2:pts[j].y+ny,dx,dy});
+  }
+  const res=[];
+  for(let i=0;i<n;i++){
+    const e1=E[i], e2=E[(i+1)%n];
+    const den=e1.dx*e2.dy - e1.dy*e2.dx;
+    if(Math.abs(den)<1e-9){ res.push({x:e1.x2,y:e1.y2}); continue; }
+    const t=((e2.x1-e1.x1)*e2.dy-(e2.y1-e1.y1)*e2.dx)/den;
+    res.push({x:e1.x1+t*e1.dx, y:e1.y1+t*e1.dy});
+  }
+  return res.length>=3?res:[];
+}
+
+// Fillable polygon for a sone: each edge inset by wall margin (yttervegg) or half-gap (delt grense).
+function _zoneFillablePolygon(zone, room, pid){
+  const wallMargin = pid!=null ? _effectiveMarginCm(pid) : MARGIN_CM;
+  const halfGap = Math.max(0.5, (pid!=null ? _effectiveGapCm(pid) : 1.0)/2);
+  const pts=zone.points, n=pts.length, dists=[];
+  for(let i=0;i<n;i++){ const a=pts[i], b=pts[(i+1)%n]; dists.push(_zoneEdgeIsWall(a,b,room)?wallMargin:halfGap); }
+  return _offsetPolygonPerEdge(pts, dists);
+}
+
+// Products of the same foil family as a given product (widest-first), for re-fill.
+function _soneFamilyProds(prod){
+  return HEATING_PRODUCTS
+    .filter(p=>p.category_id===prod.category_id && p.active!==false &&
+      (p.product_family?p.product_family===prod.product_family:p.name.startsWith(prod.name.split(' ')[0])))
+    .sort((a,b)=>(b.netto_width_mm||b.width_mm)-(a.netto_width_mm||a.width_mm));
+}
+
+function _soneCoveragePct(zone){ return _soneStats(zone).coveragePct; }
+
+// Per-sone stats: area, covered area, installed power, W/m², coverage %, strip count.
+function _soneStats(zone){
+  let cov=0, watt=0; const strips=_stripsForZone(zone.id);
+  for(const s of strips){ const p=HEATING_PRODUCTS.find(pp=>pp.id===s.productId); if(!p)continue;
+    const nc=(p.netto_width_mm||p.width_mm)/10, aM2=nc*s.length_cm/10000;
+    cov+=aM2; watt+=(p.watt_per_m2||60)*aM2; }
+  const areaM2=Math.abs(compArea(zone.points))/10000;
+  return { areaM2, coveredM2:cov, powerW:Math.round(watt), wattPerM2:areaM2>0?Math.round(watt/areaM2):0,
+    coveragePct:areaM2>0?Math.round(cov/areaM2*100):0, nStrips:strips.length };
+}
+
+// Fill foil inside a sone, scoped to its per-edge-inset polygon, in the sone's own direction.
+function _fillSoneFoil(zone, prods){
+  if(!zone || zone.type!=='sone' || !prods || !prods.length) return;
+  const room=S.rooms.find(r=>r.id===zone.roomId); if(!room) return;
+  const pid=prods[0].id;
+  const insetPoly=_zoneFillablePolygon(zone, room, pid);
+  if(!insetPoly || insetPoly.length<3 || Math.abs(compArea(insetPoly))<50){ _showToast('Sonen er for liten for folie','warn'); return; }
+  // Temp room scoped to the inset polygon → fill with margin 0 (per-edge margin already baked in).
+  const TID=-(900000+zone.id);
+  const tmp={ id:TID, name:zone.name, floorId:room.floorId, partId:room.partId, shape:'polygon',
+    wallThicknessCm:0, roomType:room.roomType, targetWm2:room.targetWm2,
+    points:insetPoly.map(p=>({x:p.x,y:p.y})), walls:[], area:Math.abs(compArea(insetPoly)), dims:[] };
+  S.rooms=S.rooms.filter(r=>r.id!==TID); S.rooms.push(tmp);
+  let defs=[];
+  try{
+    const dir=zone.direction||'h';
+    const a=_autoFillRoomOnce(tmp, prods, dir, false, undefined, 0);
+    const b=_autoFillRoomOnce(tmp, prods, dir, true, undefined, 0);
+    defs=(_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
+  } finally { S.rooms=S.rooms.filter(r=>r.id!==TID); }
+  if(!defs.length){ _showToast('Fikk ikke lagt folie i sonen','warn'); return; }
+  pushUndo();
+  S.strips=S.strips.filter(s=>s.zoneId!==zone.id);   // replace this sone's foil
+  for(const d of defs){ S.strips.push({ ...d, roomId:room.id, zoneId:zone.id, id:S.counters.nextStripId++ }); }
+  const used=new Set(defs.map(d=>d.productId)); used.forEach(p=>{ if(typeof _trackProductUsage==='function') _trackProductUsage(p); });
+  if(typeof _invalidateStripCache==='function') _invalidateStripCache();
+  renderSidebar(); updateObjInfo(); render();
+  _showToast(`${defs.length} striper i ${zone.name} (${_soneCoveragePct(zone)}% dekning)`, 'ok');
+}
+
+// «+ Produkt» from a sone ctxbar → open the product picker targeting this sone.
+function _openSoneProdukt(e, zoneId){
+  const z=S.zones.find(z=>z.id===zoneId); if(!z) return;
+  S.ui.fillTargetZoneId=zoneId;
+  S.ui.selectedRoomId=z.roomId;   // product picker needs a room context
+  openProduktMenu(e);
+}
+
+// Draw split-mode preview + collected first point (called at end of drawZones).
+function _drawZoneSplitPreview(){
+  if(!S.ui.zoneSplitMode) return;
+  const pts=S.ui.zoneSplitPts||[];
+  ctx.save();
+  ctx.strokeStyle='#6366f1'; ctx.fillStyle='#6366f1'; ctx.lineWidth=2; ctx.setLineDash([6,4]);
+  if(pts.length>=1){
+    const a=w2s(pts[0].x,pts[0].y);
+    ctx.beginPath(); ctx.arc(a.x,a.y,4,0,Math.PI*2); ctx.fill();
+    const mp=S.drawing.mousePos;
+    if(mp){ const m=w2s(mp.x,mp.y); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(m.x,m.y); ctx.stroke(); }
+  }
+  ctx.restore();
 }
 
 function _cancelPinPlace() {
@@ -22863,6 +23131,7 @@ function updateObjInfo() {
     if(zone&&zone.points&&zone.points.length>=3) {
       const zType = ZONE_TYPES.find(t => t.id === zone.purpose);
       const isForbid = zone.type === 'forbidden';
+      const isSone = zone.type === 'sone';
       const xs=zone.points.map(p=>p.x),ys=zone.points.map(p=>p.y);
       const w=Math.round(Math.max(...xs)-Math.min(...xs));
       const ht=Math.round(Math.max(...ys)-Math.min(...ys));
@@ -22873,11 +23142,18 @@ function updateObjInfo() {
         zArea += zone.points[i].x * zone.points[j].y - zone.points[j].x * zone.points[i].y;
       }
       zArea = Math.abs(zArea) / 2;
-      panel.innerHTML=`<div class="soi-title">${zType?.ico||'<svg class="ic ic-map-pin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 21s7-6.6 7-12a7 7 0 1 0-14 0c0 5.4 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>'} ${esc(zone.label||'Sone')}</div>
-        <div class="soi-row"><span class="soi-k">Type</span><span class="soi-v"><span style="padding:1px 6px;border-radius:4px;font-size:10px;background:${isForbid?'rgba(239,68,68,0.15);color:#ef4444':'rgba(34,197,94,0.15);color:#22c55e'}">${isForbid?'Forbudt sone':'Foretrukket sone'}</span></span></div>
+      const _typeBadge = isSone
+        ? `<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(99,102,241,0.15);color:#6366f1">Utleggingssone</span>`
+        : `<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:${isForbid?'rgba(239,68,68,0.15);color:#ef4444':'rgba(34,197,94,0.15);color:#22c55e'}">${isForbid?'Forbudt sone':'Foretrukket sone'}</span>`;
+      const _titleIco = isSone ? IC('grid4',14) : (zType?.ico||'<svg class="ic ic-map-pin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 21s7-6.6 7-12a7 7 0 1 0-14 0c0 5.4 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>');
+      panel.innerHTML=`<div class="soi-title">${_titleIco} ${esc((isSone?zone.name:zone.label)||'Sone')}</div>
+        <div class="soi-row"><span class="soi-k">Type</span><span class="soi-v">${_typeBadge}</span></div>
+        ${isSone?`<div class="soi-row"><span class="soi-k">Retning</span><span class="soi-v">${zone.direction==='v'?'Vertikal ↕':'Horisontal ↔'}</span></div>`:''}
         <div class="soi-row"><span class="soi-k">Bredde</span><span class="soi-v">${w} cm</span></div>
         <div class="soi-row"><span class="soi-k">Høyde</span><span class="soi-v">${ht} cm</span></div>
         <div class="soi-row"><span class="soi-k">Areal</span><span class="soi-v">${(zArea/10000).toFixed(2)} m²</span></div>
+        ${isSone?(()=>{const st=_soneStats(zone);return `<div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${st.powerW} W · ${st.wattPerM2} W/m²</span></div>
+        <div class="soi-row"><span class="soi-k">Dekning</span><span class="soi-v">${st.coveragePct}% · ${st.nStrips} strip${st.nStrips===1?'':'er'}</span></div>`;})():''}
         <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteZone(${zone.id})">✕ Slett sone</button></div>`;
       panel.style.display='block'; return;
     }
@@ -23217,23 +23493,29 @@ function _clipStripAroundZones(intervals, pos_cm, nettoCm, direction, zones, mar
 // Returns [{start_cm, length_cm}, ...] or [] if strip is entirely outside.
 // Band-clips against room polygon, subtracts hindrings AND forbidden zones,
 // merges micro-gaps, filters dust segments.
-function computeClippedSegments(roomId, direction, pos_cm, productId) {
+function computeClippedSegments(roomId, direction, pos_cm, productId, opts) {
+  opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return [];
   const p = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!p) return [];
   const nc = (p.netto_width_mm || p.width_mm) / 10;
-  const MARGIN = _effectiveMarginCm(productId), MIN_LEN = 5;
-  let segments = clipStripToRoom(pos_cm, nc, direction, room.points, MARGIN);
-  // Subtract hindrings
+  const MIN_LEN = 5;
+  const roomMargin = _effectiveMarginCm(productId);              // obstacle/zone safety margin
+  // marginCm override + clipPoly override let a layout-zone fill clip to an inset SONE polygon
+  // (already carrying per-edge margins) with NO extra uniform margin. Defaults = room behaviour.
+  const MARGIN = (opts.marginCm != null) ? opts.marginCm : roomMargin;
+  const clipPoly = opts.clipPoly || room.points;
+  let segments = clipStripToRoom(pos_cm, nc, direction, clipPoly, MARGIN);
+  // Subtract hindrings (always full obstacle margin, even in a sone fill)
   const roomHindrings = S.hindrings.filter(h => h.roomId === roomId);
   if (roomHindrings.length > 0) {
-    segments = clipStripAroundHindrings(segments, pos_cm, nc, direction, roomHindrings, MARGIN);
+    segments = clipStripAroundHindrings(segments, pos_cm, nc, direction, roomHindrings, roomMargin);
   }
   // Subtract forbidden zones
   const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden');
   if (forbiddenZones.length > 0) {
-    segments = _clipStripAroundZones(segments, pos_cm, nc, direction, forbiddenZones, MARGIN);
+    segments = _clipStripAroundZones(segments, pos_cm, nc, direction, forbiddenZones, roomMargin);
   }
   // Merge micro-gaps (< 3cm) from polygon concavities
   segments = _mergeShortGaps(segments, 3);
@@ -24143,6 +24425,25 @@ canvas.addEventListener('mousedown', e=>{
   }
 
   const wp=getWorldPos(e);
+
+  // «Del i soner» — two boundary clicks define a straight split line.
+  if (S.ui.zoneSplitMode) {
+    const room=S.rooms.find(r=>r.id===S.ui.zoneSplitRoomId);
+    if(!room){ cancelZoneSplit(); return; }
+    // Snap the click to the nearest point on the room boundary (or the sone the click lands in).
+    const sones=_sonesForRoom(room.id);
+    const inSone=sones.find(z=>ptInPoly(wp.x,wp.y,z.points));
+    const snapPoly=inSone?inSone.points:room.points;
+    const snapped=_nearestPtOnPolyBoundary(wp, snapPoly);
+    (S.ui.zoneSplitPts=S.ui.zoneSplitPts||[]).push({x:snapped.x,y:snapped.y});
+    if(S.ui.zoneSplitPts.length>=2){
+      const [pa,pb]=S.ui.zoneSplitPts;
+      const rid=room.id;
+      cancelZoneSplit();
+      _performZoneSplit(rid, pa, pb);
+    } else { updateCtxBar(); render(); }
+    return;
+  }
 
   // Zone polygon drawing
   if (S.ui.zoneDrawMode) {
@@ -26329,6 +26630,7 @@ document.addEventListener('keydown', e=>{
     if (S.ui.stairPlaceMode) { S.ui.stairPlaceMode=false; S.ui.stairPlaceParams=null; canvas.style.cursor='default'; return; }
     if (S.ui.platePlaceMode) { S.ui.platePlaceMode=false; S.ui.platePlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.pinPlaceMode) { _cancelPinPlace(); return; }
+    if (S.ui.zoneSplitMode) { cancelZoneSplit(); return; }
     if (S.ui.zoneDrawMode) { cancelZoneDraw(); return; }
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
@@ -27034,7 +27336,7 @@ function _bgSelMore(e) {
 // calibrating, placing) — the persistent background group is suppressed then.
 function _ctxBarTransient() {
   const ui = S.ui;
-  return !!(ui.pinPlaceMode || ui.zoneDrawMode || ui.seedMode || ui.autoFillPending || ui.stairPlaceMode || ui.drawMode);
+  return !!(ui.pinPlaceMode || ui.zoneDrawMode || ui.zoneSplitMode || ui.seedMode || ui.autoFillPending || ui.stairPlaceMode || ui.drawMode);
 }
 
 function _ctxBarItems() {
@@ -27069,6 +27371,14 @@ function _ctxBarItems() {
   }
 
   // Zone drawing mode — show OK/Cancel bar
+  if (ui.zoneSplitMode) {
+    const nPts = (S.ui.zoneSplitPts || []).length;
+    return `<span class="ctxbar-lbl">${IC('grid4',14)} Del i soner</span>
+      <span style="font-size:12px;color:var(--dim);padding:0 4px">${nPts === 0 ? 'Klikk på én vegg for å starte delelinjen' : 'Klikk på en annen vegg for å fullføre delingen'}</span>
+      <span class="tc-sep"></span>
+      <button class="snap-chip" onclick="cancelZoneSplit()">✕ Avbryt</button>`;
+  }
+
   if (ui.zoneDrawMode) {
     const nPts = S.drawing.points.length;
     const canFinish = nPts >= 3;
@@ -27164,6 +27474,24 @@ function _ctxBarItems() {
       <button class="snap-chip" onclick="deleteCable(${ui.selectedCableId})" title="Slett kabel"><svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Slett</button>
       <span class="tc-sep"></span>
       <button class="snap-chip${S.rooms.find(r=>r.id===cable?.roomId)?.cableDimSnap?' on':''}" id="chip-dim-kabel" onclick="toggleCableDimSnap()"><span class="snap-dot"></span>Målsett Kabel</button>`;
+  }
+
+  // Layout zone (sone) selected — name, per-zone direction, fill foil, area, delete.
+  if (ui.selectedZoneId) {
+    const _sz = S.zones.find(z => z.id === ui.selectedZoneId);
+    if (_sz && _sz.type === 'sone') {
+      const _st = _soneStats(_sz);
+      const dir = _sz.direction === 'v' ? 'Vertikal' : 'Horisontal';
+      const arrow = _sz.direction === 'v' ? '↕' : '↔';
+      return `<span class="ctxbar-lbl">${IC('grid4',14)} Sone</span>
+        <button class="snap-chip" onclick="renameSone(${_sz.id})" title="Endre sonenavn">${esc(_sz.name || 'Sone')}</button>
+        <span style="font-size:12px;color:var(--dim);padding:0 4px">${_st.areaM2.toFixed(1)} m²${_st.nStrips?` · ${_st.powerW} W · ${_st.coveragePct}%`:''}</span>
+        <span class="tc-sep"></span>
+        <button class="snap-chip primary" onclick="_openSoneProdukt(event, ${_sz.id})" title="Legg folie i denne sonen">+ Produkt</button>
+        <button class="snap-chip" onclick="toggleSoneDirection(${_sz.id})" title="Bytt utleggingsretning for sonen">${arrow} ${dir}</button>
+        <span class="tc-sep"></span>
+        <button class="snap-chip" onclick="deleteZone(${_sz.id})" title="Slett sone"><svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Slett</button>`;
+    }
   }
 
   // Zone selected
@@ -27325,6 +27653,7 @@ function _ctxBarItems() {
       <button class="snap-chip" id="chip-hindring" onclick="startHindringMode()" title="Tegn hindring i valgt rom">+ Hindring</button>
       <button class="snap-chip" onclick="showZoneTypePicker(${ui.selectedRoomId})" title="Tegn sone (forbudt/foretrukket) i rommet">+ Sone</button>
       <button class="snap-chip" onclick="autoSplitRoom(${ui.selectedRoomId})" title="Automatisk oppdeling i soner basert på hindringer">${IC('grid4',14)} Auto-soner</button>
+      <button class="snap-chip" onclick="startZoneSplit(${ui.selectedRoomId})" title="Del rommet i utleggingssoner ved å tegne delelinjer (vegg til vegg)">${IC('grid4',14)} Del i soner</button>
       <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje"><span class="snap-dot"></span>Mål</button>
       <span class="tc-sep"></span>
       <button class="snap-chip more" onclick="_showCtxMore(event,'room')" title="Flere handlinger (sentrer, tøm, dokumentasjon, mål, slett …)">⋯ Mer</button>`;

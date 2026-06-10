@@ -4,6 +4,59 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-10 — SONER: del et rom i navngitte utleggingssoner (Kjerne)
+
+Ny feature: del ett rom i flere SONER med delelinjer, fyll folie pr. sone med individuell
+retning og per-kant margin. Scope «Kjerne først» + rette delelinjer vegg-til-vegg (bekreftet
+med bruker). Bygger på eksisterende sone-/folie-infra. Verifisert numerisk + visuelt på ekte
+Bloksbergveien/Vindfang og syntetiske rom; ingen konsoll-feil; ingen regresjon på vanlig
+rom-folie.
+
+### Datamodell
+- Ny `type:'sone'` i `S.zones`: `{id,roomId,type:'sone',name,points,direction,startCorner}`.
+  Holdt UTENFOR alle `type==='forbidden'/'preferred'`-filtre (de matcher ikke 'sone') → kabel/
+  folie-constraints uberørt (verifisert).
+- Folie-strimler får `zoneId` (null for vanlig rom-folie).
+
+### Opprettelse — «Del i soner» (rett delelinje)
+- Ny modus (ctxbar-knapp på valgt rom): klikk to vegger → endepunkter snappes til rom-/
+  sonegrensen → **robust polygon-split langs korde** (`_splitPolygonByChord`) deler rom-
+  polygonet (eller sonen linja krysser) i to. Sonene PARTISJONERER rommet (verifisert: rektangel
+  → 2× lik areal; gjentatt split → N soner uten hull/overlapp; sum sone-areal = romareal).
+- Auto-navn «Sone N» (redigerbart via ctxbar). Render: indigo soner med navn + retningspil.
+
+### Valg + ctxbar/info pr. sone
+- `hitZone`/`selectZone` virker for 'sone' (hit-rekkefølge: strip→cable→zone, så strimler inni
+  kan fortsatt velges). Ctxbar: navn-redigering, «+ Produkt», per-sone retning (↕/↔), slett,
+  areal + effekt + dekning. Info-panel: «Utleggingssone», retning, areal, effekt, dekning.
+
+### Folie pr. sone + PER-KANT margin (kjernen)
+- «+ Produkt» på en sone ruter til `_fillSoneFoil`: fyller KUN sonen, i `zone.direction`,
+  strimler tagges `zoneId`. Erstatter sonens eksisterende folie.
+- **Per-kant margin** (`_zoneFillablePolygon` + `_offsetPolygonPerEdge`): hver sonekant
+  klassifiseres — ligger på en romvegg (yttervegg) → veggmargin (`_effectiveMarginCm`); delt
+  grense (delelinje) → halv folie-gap (`_effectiveGapCm/2`). Sone-polygonet insettes per kant,
+  og fylles med margin 0 (ingen dobbel-inset). Verifisert eksakt: yttervegg inset 2,5 cm, delt
+  grense 1,5 cm.
+- Motor-utvidelse (bakoverkompatibelt): `computeClippedSegments(...,opts{marginCm,clipPoly})` og
+  `_autoFillRoomOnce(...,marginCm)`. Vanlig rom-folie uendret (regresjonstestet: 94%/92%).
+
+### Stats / sletting
+- `_soneStats` (areal, effekt W, W/m², dekning %, strip-antall) vist i ctxbar + info-panel.
+  Rom-total inkluderer sone-strimler (de har `roomId`) → sum pr. rom = sum soner.
+- Slett sone fjerner også sonens folie.
+
+### Resultat / begrensninger
+- Rektangulære soner (hovedscenario): 600×400 → 4 soner à 6 m², vekslende retning, **91–92 %
+  dekning**, perfekt partisjon.
+- **Utsatt til runde 2:** (1) folie-dekning på UREGELMESSIGE soner (L/arm) er svak — den greedy
+  `_autoFillRoomOnce` får ikke brede folier over arm-grenser (Vindfang Sone 2 ~43 %); (2) sone-
+  navn kan få nummer-hull etter gjentatte splitter; (3) hindringer inne i en sone subtraheres
+  ikke i sone-fyllet; (4) kabel/matte pr. sone; (5) PDF/materialliste pr. sone; (6) polyline-
+  delelinjer; (7) sammenslåing/flytting av delelinjer.
+
+---
+
 ## 2026-06-10 — Hindring: fri plassering + mykt vegg-snap (clampHindringToRoom omskrevet)
 
 - **Symptom:** hindringer (f.eks. kjøkkenøy i Rom 6) kunne ikke plasseres fritt — de ble dratt mot
