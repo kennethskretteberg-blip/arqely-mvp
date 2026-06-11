@@ -2801,10 +2801,11 @@ function _computeRoomStats(room) {
     else foilW += _stripNettoCm(s) * s.length_cm / 10000 * 60; // fallback 60 W/m²
   }
   let cableW = 0, cableLenM = 0, cableCount = 0, cableCcCm = 0, cableProductName = '';
-  let cableWmNum = 0, cableWmDen = 0;
+  let cableWmNum = 0, cableWmDen = 0, hasLabelOnlyCable = false;
   const roomCables = _cablesForRoom(room.id);
   const cableSegs = [];
   for (const cab of roomCables) {
+    if (cab.labelOnly) hasLabelOnlyCable = true;
     const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId);
     const lenM = (cab.totalLength_cm || 0) / 100;
     cableLenM += lenM;
@@ -2835,6 +2836,9 @@ function _computeRoomStats(room) {
     const coveredCm2 = _cableCoveredCm2(room, cableSegs, ccCm, nettoCm2, sig);
     cableAreaM2 = Math.max(0, Math.min(nettoCm2, coveredCm2)) / 10000;
   }
+  // «Kun label»-kabel har ingen geometri → anta at den dekker rommets nettoareal, slik at
+  // romkort/PDF viser fornuftig dekning og flate-effekt blir totalW/netto (jf. Kenneths modell).
+  if (hasLabelOnlyCable) cableAreaM2 = Math.max(cableAreaM2, nettoM2);
   let matW = 0, matAreaM2 = 0;
   for (const mat of _matsForRoom(room.id)) {
     const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
@@ -3981,6 +3985,7 @@ function _upcRenderCableResults(container, familyName, categoryId, roomId) {
           <button class="floor-choice-btn" style="padding:3px 10px;font-size:15px;border-radius:0 6px 6px 0" onclick="_cableManualCount(1)" title="Flere kabler">+</button>
         </div>
         <button class="floor-choice-btn" style="padding:5px 12px;font-size:12px;font-weight:700;background:var(--accent);color:#0d0e10" onclick="_cableManualPreview(${sq(familyName)},${categoryId})">Forhåndsvis ›</button>
+        <button class="floor-choice-btn" style="padding:5px 12px;font-size:12px" title="Velg produktet og få samme label + stats/PDF, men uten å tegne kabelen inn" onclick="_cableLabelOnlyFromManual(${sq(familyName)},${categoryId})">Kun label</button>
       </div>
       ${_cableSplitToggleHtml()}
       <div style="font-size:10px;color:var(--dim);margin-top:4px">Setter du f.eks. 3 → nøyaktig 3 like soner, hver med samme kabel + felles CC. Delretning velges over.</div>
@@ -5312,6 +5317,63 @@ function _cancelCablePreview(familyName, categoryId) {
   if (room) room._cablePreviewMeta = null;
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);
+}
+
+// ── «Kun label» (labelOnly) — velg et kabelprodukt for et rom og få SAMME label + stats/PDF
+// som et tegnet utlegg, UTEN å tegne geometrien. Tallene (CC/meter/watt) regnes identisk med
+// motoren (_autoFillCableImpl): CC = clamp(nettoM2 / cable_length_m × 100), lengde = produktets
+// kabellengde. Dekning settes til rommets nettoareal i _computeRoomStats, så flate-effekt blir
+// totalW/netto. Brukes når det ikke trengs — eller er for krevende — å tegne kabelen inn.
+function _cableLabelOnlyStats(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod) return null;
+  const minSp = (prod.min_spacing_mm || 50) / 10;   // cm
+  const maxSp = (prod.max_spacing_mm || 200) / 10;
+  const recSp = (prod.recommended_spacing_mm || 100) / 10;
+  const nettoM2 = roomAreas(room).net / 10000;       // cm² → m²
+  let spacing;
+  if (prod.cable_length_m) {
+    spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
+  } else {
+    spacing = Math.max(minSp, Math.min(maxSp, recSp));
+  }
+  return { spacing_cm: Math.round(spacing * 10) / 10, totalLength_cm: (prod.cable_length_m || 0) * 100 };
+}
+
+/** Place a "label-only" cable in the selected room: product + computed stats, no drawn geometry. */
+function _placeCableLabelOnly(productId, familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId; if (!roomId) return;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) { console.warn('_placeCableLabelOnly: ukjent produkt'); return; }
+  const st = _cableLabelOnlyStats(roomId, productId);
+  if (!st) return;
+  pushUndo();
+  _removeCablePreview();
+  // labelOnly er et alternativ til et tegnet utlegg → erstatt evt. kabler i rommet.
+  S.cables = S.cables.filter(c => c.roomId !== roomId);
+  const cable = {
+    id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
+    spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
+    totalLength_cm: st.totalLength_cm, runs: []
+  };
+  S.cables.push(cable);
+  _invalidateCableCache();
+  if (typeof _trackProductUsage === 'function') _trackProductUsage(productId);
+  S.ui.selectedCableId = cable.id;
+  const room = S.rooms.find(r => r.id === roomId);
+  if (room) { room._cablePreviewMeta = null; room._cablePreviewIds = []; }
+  if (typeof _showToast === 'function') _showToast('Kun label lagt til (ikke tegnet)', 'ok');
+  renderSidebar(); updateCtxBar(); render();
+  _refreshCablePanel(familyName, categoryId);
+}
+
+/** Read the manual product dropdown in the cable picker and place it as a label-only object. */
+function _cableLabelOnlyFromManual(familyName, categoryId) {
+  const sel = document.getElementById('cable-manual-prod');
+  const pid = sel ? parseInt(sel.value, 10) : NaN;
+  if (isNaN(pid)) return;
+  _placeCableLabelOnly(pid, familyName, categoryId);
 }
 
 // Snow mat preview (mirrors the cable preview): packed mats live in S.mats so they render,
@@ -12944,12 +13006,103 @@ function _cableStroke(cable, isSel, isHov) {
   return isSel ? _lc('#e04020', '#ff6040') : isHov ? _lc('#50c830', '#70e850') : base;
 }
 
+// «Kun label»-kabel: ingen geometri tegnes — kun produktlabelen (samme stil som vanlige
+// kabel-labels) pluss en diskret stiplet rom-tint + «kun label»-merke, så det er tydelig at
+// ingenting er fysisk tegnet. Lagrer bounds i _cableLabelBounds → samme klikk/drag som ellers.
+function _drawCableLabelOnly(cable, room) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+  if (!prod || !room.points || !room.points.length) return;
+
+  // Diskret stiplet rom-tint (indikerer «kun label», ingenting tegnet)
+  const spts = room.points.map(p => w2s(p.x, p.y));
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(spts[0].x, spts[0].y);
+  for (let i = 1; i < spts.length; i++) ctx.lineTo(spts[i].x, spts[i].y);
+  ctx.closePath();
+  ctx.fillStyle = _lc('rgba(180,80,30,0.05)', 'rgba(255,140,60,0.05)');
+  ctx.fill();
+  ctx.strokeStyle = _lc('rgba(180,80,30,0.30)', 'rgba(255,140,60,0.28)');
+  ctx.lineWidth = 1; ctx.setLineDash([6, 4]); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // Label-posisjon: lagret labelPos (drag), ellers rom-sentrum forskjøvet litt ned
+  // for ikke å overlappe romnavnet (som sitter i sentroiden).
+  let cPt;
+  if (cable.labelPos) {
+    cPt = w2s(cable.labelPos.x, cable.labelPos.y);
+  } else {
+    const cx = room.points.reduce((a, p) => a + p.x, 0) / room.points.length;
+    const cy = room.points.reduce((a, p) => a + p.y, 0) / room.points.length;
+    const ys = room.points.map(p => p.y);
+    const h = Math.max(...ys) - Math.min(...ys);
+    cPt = w2s(cx, cy + Math.min(h * 0.22, h / 2 - 5));
+  }
+
+  const fontSize = 13, lineH = fontSize + 3, padX = 8, padY = 4;
+  const name = prod.name;
+  const lengthM = (cable.totalLength_cm / 100).toFixed(1) + ' m';
+  const cableWatt = prod.watt_per_m ? Math.round((cable.totalLength_cm / 100) * prod.watt_per_m) : 0;
+  const ccCm = cable.spacing_cm != null ? cable.spacing_cm : 0;
+  const infoLine = lengthM + (cableWatt > 0 ? ' · ' + cableWatt + ' W' : '') + (ccCm > 0 ? ' · CC ' + ccCm.toFixed(1) + ' cm' : '');
+  const tag = 'kun label';
+
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.translate(cPt.x, cPt.y);
+  ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
+  const nameW = ctx.measureText(name).width;
+  ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
+  const lenW = ctx.measureText(infoLine).width;
+  ctx.font = `${Math.round(fontSize * 0.72)}px 'IBM Plex Mono',monospace`;
+  const tagW = ctx.measureText(tag).width;
+  const frameW = Math.max(nameW, lenW, tagW) + padX * 2;
+  const frameH = lineH * 3 + padY * 2;
+  const fx = -frameW / 2, fy = -frameH / 2, r = 5;
+
+  ctx.beginPath();
+  ctx.moveTo(fx + r, fy); ctx.lineTo(fx + frameW - r, fy);
+  ctx.quadraticCurveTo(fx + frameW, fy, fx + frameW, fy + r);
+  ctx.lineTo(fx + frameW, fy + frameH - r);
+  ctx.quadraticCurveTo(fx + frameW, fy + frameH, fx + frameW - r, fy + frameH);
+  ctx.lineTo(fx + r, fy + frameH);
+  ctx.quadraticCurveTo(fx, fy + frameH, fx, fy + frameH - r);
+  ctx.lineTo(fx, fy + r);
+  ctx.quadraticCurveTo(fx, fy, fx + r, fy);
+  ctx.closePath();
+  ctx.fillStyle = _lc('rgba(255,255,255,0.92)', 'rgba(12,18,28,0.78)');
+  ctx.strokeStyle = _lc('rgba(180,80,30,0.7)', 'rgba(255,140,60,0.65)');
+  ctx.lineWidth = 1; ctx.fill(); ctx.stroke();
+
+  // Drag-håndtak (≡) til venstre
+  ctx.fillStyle = _lc('rgba(150,100,60,0.4)', 'rgba(200,150,80,0.3)');
+  ctx.font = '9px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('≡', fx + 3, 0);
+  ctx.textAlign = 'center';
+
+  const yName = -lineH, yInfo = 0, yTag = lineH;
+  ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
+  ctx.fillStyle = _lc('rgba(20,30,50,0.95)', 'rgba(255,255,255,0.95)');
+  ctx.fillText(name, 0, yName);
+  ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
+  ctx.fillStyle = _lc('rgba(180,80,30,0.95)', 'rgba(255,140,60,0.92)');
+  ctx.fillText(infoLine, 0, yInfo);
+  ctx.font = `${Math.round(fontSize * 0.72)}px 'IBM Plex Mono',monospace`;
+  ctx.fillStyle = _lc('rgba(150,90,40,0.85)', 'rgba(200,150,90,0.75)');
+  ctx.fillText(tag, 0, yTag);
+  ctx.restore();
+
+  _cableLabelBounds[cable.id] = { sx: cPt.x - frameW / 2, sy: cPt.y - frameH / 2, w: frameW, h: frameH };
+}
+
 function drawCables() {
   for (const cable of S.cables) {
     if (!_roomIdOnActiveFloor(cable.roomId)) continue;
     const room = S.rooms.find(r => r.id === cable.roomId);
+    if (!room) continue;
+    if (cable.labelOnly) { _drawCableLabelOnly(cable, room); continue; }
     const _hasGeom = (cable.runs && cable.runs.length > 0) || (cable.pathEls && cable.pathEls.length > 0);
-    if (!room || !_hasGeom) continue;
+    if (!_hasGeom) continue;
 
     const isSel = S.ui.selectedCableId === cable.id;
     const isHov = !isSel && _hoveredCableId === cable.id;
@@ -23371,6 +23524,29 @@ function updateObjInfo() {
   }
   if(S.ui.selectedCableId!==null) {
     const cable=S.cables.find(c=>c.id===S.ui.selectedCableId);
+    if(cable && cable.labelOnly) {
+      const cpL = HEATING_PRODUCTS.find(p=>p.id===cable.productId);
+      const wpm = cpL?.watt_per_m||0;
+      const tW = wpm ? Math.round(wpm*cable.totalLength_cm/100) : null;
+      const roomL = S.rooms.find(r=>r.id===cable.roomId);
+      const bruttoM2 = roomL ? (roomL.area||0)/10000 : 0;
+      const nettoM2 = roomL ? roomAreas(roomL).net/10000 : 0;
+      const wm2Brutto = (tW && bruttoM2>0) ? Math.round(tW/bruttoM2) : null;
+      const wm2Netto = (tW && nettoM2>0) ? Math.round(tW/nettoM2) : null;
+      let _supHtmlL = '';
+      if (cpL?.article_no) _supHtmlL += `<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(cpL.article_no)}</span></div>`;
+      if (cpL?.el_no) _supHtmlL += `<div class="soi-row"><span class="soi-k">El.nummer</span><span class="soi-v">${esc(cpL.el_no)}</span></div>`;
+      panel.innerHTML=`<div class="soi-title"><svg class="ic ic-plug" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/></svg> ${esc(cpL?.name||'Varmekabel')} <span style="font-size:9px;color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:1px 5px;font-weight:600">kun label</span></div>
+        ${_supHtmlL}
+        <div class="soi-row"><span class="soi-k">Total lengde</span><span class="soi-v">${(cable.totalLength_cm/100).toFixed(1)} m</span></div>
+        <div class="soi-row"><span class="soi-k">Avstand (CC)</span><span class="soi-v">${cable.spacing_cm.toFixed(1)} cm</span></div>
+        ${tW?`<div class="soi-row"><span class="soi-k">Effekt</span><span class="soi-v">${tW} W</span></div>`:''}
+        ${wm2Brutto?`<div class="soi-row"><span class="soi-k">W/m² brutto</span><span class="soi-v">${wm2Brutto} W/m²</span></div>`:''}
+        ${wm2Netto?`<div class="soi-row"><span class="soi-k">W/m² netto (flate)</span><span class="soi-v" style="font-weight:600">${wm2Netto} W/m²</span></div>`:''}
+        <div class="soi-row" style="color:var(--dim);font-size:10px">Ingen geometri tegnet — kun produkt/label for tegning + PDF.</div>
+        <div class="soi-row" style="margin-top:6px"><button style="background:var(--warn);color:#0d0e10;border:none;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer" onclick="deleteCable(${cable.id})">✕ Slett</button></div>`;
+      panel.style.display='block'; return;
+    }
     if(cable) {
       const cp=HEATING_PRODUCTS.find(p=>p.id===cable.productId);
       const wattPerM=cp?.watt_per_m||0;
@@ -25183,7 +25359,19 @@ canvas.addEventListener('mousedown', e=>{
         const rawWp = s2w(sx0, sy0);
         if (!cable.labelPos) {
           // Initialize labelPos from current auto-center
-          if (cable.pathEls && cable.pathEls.length) {
+          if (cable.labelOnly) {
+            // «Kun label» har ingen geometri → init fra rom-sentrum (forskjøvet litt ned)
+            const _r = S.rooms.find(rr => rr.id === cable.roomId);
+            if (_r && _r.points && _r.points.length) {
+              const cx = _r.points.reduce((a, p) => a + p.x, 0) / _r.points.length;
+              const cy = _r.points.reduce((a, p) => a + p.y, 0) / _r.points.length;
+              const ys = _r.points.map(p => p.y);
+              const hh = Math.max(...ys) - Math.min(...ys);
+              cable.labelPos = { x: cx, y: cy + Math.min(hh * 0.22, hh / 2 - 5) };
+            } else {
+              cable.labelPos = { x: rawWp.x, y: rawWp.y };
+            }
+          } else if (cable.pathEls && cable.pathEls.length) {
             const xs = [], ys = [];
             for (const el of cable.pathEls) {
               if (el.kind === 'run') { xs.push(el.a.x, el.b.x); ys.push(el.a.y, el.b.y); }
@@ -27784,6 +27972,13 @@ function _ctxBarItems() {
   if (ui.selectedCableId) {
     const cable = S.cables.find(c => c.id === ui.selectedCableId);
     const prod = cable ? HEATING_PRODUCTS.find(p => p.id === cable.productId) : null;
+    if (cable && cable.labelOnly) {
+      return `<span class="ctxbar-lbl"><svg class="ic ic-plug" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/></svg> Kabel</span>
+        <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Kabel'} — ${(cable.totalLength_cm/100).toFixed(1)} m · CC ${cable.spacing_cm.toFixed(1)} cm</span>
+        <span style="font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:1px 6px;font-weight:600">kun label</span>
+        <span class="tc-sep"></span>
+        <button class="snap-chip" onclick="deleteCable(${ui.selectedCableId})" title="Slett"><svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Slett</button>`;
+    }
     const spMm = cable ? Math.round(cable.spacing_cm * 10) : 0;
     const lenM = cable ? (cable.totalLength_cm / 100).toFixed(1) : '0';
     const isSnow = _isSnowModule();
