@@ -1942,6 +1942,7 @@ function _setCableRoomType(typeId, familyName, categoryId) {
 // ─── MODULE TYPES ────────────────────────────────────────────
 const MODULE_TYPES = [
   { id:'indoor', name:'Innendørs gulvvarme', ico:'🏠', desc:'Rom, plantegning, kabel, matte, folie og platesystem', available:true },
+  { id:'list',   name:'Hurtig prosjektering', ico:'📋', desc:'Rom i liste — areal + ønsket effekt, uten tegning. Kabel/matte med forslag.', available:true },
   { id:'stair',  name:'Snøsmelting i trapper', ico:'🪜', desc:'Trapper med trinn og repos', available:true },
   { id:'snow',   name:'Snøsmelting i grunn', ico:'❄️', desc:'Oppkjørsel, gangareal, ramper og uteareal', available:true },
   { id:'roof',   name:'Tak og takrenner', ico:'🏔️', desc:'Takflater, renner og nedløp', available:false },
@@ -2030,7 +2031,7 @@ function IC(name, size, sw) {
   return `<svg class="ic ic-${name}" width="${sz}" height="${sz}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw||1.75}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto">${d}</svg>`;
 }
 // Module id → line-icon name (nav buttons + dashboard tiles)
-const _MOD_ICON = { indoor:'home', stair:'stairs', snow:'snowflake', roof:'mountain' };
+const _MOD_ICON = { indoor:'home', list:'clipboard', stair:'stairs', snow:'snowflake', roof:'mountain' };
 // Paint static markup icons: any element with data-ic="name" gets the SVG
 // injected once (optionally followed by data-ic-text). For dynamic templates
 // use IC() inline instead.
@@ -2777,15 +2778,22 @@ function _cableCoveredCm2(room, segs, ccCm, nettoCm2, sig) {
 
 function _computeRoomStats(room) {
   const bruttoM2 = (room.area || 0) / 10000;
-  const hinds = S.hindrings.filter(h => h.roomId === room.id);
-  const hindM2 = hinds.reduce((a, h) => a + (h.points && h.points.length >= 3 ? compArea(h.points) : 0), 0) / 10000;
-  // Forbidden zones also reduce usable area
-  const forbiddenZones = S.zones.filter(z => z.roomId === room.id && z.type === 'forbidden');
-  const zoneM2 = forbiddenZones.reduce((a, z) => {
-    if (z.points && z.points.length >= 3) return a + compArea(z.points) / 10000;
-    if (z.pinPos && z.sizeCm) return a + Math.PI * (z.sizeCm / 2) ** 2 / 10000;
-    return a;
-  }, 0);
+  // Hurtig prosjektering (listMode): ingen polygon → bruk LAGRET hindring-areal, ingen soner.
+  let hindM2, zoneM2;
+  if (room.listMode) {
+    hindM2 = (room.listHindCm2 || 0) / 10000;
+    zoneM2 = 0;
+  } else {
+    const hinds = S.hindrings.filter(h => h.roomId === room.id);
+    hindM2 = hinds.reduce((a, h) => a + (h.points && h.points.length >= 3 ? compArea(h.points) : 0), 0) / 10000;
+    // Forbidden zones also reduce usable area
+    const forbiddenZones = S.zones.filter(z => z.roomId === room.id && z.type === 'forbidden');
+    zoneM2 = forbiddenZones.reduce((a, z) => {
+      if (z.points && z.points.length >= 3) return a + compArea(z.points) / 10000;
+      if (z.pinPos && z.sizeCm) return a + Math.PI * (z.sizeCm / 2) ** 2 / 10000;
+      return a;
+    }, 0);
+  }
   const nettoM2 = Math.max(0, bruttoM2 - hindM2 - zoneM2);
   const roomStrips = _stripsForRoom(room.id);
   let stripAreaCm2 = 0;
@@ -2842,6 +2850,12 @@ function _computeRoomStats(room) {
   let matW = 0, matAreaM2 = 0;
   for (const mat of _matsForRoom(room.id)) {
     const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
+    if (mat.labelOnly) {
+      // «Kun label»-matte (bl.a. fra Hurtig prosjektering): ingen geometri — bruk lagrede stat-felt.
+      matAreaM2 += mat._loAreaM2 || 0;
+      matW += _matRatedW(mp, mat);   // _matRatedW returnerer mat._loW for labelOnly
+      continue;
+    }
     const n = mat.num_runs || 1;
     matAreaM2 += (n * mat.width_cm * mat.length_cm) / 10000; // coverage = laid geometry
     matW += _matRatedW(mp, mat);                              // power = product rated per physical mat
@@ -4413,6 +4427,8 @@ function _matColor(mat) {
 // laid geometry (a partly-folded remainder still consumes the whole product). Falls back to
 // watt_per_m2 × nominal area, then to placed geometry for cuttable mats without a nominal area.
 function _matRatedW(prod, mat) {
+  // «Kun label»-matte (Hurtig prosjektering) bærer ferdig beregnet ratet effekt for romdekning.
+  if (mat && mat.labelOnly && mat._loW != null) return Math.round(mat._loW);
   if (!prod) return 0;
   if (prod.total_effect_w) return prod.total_effect_w;
   if (prod.watt_per_m2 && prod.mat_area_m2) return Math.round(prod.watt_per_m2 * prod.mat_area_m2);
@@ -4420,6 +4436,62 @@ function _matRatedW(prod, mat) {
   const areaM2 = mat ? (n * mat.width_cm * mat.length_cm) / 10000 : 0;
   return Math.round((prod.watt_per_m2 || 0) * areaM2);
 }
+
+// Ratet (produktets faktiske) effekt for et rom — IKKE den geometri-utledede stats.totalW.
+// Kabel legges ofte ut litt kortere enn full produktlengde (motoren får ikke alltid lagt ut
+// nøyaktig lengde), så geometrien gir f.eks. 1628 W mens produktet faktisk er 1700 W. Her brukes
+// produktets total_effect_w (ev. cable_length_m × watt_per_m) for kabel, _matRatedW for matte, og
+// arealbasert ratet effekt for folie/plate (disse kuttes til mål → ingen avvik).
+function _roomRatedEffectW(room) {
+  let w = 0;
+  for (const c of _cablesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId); if (!p) continue;
+    if (p.total_effect_w) w += p.total_effect_w;
+    else if (p.cable_length_m && p.watt_per_m) w += p.cable_length_m * p.watt_per_m;
+    else if (p.watt_per_m) w += (c.totalLength_cm / 100) * p.watt_per_m;
+  }
+  for (const m of _matsForRoom(room.id)) {
+    w += _matRatedW(HEATING_PRODUCTS.find(pr => pr.id === m.productId), m);
+  }
+  for (const s of _stripsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId); if (!p) continue;
+    const nc = (p.netto_width_mm || p.width_mm || 500) / 10;
+    w += (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000;
+  }
+  for (const pl of _platesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
+    w += (p?.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000;
+  }
+  return Math.round(w);
+}
+
+// Dominerende produkt i et rom (størst ratet effekt-bidrag) → { product, kind } eller null.
+// Brukes til kolonnene El.nr/art.nr/produkt/familie/Type i romoversikten når et rom har flere
+// produkter (vises da det dominerende, slik vedlegget gjør).
+function _roomDominantProduct(room) {
+  let best = null, bestW = -1;
+  const consider = (p, kind, w) => { if (p && w >= bestW) { bestW = w; best = { product: p, kind }; } };
+  for (const c of _cablesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
+    const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
+    consider(p, 'Kabel', w);
+  }
+  for (const m of _matsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
+    consider(p, 'Matte', _matRatedW(p, m));
+  }
+  for (const s of _stripsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
+    const nc = p ? (p.netto_width_mm || p.width_mm || 500) / 10 : 0;
+    consider(p, 'Folie', p ? (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000 : 0);
+  }
+  for (const pl of _platesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
+    consider(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0);
+  }
+  return best;
+}
+
 function _matTotalLengthMm(prod) {
   if (!prod) return null;
   if (prod.mat_total_length_mm) return prod.mat_total_length_mm;
@@ -5324,14 +5396,16 @@ function _cancelCablePreview(familyName, categoryId) {
 // motoren (_autoFillCableImpl): CC = clamp(nettoM2 / cable_length_m × 100), lengde = produktets
 // kabellengde. Dekning settes til rommets nettoareal i _computeRoomStats, så flate-effekt blir
 // totalW/netto. Brukes når det ikke trengs — eller er for krevende — å tegne kabelen inn.
-function _cableLabelOnlyStats(roomId, productId) {
+function _cableLabelOnlyStats(roomId, productId, count) {
   const room = S.rooms.find(r => r.id === roomId);
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!room || !prod) return null;
   const minSp = (prod.min_spacing_mm || 50) / 10;   // cm
   const maxSp = (prod.max_spacing_mm || 200) / 10;
   const recSp = (prod.recommended_spacing_mm || 100) / 10;
-  const nettoM2 = roomAreas(room).net / 10000;       // cm² → m²
+  // Med N like kabler deler de rommet: hver kabel dekker netto/N → CC regnes per element.
+  const n = Math.max(1, count || 1);
+  const nettoM2 = (roomAreas(room).net / 10000) / n; // cm² → m², per element
   let spacing;
   if (prod.cable_length_m) {
     spacing = Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100));
@@ -13482,6 +13556,7 @@ function _matTotalWidthCm(mat) {
 
 function drawMats() {
   for (const mat of S.mats) {
+    if (mat.labelOnly) continue;   // «kun label»-matte (Hurtig prosjektering) har ingen geometri
     if (!_roomIdOnActiveFloor(mat.roomId)) continue;
     const isSel = S.ui.selectedMatId === mat.id;
     const isHov = !isSel && _hoveredMatId === mat.id;
@@ -20417,6 +20492,12 @@ function roomAreas(room){
   // Wall thickness extends OUTWARD — it does NOT reduce interior area.
   // "gross" here means interior area (what the user drew)
   // "net" = interior minus obstacles (hindrings) and forbidden zones
+  // Hurtig prosjektering (listMode): rommet har ingen polygon — bruk LAGRET brutto/hindring-areal.
+  if (room.listMode) {
+    const gross = room.area || 0;
+    const hindArea = room.listHindCm2 || 0;
+    return { gross, hindArea, zoneArea: 0, net: Math.max(0, gross - hindArea) };
+  }
   const gross=room.area||0;
   const hindArea=S.hindrings.filter(h=>h.roomId===room.id).reduce((a,h)=>a+(h.points&&h.points.length>=3?compArea(h.points):0),0);
   const zoneArea=S.zones.filter(z=>z.roomId===room.id&&z.type==='forbidden').reduce((a,z)=>{
@@ -21516,6 +21597,8 @@ function renderSidebar() {
           h += _renderStairPartContent(part);
         } else if (part.moduleType === 'snow') {
           h += _renderSnowPartContent(part);
+        } else if (part.moduleType === 'list') {
+          h += _renderListPartContent(part);
         }
         h += `</div>`;
       }
@@ -21553,7 +21636,21 @@ function _partEntityCount(part) {
     const pRooms = S.rooms.filter(r=>r.partId===part.id);
     return pRooms.length + ' områder';
   }
+  if (part.moduleType === 'list') {
+    return S.rooms.filter(r=>r.partId===part.id && r.listMode && !r.listDraft).length + ' rom';
+  }
   return '';
+}
+// Sidebar-innhold for Hurtig prosjektering-delen: liste over opprettede rom (klikk → rediger i kortet).
+function _renderListPartContent(part){
+  const rooms=S.rooms.filter(r=>r.partId===part.id && r.listMode && !r.listDraft);
+  let h=`<div style="padding:6px 12px;font-size:11px;color:var(--dim)">Rom i liste</div>`;
+  for(const r of rooms){
+    h+=`<div class="part-room-row" style="padding:4px 12px;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;gap:6px" onclick="_listEditRoom(${r.id})" title="Rediger i kortet">
+      <span>${esc(r.name||'Rom')}</span><span style="color:var(--dim)">${((r.area||0)/10000).toFixed(1).replace(/\.0$/,'')} m²</span></div>`;
+  }
+  if(!rooms.length) h+=`<div style="padding:4px 12px;font-size:11px;color:var(--dim)">Ingen rom ennå</div>`;
+  return h;
 }
 
 // ─── BG LAYERS IN SIDEBAR ────────────────────────────────────
@@ -28307,6 +28404,7 @@ function _enterPart(part) {
   document.getElementById('module-screen').style.display='none';
   document.getElementById('app').style.display='flex';
   S.ui.activePartId=part.id;
+  if (part.moduleType !== 'list' && typeof _hideListModule === 'function') _hideListModule();
 
   // Update topbar labels
   document.getElementById('proj-name-disp').textContent=S.project.name;
@@ -28375,6 +28473,18 @@ function _enterPart(part) {
       S.ui.activeFloorId=fl.id;
       setInitialView(); renderSidebar(); showDrawToolbar();
     } else fitAll();
+  } else if (part.moduleType==='list') {
+    // Hurtig prosjektering: listebasert, ingen tegning. Vis tabell-overlay, skjul tegneverktøy.
+    let partFloors=S.floors.filter(f=>f.partId===part.id);
+    if (partFloors.length===0) {
+      const fl={ id:S.counters.nextFloorId++, name:'Plan 1', order:S.floors.length, collapsed:false, partId:part.id };
+      S.floors.push(fl); partFloors=[fl];
+    }
+    S.ui.activeFloorId = partFloors[0].id;
+    renderSidebar();
+    updateTopbarForModule();
+    _showListModule();
+    return;   // listemodulen styrer sin egen visning (ingen canvas-render)
   }
   updateCtxBar(); render();
 }
@@ -28384,6 +28494,453 @@ function switchActivePart(partId) {
   if (!part) return;
   _enterPart(part);
 }
+
+// ═══════════════ HURTIG PROSJEKTERING (listebasert modul) ═══════════════
+// Hver rad = et rom (listMode, lagret brutto/netto-areal, ingen polygon) + ett «kun label»-produkt
+// (kabel eller matte). Gjenbruker _computeRoomStats / romoversikt / materialliste direkte.
+function _listActivePart(){ return S.project.parts.find(p=>p.id===S.ui.activePartId); }
+function _listRooms(){ const p=_listActivePart(); return p ? S.rooms.filter(r=>r.partId===p.id && r.listMode) : []; }
+function _listNum(v){ if(v==null) return 0; const n=parseFloat(String(v).replace(/\s/g,'').replace(',', '.')); return isNaN(n)?0:n; }
+function _listIndoorCat(p){ const c=PRODUCT_CATEGORIES.find(c2=>c2.id===p.category_id); return c && !((c.name||'').toLowerCase().includes('utend')) ? c : null; }
+function _listCableProducts(){ return HEATING_PRODUCTS.filter(p=>{ const c=_listIndoorCat(p); return c && c.module_type==='cable' && p.active!==false && (p.cable_length_m||0)>0; }); }
+function _listMatProducts(){ return HEATING_PRODUCTS.filter(p=>{ const c=_listIndoorCat(p); return c && c.module_type==='mat' && p.active!==false; }); }
+function _listRoomProductId(roomId){
+  const c=S.cables.find(c=>c.roomId===roomId && c.labelOnly); if(c) return c.productId;
+  const m=S.mats.find(m=>m.roomId===roomId && m.labelOnly); return m?m.productId:null;
+}
+function _listCableCandidates(roomId, targetWm2){
+  const sel=selectCableByPower(roomId, _listCableProducts(), targetWm2);
+  if(!sel) return { list:[], desiredW:0, nettoM2:0, closestId:null };
+  const list=sel.candidates.slice().sort((a,b)=>a.productW-b.productW);
+  return { list, desiredW:sel.desiredW, nettoM2:sel.nettoM2, closestId: sel.closest?sel.closest.product.id:(list[0]?list[0].product.id:null) };
+}
+function _listMatCandidates(nettoM2){
+  const byFam=new Map();
+  for(const p of _listMatProducts()){ const fam=p.product_family||p.name; if(!byFam.has(fam)) byFam.set(fam,p); }
+  const list=[];
+  for(const [fam,p] of byFam){ const wm2=p.watt_per_m2||0; list.push({ product:p, family:fam, wm2, ratedW:Math.round(wm2*nettoM2) }); }
+  list.sort((a,b)=>a.wm2-b.wm2);
+  return list;
+}
+// Antall like «kun label»-elementer i rommet.
+function _listRoomCount(roomId){
+  const r=S.rooms.find(r=>r.id===roomId); if(r&&r.listCount) return r.listCount;
+  const n=S.cables.filter(c=>c.roomId===roomId&&c.labelOnly).length || S.mats.filter(m=>m.roomId===roomId&&m.labelOnly).length;
+  return n||1;
+}
+// Sett rommets «kun label»-produkt som N LIKE elementer (erstatter evt. eksisterende kabel/matte).
+function _listSetRoomProduct(roomId, modType, productId, count){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  count=Math.max(1, Math.min(16, (parseInt(count,10)||1)));
+  S.cables=S.cables.filter(c=>c.roomId!==roomId);
+  S.mats=S.mats.filter(m=>m.roomId!==roomId);
+  room.listModType=modType; room.listCount=count;
+  if(productId==null || isNaN(productId)){ room.listCount=1; _invalidateCableCache&&_invalidateCableCache(); _invalidateMatCache&&_invalidateMatCache(); return; }
+  if(modType==='cable'){
+    const st=_cableLabelOnlyStats(roomId, productId, count); if(!st) return;
+    for(let i=0;i<count;i++) S.cables.push({ id:S.counters.nextCableId++, roomId, productId, labelOnly:true, spacing_cm:st.spacing_cm, cc_mm:Math.round(st.spacing_cm*10), totalLength_cm:st.totalLength_cm, runs:[] });
+  } else {
+    const p=HEATING_PRODUCTS.find(pr=>pr.id===productId); if(!p) return;
+    const net=roomAreas(room).net/10000, wm2=p.watt_per_m2||0;
+    const area=p.mat_area_m2 || (net/count);
+    const w=p.total_effect_w || Math.round(wm2*area);
+    for(let i=0;i<count;i++) S.mats.push({ id:S.counters.nextMatId++, roomId, productId, labelOnly:true, _loAreaM2:area, _loW:w });
+  }
+  _invalidateCableCache&&_invalidateCableCache(); _invalidateMatCache&&_invalidateMatCache();
+  if(typeof _trackProductUsage==='function') _trackProductUsage(productId);
+}
+// Forslag (kabel): færrest mulig LIKE kabler som treffer ønsket effekt med gyldig CC.
+function _listSuggestCableFrom(roomId, prods){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room||!prods.length) return null;
+  const net=roomAreas(room).net/10000, target=_roomTargetWm2(roomId), desired=net*target;
+  if(desired<=0) return null;
+  const valids=[]; let fallback=null, fd=Infinity;
+  for(let count=1; count<=8; count++){
+    for(const p of prods){
+      if(!p.cable_length_m||!p.watt_per_m) continue;
+      const pw=p.total_effect_w||p.cable_length_m*p.watt_per_m;
+      const cc=(net/count)/p.cable_length_m*100;
+      const total=count*pw, d=Math.abs(total-desired);
+      const minSp=(p.min_spacing_mm||50)/10, maxSp=(p.max_spacing_mm||200)/10;
+      if(cc>=minSp&&cc<=maxSp) valids.push({productId:p.id,count,total,d});
+      if(d<fd){ fd=d; fallback={productId:p.id,count,total}; }
+    }
+  }
+  if(!valids.length) return fallback;
+  const within=valids.filter(v=>v.d<=0.12*desired);
+  if(within.length){ within.sort((a,b)=> a.count-b.count || a.d-b.d); return within[0]; }     // færrest antall innen 12 %
+  valids.sort((a,b)=> a.d-b.d || a.count-b.count); return valids[0];                            // ellers nærmeste effekt
+}
+// Forslag (matte): færrest mulig LIKE matter som dekker ~90 % av netto (matter må aldri overstige
+// gulvet → trekk fra minimum 10 %). F.eks. 10 m² → 1× 9 m²; 20 m² → 2× 9 m² (foran 3× 6 m²).
+// Klasse (60/100/150T) velges separat ut fra ønsket W/m².
+function _listSuggestMatFrom(roomId, prods){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room||!prods.length) return null;
+  const net=roomAreas(room).net/10000;
+  const target=net*0.9;                                  // mål: dekke ~90 % av netto, aldri over
+  const sizes=prods.filter(p=>(p.mat_area_m2||0)>0);
+  if(!sizes.length) return { productId:prods[0].id, count:1 };
+  const opts=[];
+  for(let count=1; count<=8; count++){
+    for(const p of sizes){
+      const total=count*p.mat_area_m2;
+      if(total > target+1e-6) continue;                  // samlet matteareal må ligge under ~90 %
+      opts.push({ productId:p.id, count, total });
+    }
+  }
+  if(!opts.length){                                      // rom mindre enn minste matte → minste, 1 stk
+    const smallest=sizes.slice().sort((a,b)=>a.mat_area_m2-b.mat_area_m2)[0];
+    return { productId:smallest.id, count:1 };
+  }
+  const within=opts.filter(o=> o.total >= net*0.85);     // dekker minst 85 % av rommet
+  const pool=within.length?within:opts;
+  pool.sort((a,b)=> a.count-b.count || (b.total-a.total));// færrest matter, deretter størst dekning
+  return { productId:pool[0].productId, count:pool[0].count };
+}
+// Formatering + mattestørrelse-tekst for resultatfeltet.
+function _listFmt(n){ return (Math.abs(n%1)<1e-9)?String(Math.round(n)):n.toFixed(1); }
+function _listMatSizeStr(room){
+  const pid=_listRoomProductId(room.id), p=pid!=null?HEATING_PRODUCTS.find(x=>x.id===pid):null;
+  const area=p?(p.mat_area_m2||0):0; if(!area) return '—';
+  const cnt=room.listCount||1;
+  return cnt>1 ? (cnt+' × '+_listFmt(area)+' m²') : (_listFmt(area)+' m²');
+}
+// ── Familier (klasser): kabel = InFloor 10T/17T, matte = EcoMat 60T/100T/150T ──
+function _listFamiliesFor(modType){
+  const prods = modType==='mat' ? _listMatProducts() : _listCableProducts();
+  const fams=[], seen=new Set();
+  for(const p of prods){ const f=p.product_family||p.name; if(!seen.has(f)){ seen.add(f); fams.push(f); } }
+  return fams;
+}
+function _listFamilyProducts(modType, family){
+  const prods = modType==='mat' ? _listMatProducts() : _listCableProducts();
+  return prods.filter(p=>(p.product_family||p.name)===family);
+}
+function _listMatFamiliesByWm2(){
+  const out=[], seen=new Set();
+  for(const p of _listMatProducts()){ const f=p.product_family||p.name; if(!seen.has(f)){ seen.add(f); out.push({family:f, wm2:p.watt_per_m2||0}); } }
+  return out;
+}
+// Beste {produkt, antall} INNEN en familie for rommet (færrest like elementer).
+function _listSuggestInFamily(roomId, modType, family){
+  if(!family) return null;
+  return modType==='cable'
+    ? _listSuggestCableFrom(roomId, _listFamilyProducts('cable',family))
+    : _listSuggestMatFrom(roomId, _listFamilyProducts('mat',family));
+}
+// Foreslå produkt + antall fra netto areal + ønsket W/m² (velger familie, variant OG antall).
+function _listAutoSuggest(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const target=_roomTargetWm2(roomId), net=roomAreas(room).net/10000;
+  if(net<=0){ S.cables=S.cables.filter(c=>c.roomId!==roomId); S.mats=S.mats.filter(m=>m.roomId!==roomId); room.listCount=1; return; }
+  const modType=room.listModType||'cable';
+  if(modType==='cable'){
+    const s=_listSuggestCableFrom(roomId, _listCableProducts());
+    if(s){ const p=HEATING_PRODUCTS.find(pr=>pr.id===s.productId); room.listFamily=p?(p.product_family||p.name):(_listFamiliesFor('cable')[0]||null); _listSetRoomProduct(roomId,'cable',s.productId,s.count); }
+    else { room.listFamily=_listFamiliesFor('cable')[0]||null; _listSetRoomProduct(roomId,'cable',null,1); }
+  } else {
+    const fams=_listMatFamiliesByWm2();
+    let bestF=fams[0], bd=Infinity;
+    for(const f of fams){ const d=Math.abs(f.wm2-target); if(d<bd){bd=d;bestF=f;} }
+    room.listFamily = bestF ? bestF.family : (_listFamiliesFor('mat')[0]||null);
+    const s=_listSuggestMatFrom(roomId, _listFamilyProducts('mat',room.listFamily));
+    _listSetRoomProduct(roomId,'mat', s?s.productId:null, s?s.count:1);
+  }
+}
+// Behold valgt produkt + antall, men reberegn CC/effekt for nytt areal (eller foreslå hvis tomt).
+function _listRecomputeCurrent(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const pid=_listRoomProductId(roomId);
+  if(pid==null){ _listAutoSuggest(roomId); return; }
+  _listSetRoomProduct(roomId, room.listModType||'cable', pid, room.listCount||1);
+}
+function _listStepProduct(roomId, dir){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const target=_roomTargetWm2(roomId), net=roomAreas(room).net/10000, modType=room.listModType||'cable';
+  const ids = modType==='cable' ? _listCableCandidates(roomId,target).list.map(c=>c.product.id) : _listMatCandidates(net).map(c=>c.product.id);
+  if(!ids.length) return;
+  let idx=ids.indexOf(_listRoomProductId(roomId)); if(idx<0) idx=0;
+  idx=Math.max(0,Math.min(ids.length-1, idx+dir));
+  _listSetRoomProduct(roomId, modType, ids[idx]);
+  renderListModule();
+}
+// ── Rad-CRUD + felt-redigering (utkast-kort + liste) ──
+function _listEnsureFloor(part){
+  let floor=S.floors.find(f=>f.partId===part.id);
+  if(!floor){ floor={id:S.counters.nextFloorId++,name:'Plan 1',order:S.floors.length,collapsed:false,partId:part.id}; S.floors.push(floor); }
+  return floor;
+}
+function _listCreateRoomObj(part, floor){
+  return { id:S.counters.nextRoomId++, name:'Rom '+(S.rooms.filter(r=>r.partId===part.id && r.listMode && !r.listDraft).length+1),
+    floorId:floor.id, partId:part.id, listMode:true, shape:'list', points:[], walls:[],
+    area:0, listHindCm2:0, targetWm2:null, roomType:null, dims:[], annotOffsets:{}, color:'#888', cardVisible:false,
+    listModType:'cable', listFamily:(_listFamiliesFor('cable')[0]||null), listCount:1 };
+}
+// Utkast-rommet som redigeres i «Nytt rom»-kortet (kun ett om gangen).
+function _listDraftRoom(){
+  const part=_listActivePart(); if(!part) return null;
+  let d=S.rooms.find(r=>r.partId===part.id && r.listMode && r.listDraft);
+  if(!d){ d=_listCreateRoomObj(part, _listEnsureFloor(part)); d.listDraft=true; S.rooms.push(d); }
+  return d;
+}
+function _listFinalizedRooms(){
+  const part=_listActivePart(); return part? S.rooms.filter(r=>r.partId===part.id && r.listMode && !r.listDraft):[];
+}
+// «Legg til rom»: gjør utkastet til et opprettet rom og start et nytt blankt utkast.
+function _listFinalizeDraft(){
+  const d=_listDraftRoom(); if(!d) return;
+  if(!(d.area>0)){ if(typeof _showToast==='function') _showToast('Skriv inn brutto areal først','warn'); const el=document.getElementById('li-gross-'+d.id); if(el) el.focus(); return; }
+  pushUndo();
+  d.listDraft=false; delete d._editing;
+  renderListModule(); renderSidebar(); _scheduleAutoSave&&_scheduleAutoSave();
+  const nd=_listDraftRoom(); const fld=document.getElementById('li-floor-'+nd.id); if(fld) fld.focus();
+}
+// Last et opprettet rom tilbake i kortet for redigering.
+function _listEditRoom(roomId){
+  const part=_listActivePart(); if(!part) return;
+  const cur=S.rooms.find(r=>r.partId===part.id && r.listMode && r.listDraft);
+  if(cur && cur.id!==roomId){ if(cur.area>0){ cur.listDraft=false; delete cur._editing; } else S.rooms=S.rooms.filter(r=>r.id!==cur.id); }
+  const r=S.rooms.find(r=>r.id===roomId); if(r){ r.listDraft=true; r._editing=true; }
+  renderListModule(); renderSidebar();
+}
+// Kompat: noen stier kaller _listAddRoom — sørg for/fokuser utkastet.
+function _listAddRoom(focusFirst){
+  const d=_listDraftRoom();
+  if(focusFirst && d){ const el=document.getElementById('li-floor-'+d.id); if(el){ el.focus(); el.select&&el.select(); } }
+  return d;
+}
+function _listDeleteRoom(roomId){
+  pushUndo();
+  S.rooms=S.rooms.filter(r=>r.id!==roomId);
+  S.cables=S.cables.filter(c=>c.roomId!==roomId);
+  S.mats=S.mats.filter(m=>m.roomId!==roomId);
+  _invalidateCableCache&&_invalidateCableCache(); _invalidateMatCache&&_invalidateMatCache();
+  renderListModule(); _scheduleAutoSave&&_scheduleAutoSave();
+}
+function _listEditName(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(r) r.name=v; _scheduleAutoSave&&_scheduleAutoSave(); }
+function _listEditFloor(roomId,name){
+  const part=_listActivePart(), r=S.rooms.find(r=>r.id===roomId); if(!part||!r) return;
+  name=(name||'').trim()||'Plan 1';
+  let floor=S.floors.find(f=>f.partId===part.id && f.name===name);
+  if(!floor){ floor={id:S.counters.nextFloorId++,name,order:S.floors.length,collapsed:false,partId:part.id}; S.floors.push(floor); }
+  r.floorId=floor.id; S.ui.activeFloorId=floor.id;
+  // Rydd bort tomme etasjer i denne delen (ingen rom refererer dem) — unngår opphopning når
+  // man stepper gjennom Plan-valgene. Andre deler røres ikke.
+  S.floors=S.floors.filter(f=> f.partId!==part.id || S.rooms.some(rr=>rr.floorId===f.id));
+  _scheduleAutoSave&&_scheduleAutoSave();
+}
+// Areal/hindring/ønsket W/m² definerer behovet → kjør forslag på nytt (familie+variant+antall),
+// men hold fast på valgt Type (Kabel/Matte). Type/Klasse/Produkt/Antall finjusteres etterpå.
+function _listEditArea(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.area=Math.max(0,_listNum(v))*10000; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+function _listEditHind(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listHindCm2=Math.max(0,_listNum(v))*10000; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+function _listEditTarget(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=_listNum(v); r.targetWm2=n>0?n:null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+// Type-bytte (Kabel/Matte): velg piltast → endrer på stedet, behold fokus på Type-feltet → TAB videre til Klasse.
+function _listOnType(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listModType=v; r.listFamily=null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+// Klasse-bytte (10T/17T el. 60/100/150T): behold fokus på Klasse → TAB videre til Produkt.
+function _listOnClass(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listFamily=v; const s=_listSuggestInFamily(roomId, r.listModType||'cable', v); _listSetRoomProduct(roomId, r.listModType||'cable', s?s.productId:null, s?s.count:1); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+function _listOnProduct(roomId,productId){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const pid=parseInt(productId,10); _listSetRoomProduct(roomId, r.listModType||'cable', pid, r.listCount||1); const p=HEATING_PRODUCTS.find(pr=>pr.id===pid); if(p) r.listFamily=p.product_family||p.name; _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+// Antall-felt + ▲/▼: behold produkt/type, endre antall like elementer (reberegner CC/effekt).
+function _listEditCount(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=Math.max(1,Math.min(16, parseInt(String(v).replace(/[^0-9]/g,''),10)||1)); _listSetRoomProduct(roomId, r.listModType||'cable', _listRoomProductId(roomId), n); const el=document.getElementById('li-count-'+roomId); if(el) el.value=String(n); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+function _listStepCount(roomId,dir){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=Math.max(1,Math.min(16,(r.listCount||1)+dir)); _listSetRoomProduct(roomId, r.listModType||'cable', _listRoomProductId(roomId), n); const el=document.getElementById('li-count-'+roomId); if(el) el.value=String(n); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+function _listKey(e){
+  const fields=[...document.querySelectorAll('#list-module .li-field')];
+  const i=fields.indexOf(e.target);
+  if(e.key==='Enter'){
+    e.preventDefault();
+    if(i>=0 && i<fields.length-1){ const nx=fields[i+1]; nx.focus(); nx.select&&nx.select(); }
+    else { _listFinalizeDraft(); }   // Enter på siste felt = legg til rom
+  } else if(e.key==='Tab' && fields.length){
+    // TAB hopper rundt i kortet: siste felt → første, Shift+TAB første → siste.
+    if(!e.shiftKey && i===fields.length-1){ e.preventDefault(); fields[0].focus(); fields[0].select&&fields[0].select(); }
+    else if(e.shiftKey && i===0){ e.preventDefault(); const last=fields[fields.length-1]; last.focus(); last.select&&last.select(); }
+  }
+}
+function _listClassOptionsHtml(room){
+  const modType=room.listModType||'cable';
+  let cur=room.listFamily;
+  if(!cur){ const pid=_listRoomProductId(room.id); const p=pid!=null?HEATING_PRODUCTS.find(pr=>pr.id===pid):null; if(p) cur=p.product_family||p.name; }
+  let o='';
+  for(const f of _listFamiliesFor(modType)){ o+=`<option value="${esc(f)}"${f===cur?' selected':''}>${esc(f)}</option>`; }
+  return o || `<option value="">—</option>`;
+}
+function _listProductOptionsHtml(room){
+  const rid=room.id, modType=room.listModType||'cable', curId=_listRoomProductId(rid);
+  const net=roomAreas(room).net/10000, count=room.listCount||1;
+  const family=room.listFamily;
+  let opts='';
+  if(modType==='cable'){
+    const fam=_listFamilyProducts('cable', family);
+    for(const p of fam){
+      if(!p.cable_length_m||!p.watt_per_m){ opts+=`<option value="${p.id}"${p.id===curId?' selected':''}>${esc(p.name)}</option>`; continue; }
+      const pw=p.total_effect_w||p.cable_length_m*p.watt_per_m;          // effekt per element
+      const cc=(net/count)/p.cable_length_m*100;                         // CC per element (netto/antall)
+      const minSp=(p.min_spacing_mm||50)/10, maxSp=(p.max_spacing_mm||200)/10, valid=cc>=minSp&&cc<=maxSp;
+      const flate=net>0?Math.round((pw*count)/net):0;                    // samlet flate-effekt
+      opts+=`<option value="${p.id}"${p.id===curId?' selected':''}>${esc(p.name)} · ${Math.round(pw)} W · CC ${cc.toFixed(1)} cm${flate?' · '+flate+' W/m²':''}${valid?'':' ⚠'}</option>`;
+    }
+  } else {
+    const fam=_listFamilyProducts('mat', family);
+    for(const p of fam){ const wm2=p.watt_per_m2||0; const area=p.mat_area_m2||net; const wEach=p.total_effect_w||Math.round(wm2*area);
+      opts+=`<option value="${p.id}"${p.id===curId?' selected':''}>${esc(p.name)} · ${wEach} W/stk (${wm2} W/m²)</option>`; }
+  }
+  return opts || `<option value="">(ingen produkter)</option>`;
+}
+// Bygg Klasse-/Produkt-nedtrekkene + antall-feltet på stedet (uten full re-render → fokus/TAB bevares).
+function _listUpdateRowSelects(roomId, skipClass){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  if(!skipClass){ const cs=document.getElementById('li-class-'+roomId); if(cs) cs.innerHTML=_listClassOptionsHtml(room); }
+  const ps=document.getElementById('li-prod-'+roomId); if(ps) ps.innerHTML=_listProductOptionsHtml(room);
+  const ce=document.getElementById('li-count-'+roomId); if(ce) ce.value=String(room.listCount||1);
+}
+// Oppdater kun beregnede tekst-celler (netto/effekt/W-m²/CC/dekning).
+function _listRefreshComputed(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const stats=_computeRoomStats(room), net=stats.nettoM2, brutto=stats.bruttoM2, ratedW=_roomRatedEffectW(room);
+  const set=(id,t)=>{ const el=document.getElementById(id); if(el) el.textContent=t; };
+  set('li-net-'+roomId, net?net.toFixed(2):'0');
+  set('li-eff-'+roomId, ratedW?ratedW+' W':'—');
+  set('li-wm2b-'+roomId, (ratedW&&brutto>0)?Math.round(ratedW/brutto)+' W/m²':'—');
+  set('li-wm2f-'+roomId, (ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—');
+  // Kabel → CC; Matte → Størrelse matte (m²). Etiketten byttes på stedet (fokus bevares).
+  const modType=room.listModType||'cable';
+  set('li-cclabel-'+roomId, modType==='mat'?'Størrelse':'CC');
+  set('li-cc-'+roomId, modType==='mat' ? _listMatSizeStr(room) : (stats.cableCcCm>0?stats.cableCcCm.toFixed(1)+' cm':'—'));
+  const heated=stats.heatedM2||0;
+  set('li-cov-'+roomId, net>0?Math.min(100,Math.round(heated/net*100))+' %':'—');
+  _scheduleAutoSave&&_scheduleAutoSave();
+}
+// Stepp et nedtrekk med ▲/▼-knappene (gir samme effekt som piltast i feltet).
+function _listStepSelect(rid, which, dir){
+  const sel=document.getElementById('li-'+which+'-'+rid); if(!sel || !sel.options.length) return;
+  let i=sel.selectedIndex; if(i<0) i=0;
+  i=Math.max(0, Math.min(sel.options.length-1, i+dir));
+  sel.selectedIndex=i;
+  const v=sel.value;
+  if(which==='floor') _listEditFloor(rid, v);
+  else if(which==='type') _listOnType(rid, v);
+  else if(which==='class') _listOnClass(rid, v);
+  else _listOnProduct(rid, v);
+  sel.focus();
+}
+// Etasje-velger: PLAN -2 … 8, standard «Plan 1». Egendefinerte navn beholdes øverst.
+function _listPlanOptionsHtml(room){
+  const floor=S.floors.find(f=>f.id===room.floorId);
+  const cur=floor?floor.name:'Plan 1';
+  let o='';
+  if(cur && !/^Plan -?\d+$/.test(cur)) o+=`<option value="${esc(cur)}" selected>${esc(cur)}</option>`;
+  for(let p=-2;p<=8;p++){ const lbl='Plan '+p; o+=`<option value="${lbl}"${lbl===cur?' selected':''}>${lbl}</option>`; }
+  return o;
+}
+// «Nytt rom»-kortet (utkast): alle felt + live resultat samlet i ett bilde.
+function _listDraftCardHtml(room){
+  const rid=room.id, stats=_computeRoomStats(room), net=stats.nettoM2, brutto=stats.bruttoM2, ratedW=_roomRatedEffectW(room);
+  const modType=room.listModType||'cable';
+  const floor=S.floors.find(f=>f.id===room.floorId);
+  const grossStr=(room.area||0)>0?((room.area)/10000).toFixed(1).replace(/\.0$/,''):'';
+  const hindStr=(room.listHindCm2||0)>0?((room.listHindCm2)/10000).toFixed(1).replace(/\.0$/,''):'';
+  const targetStr=room.targetWm2?String(room.targetWm2):'';
+  const cc=(modType==='cable'&&stats.cableCcCm>0)?stats.cableCcCm.toFixed(1)+' cm':'—';
+  const wm2b=(ratedW&&brutto>0)?Math.round(ratedW/brutto)+' W/m²':'—';
+  const wm2f=(ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—';
+  const heated=stats.heatedM2||0, cov=net>0?Math.min(100,Math.round(heated/net*100))+' %':'—';
+  const editing=!!room._editing;
+  const base='box-sizing:border-box;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:6px;color:var(--text,#e8eaed);padding:7px 9px;font-size:13px';
+  const inp=(id,val,w,onchg,extra)=>`<input id="${id}" class="li-field" onkeydown="_listKey(event)" value="${val}" ${extra||''} onchange="${onchg}" style="width:${w}px;${base}">`;
+  const step=(which)=>`<span style="display:inline-flex;flex-direction:column;margin-left:4px">`+
+    `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',-1)" title="Forrige" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:4px 4px 0 0;color:var(--dim,#9aa0aa);width:18px;height:15px;font-size:9px;line-height:1;padding:0">▲</button>`+
+    `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',1)" title="Neste" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 4px 4px;color:var(--dim,#9aa0aa);width:18px;height:15px;font-size:9px;line-height:1;padding:0">▼</button></span>`;
+  const _handler={floor:'_listEditFloor',type:'_listOnType',class:'_listOnClass',prod:'_listOnProduct'};
+  const sel=(key,inner,w)=>`<span style="display:inline-flex;align-items:center"><select id="li-${key}-${rid}" class="li-field" onkeydown="_listKey(event)" onchange="${_handler[key]}(${rid},this.value)" style="${w?'width:'+w+'px;':''}${base}">${inner}</select>${step(key)}</span>`;
+  const countStep=`<span style="display:inline-flex;align-items:center"><input id="li-count-${rid}" class="li-field" onkeydown="_listKey(event)" value="${room.listCount||1}" inputmode="numeric" onchange="_listEditCount(${rid},this.value)" style="width:46px;text-align:center;${base}"><span style="display:inline-flex;flex-direction:column;margin-left:4px"><button tabindex="-1" onclick="_listStepCount(${rid},1)" title="Flere" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:4px 4px 0 0;color:var(--dim,#9aa0aa);width:18px;height:15px;font-size:9px;line-height:1;padding:0">▲</button><button tabindex="-1" onclick="_listStepCount(${rid},-1)" title="Færre" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 4px 4px;color:var(--dim,#9aa0aa);width:18px;height:15px;font-size:9px;line-height:1;padding:0">▼</button></span></span>`;
+  const field=(lbl,ctrl)=>`<label style="display:flex;flex-direction:column;gap:5px"><span style="font-size:11px;color:var(--dim,#9aa0aa);font-weight:600">${lbl}</span>${ctrl}</label>`;
+  const resItem=(lbl,id,val,unit,lblId)=>`<div style="display:flex;flex-direction:column;gap:2px;min-width:78px"><span ${lblId?'id="'+lblId+'" ':''}style="font-size:10px;color:var(--dim,#9aa0aa);text-transform:uppercase;letter-spacing:.3px">${lbl}</span><span style="font-size:15px;font-weight:600;color:var(--text,#e8eaed);font-variant-numeric:tabular-nums"><span id="${id}">${val}</span>${unit||''}</span></div>`;
+  const ccLabel = modType==='mat' ? 'Størrelse' : 'CC';
+  const ccVal = modType==='mat' ? _listMatSizeStr(room) : cc;
+  return `<div style="max-width:940px;background:var(--surface,#15171c);border:1px solid var(--border,#2a2d36);border-radius:12px;padding:16px 18px;margin-bottom:22px;box-shadow:0 2px 12px rgba(0,0,0,0.18)">
+    <div style="font-size:14px;font-weight:700;margin-bottom:14px;color:var(--text,#e8eaed)">${editing?'Rediger rom':'Nytt rom'}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px 18px;margin-bottom:14px">
+      ${field('Etasje', sel('floor', _listPlanOptionsHtml(room), 120))}
+      ${field('Romnavn', inp('li-name-'+rid, esc(room.name||''), 160, '_listEditName('+rid+',this.value)'))}
+      ${field('Brutto areal m²', inp('li-gross-'+rid, grossStr, 90, '_listEditArea('+rid+',this.value)', 'inputmode="decimal" placeholder="m²"'))}
+      ${field('Hindringer m²', inp('li-hind-'+rid, hindStr, 90, '_listEditHind('+rid+',this.value)', 'inputmode="decimal" placeholder="0"'))}
+      ${field('Ønsket W/m²', inp('li-tgt-'+rid, targetStr, 90, '_listEditTarget('+rid+',this.value)', 'inputmode="decimal" placeholder="'+_roomTargetWm2(rid)+'"'))}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px 18px;margin-bottom:16px">
+      ${field('Type', sel('type',`<option value="cable"${modType==='cable'?' selected':''}>Kabel</option><option value="mat"${modType==='mat'?' selected':''}>Matte</option>`,92))}
+      ${field('Klasse', sel('class',_listClassOptionsHtml(room),160))}
+      ${field('Foreslått produkt', sel('prod',_listProductOptionsHtml(room),240))}
+      ${field('Antall', countStep)}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:16px 26px;padding:12px 14px;background:var(--surface2,#1a1c22);border-radius:8px;margin-bottom:16px">
+      ${resItem('Netto', 'li-net-'+rid, net?net.toFixed(2):'0', ' m²')}
+      ${resItem('Effekt', 'li-eff-'+rid, ratedW?ratedW+' W':'—', '')}
+      ${resItem('W/m² brutto', 'li-wm2b-'+rid, wm2b, '')}
+      ${resItem('W/m² flate', 'li-wm2f-'+rid, wm2f, '')}
+      ${resItem(ccLabel, 'li-cc-'+rid, ccVal, '', 'li-cclabel-'+rid)}
+      ${resItem('Dekning', 'li-cov-'+rid, cov, '')}
+    </div>
+    <button onclick="_listFinalizeDraft()" style="cursor:pointer;border:none;border-radius:8px;background:var(--accent,#4fa2b8);color:#0d0e10;padding:9px 18px;font-size:13px;font-weight:700">${editing?'✓ Oppdater rom':'+ Legg til rom'}</button>
+  </div>`;
+}
+// Opprettet rom — kompakt, klikkbar oppsummeringsrad (klikk = rediger i kortet).
+function _listFinalizedRowHtml(room){
+  const rid=room.id, stats=_computeRoomStats(room), net=stats.nettoM2, ratedW=_roomRatedEffectW(room);
+  const modType=room.listModType||'cable';
+  const floor=S.floors.find(f=>f.id===room.floorId);
+  const pid=_listRoomProductId(rid), p=pid!=null?HEATING_PRODUCTS.find(x=>x.id===pid):null;
+  const count=room.listCount||1;
+  const prodTxt=p?((count>1?count+'× ':'')+p.name):'—';
+  const cc=modType==='mat' ? _listMatSizeStr(room) : ((stats.cableCcCm>0)?stats.cableCcCm.toFixed(1)+' cm':'—');
+  const wm2f=(ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—';
+  const td=(c,st)=>`<td style="padding:7px 10px;border-bottom:1px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${c}</td>`;
+  return `<tr style="cursor:pointer" onmouseover="this.style.background='var(--surface2,#1a1c22)'" onmouseout="this.style.background=''" onclick="_listEditRoom(${rid})" title="Klikk for å redigere">
+    ${td(esc(floor?floor.name:''))}
+    ${td('<b>'+esc(room.name||'Rom')+'</b>')}
+    ${td(net?net.toFixed(2)+' m²':'—')}
+    ${td(modType==='mat'?'Matte':'Kabel')}
+    ${td(esc(prodTxt))}
+    ${td('<b>'+(ratedW?ratedW+' W':'—')+'</b>')}
+    ${td(wm2f)}
+    ${td(cc)}
+    ${td(`<button onclick="event.stopPropagation();_listDeleteRoom(${rid})" title="Slett rom" style="cursor:pointer;background:transparent;border:none;color:var(--warn,#ef4444);font-size:14px">✕</button>`, ';text-align:right')}
+  </tr>`;
+}
+function renderListModule(){
+  const el=document.getElementById('list-module'); if(!el) return;
+  const draft=_listDraftRoom();
+  const rooms=_listFinalizedRooms();
+  let totW=0, totNet=0; for(const r of rooms){ totW+=_roomRatedEffectW(r); totNet+=_computeRoomStats(r).nettoM2; }
+  const btn='cursor:pointer;border:1px solid var(--border,#2a2d36);border-radius:7px;background:var(--surface2,#1a1c22);color:var(--text,#e8eaed);padding:7px 12px;font-size:12px;font-weight:600';
+  const th=(t,st)=>`<th style="text-align:left;font-size:11px;color:var(--dim,#9aa0aa);font-weight:600;padding:6px 10px;border-bottom:2px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${t}</th>`;
+  let h=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+    <div style="font-size:18px;font-weight:700;color:var(--text,#e8eaed)">${IC('clipboard',20)} Hurtig prosjektering</div>
+    <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} rom · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W</div>
+    <div style="flex:1"></div>
+    <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
+    <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
+  </div>`;
+  h+= draft ? _listDraftCardHtml(draft) : '';
+  h+=`<div style="font-size:13px;font-weight:700;margin:4px 0 10px;color:var(--text,#e8eaed)">Opprettede rom (${rooms.length})</div>`;
+  if(rooms.length){
+    h+=`<div style="overflow-x:auto;max-width:100%"><table style="border-collapse:collapse;font-size:12.5px;min-width:680px"><thead><tr>
+      ${th('Etasje')}${th('Rom')}${th('Netto')}${th('Type')}${th('Produkt')}${th('Effekt')}${th('W/m² flate')}${th('CC / str.')}${th('',';text-align:right')}
+    </tr></thead><tbody>`;
+    for(const r of rooms) h+=_listFinalizedRowHtml(r);
+    h+=`</tbody></table></div>`;
+  } else {
+    h+=`<div style="color:var(--dim,#9aa0aa);font-size:12px">Ingen rom opprettet ennå. Fyll inn kortet over og klikk «Legg til rom».</div>`;
+  }
+  el.innerHTML=h;
+}
+function _showListModule(){
+  let el=document.getElementById('list-module');
+  if(!el){ el=document.createElement('div'); el.id='list-module';
+    el.style.cssText='position:absolute;inset:0;background:var(--bg,#0d0e10);overflow:auto;z-index:60;padding:18px 22px';
+    (document.getElementById('canvas-wrap')||document.body).appendChild(el); }
+  el.style.display='block';
+  renderListModule();
+}
+function _hideListModule(){ const el=document.getElementById('list-module'); if(el) el.style.display='none'; }
 
 function backToModuleScreen_back() {
   if (S.project.parts.length===0) {
@@ -28407,10 +28964,10 @@ function updateTopbarForModule() {
 
 function renderPartTabs() { renderModuleNav(); }
 
-const _MOD_SHORT = {indoor:'Inne',stair:'Trapp',snow:'Ute',roof:'Tak & renne'};
+const _MOD_SHORT = {indoor:'Inne',list:'Liste',stair:'Trapp',snow:'Ute',roof:'Tak & renne'};
 // Visningsrekkefølge i modul-navet: Inne | Ute | Trapp (kun synlig etikett —
 // MODULE_TYPES-arrayet og type-kodene floor/snow/stair er uendret).
-const _MOD_NAV_ORDER = ['indoor','snow','stair'];
+const _MOD_NAV_ORDER = ['indoor','list','snow','stair'];
 
 function renderModuleNav() {
   const container = document.getElementById('tb-module-nav');
@@ -29113,7 +29670,7 @@ function _updateNotes(text) {
 function _showExportDialog() {
   let overlay = document.getElementById('export-dialog');
   if (!overlay) { overlay = document.createElement('div'); overlay.id='export-dialog'; overlay.className='exp-overlay'; overlay.onclick=e=>{if(e.target===overlay)overlay.style.display='none'}; document.body.appendChild(overlay); }
-  const rooms = S.rooms || [];
+  const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes
   const stairs = S.stairs || [];
   const hasStairs = stairs.length > 0;
   const hasPrices = HEATING_PRODUCTS.some(p => p.price_list > 0);
@@ -29140,6 +29697,7 @@ function _showExportDialog() {
           ${stairs.map(s => `<label class="exp-check sub" onclick="_expPreviewStair(${s.id})"><input type="checkbox" class="exp-stair-cb" value="${s.id}" checked> ${_esc(s.name||'Trapp')}</label>`).join('')}
         </div>` : ''}
         <div class="exp-group">
+          <label class="exp-check"><input type="checkbox" id="exp-roomtable" checked> Romoversikt</label>
           <label class="exp-check"><input type="checkbox" id="exp-matlist" checked> Materialliste</label>
           ${hasPrices ? `<label class="exp-check"><input type="checkbox" id="exp-pricing"> Tilbudspris</label>
             <div class="exp-check sub" style="padding-left:24px">
@@ -29214,6 +29772,7 @@ function _runExportPDF() {
     summary: document.getElementById('exp-summary')?.checked,
     rooms: [...document.querySelectorAll('.exp-room-cb:checked')].map(c => +c.value),
     stairs: [...document.querySelectorAll('.exp-stair-cb:checked')].map(c => +c.value),
+    roomTable: document.getElementById('exp-roomtable')?.checked,
     materialList: document.getElementById('exp-matlist')?.checked,
     pricing: document.getElementById('exp-pricing')?.checked,
     discount: parseFloat(document.getElementById('exp-discount')?.value) || 0,
@@ -29228,7 +29787,7 @@ function _runExportPDF() {
 
 // ─── PDF EXPORT ──────────────────────────────────────────────
 async function exportPDF(opts) {
-  opts = opts || { cover:true, summary:true, rooms:S.rooms.map(r=>r.id), stairs:(S.stairs||[]).map(s=>s.id), materialList:true, pricing:false, discount:0, showDGDB:false, docs:false, signature:false, freeText:'' };
+  opts = opts || { cover:true, summary:true, rooms:S.rooms.map(r=>r.id), stairs:(S.stairs||[]).map(s=>s.id), roomTable:true, materialList:true, pricing:false, discount:0, showDGDB:false, docs:false, signature:false, freeText:'' };
   if (!window.jspdf) { alert('PDF-bibliotek ikke lastet. Prøv igjen.'); return; }
   // Foil-accessories modal — gathers tilbehør quantities before render.
   // Cancelled modal short-circuits the whole export (per spec).
@@ -29361,7 +29920,7 @@ async function exportPDF(opts) {
     return { sym: '○', color: [160, 165, 175] };
   };
   for (const fl of [...S.floors].sort((a, b) => a.order - b.order)) {
-    const frooms = S.rooms.filter(r => r.floorId === fl.id);
+    const frooms = S.rooms.filter(r => r.floorId === fl.id && !r.listDraft);
     let floorW = 0;
     const roomSums = [];
     for (const room of frooms) {
@@ -29374,7 +29933,7 @@ async function exportPDF(opts) {
     totalProjectW += floorW;
     floorSummaries.push({ floor: fl, rooms: roomSums, totalW: floorW });
   }
-  const unassigned = S.rooms.filter(r => r.floorId === null);
+  const unassigned = S.rooms.filter(r => r.floorId === null && !r.listDraft);
   if (unassigned.length) {
     const roomSums = [];
     let floorW = 0;
@@ -29514,9 +30073,73 @@ async function exportPDF(opts) {
   } // end if (opts.summary)
   // (Status legend removed \u2014 Status column is gone)
 
+  // \u2500\u2500 Romoversikt (A-L tabell, \u00e9n rad pr. rom) \u2500\u2500 (only when selected)
+  // Kolonne J (Effekt W) = produktets RATEDE effekt (_roomRatedEffectW), ikke geometri-utledet.
+  if (opts.roomTable) {
+    if (_pageStarted) _addPage(); else _pageStarted = true;
+    _currentRoomName = '';
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(20, 40, 80);
+    doc.text('Romoversikt', M, y); y += 9;
+
+    const rColX = [15, 29, 51, 62, 69, 85, 101, 131, 153, 166, 177, 187];
+    const rColW = [14, 22, 11,  7, 16, 16, 30,  22,  13,  11,  10,  8];
+    const rHeads = ['Etasje','Rom','Areal','Ant','El.nr','Art.nr','Produkt','Gruppe','Type','W','W/m\u00b2','CC'];
+    const _fit = (s, wmm) => {
+      s = String(s == null ? '' : s);
+      if (!s) return '';
+      const parts = doc.splitTextToSize(s, wmm);
+      return parts[0] || '';
+    };
+    const _rDrawHead = () => {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7);
+      doc.setTextColor(120, 130, 150);
+      for (let i = 0; i < rHeads.length; i++) doc.text(rHeads[i], rColX[i], y);
+      y += 2.5; _line(y); y += 3.5;
+      doc.setFont('helvetica', 'normal');
+    };
+    _rDrawHead();
+    for (const fs of floorSummaries) {
+      for (const rs of fs.rooms) {
+        if (y + 5 > H - M) { _addPage(); _rDrawHead(); }
+        const room = rs.room, st = rs.stats;
+        const nettoM2 = st.nettoM2 || 0;
+        const productCount = _stripsForRoom(room.id).length + _cablesForRoom(room.id).length +
+                             _matsForRoom(room.id).length + _platesForRoom(room.id).length;
+        const ratedW = _roomRatedEffectW(room);
+        const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2) : (rs.targetWm2 || 0);
+        const dom = _roomDominantProduct(room);
+        const dp = dom?.product || null;
+        const ccCm = st.cableCcCm > 0 ? st.cableCcCm.toFixed(1) : '';
+        const cells = [
+          fs.floor ? fs.floor.name : '',
+          room.name || 'Rom',
+          nettoM2 ? nettoM2.toFixed(1) : '',
+          String(productCount),
+          dp?.el_no || '',
+          dp?.article_no || '',
+          dp?.name || '',
+          dp?.product_family || '',
+          dom?.kind || '',
+          ratedW ? String(ratedW) : '',
+          wm2 ? String(wm2) : '',
+          ccCm
+        ];
+        doc.setFontSize(7);
+        doc.setTextColor(30, 40, 60);
+        for (let i = 0; i < cells.length; i++) doc.text(_fit(cells[i], rColW[i]), rColX[i], y);
+        y += 5;
+      }
+    }
+    _pageStarted = true;
+  } // end if (opts.roomTable)
+
   // ── Room detail pages ──
   const _selectedRooms = opts.rooms && opts.rooms.length > 0 ? S.rooms.filter(r => opts.rooms.includes(r.id)) : S.rooms;
   for (const room of _selectedRooms) {
+    if (room.listMode) continue;   // Hurtig prosjektering-rom har ingen tegning → ingen detaljside (vises i Romoversikt + materialliste)
     if (_pageStarted) _addPage(); else _pageStarted = true;
     _currentRoomName = room.name || 'Rom';
     const stats = _computeRoomStats(room);
@@ -33548,7 +34171,7 @@ async function _exportMaterialListXLSX() {
   const accessoryResult = await showAccessoriesModal();
   if (!accessoryResult) return;
   const accessoryItems = accessoryResult.items || [];
-  const rooms = S.rooms || [];
+  const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes
 
   // ── Collect raw line items shared by all three sheets ──
   // Each entry: { product, kind, roomName, floorName, qtyStr, areaM2, watt }
@@ -33701,42 +34324,42 @@ async function _exportMaterialListXLSX() {
   const wsMat = XLSX.utils.aoa_to_sheet(matRows);
   wsMat['!cols'] = [{wch:14},{wch:16},{wch:30},{wch:18},{wch:14},{wch:18},{wch:16},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12}];
 
-  // ── Sheet 3: Per rom — one line per room with crosscheck data ──
-  const roomRows = [['Rom','Etasje','Type','Areal m²','Effekt W','W/m²','CC cm','Antall produkter','Validering']];
+  // ── Sheet 3: Per rom — A-L (12 kolonner), én rad pr. rom. Kolonne J (Effekt W) er produktets
+  //    RATEDE effekt (_roomRatedEffectW), ikke den geometri-utledede stats.totalW. E-H = produktets
+  //    el-nummer/art.nr/navn/familie (det dominerende produktet for rom med flere produkter). ──
+  const roomRows = [['Etasje','Rom','Areal m²','Antall produkter','El.nummer','Lev. art.nr','Produkt','Produktgruppe','Type','Effekt W','W/m²','CC cm']];
   for (const room of rooms) {
     const floor = (S.floors||[]).find(f => f.id === room.floorId);
-    const stats = (typeof _computeRoomStats === 'function') ? _computeRoomStats(room) : { nettoM2: 0, totalW: 0 };
-    const targetWm2 = (typeof _roomTargetWm2 === 'function') ? (_roomTargetWm2(room.id) || 0) : 0;
-    const actualWm2 = stats.nettoM2 > 0 ? Math.round(stats.totalW / stats.nettoM2) : 0;
+    const stats = (typeof _computeRoomStats === 'function') ? _computeRoomStats(room) : { nettoM2: 0, cableCcCm: 0 };
+    const nettoM2 = stats.nettoM2 || 0;
     const productCount =
       (S.strips||[]).filter(s => s.roomId === room.id).length +
       (S.cables||[]).filter(c => c.roomId === room.id).length +
       (S.mats||[]).filter(m => m.roomId === room.id).length +
       (S.plates||[]).filter(p => p.roomId === room.id).length;
-    let validation = 'OK';
-    try {
-      const anyViol =
-        (S.strips||[]).filter(s => s.roomId === room.id).some(s => { try { const v = getStripViolations(s); return v && v.hasAny; } catch(_) { return false; } }) ||
-        (S.cables||[]).filter(c => c.roomId === room.id).some(c => { try { const v = getCableViolations(c); return v && v.hasAny; } catch(_) { return false; } });
-      if (anyViol) validation = 'Avvik';
-      else if (productCount === 0) validation = 'Tomt';
-      else if (targetWm2 && actualWm2 < targetWm2 * 0.95) validation = 'Underdekket';
-    } catch(_) {}
+    const ratedW = (typeof _roomRatedEffectW === 'function') ? _roomRatedEffectW(room) : 0;
+    const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2)
+      : ((typeof _roomTargetWm2 === 'function') ? (_roomTargetWm2(room.id) || '') : '');
+    const dom = (typeof _roomDominantProduct === 'function') ? _roomDominantProduct(room) : null;
+    const dp = dom?.product || null;
     const ccCm = (stats.cableCcCm > 0) ? +stats.cableCcCm.toFixed(1) : '';
     roomRows.push([
-      room.name || 'Rom',
       floor ? floor.name : '',
-      room.roomType || room.type || '',
-      +stats.nettoM2.toFixed(2),
-      Math.round(stats.totalW),
-      actualWm2 || (targetWm2 || ''),
-      ccCm,
+      room.name || 'Rom',
+      +nettoM2.toFixed(2),
       productCount,
-      validation
+      dp?.el_no || '',
+      dp?.article_no || '',
+      dp?.name || '',
+      dp?.product_family || '',
+      dom?.kind || '',
+      ratedW || '',
+      wm2,
+      ccCm
     ]);
   }
   const wsRooms = XLSX.utils.aoa_to_sheet(roomRows);
-  wsRooms['!cols'] = [{wch:20},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:8},{wch:18},{wch:14}];
+  wsRooms['!cols'] = [{wch:14},{wch:20},{wch:10},{wch:14},{wch:14},{wch:16},{wch:28},{wch:18},{wch:10},{wch:10},{wch:10},{wch:8}];
 
   // ── Build workbook ──
   const wb = XLSX.utils.book_new();
