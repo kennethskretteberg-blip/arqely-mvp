@@ -20761,7 +20761,7 @@ function exitDrawing() {
   document.getElementById('draw-dim-panel').style.display='none';
   document.getElementById('chip-dim-tool')?.classList.remove('on');
   // Clean up bg calibration if ESC pressed mid-flow
-  { const _bg = activeBg(); if (_bg.calibrating) {
+  { const _bg = _ctxBg(); if (_bg && _bg.calibrating) {
     _bg.calibrating = false; _bg.calPts = [];
     document.getElementById('bg-cal-hint').style.display = 'none';
     if (_bg.img) showBgPanel(); else hideBgPanel();
@@ -21061,7 +21061,9 @@ function selectBgLayer(bg) {
 function deselectBg() { S.ui.selectedBg = null; updateCtxBar(); render(); }
 
 // ── Background action-menu operations (operate on the selected/active layer) ──
-function _ctxBg() { return S.ui.selectedBg || (S.bgs && activeBg()); }
+// Resolve "the background the context controls act on": an explicitly selected layer,
+// else the active/orphaned layer (robust to key mismatch), else the active-floor slot.
+function _ctxBg() { return S.ui.selectedBg || _activeBgLayer() || (S.bgs && activeBg()); }
 function toggleBgLock() {
   const bg = _ctxBg(); if (!bg) return;
   bg.locked = !bg.locked;
@@ -21267,7 +21269,8 @@ function _installBgImage(img, dataUrl, fileName, meta) {
 }
 
 function setBgOpacity(val) {
-  activeBg().opacity = val / 100;
+  const bg = _ctxBg(); if (!bg) return;
+  bg.opacity = val / 100;
   const oldLbl = document.getElementById('bg-opacity-lbl');
   if (oldLbl) oldLbl.textContent = val + '%';
   const oldSl = document.getElementById('bg-opacity-sl');
@@ -21275,14 +21278,17 @@ function setBgOpacity(val) {
   render();
 }
 function toggleBgVisible(checked) {
-  activeBg().visible = checked;
+  const bg = _ctxBg(); if (!bg) return;
+  bg.visible = checked;
   const oldChk = document.getElementById('bg-vis-chk');
   if (oldChk) oldChk.checked = checked;
   render();
 }
 function removeBgImage() {
-  const bg = activeBg();
+  const bg = _ctxBg(); if (!bg) return;
   // Remove this layer from the floor's layer array (multi-layer model).
+  // Also clear the S.bgs slot that holds it (may be a different key than activeFloorId).
+  for (const key in S.bgs) { if (S.bgs[key] === bg) delete S.bgs[key]; }
   if (S.bgLayers) for (const k in S.bgLayers) {
     const arr = S.bgLayers[k]; const i = arr.indexOf(bg); if (i >= 0) arr.splice(i, 1);
   }
@@ -21301,7 +21307,7 @@ function removeBgImage() {
 }
 
 function startBgCalibrate() {
-  const bg = activeBg(); if (!bg.img) return;
+  const bg = _ctxBg(); if (!bg || !bg.img) return;
   bg.calibrating = true; bg.calPts = [];
   S.ui.drawMode = 'bg-calibrate';
   canvas.style.cursor = 'crosshair';
@@ -21326,7 +21332,7 @@ function setCalibUnit(unit) {
 }
 
 function cancelBgCalibrate() {
-  const bg = activeBg();
+  const bg = _ctxBg(); if (!bg) { S.ui.drawMode = null; closeModal(); return; }
   bg.calibrating = false; bg.calPts = [];
   S.ui.drawMode = null;
   canvas.style.cursor = 'default';
@@ -21349,7 +21355,7 @@ function confirmBgCalibrate() {
   const toCm = {m: 100, cm: 1, mm: 0.1};
   const dist = rawVal * (toCm[_calibUnit] || 100);
   closeModal();
-  const bg = activeBg();
+  const bg = _ctxBg(); if (!bg) return;
   const p1 = bg.calPts[0], p2 = bg.calPts[1];
   const measuredCm = Math.hypot(p2.x - p1.x, p2.y - p1.y);
   if (measuredCm < 0.1) { cancelBgCalibrate(); return; }
@@ -21389,7 +21395,7 @@ function confirmBgCalibrate() {
 }
 
 function showFixedScaleModal() {
-  const bg = activeBg(); if (!bg.img) return;
+  const bg = _ctxBg(); if (!bg || !bg.img) return;
   document.getElementById('fixed-scale-inp').value = bg.fixedScale || 100;
   showModal('modal-fixed-scale');
   setTimeout(() => document.getElementById('fixed-scale-inp').select(), 50);
@@ -21399,7 +21405,7 @@ function confirmFixedScale() {
   const scale = parseInt(document.getElementById('fixed-scale-inp').value) || 100;
   if (scale < 1) { alert('Målestokk må være minst 1.'); return; }
   closeModal();
-  const bg = activeBg(); if (!bg.img) return;
+  const bg = _ctxBg(); if (!bg || !bg.img) return;
   // Real-world size = physical paper size × scale (e.g. 1:50 → paper-cm × 50).
   // PDFs carry their EXACT physical page size (captured at import from the PDF point size) →
   // an accurate 1:50. Raster images (JPG/PNG) have no reliable physical size, so we assume a
@@ -25414,7 +25420,7 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
   } else if (mode==='bg-calibrate') {
-    const _cbg = activeBg();
+    const _cbg = _ctxBg(); if (!_cbg) return;
     // Snap second calibration point to 90° (H/V) relative to first point
     let calPt = {x:wp.x, y:wp.y};
     if (_cbg.calPts.length === 1) calPt = angleSnap(wp.x, wp.y, _cbg.calPts[0]);
@@ -27928,14 +27934,22 @@ function _showCtxMore(e, ctx) {
 }
 
 // The active background layer for the active floor (calibrated + has an image), or null.
+// Falls back to ANY background with an image when the active-floor key has none — legacy
+// projects stored a single bg under '__global__', and the drawing renders from every key,
+// so the controls must stay reachable even when the key doesn't match S.ui.activeFloorId.
 function _activeBgLayer() {
   const k = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
-  let bg = (S.bgs[k] && S.bgs[k].img) ? S.bgs[k] : null;
-  if (!bg) {
-    const layers = (S.bgLayers && S.bgLayers[k]) || [];
-    bg = layers.find(l => l && l.img) || null;
+  if (S.bgs[k] && S.bgs[k].img) return S.bgs[k];
+  const layers = (S.bgLayers && S.bgLayers[k]) || [];
+  const inLayer = layers.find(l => l && l.img);
+  if (inLayer) return inLayer;
+  // Fallback: any bg with an image under another key (e.g. '__global__').
+  for (const key in S.bgs) { if (S.bgs[key] && S.bgs[key].img) return S.bgs[key]; }
+  if (S.bgLayers) for (const key in S.bgLayers) {
+    const f = (S.bgLayers[key] || []).find(l => l && l.img);
+    if (f) return f;
   }
-  return bg;
+  return null;
 }
 
 // Persistent "Bakgrunn" quick-control for the context bar — visibility + dimming + a
@@ -29358,7 +29372,9 @@ function _restoreProject(data) {
       // instead of re-selecting the drawing every click → «henger i plantegning-baren»). Makes
       // existing projects with an unlocked calibrated bg click-safe. Unlock via the lock toggle.
       if (S.bgs[k].img && !S.bgs[k]._needsCalibration) S.bgs[k].locked = true;
-      render();
+      // The image arrives async — refresh the context bar so the «Bakgrunn» quick-control
+      // (visibility/dimming/…) appears now that a calibrated bg exists for this floor.
+      updateCtxBar(); render();
     };
     bImg.src = bgData.dataUrl;
   }
