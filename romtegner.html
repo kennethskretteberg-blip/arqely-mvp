@@ -1161,11 +1161,46 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
     <!-- ═══ TAB: GARANTIPORTAL (rollestyrt — kun leverandør) ═══ -->
     <div id="dash-tab-content-portal" style="display:none">
       <div class="dash-section" style="margin-top:12px">
-        <div class="dash-section-title">Garantiportal</div>
-        <div style="color:var(--dim);font-size:13px;margin-bottom:8px">Oversikt over garantibevis der dine produkter er montert, på tvers av prosjekter.</div>
-        <div id="doc-portal-body" style="border:1px dashed var(--border);border-radius:10px;padding:24px;text-align:center;color:var(--dim)">
-          Garantiportalen settes opp i Fase 2. Datagrunnlaget (garantibevis, måleverdier, foto) bygges nå i dokumentasjonsmodulen.
+        <div class="dash-section-title">Garantibevis</div>
+        <div style="color:var(--dim);font-size:13px;margin-bottom:12px">Garantibevis der dine produkter er montert, på tvers av prosjekter og elektrofirma.</div>
+        <!-- KPI -->
+        <div class="dash-stats" id="portal-stats" style="margin-bottom:14px"></div>
+        <!-- Filtre -->
+        <div class="dash-filters" id="portal-filters">
+          <input class="dash-search" id="portal-search" type="text" placeholder="Søk garanti-ID, firma, prosjekt eller produkt…" oninput="_portalApplyAndRender()" style="flex:2;min-width:220px">
+          <select class="dash-filter-select" id="portal-filter-status" onchange="_portalApplyAndRender()">
+            <option value="">Alle statuser</option>
+            <option value="godkjent">Godkjent</option>
+            <option value="avvik">Avvik</option>
+            <option value="venter">Venter</option>
+          </select>
+          <select class="dash-filter-select" id="portal-filter-firm" onchange="_portalApplyAndRender()">
+            <option value="">Alle elektrofirma</option>
+          </select>
+          <select class="dash-filter-select" id="portal-filter-period" onchange="_portalApplyAndRender()">
+            <option value="">Hele perioden</option>
+            <option value="30">Siste 30 dager</option>
+            <option value="90">Siste 90 dager</option>
+            <option value="year">I år</option>
+          </select>
         </div>
+        <!-- Tabell -->
+        <div class="pl-table-wrap">
+          <table class="pl-table">
+            <thead>
+              <tr>
+                <th class="pl-th">Garanti-ID</th>
+                <th class="pl-th">Dato</th>
+                <th class="pl-th">Elektrofirma</th>
+                <th class="pl-th">Prosjekt / rom</th>
+                <th class="pl-th">Produkter</th>
+                <th class="pl-th">Status</th>
+              </tr>
+            </thead>
+            <tbody id="portal-tbody"></tbody>
+          </table>
+        </div>
+        <div id="portal-empty" class="pl-empty" style="display:none">Ingen garantibevis matcher søket.</div>
       </div>
     </div><!-- /dash-tab-content-portal -->
 
@@ -34166,6 +34201,7 @@ function _switchDashTab(tab) {
   });
   if (tab === 'customers') _renderCustomerTable();
   else if (tab === 'docs') _renderDocPicker();
+  else if (tab === 'portal') _renderPortal();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -34779,6 +34815,199 @@ function _docShowSuccess(st, pdfBlob) {
   document.getElementById('doc-stepper').innerHTML = DOC_STEPS.map(()=>'<div class="doc-step-dot done"></div>').join('');
   document.getElementById('doc-step-label').textContent = 'Fullført';
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  GARANTIPORTAL (Fase 2) — leverandørens oversikt på tvers av prosjekter.
+//  RLS («Supplier orgs read their certificates») filtrerer automatisk til bevis
+//  der leverandørens produkter er montert.
+// ════════════════════════════════════════════════════════════════════════════
+let _portalCerts = null;
+
+async function _renderPortal() {
+  const tbody = document.getElementById('portal-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" class="pl-loading" style="color:var(--dim)">Laster garantibevis…</td></tr>';
+  await _docLoadSuppliers();
+  const certs = await _portalLoad();
+  if (certs === null) { tbody.innerHTML = '<tr><td colspan="6" style="color:#ff6b6b;padding:12px">Kunne ikke laste garantibevis.</td></tr>'; return; }
+  _portalCerts = certs;
+  // Fyll firma-filter
+  const firmSel = document.getElementById('portal-filter-firm');
+  if (firmSel) {
+    const firms = [...new Set(certs.map(c => c.installer_company).filter(Boolean))].sort();
+    firmSel.innerHTML = '<option value="">Alle elektrofirma</option>' + firms.map(f => `<option value="${_esc(f)}">${_esc(f)}</option>`).join('');
+  }
+  _portalApplyAndRender();
+}
+
+async function _portalLoad() {
+  try {
+    const { data, error } = await _db.from('warranty_certificates')
+      .select('*, certificate_products(*, measurements(*)), certificate_photos(slot, storage_path)')
+      .order('created_at', { ascending: false });
+    if (error) { console.warn('Portal load:', error); return null; }
+    return data || [];
+  } catch(e) { console.warn(e); return null; }
+}
+
+function _portalDeviation(cert) {
+  return (cert.certificate_products || []).some(p => (p.measurements || []).some(m => m.ok === false));
+}
+function _portalStatus(cert) {
+  if (_portalDeviation(cert)) return { key:'avvik', label:'Avvik', color:'background:rgba(229,72,77,.16);color:#e5484d' };
+  if (cert.status === 'signed') return { key:'godkjent', label:'Godkjent', color:'background:rgba(40,180,110,.16);color:#28b46e' };
+  return { key:'venter', label:'Venter', color:'background:rgba(230,160,30,.16);color:#e6a01e' };
+}
+function _portalPill(s) { return `<span class="doc-pill" style="${s.color}">${s.label}</span>`; }
+
+function _portalApplyAndRender() {
+  const certs = _portalCerts || [];
+  const q = (document.getElementById('portal-search')?.value || '').toLowerCase().trim();
+  const fStatus = document.getElementById('portal-filter-status')?.value || '';
+  const fFirm = document.getElementById('portal-filter-firm')?.value || '';
+  const fPeriod = document.getElementById('portal-filter-period')?.value || '';
+  const now = new Date();
+  const filtered = certs.filter(c => {
+    const st = _portalStatus(c);
+    if (fStatus && st.key !== fStatus) return false;
+    if (fFirm && c.installer_company !== fFirm) return false;
+    if (fPeriod) {
+      const d = new Date(c.created_at);
+      if (fPeriod === 'year') { if (d.getFullYear() !== now.getFullYear()) return false; }
+      else { const days = (now - d) / 86400000; if (days > Number(fPeriod)) return false; }
+    }
+    if (q) {
+      const prodNames = (c.certificate_products||[]).map(p => p.product_name).join(' ');
+      const hay = [c.garanti_id, c.installer_company, c.project_name, c.project_address, c.room_name, prodNames].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  // KPI
+  _portalRenderStats(certs);
+  // Tabell
+  const tbody = document.getElementById('portal-tbody');
+  const empty = document.getElementById('portal-empty');
+  if (!filtered.length) { tbody.innerHTML = ''; empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  tbody.innerHTML = filtered.map(c => {
+    const st = _portalStatus(c);
+    const date = c.signed_at || c.created_at;
+    const prods = c.certificate_products || [];
+    const prodLabel = prods.length ? (prods[0].product_name + (prods.length > 1 ? ` +${prods.length-1}` : '')) : '—';
+    return `<tr class="pl-row" style="cursor:pointer" onclick="_portalDetail('${c.id}')">
+      <td class="pl-td" style="font-weight:600">${_esc(c.garanti_id||'—')}</td>
+      <td class="pl-td">${date ? new Date(date).toLocaleDateString('nb-NO') : '—'}</td>
+      <td class="pl-td">${_esc(c.installer_company||'—')}</td>
+      <td class="pl-td">${_esc(c.project_name||'—')}<span style="color:var(--dim)"> · ${_esc(c.room_name||'')}</span></td>
+      <td class="pl-td">${_esc(prodLabel)}</td>
+      <td class="pl-td">${_portalPill(st)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _portalRenderStats(certs) {
+  const el = document.getElementById('portal-stats');
+  if (!el) return;
+  const now = new Date();
+  const thisMonth = certs.filter(c => { const d = new Date(c.created_at); return d.getFullYear()===now.getFullYear() && d.getMonth()===now.getMonth(); }).length;
+  const withDev = certs.filter(_portalDeviation).length;
+  const firms = new Set(certs.map(c => c.installer_company).filter(Boolean)).size;
+  const stat = (val, lbl, sub) => `<div class="dash-stat"><div class="dash-stat-num">${val}</div><div class="dash-stat-label">${lbl}</div>${sub?`<div style="font-size:11px;color:var(--dim);margin-top:2px">${sub}</div>`:''}</div>`;
+  el.innerHTML =
+    stat(certs.length, 'Totalt arkivert', '') +
+    stat(thisMonth, 'Denne måneden', '') +
+    stat(withDev, 'Med avvik', withDev ? 'Krever oppfølging' : '') +
+    stat(firms, 'Aktive firma', '');
+}
+
+// ─── DETALJPANEL ────────────────────────────────────────────────────────────
+async function _portalDetail(certId) {
+  const cert = (_portalCerts || []).find(c => c.id === certId);
+  if (!cert) return;
+  let ov = document.getElementById('portal-detail-overlay');
+  if (!ov) {
+    ov = document.createElement('div'); ov.id = 'portal-detail-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.5);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:32px 16px';
+    ov.onclick = e => { if (e.target === ov) _portalCloseDetail(); };
+    document.body.appendChild(ov);
+  }
+  ov.style.display = 'flex';
+  const sup = (_docSuppliers || []).find(s => s.id === cert.supplier_id) || DOC_DEFAULT_SUPPLIER;
+  const st = _portalStatus(cert);
+  const STAGE_LBL = { 1:'Før installasjon', 2:'Før innstøping', 3:'Før tilkobling' };
+  const field = (lbl, val) => `<div><div style="font-size:11px;color:var(--dim)">${lbl}</div><div style="font-size:14px;color:var(--fg)">${_esc(val||'—')}</div></div>`;
+  // Produkter + måletabell
+  let prodHtml = '';
+  for (const p of (cert.certificate_products || [])) {
+    const tol = p.nominal_ohm ? p.nominal_ohm * ((sup.resistance_tolerance_pct||10)/100) : 0;
+    const lo = p.nominal_ohm ? Math.round((p.nominal_ohm-tol)*10)/10 : null;
+    const hi = p.nominal_ohm ? Math.round((p.nominal_ohm+tol)*10)/10 : null;
+    const dim = p.kind === 'cable' ? `${p.meters??'–'} m` : `${p.width_m??'–'}×${p.length_m??'–'} m`;
+    const byStage = {}; (p.measurements||[]).forEach(m => byStage[m.stage] = m);
+    let rows = '';
+    [1,2,3].forEach(stage => {
+      const m = byStage[stage]; if (!m) return;
+      const rOk = (lo!=null && m.resistance_ohm!=null) ? (m.resistance_ohm>=lo && m.resistance_ohm<=hi) : null;
+      const iOk = (m.insulation_mohm!=null) ? (m.insulation_mohm > (sup.insulation_min_mohm||10)) : null;
+      const cell = (v, ok) => `<td style="padding:6px 8px;${ok===true?'color:#28b46e':(ok===false?'color:#e5484d;font-weight:600':'')}">${v??'–'}</td>`;
+      rows += `<tr><td style="padding:6px 8px;color:var(--dim)">${STAGE_LBL[stage]}</td>${cell(m.resistance_ohm,rOk)}${cell(m.insulation_mohm,iOk)}</tr>`;
+    });
+    prodHtml += `<div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;font-weight:600;font-size:14px;margin-bottom:4px"><span>${_esc(p.product_name)}</span><span style="font-weight:400;color:var(--dim);font-size:12px">${dim} · ${p.effect_w??'–'} W · nominell ${p.nominal_ohm??'–'} Ω${lo!=null?` (${lo}–${hi})`:''}</span></div>
+      ${rows ? `<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="color:var(--dim);font-size:11px;text-align:left"><th style="padding:4px 8px;font-weight:500"></th><th style="padding:4px 8px;font-weight:500">Resistans Ω</th><th style="padding:4px 8px;font-weight:500">Isolasjon MΩ</th></tr></thead><tbody>${rows}</tbody></table>` : '<div style="color:var(--dim);font-size:12px">Ingen måleverdier registrert.</div>'}
+    </div>`;
+  }
+  const photos = cert.certificate_photos || [];
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:14px;max-width:680px;width:100%;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <div style="flex:1"><div style="font-size:17px;font-weight:700;color:var(--fg)">${_esc(cert.garanti_id||'Garantibevis')}</div>
+        <div style="font-size:12px;color:var(--dim)">${_esc(cert.project_name||'')} · ${_esc(cert.room_name||'')}</div></div>
+      ${_portalPill(st)}
+      <button onclick="_portalCloseDetail()" style="background:none;border:none;color:var(--dim);font-size:22px;cursor:pointer;padding:2px 8px">✕</button>
+    </div>
+    <div style="padding:18px 20px;max-height:70vh;overflow-y:auto">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+        ${field('Prosjekt', cert.project_name)}${field('Adresse', cert.project_address)}${field('Rom', cert.room_name)}
+        ${field('Elektrofirma', cert.installer_company)}${field('Org.nr', cert.installer_orgno)}${field('Montør', cert.installer_name)}
+        ${field('Dato', (cert.signed_at||cert.created_at) ? new Date(cert.signed_at||cert.created_at).toLocaleDateString('nb-NO') : '')}
+        ${field('Installasjon', cert.install_type)}${field('Styring', cert.styring_type)}
+      </div>
+      <div style="font-size:13px;font-weight:600;color:var(--fg);margin-bottom:8px">Produkter og måleverdier</div>
+      ${prodHtml || '<div style="color:var(--dim);font-size:13px">Ingen produkter.</div>'}
+      <div style="font-size:13px;font-weight:600;color:var(--fg);margin:14px 0 8px">Fotodokumentasjon (${photos.length})</div>
+      <div id="portal-photos" style="display:flex;gap:8px;flex-wrap:wrap">${photos.length ? '<span style="color:var(--dim);font-size:12px">Laster bilder…</span>' : '<span style="color:var(--dim);font-size:12px">Ingen foto.</span>'}</div>
+      <div style="display:flex;gap:10px;margin-top:18px">
+        <button class="dash-create-btn" onclick="_portalOpenPdf('${cert.id}')" style="flex:0;white-space:nowrap">Åpne PDF</button>
+        <button class="doc-btn" style="flex:0;padding:10px 18px" onclick="_portalCloseDetail()">Lukk</button>
+      </div>
+    </div>
+  </div>`;
+  // Last inn signerte URL-er for foto
+  if (photos.length) _portalLoadPhotos(cert);
+}
+async function _portalLoadPhotos(cert) {
+  const box = document.getElementById('portal-photos'); if (!box) return;
+  const slotLbl = { 'kabel-sloyfe':'Kabel i sløyfe','foler':'Følerplassering','skjot':'Skjøt/kald-ende','termostat':'Termostat','oversikt':'Oversikt','annet':'Annet' };
+  const items = [];
+  for (const ph of (cert.certificate_photos||[])) {
+    try {
+      const { data } = await _db.storage.from('documentation').createSignedUrl(ph.storage_path, 3600);
+      if (data?.signedUrl) items.push(`<a href="${data.signedUrl}" target="_blank" title="${slotLbl[ph.slot]||ph.slot}" style="display:block"><img src="${data.signedUrl}" style="width:96px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--border)"></a>`);
+    } catch(e) {}
+  }
+  if (document.getElementById('portal-photos')) document.getElementById('portal-photos').innerHTML = items.length ? items.join('') : '<span style="color:var(--dim);font-size:12px">Kunne ikke laste bilder.</span>';
+}
+async function _portalOpenPdf(certId) {
+  const cert = (_portalCerts||[]).find(c => c.id === certId); if (!cert) return;
+  const path = `${cert.org_id}/${cert.id}/garantibevis-${cert.garanti_id}.pdf`;
+  try {
+    const { data, error } = await _db.storage.from('documentation').createSignedUrl(path, 3600);
+    if (error || !data?.signedUrl) { _showToast('Fant ingen lagret PDF for dette beviset.'); return; }
+    window.open(data.signedUrl, '_blank');
+  } catch(e) { _showToast('Kunne ikke åpne PDF.'); }
+}
+function _portalCloseDetail() { const ov = document.getElementById('portal-detail-overlay'); if (ov) ov.style.display = 'none'; }
 
 // ─── CUSTOMER TABLE (CRM TAB) ───
 let _customerProjectCounts = null;
