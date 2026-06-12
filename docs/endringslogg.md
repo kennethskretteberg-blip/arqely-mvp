@@ -4,6 +4,52 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-12 — NY MODUL: Dokumentasjon & garantiportal (Fase 1–3, hele Prompt 0→3)
+
+Bygget en komplett dokumentasjons-, garanti- og reklamasjonsmodul oppå eksisterende
+prosjekt/rom/produkt/innlogging. Alt verifisert i preview (UI + PDF) og ende-til-ende mot
+Supabase (lagring + reklamasjonsflyt, med opprydding av testdata). Pushet til `main`.
+Commits (nyeste først): `8bf26f9` (Fase 3), `1176ed0` (Fase 2), `e48b862` (Fase 1).
+
+**Migrasjoner (kjørt i Supabase, ren ASCII, idempotente)**
+- `supabase-migration-documentation.sql` — `suppliers` (leverandør som data, seed Cenika m/
+  måleregler ±10 %, >10 MΩ @ 500 V), `supplier_id` FK på `heating_products` (integer, ikke uuid),
+  `warranty_certificates`, `certificate_products`, `measurements`, `certificate_photos`, RLS + privat
+  `documentation` storage-bucket.
+- `supabase-migration-claims.sql` — `claims`, `claim_events` (tidslinje), `claim_photos`, RLS.
+- **RLS-lærdom:** superadmin-policyer må lese `is_superadmin` fra `auth.jwt() -> 'app_metadata'`,
+  IKKE `SELECT FROM auth.users` (authenticated mangler tilgang → 42501; separate policyer
+  kortslutter ikke slik OR-uttrykk inni én policy gjør).
+
+**Fase 1 — Dokumentasjon (`e48b862`)**
+- Ny «Dokumentasjon»-fane (prosjekt-/rom-velger) + rollestyrt «Garantiportal»-fane (kun
+  `org_type='supplier'`) + «Dokumentér»-snarvei i rom-høyreklikkmeny.
+- Mobil `#doc-screen` 5-stegs veiviser: bekreft produkter (prefill fra tegning, nominell R=U²/P)
+  → installasjon & styring → måleverdier m/ live validering (grønn/rød) → foto med faste slots
+  → sjekkliste + signatur → genererer garanti-ID, lagrer bevis + PDF (jsPDF) til skyen.
+
+**Fase 2 — Garantiportal (`1176ed0`)**
+- KPI (totalt, denne måneden, med avvik, aktive firma), filtrert bevisliste (søk + status + firma +
+  periode), detaljpanel med fargekodet måletabell (mot leverandørtoleranse), foto via signerte
+  storage-URL-er, «Åpne PDF». RLS «Supplier orgs read their certificates» filtrerer automatisk.
+
+**Fase 3 — Reklamasjon (`8bf26f9`)**
+- Mobil `#claim-screen` «Meld feil» (kanal app + telefon → samme sak): feiltype, kundebeskrivelse,
+  feilsøk (R/iso/foto), anbefalt tiltak, feilsøkefirma, kunde-e-post → sak m/ tidslinje.
+- Portal under-nav Garantibevis|Reklamasjoner: statistikk (antall, samlet kostnad, vanligste årsak,
+  andel dekket), saksliste, saksdetalj med tidslinje + **godkjenningssteg** (Godkjenn/Avvis —
+  feilsøkefirma sendes ikke ut før godkjent) + kostnad + utfall (godkjent/delvis/avslått → lukk).
+- Innganger: «⚠ Meld feil» på fullført rom i doc-velger + «Registrer telefonsak» i bevisdetalj.
+
+**Bevisste valg / gjenstår**
+- Leverandør som data (ØS Varme = «én ny rad»). Egne tabeller, ikke prosjekt-JSON (portal-søk på tvers).
+- Skjermer `#doc-screen`/`#claim-screen` må ha z-index > 1001 (dashbordet `#project-list-screen` = 1001);
+  portal-modal z-index 2000.
+- E-post (kunde-rutinevarsel + leverandør/montør-kopi) utsatt til Supabase Edge Function — vises som
+  info; alt lagres i skyen uavhengig. `share_token` finnes på beviset for senere «del med huseier»-lenke.
+
+---
+
 ## 2026-06-10 — ØKT-OPPSUMMERING (stor økt: kabel-, folie-, matte-, soner- og plantegning-arbeid)
 
 Detaljerte oppføringer pr. punkt under. Alt verifisert (mest numerisk in-memory pga. treg test-fane
