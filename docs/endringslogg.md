@@ -4,6 +4,41 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-13 — Autonom polering av dok-/garanti-/reklamasjonsmodulen
+
+Kjørt autonomt (uten brukervalg) mens bruker var borte. Alt verifisert i preview
+(parse + render + PDF-bygging med mock-state, ingen skriving til produksjons-DB).
+Commits (nyeste først): `bf64a2d` (kode), + CLAUDE.md / Edge Function / denne loggen.
+
+**Selvgjennomgang + buggfiks** (underagent-review av all ny kode)
+- `_docUpdProduct`: `nominal_ohm` settes til `null` (ikke `NaN`) når effekt tømmes.
+- `_claimMutate`: kaster nå feil ved mislykket `claim_events`-innsetting (ingen stille feil).
+- `_docMeasOk`: robust fallback til standard-leverandør hvis `_docState` mangler
+  (hindrer krasj ved PDF-bygging uten aktiv state).
+
+**Montørens sak-status (les-only)** — `_claimStatusView`
+- Fullført rom i doc-velgeren viser «Sak: <status>» når en reklamasjon finnes, og åpner
+  en les-only statusvisning med tidslinje + «neste steg» (venter på godkjenning /
+  godkjent → kontakt feilsøkefirma / avvist / lukket). Henter kun egne saker.
+
+**Rikere garantibevis-PDF** — `_docBuildPDF`
+- Leverandørfarget topp (hex→rgb for robust jsPDF-rendering).
+- Fotodokumentasjon bygget inn som miniatyr-rutenett (2 per rad, automatisk sideskift).
+
+**Dokumentasjon / scaffold**
+- `CLAUDE.md`: ny seksjon «Documentation, Warranty & Claims Module (implemented)» —
+  tabeller, RLS-mønster (JWT-superadmin), kodekart, z-index- og e-post-konvensjoner.
+  Flyttet ut av «Future».
+- `supabase/functions/send-warranty-email/` (index.ts + README): Edge Function for
+  kunde-/leverandørkopi (Resend). **Inaktiv** til den rulles ut + secrets settes —
+  README har deploy-steg og hvordan den kobles på i `_docGenerate`/`_claimSubmit`.
+
+**Gjenstår til bruker (krever valg/nøkler):** rull ut Edge Function (Resend-nøkkel +
+verifisert domene) og koble den på; «del med huseier»-offentlig visning (krever ny
+anon-RLS-policy via share_token — egen migrasjon).
+
+---
+
 ## 2026-06-12 — NY MODUL: Dokumentasjon & garantiportal (Fase 1–3, hele Prompt 0→3)
 
 Bygget en komplett dokumentasjons-, garanti- og reklamasjonsmodul oppå eksisterende

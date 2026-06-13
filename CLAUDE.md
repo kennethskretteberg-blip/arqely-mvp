@@ -296,6 +296,56 @@ When modifying code:
 
 ---
 
+# Documentation, Warranty & Claims Module (implemented — Fase 1–3)
+
+A separate, mobile-first module on the same login, built on top of existing
+project/room/product/auth. Entered via dashboard tabs **Dokumentasjon** (project/room
+picker) and **Garantiportal** (role-gated to `org_type='supplier'`), plus a
+**Dokumentér** shortcut in the room right-click menu (`_docFromRoom`).
+
+## Supplier as data (not branding)
+The app stays neutrally "Varmeplan"-branded. Each supplier is a row in `suppliers`
+(seeded with Cenika): name, display_name, color, garanti_id_prefix, recipient_email,
+and measurement rules (`resistance_tolerance_pct` ±10 %, `insulation_min_mohm` >10,
+`insulation_min_volt` 500). Adding ØS Varme later = one new row. `heating_products`
+links via `supplier_id` (integer FK — `heating_products.id` is integer, not uuid).
+
+## Data model (separate Supabase tables, NOT in project JSON)
+Kept out of project JSON so the portal can search across projects.
+- `warranty_certificates` — one per room; snapshot fields (project/room name) so the
+  cert survives project edits; `share_token` for a future homeowner link; `status`
+  draft|signed.
+- `certificate_products` (1..n per cert) → `measurements` (3 stages: før installasjon /
+  innstøping / tilkobling, R + isolasjon, `ok` snapshot) + `certificate_photos`.
+- `claims` (reklamasjonssak, linked to a cert) → `claim_events` (timeline) + `claim_photos`.
+- Private `documentation` storage bucket (photos, signature, generated PDF).
+
+## RLS pattern (IMPORTANT)
+Org members see their org's rows; supplier orgs see rows for their products
+(`supplier_id` ↔ `organizations.supplier_name`). **Superadmin checks MUST read
+`auth.jwt() -> 'app_metadata' ->> 'is_superadmin'`, NEVER `SELECT FROM auth.users`** —
+the `authenticated` role lacks access to `auth.users` (→ 42501; and separate policies
+don't short-circuit the way OR-conditions inside one policy do).
+
+## Code map (all in `romtegner.html`)
+- `_doc*` — picker, 5-step mobile wizard (`#doc-screen`), prefill from drawing,
+  nominal R=U²/P, live measurement validation, `_docBuildPDF` (jsPDF), save to cloud.
+- `_portal*` — Garantiportal: KPI, filtered cert list, detail with color-coded
+  measurement table, photos (signed URLs), open PDF; sub-nav to Reklamasjoner.
+- `_claim*` — Meld feil form (`#claim-screen`, channel app+phone → same case),
+  approval gate, timeline, cost, outcome; `_claimStatusView` is the installer's
+  read-only status revisit.
+
+## Conventions / gotchas
+- Migrations are plain ASCII `.sql` files run manually in Supabase SQL Editor
+  (`supabase-migration-documentation.sql`, `supabase-migration-claims.sql`); idempotent.
+- Full-screen overlays `#doc-screen`/`#claim-screen` use z-index > 1001 (the dashboard
+  `#project-list-screen` is z-index 1001); portal modal uses z-index 2000.
+- Email (customer routine notice + supplier/installer copy) is intentionally deferred
+  to a Supabase Edge Function — shown as info on the receipt; data is saved regardless.
+
+---
+
 # Future (not yet implemented)
 
 The following features are planned but do not exist in the codebase yet.
@@ -308,13 +358,9 @@ Do not build infrastructure for these unless explicitly requested.
 
 Each future module will use the same architecture: object-based geometry, product references, rule validation, and power calculations.
 
-## Documentation Module
-Mobile-friendly installation documentation for electricians:
-- electrical measurements
-- installation checklists
-- photo upload to cloud
-- link documentation to project/room
-- generate final installation document (project info, products, measurements, images, signature)
+## Email delivery (Edge Function)
+Routine email to customer on claim creation + warranty-certificate copy to installer/
+supplier. Scaffolded in `supabase/functions/` — needs deploy + secrets to activate.
 
 ## Project Export (PDF)
 Export functionality for:
