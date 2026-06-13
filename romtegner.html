@@ -34349,6 +34349,15 @@ async function _docToggleProject(projectId, rowEl) {
   let certs = [];
   try { const { data: cd } = await _db.from('warranty_certificates').select('id,room_ref,status').eq('project_id', projectId); certs = cd || []; } catch(e) {}
   const certByRoom = {}; certs.forEach(c => { certByRoom[c.room_ref] = c; });
+  // Eksisterende reklamasjonssaker for disse bevisene (vis status i stedet for «Meld feil»)
+  const claimByCert = {};
+  const certIds = certs.map(c => c.id).filter(Boolean);
+  if (certIds.length) {
+    try {
+      const { data: cl } = await _db.from('claims').select('id,certificate_id,status,claim_no').in('certificate_id', certIds).order('created_at', { ascending:false });
+      (cl||[]).forEach(c => { if (!claimByCert[c.certificate_id]) claimByCert[c.certificate_id] = c; });
+    } catch(e) {}
+  }
   if (!rooms.length) { box.innerHTML = '<div style="padding:8px;color:var(--dim);font-size:13px">Ingen rom i prosjektet.</div>'; return; }
   box.innerHTML = rooms.map(r => {
     const summary = _docRoomProductSummary(data, r.id);
@@ -34357,8 +34366,14 @@ async function _docToggleProject(projectId, rowEl) {
     const pill = st === 'signed'
       ? '<span class="doc-pill ok">Fullført</span>'
       : (st === 'draft' ? '<span class="doc-pill warn">Utkast</span>' : '<span class="doc-pill warn">Mangler dok.</span>');
-    const meldFeil = (st === 'signed' && cinfo?.id)
-      ? `<button class="doc-pill" style="background:rgba(229,72,77,.12);color:#e5484d;border:none;cursor:pointer" onclick="event.stopPropagation();_claimOpen('${cinfo.id}','app','docs')" title="Meld feil på dette beviset">⚠ Meld feil</button>` : '';
+    const claim = (st === 'signed' && cinfo?.id) ? claimByCert[cinfo.id] : null;
+    let meldFeil = '';
+    if (claim) {
+      const cs = CLAIM_STATUS[claim.status] || { label:claim.status, color:'' };
+      meldFeil = `<button class="doc-pill" style="${cs.color};border:none;cursor:pointer" onclick="event.stopPropagation();_claimStatusView('${claim.id}','docs')" title="Se sak ${_esc(claim.claim_no||'')}">Sak: ${cs.label}</button>`;
+    } else if (st === 'signed' && cinfo?.id) {
+      meldFeil = `<button class="doc-pill" style="background:rgba(229,72,77,.12);color:#e5484d;border:none;cursor:pointer" onclick="event.stopPropagation();_claimOpen('${cinfo.id}','app','docs')" title="Meld feil på dette beviset">⚠ Meld feil</button>`;
+    }
     return `<div class="doc-pick-row" onclick="_showDocScreen('${projectId}', ${JSON.stringify(r.id)})">
       <div style="flex:1;min-width:0">
         <div class="t1">${_esc(r.name||('Rom '+r.id))}</div>
@@ -34564,6 +34579,7 @@ function _docUpdProduct(i, field, val) {
     // keep effect as-is (user/tegning), only refresh nominal from effect+volt
   }
   if (p.effect_w > 0 && p.volt > 0) p.nominal_ohm = Math.round((p.volt*p.volt / p.effect_w) * 10) / 10;
+  else p.nominal_ohm = null;
   if (field === 'effect_w') _docRenderWizard();
 }
 function _docAddProduct() {
@@ -34597,7 +34613,7 @@ function _docStepInstall() {
 // ─── STEG 3: MÅLEVERDIER (live validering) ──────────────────────────────────
 const DOC_STAGES = [ [1,'Før installasjon'], [2,'Før innstøping'], [3,'Før tilkobling'] ];
 function _docMeasOk(p, stage) {
-  const m = p.meas[stage] || {}; const sup = _docState.supplier;
+  const m = p.meas[stage] || {}; const sup = (_docState && _docState.supplier) || DOC_DEFAULT_SUPPLIER;
   const r = parseFloat(m.r), iso = parseFloat(m.iso);
   let rOk = null, isoOk = null;
   if (!isNaN(r) && p.nominal_ohm) { const tol = p.nominal_ohm * ((sup.resistance_tolerance_pct||10)/100); rOk = Math.abs(r - p.nominal_ohm) <= tol; }
@@ -34814,8 +34830,9 @@ function _docBuildPDF(st) {
     doc.setFont('helvetica', bold?'bold':'normal'); doc.setFontSize(size); doc.setTextColor(...color);
     doc.text(String(txt), M, y); y += size*0.5 + 1.5;
   };
-  // Header
-  doc.setFillColor(st.supplier.color || '#E8742C'); doc.rect(0, 0, 210, 4, 'F');
+  // Header — leverandørfarge (hex → rgb for robust jsPDF-rendering på tvers av versjoner)
+  const _hexRgb = h => { const m = /^#?([0-9a-fA-F]{6})$/.exec(String(h||'').trim()); if (!m) return [232,116,44]; const n = parseInt(m[1],16); return [(n>>16)&255,(n>>8)&255,n&255]; };
+  doc.setFillColor(..._hexRgb(st.supplier.color)); doc.rect(0, 0, 210, 4, 'F');
   line('Garantibevis – ' + (st.supplier.display_name || 'Leverandør'), 16, true);
   line('Garanti-ID: ' + st.garantiId, 11, true, [120,120,120]); y += 2;
   line('Prosjekt: ' + (st.projectName||'—'), 10);
@@ -34844,6 +34861,21 @@ function _docBuildPDF(st) {
   line((st.installer.name||'—') + ' · ' + (st.installer.company||'—') + (st.installer.orgno?(' · '+st.installer.orgno):''), 10);
   // Signatur
   if (st.signatureDataUrl) { try { doc.addImage(st.signatureDataUrl, 'PNG', M, y+2, 60, 22); y += 26; line('Signatur', 8, false, [120,120,120]); } catch(e){} }
+  // Fotodokumentasjon (miniatyrer i rutenett, 2 per rad)
+  const photoSlots = DOC_PHOTO_SLOTS.filter(s => st.photos[s.key]);
+  if (photoSlots.length) {
+    if (y > 220) { doc.addPage(); y = M; }
+    y += 4; line('Fotodokumentasjon', 12, true); y += 2;
+    const cw = 82, ch = 55, gap = 10; let col = 0, rowY = y;
+    for (const slot of photoSlots) {
+      if (col === 0 && rowY + ch + 8 > 285) { doc.addPage(); rowY = M; }
+      const x = M + col * (cw + gap);
+      try { doc.addImage(st.photos[slot.key].dataUrl, 'JPEG', x, rowY, cw, ch); } catch(e){}
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(90,90,90);
+      doc.text(slot.label, x, rowY + ch + 4);
+      col++; if (col === 2) { col = 0; rowY += ch + 12; }
+    }
+  }
   return doc.output('blob');
 }
 
@@ -35250,6 +35282,68 @@ function _claimShowSuccess() {
   document.getElementById('claim-foot').innerHTML = '';
 }
 
+// ─── MONTØRENS SAK-STATUS (les-only revisit) ────────────────────────────────
+async function _claimStatusView(claimId, returnTo) {
+  await _docLoadSuppliers();
+  const { data: c, error } = await _db.from('claims')
+    .select('*, claim_events(*), warranty_certificates(garanti_id,project_name,room_name)').eq('id', claimId).single();
+  if (error || !c) { _showToast('Fant ikke saken.'); return; }
+  const supplier = (_docSuppliers||[]).find(s => s.id === c.supplier_id) || DOC_DEFAULT_SUPPLIER;
+  _claimReturnTo = returnTo || 'docs';
+  _claimState = { claimId: c.id }; // for _claimClose-navigasjon
+  document.getElementById('doc-screen').style.display = 'none';
+  document.getElementById('project-list-screen').style.display = 'none';
+  const ovd = document.getElementById('portal-detail-overlay'); if (ovd) ovd.style.display = 'none';
+  document.getElementById('claim-screen').style.display = 'flex';
+  const chip = document.getElementById('claim-supplier-chip');
+  chip.textContent = supplier.display_name || 'Leverandør'; chip.style.background = supplier.color || '#E8742C';
+  const cert = c.warranty_certificates || {};
+  document.getElementById('claim-top-t1').textContent = 'Sak ' + (c.claim_no || '');
+  document.getElementById('claim-top-t2').textContent = (cert.project_name||'') + ' · ' + (cert.room_name||'');
+  const s = CLAIM_STATUS[c.status] || { label:c.status, color:'' };
+  const fault = (CLAIM_FAULTS.find(f => f[0]===c.fault_type)||[])[1] || c.fault_type || '—';
+  const events = (c.claim_events||[]).slice().sort((a,b) => new Date(a.at) - new Date(b.at));
+  const timeline = events.map(e => `<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:5px;flex:0 0 auto"></div>
+      <div style="flex:1"><div style="font-size:13px;color:var(--fg)">${_esc(e.message||e.kind)}</div>
+      <div style="font-size:11px;color:var(--dim)">${e.at?new Date(e.at).toLocaleString('nb-NO'):''} · ${_esc(e.actor||'')}</div></div>
+    </div>`).join('') || '<div style="color:var(--dim);font-size:12px">Ingen hendelser.</div>';
+  // Neste steg avhengig av status
+  let nextStep = '';
+  if (c.status === 'venter_godkjenning') {
+    nextStep = `<div class="doc-card" style="background:rgba(230,160,30,.10);border-color:rgba(230,160,30,.3)">
+      <div class="doc-card-h">Neste steg</div>
+      <div style="font-size:13px;color:var(--fg)">Venter på godkjenning fra ${_esc(supplier.display_name||'leverandør')}.</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:4px">Feilsøkefirma kan ikke sendes ut før saken er godkjent. Saksnr <b>${_esc(c.claim_no||'')}</b> følger korrespondansen.</div></div>`;
+  } else if (c.status === 'godkjent' || c.status === 'under_arbeid') {
+    nextStep = `<div class="doc-card" style="background:rgba(40,180,110,.10);border-color:rgba(40,180,110,.3)">
+      <div class="doc-card-h">Godkjent — neste steg</div>
+      <div style="font-size:13px;color:var(--fg)">Feilsøk er godkjent. Du kan nå kontakte ${_esc(c.troubleshoot_firm||'feilsøkefirma')} og avtale utrykning.</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:4px">Saksnr <b>${_esc(c.claim_no||'')}</b> følger med. Registrer reparasjon (ny måling + bilder) når arbeidet er gjort.</div></div>`;
+  } else if (c.status === 'avvist') {
+    nextStep = `<div class="doc-card" style="background:rgba(229,72,77,.10);border-color:rgba(229,72,77,.3)">
+      <div class="doc-card-h">Avvist</div>
+      <div style="font-size:13px;color:var(--fg)">Saken ble avvist av ${_esc(supplier.display_name||'leverandør')}. Se saksgang for begrunnelse.</div></div>`;
+  } else if (c.status === 'lukket') {
+    const oc = c.outcome === 'godkjent' ? 'Garanti godkjent' : (c.outcome === 'delvis' ? 'Delvis dekket' : 'Avslått');
+    nextStep = `<div class="doc-card" style="background:rgba(40,180,110,.10);border-color:rgba(40,180,110,.3)">
+      <div class="doc-card-h">Sak lukket</div>
+      <div style="font-size:13px;color:var(--fg)">${oc}${c.cost?` · ${Number(c.cost).toLocaleString('nb-NO')} kr`:''}</div></div>`;
+  }
+  document.getElementById('claim-body').innerHTML = `
+    <div class="doc-card">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span class="doc-pill" style="${s.color}">${s.label}</span>
+        <span style="font-size:12px;color:var(--dim)">${_esc(fault)}</span>
+      </div>
+      <div style="font-size:13px;color:var(--fg)">${_esc(c.fault_description||'')}</div>
+    </div>
+    ${nextStep}
+    <div class="doc-card"><div class="doc-card-h">Saksgang</div>${timeline}</div>`;
+  document.getElementById('claim-body').scrollTop = 0;
+  document.getElementById('claim-foot').innerHTML = `<button class="doc-btn primary" onclick="_claimClose()">Tilbake</button>`;
+}
+
 // ─── PORTAL: REKLAMASJONER ──────────────────────────────────────────────────
 let _portalClaims = null;
 const CLAIM_STATUS = {
@@ -35420,7 +35514,7 @@ async function _claimMutate(claimId, patch, event) {
   try {
     const { error } = await _db.from('claims').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', claimId);
     if (error) throw error;
-    if (event) await _db.from('claim_events').insert({ claim_id: claimId, ...event });
+    if (event) { const { error: evErr } = await _db.from('claim_events').insert({ claim_id: claimId, ...event }); if (evErr) throw evErr; }
     _portalClaims = null; // tving reload
     await _portalRenderClaims();
     _portalClaimDetail(claimId);
