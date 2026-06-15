@@ -4,6 +4,36 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-15 (kveld) — Infra: motor deployet til Fly, mappe-organisering, feltapp-oppsett
+
+Ikke `romtegner.html`-endringer, men workspace/infra fra samme økt — loggført for sporbarhet.
+
+**Lumelo-motoren live på Fly.io**
+- Deployet `~/Code/lumelo-backend` (FastAPI) → `https://lumelo-backend.fly.dev` (region arn,
+  scale-to-zero). La til `Dockerfile`/`fly.toml`/`.dockerignore` + CORS for arqely.com i
+  `app/core/config.py` + deploy/status-notis i `lumelo-backend/CLAUDE.md`. Commit i
+  lumelo-backend: `95b45a5` (repoet har ingen remote ennå — kun lokal commit).
+- Verifisert `GET /health` → ok (fra mobil; mitt sandkasse-miljø når ikke eksternt nett).
+  Sandkasse-merknad: Bash/preview/WebFetch er nett-begrenset her → ekstern verifisering må
+  gjøres fra brukerens maskin.
+
+**Prosjektmappe-organisering** (`~/Documents/Claude Code/`)
+- Den ekte koden til Lumelo bor i `~/Code` (ikke iCloud). La inn **symlenker** under Claude
+  Code-mappa: `lumelo` → `~/Code/lumelo`, `lumelo-backend` → `~/Code/lumelo-backend`
+  (samlet tilgang, men deps synkes ikke til iCloud).
+- `Lumelo_Spec` → omdøpt til **`Lumelo_Spec (arkiv)`** (kun gammel plan/spec; den ekte koden
+  er symlenkene). `arqely-mvp` = fortsatt rotmappa til Varmeplan-web.
+
+**Ny app: Varmeplan Feltapp (Prompt 0 + oppsett)**
+- Eget prosjekt for mobil feltapp (Expo/React Native), delt Supabase. Opprettet
+  `~/Code/varmeplan-app` (+ symlink i Claude Code-mappa) med `docs/` (UX-prototyper +
+  `supabase-schema/` = migrasjonene) og en `CLAUDE.md` som fanger Prompt 0-planen:
+  offline-først (expo-sqlite + outbox), backend-kontrakt (rom i prosjekt-JSON, integer
+  product_id, klient-genererte UUID-er, RLS via org-medlemskap), måleregler fra `suppliers`,
+  navigasjon + 6-stegs byggeplan. Bygges i egen Claude Code-økt (Prompt 1).
+
+---
+
 ## 2026-06-15 — Import plantegning: gjennomgangssteg, motor live, og liste-UX
 
 Koblet PDF-import (mot den delte Lumelo-motoren) til hurtig prosjektering via et
