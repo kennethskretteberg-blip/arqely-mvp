@@ -29164,6 +29164,7 @@ function renderListModule(){
     <div style="font-size:18px;font-weight:700;color:var(--text,#e8eaed)">${IC('clipboard',20)} Hurtig prosjektering</div>
     <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} rom · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W</div>
     <div style="flex:1"></div>
+    <button style="${btn}" onclick="_pdfImportStart()">Importer tegning (PDF)</button>
     <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
     <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
   </div>`;
@@ -29189,6 +29190,161 @@ function _showListModule(){
   renderListModule();
 }
 function _hideListModule(){ const el=document.getElementById('list-module'); if(el) el.style.display='none'; }
+
+// ─── PDF-IMPORT MOT DEN DELTE MOTOREN (lumelo-backend) ───────────────────────
+// Last en vektor-PDF → motoren tolker rom → opprett listMode-rom (navn + areal)
+// i hurtigprosjektering. Areal = shoelace(polygon i meter) × 10000 = cm².
+const ENGINE_URL = window.LUMELO_ENGINE_URL || 'http://localhost:8000';
+
+function _pdfEsc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function _pdfImportStart(){
+  let inp = document.getElementById('_pdf-import-inp');
+  if(!inp){
+    inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.pdf,application/pdf'; inp.id = '_pdf-import-inp';
+    inp.style.display = 'none';
+    inp.addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if(f) _pdfImportPickLayers(f); inp.value=''; });
+    document.body.appendChild(inp);
+  }
+  inp.click();
+}
+
+async function _pdfImportPickLayers(file){
+  let layers = {};
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const r = await fetch(ENGINE_URL + '/import/pdf/layers', { method:'POST', body:fd });
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    layers = (await r.json()).layers || {};
+  } catch(err){
+    alert('Fikk ikke kontakt med tolkemotoren på ' + ENGINE_URL + '.\nKjører den? (uv run uvicorn app.main:app --port 8000)\n\n' + err.message);
+    return;
+  }
+  _pdfImportShowModal(file, layers);
+}
+
+function _pdfImportShowModal(file, layers){
+  const wallRe = /vegg|wall/i;
+  const entries = Object.entries(layers);
+  const rows = entries.length
+    ? entries.map(([name,count]) => `
+        <label style="display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;cursor:pointer">
+          <input type="checkbox" class="_pdf-layer" value="${_pdfEsc(name)}" ${wallRe.test(name)?'checked':''}>
+          <span style="flex:1">${_pdfEsc(name)}</span><span style="color:var(--dim)">${count}</span>
+        </label>`).join('')
+    : `<div style="font-size:12px;color:var(--dim)">Ingen lag i PDF-en — hele tegningen brukes.</div>`;
+  const ov = document.createElement('div');
+  ov.id = '_pdf-import-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;width:460px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:17px;font-weight:700;color:var(--text)">Importer tegning</div>
+        <button onclick="_pdfImportClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted)">${_pdfEsc(file.name)}</div>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px">Vegg-lag (huk av hvilke lag som er vegger)</div>
+        <div style="max-height:200px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${rows}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <label style="font-size:13px;color:var(--text)">Målestokk&nbsp;1:</label>
+        <input id="_pdf-scale" type="number" value="100" min="1" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text)">
+        <span style="font-size:11px;color:var(--dim)">antar tegningen er i denne målestokken</span>
+      </div>
+      <div id="_pdf-import-msg" style="font-size:12px;color:var(--accent)"></div>
+      <div style="display:flex;justify-content:flex-end;gap:10px">
+        <button onclick="_pdfImportClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
+        <button id="_pdf-import-go" style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Importer rom</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  document.getElementById('_pdf-import-go').onclick = () => {
+    const sel = [...ov.querySelectorAll('._pdf-layer:checked')].map(c => c.value);
+    const ratio = parseFloat(document.getElementById('_pdf-scale').value) || 100;
+    _pdfImportRun(file, sel, ratio);
+  };
+}
+
+function _pdfImportClose(){ const ov = document.getElementById('_pdf-import-ov'); if(ov) ov.remove(); }
+
+async function _pdfImportRun(file, layers, ratio){
+  const go = document.getElementById('_pdf-import-go'), msg = document.getElementById('_pdf-import-msg');
+  if(go){ go.disabled = true; go.textContent = 'Importerer…'; }
+  // PDF-punkt → meter: 1 pt = 1/72" = 0.0254/72 m på papir; ved 1:ratio → × ratio.
+  const mpp = ratio * 0.0254 / 72;
+  let result;
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const qs = new URLSearchParams();
+    layers.forEach(l => qs.append('layers', l));
+    qs.append('min_area_pt', '3000');
+    qs.append('meters_per_point', String(mpp));
+    const r = await fetch(ENGINE_URL + '/import/pdf?' + qs.toString(), { method:'POST', body:fd });
+    if(!r.ok){ let d = 'HTTP ' + r.status; try { const b = await r.json(); if(b.detail) d = b.detail; } catch(e){} throw new Error(d); }
+    result = await r.json();
+  } catch(err){
+    if(msg){ msg.style.color = '#e5484d'; msg.textContent = 'Import feilet: ' + err.message; }
+    if(go){ go.disabled = false; go.textContent = 'Importer rom'; }
+    return;
+  }
+  const rooms = (result.model && result.model.storeys && result.model.storeys[0] && result.model.storeys[0].rooms) || [];
+  if(!rooms.length){
+    if(msg){ msg.style.color = '#e5484d'; msg.textContent = 'Fant ingen rom — prøv andre lag eller juster målestokken.'; }
+    if(go){ go.disabled = false; go.textContent = 'Importer rom'; }
+    return;
+  }
+  const n = _pdfCreateListRooms(rooms);
+  _pdfImportClose();
+  if(typeof _showToast === 'function') _showToast(n + ' rom importert', 'success');
+}
+
+function _pdfPolyAreaM2(poly){ // poly i meter, [[x,y],…]
+  if(!poly || poly.length < 3) return 0;
+  let a = 0;
+  for(let i=0;i<poly.length;i++){ const p1 = poly[i], p2 = poly[(i+1)%poly.length]; a += p1[0]*p2[1] - p2[0]*p1[1]; }
+  return Math.abs(a) / 2;
+}
+
+function _pdfGuessRoomType(name){
+  const n = (name||'').toLowerCase();
+  if(/bad|wc|dusj|v.trom|toalett/.test(n)) return 'bathroom';
+  if(/kj.kken/.test(n)) return 'kitchen';
+  if(/stue|opphold/.test(n)) return 'living';
+  if(/sov/.test(n)) return 'bedroom';
+  if(/vask|^bk|\bbk\b/.test(n)) return 'laundry';
+  if(/gang|entr|korridor|hall/.test(n)) return 'hallway';
+  if(/kontor|m.te/.test(n)) return 'office';
+  return 'other';
+}
+
+function _pdfCreateListRooms(engineRooms){
+  const part = _listActivePart();
+  if(!part){ if(typeof _showToast === 'function') _showToast('Åpne hurtigprosjektering først', 'warn'); return 0; }
+  if(typeof pushUndo === 'function') pushUndo();
+  const floor = _listEnsureFloor(part);
+  let n = 0;
+  for(const er of engineRooms){
+    const areaM2 = _pdfPolyAreaM2(er.polygon);
+    if(!(areaM2 > 0)) continue;
+    const room = _listCreateRoomObj(part, floor);
+    room.name = er.name || ('Rom ' + (n+1));
+    room.area = Math.round(areaM2 * 10000); // m² → cm²
+    room.listDraft = false;
+    const rt = _pdfGuessRoomType(room.name);
+    room.roomType = rt;
+    room.targetWm2 = _roomTypeDefaults(rt).targetWm2;
+    S.rooms.push(room);
+    if(typeof _listAutoSuggest === 'function') _listAutoSuggest(room.id);
+    n++;
+  }
+  renderListModule();
+  if(typeof renderSidebar === 'function') renderSidebar();
+  if(typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
+  return n;
+}
+// ─── END PDF-IMPORT ──────────────────────────────────────────────────────────
 
 function backToModuleScreen_back() {
   if (S.project.parts.length===0) {
