@@ -4,6 +4,44 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-15 — Import plantegning: gjennomgangssteg, motor live, og liste-UX
+
+Koblet PDF-import (mot den delte Lumelo-motoren) til hurtig prosjektering via et
+fokusert gjennomgangssteg, og fikk **motoren live i produksjon**. Commits (nyeste
+først): `aebdd88`, `d635d91`, `c8e0802`, `51b334b`, `021f21d`.
+
+**Gjennomgangssteg (steg 2)** — `#import-review-screen` (`021f21d` la import, `51b334b` la gjennomgang)
+- `_pdfImportRun` → `_pdfOpenReview(ImportResult)` i stedet for rett i lista.
+- To synkroniserte ruter mot én kilde (`_reviewState.rooms`): SVG-plan (polygoner,
+  bbox→viewBox, flip Y; teal=valgt, grå=fravalgt, gul=warn; klikk=toggle) + redigerbar
+  liste (navn/areal/slett/legg til). Toveis hover via rom-id.
+- Areal = shoelace(polygon, m²). `review[]` plasseres i riktig rom via `where`-punkt;
+  navnløse rom → «Sjekk navn». Bulk (alle/ingen/forslag) + smart standard fra
+  `_pdfGuessRoomType`. Gulvoppbygging lagres (`_floorBuild`). Adapter
+  `_pdfCreateListRoomsFromReview` → `_listCreateRoomObj`.
+
+**Motor live på Fly.io** (`c8e0802`, `d635d91`)
+- `_engineUrl()`: `window.LUMELO_ENGINE_URL` → `localStorage['lumelo_engine_url']` →
+  vertsbasert (arqely.com → `https://lumelo-backend.fly.dev`, ellers localhost:8000).
+  Feil-dialog lar deg lime inn/lagre motor-adresse.
+- Motoren (`~/Code/lumelo-backend`, FastAPI) deployet til Fly (`lumelo-backend.fly.dev`,
+  region arn) — bekreftet `/health` = ok. Se [[project_lumelo_engine]].
+
+**Liste-/import-UX** (`aebdd88`)
+- Fiks blank side: `_pdfOpenReview` skjulte `#app`; `_reviewReturnToApp()` viser den igjen
+  ved commit/avbryt → man lander rett i hurtig prosjektering.
+- Prosjektnavn ved import (felt i gjennomgang-toolbaren → `S.project.name`).
+  **Bugfiks:** `_ensureDraftProject` auto-navnga ALLTID ved autolagring og overskrev
+  brukerens navn — nå kun når navnet er tomt.
+- Valgt rom forsvinner ikke lenger fra lista: redigert rom blir værende i tabellen,
+  uthevet (teal + ● + venstrekant); kortet får «Rediger rom: \<navn\>».
+- Piltaster på Type/Klasse/Produkt/Etasje-nedtrekkene stepper valget med live CC + W/m².
+
+Alt verifisert i preview (mock-import, ingen DB-skriving). Motor-deploy-artefakter
+(`Dockerfile`/`fly.toml`/`.dockerignore` + CORS for arqely.com) ligger i `lumelo-backend`.
+
+---
+
 ## 2026-06-13 — Autonom polering av dok-/garanti-/reklamasjonsmodulen
 
 Kjørt autonomt (uten brukervalg) mens bruker var borte. Alt verifisert i preview
