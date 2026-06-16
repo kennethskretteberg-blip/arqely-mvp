@@ -1706,11 +1706,10 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
         <div class="shape-nm">Vegg-for-vegg</div>
         <div class="shape-desc">Definer lengde og retning per vegg med panel</div>
       </div>
-      <div class="shape-card dim" data-shape="import">
-        <span class="shape-badge">Kommer snart</span>
+      <div class="shape-card" data-shape="import" onclick="_importPlanToDraw()">
         <span class="shape-ico"><svg class="ic ic-file-text" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></span>
         <div class="shape-nm">Importer plantegning</div>
-        <div class="shape-desc">Last inn JPG, PDF eller DWG</div>
+        <div class="shape-desc">Les av rom automatisk fra vektor-PDF</div>
       </div>
     </div>
     <div class="modal-footer">
@@ -29298,7 +29297,21 @@ function _pdfSetEngineUrl(u){ if(u){ localStorage.setItem('lumelo_engine_url', S
 
 function _pdfEsc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-function _pdfImportStart(){
+// Mål for importen: 'list' = hurtig prosjektering (liste-rom), 'draw' = tegnede rom
+// (ekte polygon-geometri i tegnemodulen, så man kan tegne folie/kabel inn i dem).
+let _pdfImportTarget = 'list';
+let _pdfImportDrawFloorId = null;
+
+// Inngang fra formvelgeren («Importer plantegning»): tegn rom inn i tegnemodulen.
+function _importPlanToDraw(){
+  if(typeof closeModal==='function') closeModal();
+  _pdfImportDrawFloorId = (typeof _pendingFloorId!=='undefined' && _pendingFloorId!=null)
+    ? _pendingFloorId : (S.ui.activeFloorId ?? (S.floors[0] && S.floors[0].id) ?? null);
+  _pdfImportStart('draw');
+}
+
+function _pdfImportStart(target){
+  _pdfImportTarget = (target === 'draw') ? 'draw' : 'list';
   let inp = document.getElementById('_pdf-import-inp');
   if(!inp){
     inp = document.createElement('input');
@@ -29489,6 +29502,7 @@ function _pdfOpenReview(result){
   for(const r of rooms){ if(!r._named) r.review.push({severity:'warn',message:'Sjekk navn'}); }
   _reviewState={
     rooms,
+    target: _pdfImportTarget || 'list',   // 'list' = hurtig prosjektering, 'draw' = tegnede rom
     projectName:(result.model&&result.model.project&&result.model.project.name)||'',
     calibrated: result.calibrated!==false, mpp: result.metersPerPoint||null,
     floorBuild:'concrete', hoverId:null,
@@ -29592,27 +29606,57 @@ function _reviewDeleteRoom(id){ if(!_reviewState) return; _reviewState.rooms=_re
 
 // Tilbake til hurtig prosjektering. _pdfOpenReview skjulte #app — den MÅ vises igjen,
 // ellers blir #list-module (som ligger inni #app) usynlig → blank side.
-function _reviewReturnToApp(){
+function _reviewReturnToApp(target){
   const rs=document.getElementById('import-review-screen'); if(rs) rs.style.display='none';
   const pls=document.getElementById('project-list-screen'); if(pls) pls.style.display='none';
   const ms=document.getElementById('module-screen'); if(ms) ms.style.display='none';
   const app=document.getElementById('app'); if(app) app.style.display='flex';
-  if(typeof _showListModule==='function') _showListModule();
+  if(target==='draw'){
+    // Tegnemodul: vis lerretet (skjul ev. liste-overlay), ram inn + tegn rommene.
+    // fitAll/render KJØRES HER (etter at #app er synlig) så canvas har gyldige dimensjoner.
+    const lm=document.getElementById('list-module'); if(lm) lm.style.display='none';
+    if(typeof fitAll==='function') fitAll();
+    if(typeof render==='function') render();
+  } else {
+    if(typeof _showListModule==='function') _showListModule();
+  }
 }
-function _reviewClose(){ _reviewState=null; _reviewReturnToApp(); }
+function _reviewClose(){ const t=_reviewState&&_reviewState.target; _reviewState=null; _reviewReturnToApp(t); }
 
 function _reviewCommit(){
   if(!_reviewState) return;
-  const chosen=_reviewState.rooms.filter(r=>r.heat && r.areaM2>0);
-  if(!chosen.length){ if(typeof _showToast==='function') _showToast('Velg minst ett rom med areal','warn'); return; }
+  const target=_reviewState.target||'list';
+  const chosen=_reviewState.rooms.filter(r=>r.heat && (target==='draw' ? (r.poly&&r.poly.length>=3) : r.areaM2>0));
+  if(!chosen.length){ if(typeof _showToast==='function') _showToast(target==='draw'?'Velg minst ett rom med geometri':'Velg minst ett rom med areal','warn'); return; }
   // Prosjektnavn fra gjennomgangen → sett på prosjektet, så man slipper å finne det i lista etterpå.
   const pn=(document.getElementById('rv-projname')?.value||'').trim();
   if(pn){ S.project.name=pn; const d=document.getElementById('proj-name-disp'); if(d) d.textContent=pn; }
-  const fb=_reviewState.floorBuild;
-  const n=_pdfCreateListRoomsFromReview(chosen, fb);
+  let n;
+  if(target==='draw'){
+    n=_drawCreateRoomsFromReview(chosen);
+  } else {
+    n=_pdfCreateListRoomsFromReview(chosen, _reviewState.floorBuild);
+  }
   _reviewState=null;
-  _reviewReturnToApp();
-  if(typeof _showToast==='function') _showToast(n+' rom lagt i prosjektering','success');
+  _reviewReturnToApp(target);
+  if(typeof _showToast==='function') _showToast(n+(target==='draw'?' rom tegnet inn':' rom lagt i prosjektering'),'success');
+}
+
+// Adapter: gjennomgang-rom (motor-polygon i meter, Y-opp) → ekte TEGNEDE rom med
+// geometri + vegger i tegnemodulen. Y flippes (motor Y-opp → app verdens-Y nedover),
+// m→cm. keepPosition=true bevarer rommenes innbyrdes plassering fra tegningen.
+function _drawCreateRoomsFromReview(rooms){
+  const floorId = (_pdfImportDrawFloorId!=null) ? _pdfImportDrawFloorId
+    : (S.ui.activeFloorId ?? (S.floors[0] && S.floors[0].id) ?? null);
+  let n=0;
+  for(const rr of rooms){
+    if(!rr.poly || rr.poly.length<3) continue; // manuelt tillagte uten geometri kan ikke tegnes
+    const pts = rr.poly.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
+    const room = createRoom(pts, 'polygon', rr.name||('Rom '+(n+1)), floorId, /*keepPosition*/true);
+    if(room){ if(rr.type){ room.roomType=rr.type; if(typeof _roomTypeDefaults==='function') room.targetWm2=_roomTypeDefaults(rr.type).targetWm2; } n++; }
+  }
+  if(n){ if(typeof fitAll==='function') fitAll(); if(typeof render==='function') render(); if(typeof _scheduleAutoSave==='function') _scheduleAutoSave(); }
+  return n;
 }
 
 // Adapter: gjennomgang-rom (med ev. redigert areal / manuelt tillagte rom) → listMode-rom.
