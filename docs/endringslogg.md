@@ -4,6 +4,46 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-16 — Import plantegning: tegnede rom, samlet meny, kalibreringsvalg, lag-filter, folie-label
+
+Bygde ut PDF-importen (mot den delte motoren) så den også gir **ekte tegnede rom**, og
+ryddet i import-UX etter testtilbakemelding. Commits (nyeste først): `e963ae4`, `9c679de`,
+`81a8fcf`, `caf0c6a`, `2218a1d`, `fdd2fcc`, `23eb071`.
+
+**Importer plantegning → tegnede rom** (`23eb071`, `fdd2fcc`)
+- Ny adapter `_drawCreateRoomsFromReview`: motor-polygon (meter, Y-opp) → cm med Y-flip →
+  `createRoom(pts,'polygon',navn,floorId,keepPosition=true)` = ekte rom m/ vegger, bevart
+  innbyrdes plassering. Mål (`target` 'draw'/'list') tres gjennom review-flyten.
+- «Importer plantegning» i tegne-verktøylinja (ctxbar) peker nå på motor-importen.
+
+**Samlet import-meny** (`2218a1d`)
+- Én «Importer plantegning»-knapp → `_importPlanMenu`: «Les av rom automatisk» (motor) eller
+  «Tegn selv over bakgrunn» (PDF/JPG som bakgrunn, også skannede).
+
+**Auto-les med bakgrunn + kalibrering i flukt** (`caf0c6a`, `81a8fcf`)
+- Auto-les laster PDF som **bakgrunn** (pdf.js), bruker kalibrerer, så plasseres rommene
+  nøyaktig oppå (kanonisk frame: PDF-punkt (0,0) = verden (0,0), skala fra kalibrert bakgrunn).
+  Bakgrunnen blir liggende så møblering vises mens man tegner folie.
+- Kalibrerings-overlayet tilbyr nå **begge** metoder: «Klikk to punkter (kjent avstand)» og
+  «Fast målestokk (1:50)» (gjaldt før kun to-punkts). Gjelder all bakgrunnsimport.
+- **Lag-filter:** auto-les henter PDF-lagene og lar bruker huke av vegg-lag (default
+  vegg/yttervegg/skille) → kun vegger blir rom; møbler/inventar/tekst vises kun i bakgrunnen.
+
+**Folie-stripe-label mindre på skjerm** (`9c679de`)
+- Folie-stripe-labelen skaleres ned på canvas (lettere å lese romoppsett), men beholder
+  passende størrelse i PDF-utskrift.
+
+**Liste-import (hurtig prosjektering) — to skaleringsvalg** (`e963ae4`)
+- PDF-importen i hurtig prosjektering får i tillegg til «Målestokk 1:__» et valg
+  «Klikk et kjent mål i tegningen» (to-punkts via bakgrunn). Etter målsetting fortsetter
+  alt som før: vegg-lag → liste med romnavn + areal.
+
+**Forbehold (uendret):** selve motoren testes mot ekte vektor-PDF fra brukerens maskin
+(sandkassen min når den ikke). Bakgrunn↔rom-justering kan trenge én finjusterings-runde på
+en virkelig tegning. Lag-filteret virker kun hvis PDF-en har lag som skiller vegger fra møbler.
+
+---
+
 ## 2026-06-15 (kveld) — Infra: motor deployet til Fly, mappe-organisering, feltapp-oppsett
 
 Ikke `romtegner.html`-endringer, men workspace/infra fra samme økt — loggført for sporbarhet.
