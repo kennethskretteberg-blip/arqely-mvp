@@ -21652,6 +21652,7 @@ function confirmBgCalibrate() {
   }
   const ni = document.getElementById('ctxbar-room-name');
   if (ni) setTimeout(() => { ni.focus(); ni.select(); }, 100);
+  _autoReadIfPending();   // auto-les-flyt: kjør motoren nå som målestokken er satt
 }
 
 function showFixedScaleModal() {
@@ -21704,6 +21705,7 @@ function confirmFixedScale() {
   S.ui.selectedRoomId = null; S.ui.selectedWallId = null; S.ui.selectedBg = null;
   bg.locked = true;
   renderSidebar(); updMode(); render();
+  _autoReadIfPending();   // auto-les-flyt: kjør motoren nå som målestokken er satt
 }
 
 function setRoomType(roomId, typeId) {
@@ -29303,13 +29305,73 @@ let _pdfImportTarget = 'list';
 let _pdfImportDrawFloorId = null;
 
 // Inngang fra formvelgeren («Importer plantegning»): tegn rom inn i tegnemodulen.
+// SAMLET AUTO-LES-FLYT: last PDF som bakgrunn → bruker kalibrerer (to-punkts ELLER
+// målestokk, gjenbruker bakgrunns-kalibreringen) → motoren leser av rom → rommene
+// plasseres I FLUKT oppå bakgrunnen (samme målestokk). Bakgrunnen blir liggende så man
+// ser møblering/hindringer mens man tegner folie.
+let _autoReadPdf = null;   // {file} som venter på at brukeren kalibrerer bakgrunnen
+
 function _importPlanToDraw(){
   if(typeof closeModal==='function') closeModal();
-  // Aktiv etasje først (ctxbar-flyt), så modal-valgt etasje, så første etasje.
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
-    : ((typeof _pendingFloorId!=='undefined' && _pendingFloorId!=null) ? _pendingFloorId
-    : ((S.floors[0] && S.floors[0].id) ?? null));
-  _pdfImportStart('draw');
+    : ((S.floors[0] && S.floors[0].id) ?? null);
+  let inp=document.getElementById('_pdf-autoread-inp');
+  if(!inp){
+    inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf,application/pdf';
+    inp.id='_pdf-autoread-inp'; inp.style.display='none';
+    inp.addEventListener('change', e=>{ const f=e.target.files&&e.target.files[0]; if(f) _autoReadStart(f); inp.value=''; });
+    document.body.appendChild(inp);
+  }
+  inp.click();
+}
+
+function _autoReadStart(file){
+  _autoReadPdf = { file };
+  // Last som bakgrunn (rasteriserer + viser). _needsCalibration=true → ctxbar tilbyr
+  // «Sett målestokk» (to-punkts) og «Fast målestokk» (1:50). Begge ender i _autoReadIfPending.
+  _loadBgPdf(file, file.name);
+  if(typeof _showToast==='function') _showToast('Sett målestokk på tegningen — så leser appen av rommene','info');
+}
+
+// Kalles på slutten av begge kalibrerings-funksjonene.
+function _autoReadIfPending(){
+  if(!_autoReadPdf) return;
+  const job=_autoReadPdf; _autoReadPdf=null;
+  _autoReadRunEngine(job.file);
+}
+
+async function _autoReadRunEngine(file){
+  const bg = (typeof activeBg==='function') ? activeBg() : null;
+  if(!bg || !bg.img || !(bg.widthCm>0)){ if(typeof _showToast==='function') _showToast('Kalibrer tegningen først.'); return; }
+  // Sidestørrelse i PDF-punkter (fra fysisk papirstørrelse fanget ved import).
+  const Wpt = bg.paperWidthCm>0 ? bg.paperWidthCm/2.54*72 : bg.img.naturalWidth;
+  const Hpt = bg.paperHeightCm>0 ? bg.paperHeightCm/2.54*72 : bg.img.naturalHeight;
+  const cmPerPt = bg.widthCm / Wpt;          // kalibrert skala
+  const mpp = cmPerPt / 100;                 // meter per punkt → motoren returnerer meter
+  // Kanonisk bakgrunnsplassering: PDF-punkt (0,0) nede-venstre = verden (0,0), så rom plassert
+  // som (px·cmPerPt, -(py·cmPerPt)) av den eksisterende adapteren ligger nøyaktig oppå.
+  bg.heightCm = Hpt * cmPerPt;
+  bg.originX = 0;
+  bg.originY = -bg.heightCm;
+  bg.locked = true;
+  if(typeof _showToast==='function') _showToast('Leser av rom …','info');
+  let result;
+  try {
+    const fd=new FormData(); fd.append('file', file);
+    const qs=new URLSearchParams(); qs.append('meters_per_point', String(mpp)); qs.append('min_area_pt','400');
+    const r=await fetch(_engineUrl()+'/import/pdf?'+qs.toString(), {method:'POST', body:fd});
+    if(!r.ok){ let d='HTTP '+r.status; try{const b=await r.json(); if(b.detail) d=b.detail;}catch(e){} throw new Error(d); }
+    result=await r.json();
+  } catch(err){
+    const cur=_engineUrl();
+    const next=prompt('Fikk ikke kontakt med tolkemotoren på:\n'+cur+'\n\nLim inn motorens adresse (https://…), eller avbryt.', cur);
+    if(next && next.trim() && next.trim().replace(/\/+$/,'')!==cur){ _pdfSetEngineUrl(next); return _autoReadRunEngine(file); }
+    if(typeof _showToast==='function') _showToast('Import feilet: '+err.message); return;
+  }
+  const rooms=(result.model && result.model.storeys && result.model.storeys[0] && result.model.storeys[0].rooms) || [];
+  if(!rooms.length){ if(typeof _showToast==='function') _showToast('Fant ingen rom. Prøv «Tegn selv over bakgrunn».'); if(typeof render==='function') render(); return; }
+  _pdfImportTarget='draw';
+  _pdfOpenReview(result);
 }
 
 // Én «Importer plantegning»-knapp → valg mellom auto-lesing og tegn-selv-over-bakgrunn.
