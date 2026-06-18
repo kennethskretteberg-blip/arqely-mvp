@@ -4,6 +4,21 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-18 — Hurtig prosjektering: «Lagre prosjekt»-knapp (commit 2f080da)
+
+Tydelig lagre-kontroll nederst i romlista, som komplement til autolagringen.
+- Teal «Lagre prosjekt»-knapp rett under «Opprettede rom»; deaktivert når lista er tom.
+  Autolagrings-indikatoren i headeren beholdt.
+- `_listSaveProject` → idempotent flush (`_saveToSupabase`) + toast «Lagret – finnes i
+  prosjektlista og i feltappen»; knappen viser «Lagret ✓», og «Gå til prosjektliste»
+  dukker opp (uten å tvinge navigasjon).
+- Navngiving for gjenfinning: ved autonavn («Prosjekt – <dato>») ber `_listSaveNameDialog`
+  om prosjektnavn (+ valgfri adresse) før lagring; ellers lagres direkte. Navnet skrives
+  til `romtegner_projects.name` → søkbart i feltappen.
+- Datastruktur uendret — samme record (rom + produkter i `data`) som feltappen leser; kun verifisert.
+
+---
+
 ## 2026-06-16 — Import plantegning: tegnede rom, samlet meny, kalibreringsvalg, lag-filter, folie-label
 
 Bygde ut PDF-importen (mot den delte motoren) så den også gir **ekte tegnede rom**, og
