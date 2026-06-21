@@ -2886,6 +2886,7 @@ function render() {
     if (S.ui.selectedHindringWallIdx !== null) drawHindringWallArrows();
   }
   drawUserDimLines();
+  if (S.ui.present) _drawPresentHighlight();
   if (S.ui.selectedDimId!==null) drawDimMoveGizmo();
   if (S.ui.selectedBg) drawBgGizmo();
   _drawDebugCableCells();
@@ -4264,6 +4265,7 @@ function _presentEnter() {
   document.body.classList.add('present-mode');
   _presentRenderBar();
   const det = document.getElementById('present-detail'); if (det) det.style.display = 'none';
+  canvas.style.cursor = 'grab';
   resizeCanvas();   // canvas-wrap er nå full bredde (sidebar/topbar skjult)
   fitAll();         // vis hele prosjektet
   render();
@@ -4274,9 +4276,96 @@ function _presentExit() {
   document.body.classList.remove('present-mode');
   const bar = document.getElementById('present-bar'); if (bar) bar.style.display = 'none';
   const det = document.getElementById('present-detail'); if (det) det.style.display = 'none';
+  canvas.style.cursor = 'default';
   resizeCanvas();
   if (typeof renderSidebar === 'function') renderSidebar();
   render();
+}
+
+// ── Steg 2: hover/tap → fremhev rom + detaljpanel ──────────────────────────
+function _presentRoomAt(e) {
+  const wp = getWorldPos(e);
+  for (const r of [...S.rooms].reverse()) {
+    if (r.listDraft || !r.points || r.points.length < 3) continue;
+    if (!_roomOnActiveFloor(r)) continue;
+    if (ptInPoly(wp.x, wp.y, r.points)) return r;
+  }
+  return null;
+}
+function _presentHover(e) {
+  const r = _presentRoomAt(e);
+  const id = r ? r.id : null;
+  canvas.style.cursor = id != null ? 'pointer' : 'grab';
+  if (id !== S.ui.presentRoomId) {
+    S.ui.presentRoomId = id;
+    _presentRenderDetail();
+    markDirty();
+  }
+}
+// Finn det dominerende produktet i et rom (kabel → folie → matte → plate).
+function _presentRoomProduct(room) {
+  const find = (arr) => (arr || []).find(x => x.roomId === room.id);
+  const c = find(S.cables); if (c) return HEATING_PRODUCTS.find(p => p.id === c.productId);
+  const s = find(S.strips); if (s) return HEATING_PRODUCTS.find(p => p.id === s.productId);
+  const m = find(S.mats);   if (m) return HEATING_PRODUCTS.find(p => p.id === m.productId);
+  const pl = find(S.plates); if (pl) return HEATING_PRODUCTS.find(p => p.id === pl.productId);
+  return null;
+}
+function _presentRoomDetailHtml(room) {
+  const stats = _computeRoomStats(room);
+  const installedW = Math.round(_roomRatedEffectW(room) || 0);
+  const flateeffekt = stats.cableLenM > 0 ? stats.cableWm2 : stats.wm2Heated;   // samme regel som romdetaljer
+  const prod = _presentRoomProduct(room);
+  const volt = (prod && prod.voltage) ? prod.voltage : 230;
+  const R = installedW > 0 ? (volt * volt / installedW) : 0;   // nominell motstand R = U²/P
+  const row = (l, v) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px solid var(--border)"><span style="color:var(--dim)">${l}</span><span style="font-weight:600;text-align:right">${v}</span></div>`;
+  const rows = [];
+  if (prod) {
+    rows.push(row('Produkt', esc(prod.name || '—')));
+    if (prod.article_no) rows.push(row('Artikkelnr', esc(String(prod.article_no))));
+  } else {
+    rows.push(row('Produkt', '<span style="color:var(--dim)">ikke plassert</span>'));
+  }
+  rows.push(row('Installert effekt', installedW + ' W'));
+  if (flateeffekt > 0) rows.push(row('Flateeffekt', Math.round(flateeffekt) + ' W/m²'));
+  if (stats.cableCcCm > 0) rows.push(row('c/c-avstand', stats.cableCcCm.toFixed(1) + ' cm'));
+  if (stats.cableLenM > 0) rows.push(row('Kabellengde', stats.cableLenM.toFixed(1) + ' m'));
+  rows.push(row('Spenning', volt + ' V'));
+  if (R > 0) rows.push(row('Nominell motstand', R.toFixed(1) + ' Ω'));
+  const ftDef = _floorTypeDef(room.floorType);
+  rows.push(row('Toppgulv', ftDef ? esc(ftDef.label) : '<span style="color:var(--dim)">ikke angitt</span>'));
+  const rt = room.roomType ? ROOM_TYPES.find(t => t.id === room.roomType) : null;
+  const compat = _floorCompatBannerHtml(room.floorType, flateeffekt > 0 ? flateeffekt : (room.targetWm2 || 0));
+  return `<div style="font-size:15px;font-weight:700;margin-bottom:6px;border-left:4px solid ${room.color || '#4fa2b8'};padding-left:10px">${esc(room.name || 'Rom')}</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">${(room.area / 10000).toFixed(2)} m²${rt ? ' · ' + esc(rt.label) : ''}</div>
+    <div style="font-size:13px">${rows.join('')}</div>
+    ${compat}`;
+}
+function _presentRenderDetail() {
+  const el = document.getElementById('present-detail');
+  if (!el) return;
+  const id = S.ui.presentRoomId;
+  const room = id != null ? S.rooms.find(r => r.id === id) : null;
+  if (!room) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.innerHTML = _presentRoomDetailHtml(room);
+  const bar = document.getElementById('present-bar');
+  el.style.top = ((bar ? bar.offsetHeight : 56) + 12) + 'px';
+  el.style.display = 'block';
+}
+function _drawPresentHighlight() {
+  if (!S.ui.present || S.ui.presentRoomId == null) return;
+  const r = S.rooms.find(x => x.id === S.ui.presentRoomId);
+  if (!r || !r.points || r.points.length < 3) return;
+  ctx.save();
+  ctx.beginPath();
+  const p0 = w2s(r.points[0].x, r.points[0].y); ctx.moveTo(p0.x, p0.y);
+  for (let i = 1; i < r.points.length; i++) { const p = w2s(r.points[i].x, r.points[i].y); ctx.lineTo(p.x, p.y); }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(79,162,184,0.10)'; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#4fa2b8';
+  ctx.shadowColor = 'rgba(79,162,184,0.6)'; ctx.shadowBlur = 12;
+  ctx.stroke();
+  ctx.restore();
 }
 
 function _upcProductTypeChanged(modType) {
@@ -26636,6 +26725,19 @@ canvas.addEventListener('mousemove', e=>{
     }
   }
 
+  // Presentasjonsmodus: kun panorering (drag) + hover-fremheving. Ingen redigering.
+  if (S.ui.present) {
+    if (_panning) {
+      const sc = S.view.zoom * BASE_SCALE;
+      S.view.panX = _panSV.x - (e.clientX - _panStart.x) / sc;
+      S.view.panY = _panSV.y - (e.clientY - _panStart.y) / sc;
+      markDirty();
+    } else {
+      _presentHover(e);
+    }
+    return;
+  }
+
   // Background transform-gizmo drag (move / scale-about-centre / rotate)
   if (_bgDragging) {
     const bg = S.ui.selectedBg;
@@ -27432,6 +27534,22 @@ canvas.addEventListener('mouseleave', () => {
 });
 
 canvas.addEventListener('mouseup', e=>{
+  // Presentasjonsmodus: avslutt panorering; tap (uten drag) velger rom under peker.
+  if (S.ui.present) {
+    if (_panning) {
+      _panning = false;
+      canvas.style.cursor = 'grab';
+      if (_presentPressPt && Math.hypot(e.clientX - _presentPressPt.x, e.clientY - _presentPressPt.y) < 5) {
+        const r = _presentRoomAt(e);
+        S.ui.presentRoomId = r ? r.id : null;
+        canvas.style.cursor = r ? 'pointer' : 'grab';
+        _presentRenderDetail();
+        render();
+      }
+      _presentPressPt = null;
+    }
+    return;
+  }
   if (_bgDragging) {
     _bgDragging=null; _bgDragOrig=null; _bgScaleCorner0=null;
     canvas.style.cursor='default'; updateCtxBar(); render(); return;
