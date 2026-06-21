@@ -337,6 +337,27 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
 
 /* ── CANVAS ── */
 #canvas-wrap{position:relative;flex:1;overflow:hidden;background:var(--bg)}
+/* ── PRESENTASJONSMODUS (read-only) ── skjuler all redigerings-chrome, beholder canvas. */
+body.present-mode #topbar,
+body.present-mode #sidebar,
+body.present-mode #sidebar-resizer,
+body.present-mode #ctxbar,
+body.present-mode #room-workflow-panel,
+body.present-mode #zoom-badge,
+body.present-mode #topbar-avatar-wrap,
+body.present-mode #stair-settings-panel,
+body.present-mode #snow-settings-panel,
+body.present-mode #statusbar,
+body.present-mode #render-stats{display:none !important}
+#present-bar{position:absolute;top:0;left:0;right:0;z-index:80;background:var(--surface);border-bottom:1px solid var(--border);box-shadow:0 2px 12px rgba(0,0,0,.25);padding:10px 16px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+#present-bar .pb-title{font-size:16px;font-weight:700;color:var(--text)}
+#present-bar .pb-sub{font-size:12px;color:var(--dim)}
+#present-bar .pb-kpis{display:flex;gap:18px;margin-left:auto;align-items:center;flex-wrap:wrap}
+#present-bar .pb-kpi{display:flex;flex-direction:column;line-height:1.15}
+#present-bar .pb-kpi b{font-size:15px;color:var(--text);font-variant-numeric:tabular-nums}
+#present-bar .pb-kpi span{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
+#present-bar .pb-btn{cursor:pointer;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);padding:7px 12px;font-size:12px;font-weight:600}
+#present-detail{position:absolute;right:16px;width:320px;max-width:calc(100vw - 32px);z-index:81;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.35);padding:14px 16px;font-size:13px;color:var(--text)}
 /* Dokket over venstre sidebar (geometri settes av _dockRwp), aldri over griddet. */
 #room-workflow-panel{position:fixed;z-index:150;background:var(--surface);border-right:1px solid var(--border);box-shadow:4px 0 18px rgba(0,0,0,.35);user-select:none;overflow-y:auto;overflow-x:hidden}
 .rwp-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 6px;border-bottom:1px solid var(--border);cursor:grab}
@@ -1464,6 +1485,7 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
       <button class="file-btn" onclick="openProject()" title="Åpne prosjekt" data-ic="folder-open"></button>
       <button class="file-btn" onclick="_showExportDialog()" title="Eksporter PDF" data-ic="file-text"></button>
       <button class="file-btn" onclick="_exportMaterialListXLSX()" title="Materialliste (Excel)" data-ic="table"></button>
+      <button class="tool-chip" id="chip-present" onclick="_presentEnter()" title="Vis prosjektet read-only for kunde/elektriker">▶ Presentasjon</button>
     </span>
     <!-- Product import moved to Admin panel -->
     <span data-modules="indoor snow" style="display:none"><button class="file-btn" id="btn-import-products" onclick="openExcelModal()" title="Importer produkter fra Excel" style="display:none" data-ic="table"></button></span>
@@ -1532,6 +1554,9 @@ body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-colo
     <div id="canvas-wrap">
       <canvas id="canvas"></canvas>
       <div id="ctxbar"></div>
+      <!-- PRESENTASJONSMODUS (read-only) overlays -->
+      <div id="present-bar" style="display:none"></div>
+      <div id="present-detail" style="display:none"></div>
       <div id="stair-settings-panel" style="display:none;position:absolute;top:40px;right:8px;z-index:50"></div>
       <div id="snow-settings-panel" style="display:none;position:absolute;top:40px;right:8px;z-index:50"></div>
       <div id="zoom-badge">100%</div>
@@ -4163,6 +4188,95 @@ function _upcUpdateFloorCompat() {
   const inp = document.getElementById('upc-wm2');
   const wm2 = inp ? (parseInt(inp.value) || room.targetWm2 || 0) : (room.targetWm2 || 0);
   el.innerHTML = _floorCompatBannerHtml(room.floorType, wm2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESENTASJONSMODUS (read-only) — gjenbruker editor-canvas + render().
+// Ingen redigering; kun fremvisning av prosjektet «som prosjektert».
+// ═══════════════════════════════════════════════════════════════════════════
+// Rom som faktisk tegnes på canvas (har polygon-geometri).
+function _presentDrawnRooms() {
+  return S.rooms.filter(r => !r.listDraft && r.points && r.points.length >= 3);
+}
+function _presentStats() {
+  let rooms = 0, heated = 0, totalW = 0;
+  for (const r of _presentDrawnRooms()) {
+    rooms++;
+    const st = _computeRoomStats(r);
+    heated += st.heatedM2 || 0;
+    totalW += _roomRatedEffectW(r) || 0;
+  }
+  return { rooms, heated, totalW: Math.round(totalW) };
+}
+// Leverandør for topptekst/temafarge: vanligste leverandør blant plasserte produkter.
+// Nøytral default «Varmeplan» når ingenting er kjent (leverandøruavhengig).
+function _presentSupplier() {
+  const counts = {};
+  const add = (pid) => { const p = HEATING_PRODUCTS.find(x => x.id === pid); if (p && p.supplier) counts[p.supplier] = (counts[p.supplier] || 0) + 1; };
+  (S.strips || []).forEach(s => add(s.productId));
+  (S.cables || []).forEach(c => add(c.productId));
+  (S.mats   || []).forEach(m => add(m.productId));
+  (S.plates || []).forEach(p => add(p.productId));
+  let best = null, bn = 0;
+  for (const k in counts) if (counts[k] > bn) { bn = counts[k]; best = k; }
+  if (best) {
+    const sup = (typeof _docSuppliers !== 'undefined' && _docSuppliers) ? _docSuppliers.find(s => s.name === best) : null;
+    return { name: (sup && (sup.display_name || sup.name)) || best, color: (sup && sup.color) || '#4fa2b8' };
+  }
+  return { name: 'Varmeplan', color: '#4fa2b8' };
+}
+function _presentRenderBar() {
+  const bar = document.getElementById('present-bar');
+  if (!bar) return;
+  const st = _presentStats(), sup = _presentSupplier(), proj = S.project || {};
+  const navn = esc(proj.name || 'Uten navn');
+  const firma = esc((proj.customer || '').trim());
+  let dato = '';
+  try { dato = new Date().toLocaleDateString('nb-NO', { year:'numeric', month:'long', day:'numeric' }); } catch(e) { dato = ''; }
+  const sub = `Prosjektert av ${esc(sup.name)}${firma ? ` for ${firma}` : ''}${dato ? ` · ${dato}` : ''}`;
+  bar.innerHTML = `
+    <div style="border-left:4px solid ${sup.color};padding-left:12px">
+      <div class="pb-title">${navn}</div>
+      <div class="pb-sub">${sub}</div>
+    </div>
+    <div class="pb-kpis">
+      <div class="pb-kpi"><b>${st.rooms}</b><span>Rom</span></div>
+      <div class="pb-kpi"><b>${st.heated.toFixed(1)} m²</b><span>Oppvarmet</span></div>
+      <div class="pb-kpi"><b>${st.totalW} W</b><span>Installert effekt</span></div>
+      <button class="pb-btn" onclick="_presentExit()">✕ Avslutt</button>
+    </div>`;
+  bar.style.display = 'flex';
+}
+function _presentClearSelections() {
+  const u = S.ui; if (!u) return;
+  u.selectedStripId = null;
+  if (u.selectedStripIds && u.selectedStripIds.clear) u.selectedStripIds.clear();
+  u.selectedWallId = null; u.selectedRoomId = null; u.selectedMatId = null;
+  u.selectedPlateId = null; u.selectedStairId = null; u.selectedHindringId = null;
+  u.selectedDimId = null; u.selectedBg = null;
+}
+function _presentEnter() {
+  if (!S.ui) S.ui = {};
+  S.ui.present = true;
+  S.ui.presentRoomId = null;
+  _presentClearSelections();
+  S.ui.drawMode = null;
+  document.body.classList.add('present-mode');
+  _presentRenderBar();
+  const det = document.getElementById('present-detail'); if (det) det.style.display = 'none';
+  resizeCanvas();   // canvas-wrap er nå full bredde (sidebar/topbar skjult)
+  fitAll();         // vis hele prosjektet
+  render();
+}
+function _presentExit() {
+  S.ui.present = false;
+  S.ui.presentRoomId = null;
+  document.body.classList.remove('present-mode');
+  const bar = document.getElementById('present-bar'); if (bar) bar.style.display = 'none';
+  const det = document.getElementById('present-detail'); if (det) det.style.display = 'none';
+  resizeCanvas();
+  if (typeof renderSidebar === 'function') renderSidebar();
+  render();
 }
 
 function _upcProductTypeChanged(modType) {
@@ -25038,6 +25152,7 @@ let _sgOrigPos=0, _sgOrigStart=0, _sgOrigMouse={x:0,y:0};
 let _sgEndDragging=false, _sgEndWhich=''; // 'start'|'end'
 let _sgOrigLength=0, _sgOrigStartCm=0;
 let _dragging=false, _panning=false;
+let _presentPressPt=null;   // presentasjonsmodus: skiller tap fra drag
 // Click-cycling: did the previous press move (drag) vs. a clean click? Used to
 // decide whether a repeated click at the same spot advances the selection cycle.
 // _pressMoved is set only when the pointer is dragged beyond CYCLE_MOVE_PX from
@@ -25347,6 +25462,19 @@ function _showCycleBadge(clientX, clientY, idx, total) {
 function _hideCycleBadge() { if (_cycleBadgeEl) _cycleBadgeEl.style.display = 'none'; }
 
 canvas.addEventListener('mousedown', e=>{
+  // Presentasjonsmodus: kun panorering (ingen redigering). Klikk-for-detalj
+  // håndteres i mouseup (skiller tap fra drag).
+  if (S.ui.present) {
+    if (e.button===0 || e.button===1) {
+      _panning=true; _resetCycle();
+      _panStart={x:e.clientX,y:e.clientY};
+      _panSV={x:S.view.panX,y:S.view.panY};
+      _presentPressPt={x:e.clientX,y:e.clientY};
+      canvas.style.cursor='grabbing';
+      e.preventDefault();
+    }
+    return;
+  }
   // Pan triggers (in priority order):
   //   - spacePan: explicit temporary pan toggled with Space during draw mode
   //   - shift+drawMode: hold Shift while drawing to pan
@@ -27485,6 +27613,7 @@ function _bgCtxMenuItems() {
 
 canvas.addEventListener('contextmenu', e=>{
   e.preventDefault();
+  if (S.ui.present) return;   // ingen høyreklikk-meny i presentasjon
   if (S.ui.drawMode) { cancelDrawing(); return; }
   const cRect=canvas.getBoundingClientRect();
   const sx=e.clientX-cRect.left, sy=e.clientY-cRect.top;
@@ -27633,6 +27762,9 @@ document.addEventListener('keydown', e=>{
   // Broad safety net: most canvas-focused keys (Esc, arrows, delete, R, etc.)
   // change state. One extra render per key is cheap insurance.
   markDirty();
+
+  // Presentasjonsmodus: ignorer alle redigerings-snarveier; kun Escape avslutter.
+  if (S.ui.present) { if (e.key==='Escape') _presentExit(); return; }
 
   if (e.key==='Escape') {
     _resetCycle();
