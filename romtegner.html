@@ -2857,6 +2857,7 @@ function render() {
   drawBgImage();
   if (S.ui.showGrid !== false) drawGrid();
   drawRooms();
+  if (S.ui.present) drawPresentFloorTextures();   // subtil gulvtekstur UNDER leggemønsteret
   drawStrips();
   drawCables();
   drawMats();
@@ -4244,7 +4245,9 @@ function _presentRenderBar() {
       <div class="pb-kpi"><b>${st.rooms}</b><span>Rom</span></div>
       <div class="pb-kpi"><b>${st.heated.toFixed(1)} m²</b><span>Oppvarmet</span></div>
       <div class="pb-kpi"><b>${st.totalW} W</b><span>Installert effekt</span></div>
-      <button class="pb-btn" onclick="_presentExit()">✕ Avslutt</button>
+      ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentShareLink()" title="Kopier delelenke for kunde/elektriker">🔗 Del lenke</button>`}
+      <button class="pb-btn" onclick="_presentDownloadPDF()" title="Last ned prosjektoversikt som PDF">⬇ PDF</button>
+      ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentExit()">✕ Avslutt</button>`}
     </div>`;
   bar.style.display = 'flex';
 }
@@ -4259,6 +4262,7 @@ function _presentClearSelections() {
 function _presentEnter() {
   if (!S.ui) S.ui = {};
   S.ui.present = true;
+  S.ui.presentPublic = false;   // in-app: vis Del/PDF/Avslutt-knapper
   S.ui.presentRoomId = null;
   _presentClearSelections();
   S.ui.drawMode = null;
@@ -4352,6 +4356,100 @@ function _presentRenderDetail() {
   el.style.top = ((bar ? bar.offsetHeight : 56) + 12) + 'px';
   el.style.display = 'block';
 }
+// ── Steg 3: subtil gulvtekstur per gulvtype (under leggemønsteret) ─────────
+// flis/betong/mikrosement → rutenett (fliser); tre/vinyl → bordmønster;
+// teppe → fin prikketekstur. Holdes diskré så varmemønsteret er tydeligst.
+function _floorTexSpec(ft) {
+  switch (ft) {
+    case 'flis':        return { kind:'grid',  step:30 };
+    case 'mikrosement': return { kind:'grid',  step:60 };
+    case 'betong':      return { kind:'grid',  step:100 };
+    case 'laminat':     return { kind:'plank', step:19 };
+    case 'parkett':     return { kind:'plank', step:19 };
+    case 'vinyl':       return { kind:'plank', step:30 };
+    case 'teppe':       return { kind:'dots',  step:14 };
+    default:            return null;
+  }
+}
+function drawPresentFloorTextures() {
+  for (const r of _presentDrawnRooms()) {
+    const spec = _floorTexSpec(r.floorType);
+    if (spec) _drawRoomTexture(r, spec);
+  }
+}
+function _drawRoomTexture(room, spec) {
+  const pts = room.points;
+  let mnx=Infinity, mny=Infinity, mxx=-Infinity, mxy=-Infinity;
+  for (const p of pts) { if(p.x<mnx)mnx=p.x; if(p.x>mxx)mxx=p.x; if(p.y<mny)mny=p.y; if(p.y>mxy)mxy=p.y; }
+  ctx.save();
+  ctx.beginPath();
+  const s0 = w2s(pts[0].x, pts[0].y); ctx.moveTo(s0.x, s0.y);
+  for (let i=1;i<pts.length;i++){ const s=w2s(pts[i].x,pts[i].y); ctx.lineTo(s.x,s.y); }
+  ctx.closePath(); ctx.clip();
+  const col = _lc('rgba(0,0,0,0.07)', 'rgba(255,255,255,0.06)');
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+  const step = spec.step;
+  if (spec.kind === 'grid' || spec.kind === 'plank') {
+    const y0 = Math.floor(mny/step)*step;
+    for (let y=y0; y<=mxy; y+=step) { const a=w2s(mnx,y), b=w2s(mxx,y); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    if (spec.kind === 'grid') {
+      const x0 = Math.floor(mnx/step)*step;
+      for (let x=x0; x<=mxx; x+=step) { const a=w2s(x,mny), b=w2s(x,mxy); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    }
+  } else if (spec.kind === 'dots') {
+    const x0 = Math.floor(mnx/step)*step, y0 = Math.floor(mny/step)*step;
+    for (let y=y0; y<=mxy; y+=step) for (let x=x0; x<=mxx; x+=step) { const s=w2s(x,y); ctx.beginPath(); ctx.arc(s.x,s.y,0.8,0,Math.PI*2); ctx.fill(); }
+  }
+  ctx.restore();
+}
+
+// ── Steg 3: delelenke (?present=<token>) + PDF ─────────────────────────────
+function _presentDownloadPDF() {
+  if (typeof exportPDF === 'function') exportPDF();
+  else _showToast && _showToast('PDF-eksport er ikke tilgjengelig.');
+}
+async function _presentShareLink() {
+  if (!_db || !_supabaseProjectId) {
+    _showToast && _showToast('Lagre prosjektet i skyen først for å dele.');
+    return;
+  }
+  let token = (S.project && S.project.present_token) || null;
+  if (!token) {
+    token = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : (Math.random().toString(36).slice(2) + Date.now().toString(36));
+    S.project.present_token = token;
+    try {
+      await _db.from('romtegner_projects').update({ present_token: token }).eq('id', _supabaseProjectId);
+      _projectDirty = true;   // sørg for at token også havner i lagret data-JSON
+    } catch (e) {
+      console.warn('Kunne ikke lagre delingstoken (kjørte du migrasjonen?):', e.message);
+      _showToast && _showToast('Kunne ikke lagre delelenke. Se konsoll / kjør migrasjonen.');
+      return;
+    }
+  }
+  const url = location.origin + location.pathname + '?present=' + token;
+  try { await navigator.clipboard.writeText(url); _showToast && _showToast('Delelenke kopiert til utklippstavle'); }
+  catch (e) { window.prompt('Kopier delelenke:', url); }
+}
+// Boot-sti: åpne et prosjekt read-only via offentlig token (uten innlogging).
+async function _presentLoadByToken(token) {
+  try {
+    // Sikker offentlig henting via SECURITY DEFINER-funksjon (anon kan ikke
+    // liste alle delte prosjekter — kun slå opp eksakt token). Se migrasjonen.
+    const { data, error } = await _db.rpc('get_present_project', { p_token: token });
+    if (error || !data || !data.data) { console.warn('Presentasjon: fant ikke prosjekt for token.', error && error.message); return false; }
+    try { if (typeof _loadProducts === 'function') await _loadProducts(); } catch (e) { /* produktnavn er valgfritt */ }
+    _restoreProject(data.data);
+    _supabaseProjectId = data.id;
+    S.ui.presentPublic = true;   // offentlig visning: skjul Del/Avslutt-knapper
+    ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    document.getElementById('app').style.display = 'flex';
+    _presentEnter();
+    return true;
+  } catch (e) { console.warn('Presentasjon-lasting feilet:', e.message); return false; }
+}
+
 function _drawPresentHighlight() {
   if (!S.ui.present || S.ui.presentRoomId == null) return;
   const r = S.rooms.find(x => x.id === S.ui.presentRoomId);
@@ -37198,6 +37296,9 @@ async function _initAfterAuth() {
 async function initSupabase() {
   try {
     _db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    // Offentlig read-only presentasjon via ?present=<token> (ingen innlogging).
+    const _presTok = new URLSearchParams(location.search).get('present');
+    if (_presTok) { const ok = await _presentLoadByToken(_presTok); if (ok) return; }
     // Check for existing session
     const { data: { session } } = await _db.auth.getSession();
     if (session?.user) {
