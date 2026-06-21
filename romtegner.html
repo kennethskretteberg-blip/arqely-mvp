@@ -2107,6 +2107,38 @@ let ROOM_TYPES = [
 function _roomTypeDefaults(typeId) {
   return ROOM_TYPES.find(t => t.id === typeId) || ROOM_TYPES[ROOM_TYPES.length - 1];
 }
+
+// ─── FLOOR TYPES (TOPPGULV) & MAX RECOMMENDED FLATEEFFEKT ─────────────────
+// Veiledende bransjepraksis (ikke en absolutt lov). maxWm2 = null → ingen sjekk.
+// Tre (laminat/parkett) er temperaturbegrenset ~100 W/m²; flis/mikrosement/betong
+// tåler høyere (bad ofte 130–150). Lett redigerbar — dette er data, ikke logikk.
+let FLOOR_TYPES = [
+  {id:'flis',        label:'Flis',           maxWm2:150},
+  {id:'mikrosement', label:'Mikrosement',    maxWm2:150},
+  {id:'betong',      label:'Betong/epoxy',   maxWm2:150},
+  {id:'vinyl',       label:'Vinyl',          maxWm2:100},
+  {id:'laminat',     label:'Laminat',        maxWm2:100},
+  {id:'parkett',     label:'Parkett',        maxWm2:100},
+  {id:'teppe',       label:'Teppe',          maxWm2:60},
+  {id:'annet',       label:'Annet',          maxWm2:null},
+];
+function _floorTypeDef(id) {
+  return id ? (FLOOR_TYPES.find(f => f.id === id) || null) : null;
+}
+// Ren funksjon: gulvtype + prosjektert flateeffekt → status. Ingen sideeffekter.
+//   status: 'none' (ukjent/ingen sjekk) | 'ok' (grønn) | 'warn' (gul/rød)
+function floorTypeCompat(floorType, wm2) {
+  const def = _floorTypeDef(floorType);
+  if (!def || def.maxWm2 == null) return { status:'none', maxWm2:null, label:def?def.label:null, msg:'' };
+  const w = Number(wm2);
+  if (!isFinite(w) || w <= 0) return { status:'none', maxWm2:def.maxWm2, label:def.label, msg:'' };
+  if (w > def.maxWm2) {
+    return { status:'warn', maxWm2:def.maxWm2, label:def.label,
+      msg:`${def.label} tåler ca. ${def.maxWm2} W/m² – prosjektert ${Math.round(w)} W/m². Vurder lavere effekt eller annet toppgulv.` };
+  }
+  return { status:'ok', maxWm2:def.maxWm2, label:def.label,
+    msg:`${def.label} + ${Math.round(w)} W/m² – god løsning (maks ca. ${def.maxWm2} W/m²).` };
+}
 // Load room type defaults from Supabase with hierarchical merge: global → org → user
 async function _loadRoomTypeDefaults() {
   if (!_db) return;
@@ -4008,6 +4040,10 @@ function showUnifiedProductPanel() {
     `<option value="${t.id}"${curType === t.id ? ' selected' : ''}>${t.icon} ${t.label} (${t.targetWm2} W/m²)</option>`
   ).join('');
 
+  const ftOptions = FLOOR_TYPES.map(f =>
+    `<option value="${f.id}"${room.floorType === f.id ? ' selected' : ''}>${f.label}${f.maxWm2 ? ` (≤ ${f.maxWm2} W/m²)` : ''}</option>`
+  ).join('');
+
   const modOptions = modTypes.map(m =>
     `<option value="${m.type}"${m.type === defaultModType ? ' selected' : ''}>${m.label}</option>`
   ).join('');
@@ -4054,6 +4090,14 @@ function showUnifiedProductPanel() {
         </div>
       </div>
 
+      ${_snowMod ? '' : `
+      <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:-4px">Toppgulv</label>
+      <select id="upc-floor-type" style="${_sel}" onchange="_upcFloorTypeChanged(this.value)">
+        <option value="">— Ikke angitt —</option>
+        ${ftOptions}
+      </select>
+      <div id="upc-floor-compat" style="font-size:11px"></div>`}
+
       <div id="upc-results" style="font-size:12px"></div>
     </div>`;
   section.style.display = 'block';
@@ -4070,6 +4114,7 @@ function showUnifiedProductPanel() {
   _upcRenderTypeChips();
   // Render effect-class chips (preselect class from any already-placed product) + results
   _upcPopulateFamilies(defaultModType, defaultFamily ? _familyKlasse(defaultFamily) : null);
+  _upcUpdateFloorCompat();
 }
 
 function _upcRoomTypeChanged(typeId) {
@@ -4088,7 +4133,36 @@ function _upcRoomTypeChanged(typeId) {
   if (cableWm2) cableWm2.value = newWm2;
   // Refresh results with new W/m²
   _upcRefreshResults();
+  _upcUpdateFloorCompat();
   renderSidebar(); render();
+}
+
+function _upcFloorTypeChanged(val) {
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) return;
+  pushUndo();
+  room.floorType = val || null;
+  _upcUpdateFloorCompat();
+  renderSidebar(); render();
+}
+// Shared banner for floor-type vs. flateeffekt compatibility (editor + presentation).
+function _floorCompatBannerHtml(floorType, wm2) {
+  const c = floorTypeCompat(floorType, wm2);
+  if (c.status === 'none') return '';
+  const isWarn = c.status === 'warn';
+  const bd = isWarn ? '#ef4444' : '#22c55e';
+  const bg = isWarn ? 'rgba(239,68,68,0.12)' : 'rgba(34,197,94,0.12)';
+  const ico = isWarn ? '⚠' : '✓';
+  return `<div style="margin-top:6px;padding:6px 8px;border:1px solid ${bd};border-left-width:3px;border-radius:6px;background:${bg};color:var(--text);line-height:1.35">${ico} ${esc(c.msg)}</div>`;
+}
+function _upcUpdateFloorCompat() {
+  const el = document.getElementById('upc-floor-compat');
+  if (!el) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room) { el.innerHTML = ''; return; }
+  const inp = document.getElementById('upc-wm2');
+  const wm2 = inp ? (parseInt(inp.value) || room.targetWm2 || 0) : (room.targetWm2 || 0);
+  el.innerHTML = _floorCompatBannerHtml(room.floorType, wm2);
 }
 
 function _upcProductTypeChanged(modType) {
@@ -4144,6 +4218,7 @@ function _upcPopulateFamilies(modType, preselectKlasse) {
 function _upcWm2Changed(val) {
   _setRoomOrGlobalWm2(val);
   _upcRefreshResults();
+  _upcUpdateFloorCompat();
 }
 
 function _upcRefreshResults() {
@@ -20952,6 +21027,7 @@ function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=n
     wallThicknessCm: (shape==='outer-wall' && !_isSnowModule()) ? 20 : 0,
     roomType: null,
     targetWm2: null,
+    floorType: null,
     points : finalPts,
     walls  : [],
     area   : compArea(pts),
@@ -21729,6 +21805,13 @@ function setRoomTargetWm2(roomId, val) {
   if (!room) return;
   pushUndo();
   room.targetWm2 = Math.max(30, Math.min(300, val || 100));
+  renderSidebar(); render();
+}
+function setRoomFloorType(roomId, val) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  pushUndo();
+  room.floorType = val || null;
   renderSidebar(); render();
 }
 function setWallThickness(roomId, val) {
@@ -28986,7 +29069,7 @@ function _listEnsureFloor(part){
 function _listCreateRoomObj(part, floor){
   return { id:S.counters.nextRoomId++, name:'Rom '+(S.rooms.filter(r=>r.partId===part.id && r.listMode && !r.listDraft).length+1),
     floorId:floor.id, partId:part.id, listMode:true, shape:'list', points:[], walls:[],
-    area:0, listHindCm2:0, targetWm2:null, roomType:null, dims:[], annotOffsets:{}, color:'#888', cardVisible:false,
+    area:0, listHindCm2:0, targetWm2:null, roomType:null, floorType:null, dims:[], annotOffsets:{}, color:'#888', cardVisible:false,
     listModType:'cable', listFamily:(_listFamiliesFor('cable')[0]||null), listCount:1 };
 }
 // Utkast-rommet som redigeres i «Nytt rom»-kortet (kun ett om gangen).
@@ -29047,6 +29130,14 @@ function _listEditFloor(roomId,name){
 function _listEditArea(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.area=Math.max(0,_listNum(v))*10000; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
 function _listEditHind(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listHindCm2=Math.max(0,_listNum(v))*10000; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
 function _listEditTarget(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=_listNum(v); r.targetWm2=n>0?n:null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+function _listEditFloorType(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.floorType=v||null; _listRefreshCompat(roomId); _scheduleAutoSave&&_scheduleAutoSave(); }
+function _listRefreshCompat(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const el=document.getElementById('li-compat-'+roomId); if(!el) return;
+  const stats=_computeRoomStats(room), net=stats.nettoM2, ratedW=_roomRatedEffectW(room);
+  const wm2=(ratedW&&net>0)?Math.round(ratedW/net):(room.targetWm2||0);
+  el.innerHTML=_floorCompatBannerHtml(room.floorType, wm2);
+}
 // Type-bytte (Kabel/Matte): velg piltast → endrer på stedet, behold fokus på Type-feltet → TAB videre til Klasse.
 function _listOnType(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listModType=v; r.listFamily=null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
 // Klasse-bytte (10T/17T el. 60/100/150T): behold fokus på Klasse → TAB videre til Produkt.
@@ -29141,6 +29232,7 @@ function _listRefreshComputed(roomId){
   set('li-cc-'+roomId, modType==='mat' ? _listMatSizeStr(room) : (stats.cableCcCm>0?stats.cableCcCm.toFixed(1)+' cm':'—'));
   const heated=stats.heatedM2||0;
   set('li-cov-'+roomId, net>0?Math.min(100,Math.round(heated/net*100))+' %':'—');
+  _listRefreshCompat(roomId);
   _scheduleAutoSave&&_scheduleAutoSave();
 }
 // Stepp et nedtrekk med ▲/▼-knappene (gir samme effekt som piltast i feltet).
@@ -29190,6 +29282,8 @@ function _listDraftCardHtml(room){
   const resItem=(lbl,id,val,unit,lblId)=>`<div style="display:flex;flex-direction:column;gap:2px;min-width:78px"><span ${lblId?'id="'+lblId+'" ':''}style="font-size:10px;color:var(--dim,#9aa0aa);text-transform:uppercase;letter-spacing:.3px">${lbl}</span><span style="font-size:15px;font-weight:600;color:var(--text,#e8eaed);font-variant-numeric:tabular-nums"><span id="${id}">${val}</span>${unit||''}</span></div>`;
   const ccLabel = modType==='mat' ? 'Størrelse' : 'CC';
   const ccVal = modType==='mat' ? _listMatSizeStr(room) : cc;
+  const ftOpts = FLOOR_TYPES.map(f=>`<option value="${f.id}"${room.floorType===f.id?' selected':''}>${f.label}${f.maxWm2?` (≤ ${f.maxWm2} W/m²)`:''}</option>`).join('');
+  const compatWm2 = (ratedW&&net>0)?Math.round(ratedW/net):(room.targetWm2||0);
   return `<div style="max-width:940px;background:var(--surface,#15171c);border:1px solid var(--border,#2a2d36);border-radius:12px;padding:16px 18px;margin-bottom:22px;box-shadow:0 2px 12px rgba(0,0,0,0.18)">
     <div style="font-size:14px;font-weight:700;margin-bottom:14px;color:var(--text,#e8eaed)">${editing?('Rediger rom: <span style="color:var(--accent,#4fa2b8)">'+esc(room.name||'')+'</span>'):'Nytt rom'}</div>
     <div style="display:flex;flex-wrap:wrap;gap:14px 18px;margin-bottom:14px">
@@ -29198,6 +29292,7 @@ function _listDraftCardHtml(room){
       ${field('Brutto areal m²', inp('li-gross-'+rid, grossStr, 90, '_listEditArea('+rid+',this.value)', 'inputmode="decimal" placeholder="m²"'))}
       ${field('Hindringer m²', inp('li-hind-'+rid, hindStr, 90, '_listEditHind('+rid+',this.value)', 'inputmode="decimal" placeholder="0"'))}
       ${field('Ønsket W/m²', inp('li-tgt-'+rid, targetStr, 90, '_listEditTarget('+rid+',this.value)', 'inputmode="decimal" placeholder="'+_roomTargetWm2(rid)+'"'))}
+      ${field('Toppgulv', `<select id="li-floor-${rid}" class="li-field" onkeydown="_listKey(event)" onchange="_listEditFloorType(${rid},this.value)" style="width:150px;${base}"><option value="">— Ikke angitt —</option>${ftOpts}</select>`)}
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:14px 18px;margin-bottom:16px">
       ${field('Type', sel('type',`<option value="cable"${modType==='cable'?' selected':''}>Kabel</option><option value="mat"${modType==='mat'?' selected':''}>Matte</option>`,92))}
@@ -29214,6 +29309,7 @@ function _listDraftCardHtml(room){
       ${resItem(ccLabel, 'li-cc-'+rid, ccVal, '', 'li-cclabel-'+rid)}
       ${resItem('Dekning', 'li-cov-'+rid, cov, '')}
     </div>
+    <div id="li-compat-${rid}" style="margin-bottom:14px">${_floorCompatBannerHtml(room.floorType, compatWm2)}</div>
     <button class="li-addbtn" onkeydown="_listKey(event)" onclick="_listFinalizeDraft()" style="cursor:pointer;border:none;border-radius:8px;background:var(--accent,#4fa2b8);color:#0d0e10;padding:9px 18px;font-size:13px;font-weight:700">${editing?'✓ Oppdater rom':'+ Legg til rom'}</button>
   </div>`;
 }
