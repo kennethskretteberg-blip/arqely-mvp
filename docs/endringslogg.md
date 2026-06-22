@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Kabel-tilbehør ved PDF-eksport (typeavhengig)
+
+Utvidet den deklarative tilbehørs-funksjonen til varmekabel, og gjorde hele tilbehørs-
+lista typeavhengig. Commits (nyeste først): `3720ce4`, `f445aec`.
+
+**Typegating + kabel-tilbehør i modal** (`f445aec`)
+- `showAccessoriesModal()` viser Varmefolie-seksjon KUN ved folie og Varmekabel-seksjon
+  KUN ved kabel (begge hvis begge; matte alene → ingen). Avledet fra `S.strips`/`S.cables`.
+- Ny deklarativ `CABLE_ACCESSORIES` + `_computeCableContext()`:
+  - Strips svart (CV087193): 4/m → rund opp til hele 100-pk, viser utregningsgrunnlag.
+  - Stålnett (CVA10900): per-rom sjekkliste, `ceil(netto_m2 × 1,10 / 0,92)` pr rom + live total.
+  - Følerrør: 1 per kabel-rom; art.nr/EL-nr slås opp i katalogen, flagges hvis det mangler.
+- Items merkes `type:'foil'|'cable'`. Ingen regresjon i folie-tilbehør/RKK.
+
+**PDF/Excel gruppert per type** (`3720ce4`)
+- PDF «Tilbehør» får egne underseksjoner (Varmefolie / Varmekabel) med art.nr/EL/enhet/
+  antall; stålnett viser valgte rom, manglende katalog-nr flagges «OBS:».
+- Excel Bestilling + Materialliste skiller tilbehør per type; stålnett-rom i Rom-kolonnen.
+
+Verifisert (rene auto-regler): 75 m → 300 strips / 3×100pk · bad 5,8 m² → 7 nett · 1 føler/rom.
+
+---
+
 ## 2026-06-22 — Gulvtype (toppgulv) + read-only prosjektpresentasjon
 
 To sammenhengende ting: gulvtype per rom med effekt-kompatibilitet, og en read-only
