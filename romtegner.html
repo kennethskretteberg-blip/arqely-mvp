@@ -3808,6 +3808,91 @@ function autoAddStrips(roomId, productId) {
   renderSidebar(); updateObjInfo();
 }
 
+// ─── SONE-BASERT AUTO-UTLEGG (Problem 1) ─────────────────────────────────────
+// Del rommet i naturlige rektangulære soner og pakk HVER sone uavhengig i den
+// retningen som gir best dekning. Gjenbruker computeClippedSegments (clipPoly +
+// hindring-klipp via roomId) og _withFoilAvoid (soner overlapper aldri hverandre).
+// Faller tilbake til global autoAddStrips for enkle/konvekse rom (ingen regresjon).
+
+// Ortogonal-polygon → akse-justerte rektangler (vertikale slabber, slått sammen
+// horisontalt). Returnerer null hvis rommet ikke er ortogonalt (→ fallback).
+function _decomposeRoomToRects(room) {
+  const pts = room.points;
+  if (!pts || pts.length < 4) return null;
+  for (let i = 0; i < pts.length; i++) {            // kun ortogonale rom (alle kanter akse-justert)
+    const j = (i + 1) % pts.length;
+    if (Math.abs(pts[j].x - pts[i].x) > 1 && Math.abs(pts[j].y - pts[i].y) > 1) return null;
+  }
+  const round = v => Math.round(v * 100) / 100;
+  const xs = [...new Set(pts.map(p => round(p.x)))].sort((a, b) => a - b);
+  if (xs.length < 2) return null;
+  let rects = [];
+  for (let i = 0; i < xs.length - 1; i++) {          // én vertikal slabb pr x-intervall
+    const x0 = xs[i], x1 = xs[i + 1];
+    if (x1 - x0 < 1) continue;
+    for (const [lo, hi] of clipScanlineToPolygon('y', (x0 + x1) / 2, pts)) {
+      if (hi - lo >= 1) rects.push({ x0, x1, y0: lo, y1: hi });
+    }
+  }
+  rects.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);  // slå sammen x-tilstøtende slabber med lik y
+  const merged = [];
+  for (const r of rects) {
+    const m = merged.find(q => Math.abs(q.y0 - r.y0) < 0.5 && Math.abs(q.y1 - r.y1) < 0.5 && Math.abs(q.x1 - r.x0) < 0.5);
+    if (m) m.x1 = r.x1; else merged.push({ ...r });
+  }
+  const MIN = 8; // cm — ignorer slivere
+  return merged.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
+}
+
+// Pakk ett rektangel i én retning (uten å mutere S.strips). Returnerer strip-defs.
+function _computeRectFillDefs(roomId, rect, productId, direction) {
+  const p = HEATING_PRODUCTS.find(x => x.id === productId); if (!p) return [];
+  const nc = (p.netto_width_mm || p.width_mm) / 10;
+  const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
+  const rectPoly = [{x:rect.x0,y:rect.y0},{x:rect.x1,y:rect.y0},{x:rect.x1,y:rect.y1},{x:rect.x0,y:rect.y1}];
+  const basePos = direction === 'v' ? rect.x0 : rect.y0;
+  const baseMax = direction === 'v' ? rect.x1 : rect.y1;
+  const defs = [];
+  let cursor = basePos + margin, guard = 0;
+  while (cursor + nc <= baseMax - margin + 0.01 && guard++ < 2000) {
+    const segs = computeClippedSegments(roomId, direction, cursor, productId, { clipPoly: rectPoly });
+    for (const seg of segs) defs.push({ productId, direction, pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm });
+    cursor += nc + gap;
+  }
+  return defs;
+}
+
+// Velg retningen (v/h) som dekker mest areal i rektangelet, og legg strimlene.
+function _packRectBestDir(roomId, rect, productId) {
+  const dv = _computeRectFillDefs(roomId, rect, productId, 'v');
+  const dh = _computeRectFillDefs(roomId, rect, productId, 'h');
+  const cover = a => a.reduce((s, d) => s + d.length_cm, 0);
+  const best = cover(dv) >= cover(dh) ? dv : dh;
+  for (const d of best) {
+    S.strips.push({ id: S.counters.nextStripId++, roomId, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm });
+  }
+  if (best.length) _invalidateStripCache();
+  return best.length;
+}
+
+function autoAddStripsZoned(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const p = HEATING_PRODUCTS.find(x => x.id === productId);
+  if (!room || !p) return;
+  const rects = _decomposeRoomToRects(room);
+  // Enkelt/konvekst rom (ett rektangel) eller ikke-ortogonalt → behold dagens globale utlegg.
+  if (!rects || rects.length <= 1) { autoAddStrips(roomId, productId); return; }
+  pushUndo();
+  const familyIds = new Set(getProductFamily(productId).map(f => f.id));
+  S.strips = S.strips.filter(s => !(s.roomId === roomId && familyIds.has(s.productId)));
+  _invalidateStripCache();
+  // Største sone først; _withFoilAvoid sørger for at neste sone stopper en klaring
+  // før forrige sones folie (tett, men aldri overlapp).
+  rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
+  for (const rect of rects) _withFoilAvoid(roomId, new Set(), () => _packRectBestDir(roomId, rect, productId));
+  renderSidebar(); updateObjInfo(); render();
+}
+
 // ─── PRODUKT-MENY ────────────────────────────────────────────
 function showProduktDropdown(html, x, y) {
   const m = document.getElementById('produkt-menu');
@@ -19093,7 +19178,7 @@ function vfPanelHtml(room) {
     </select>
     <canvas id="vf-pick-cv" width="130" height="90" style="display:block;margin:6px auto 2px;cursor:crosshair" onclick="event.stopPropagation()"></canvas>
     <div id="vf-pick-lbl" style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:6px"></div>
-    <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStrips(${room.id},S.varmefolie.pendingProductId)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
+    <button class="vf-toggle${canAdd?' on':''}" onclick="${canAdd?`autoAddStripsZoned(${room.id},S.varmefolie.pendingProductId)`:'void 0'};event.stopPropagation()" ${!canAdd?'disabled style="opacity:0.45"':''}>
       ＋ Legg til striper
     </button>
     ${roomStrips.length ? `<div class="vf-stat" style="margin-top:6px"><span class="vf-stat-l">Striper i rom</span><span class="vf-stat-v">${roomStrips.length} stk</span></div>` : ''}
