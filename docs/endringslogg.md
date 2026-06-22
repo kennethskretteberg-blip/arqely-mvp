@@ -8,7 +8,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 Fire sammenhengende folie-problemer (sone-utlegg, hindring-eksklusjon, uavhengige
 arealer). Diagnostisert empirisk i koden FØRST (innlogget, ekte produkter). Commits
-(nyeste først): `a591539`, `49c5e41`.
+(nyeste først): `bab96f6`, `07866c5`, `f80a5c8`, `a591539`, `49c5e41`.
 
 **Verifisering (read-only) viste at 4/3/2 alt var helt/delvis løst siden prompten:**
 - **Problem 4 (uavhengige arealer)** — allerede løst: `_stripOverlapsAny`/`_clampStripToRoom`
@@ -30,9 +30,19 @@ arealer). Diagnostisert empirisk i koden FØRST (innlogget, ekte produkter). Com
   overlapper; hindringer rutes rundt. Fallback til `autoAddStrips` for enkle/ikke-ortogonale
   rom (ingen regresjon). Låste regler består.
 - Verifisert: L-form → 2 soner, 0 overlapp, sone-isolert, 0 folie under hindring;
-  rektangel → fallback. **Visuell bekreftelse gjenstår i appen** (offline-canvas kunne
-  ikke skjermdumpes). v1-begrensninger: romsligere søm mellom soner (per-sone margin),
-  fast produktbredde per sone.
+  rektangel → fallback.
+
+**Problem 1 — koblet inn i faktisk flyt + bedre dekning + robusthet** (`f80a5c8`, `07866c5`, `bab96f6`)
+- Sone-utlegget lå i en sekundær knapp som hovedflyten ikke bruker. Nå tilbyr
+  `showAutoFillComparison` et tredje «★ Soner»-kort (ved siden av Horisontal/Vertikal),
+  via `_zonedFoilDefs` (defs uten å plassere; sentinel-strips så soner aldri overlapper).
+- Adaptiv bredde per sone (bredeste folie som får plass → smalere fyller resten) + retning
+  per sone etter dekket areal → kraftig bedre dekning (U-rom: H/V 57 % → Soner 87 %).
+- **Robust dekomponering:** klyng/snap koordinater + soner garantert inne i rommet (snitt
+  av flere skann). Fjernet den harde ortogonalitets-bailen som gjorde at håndtegnede
+  (litt skjeve) rom aldri delte seg → «Soner» dukket aldri opp. Nå trigger den på ekte
+  L/T/U-rom; >12 soner → fallback. Verifisert: noisy U m/ hindring → Soner 78 %, 0 overlapp,
+  0 folie under hindring, 0 strimler utenfor rommet.
 
 ---
 
