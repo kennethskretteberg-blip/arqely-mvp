@@ -4,6 +4,31 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 📌 STATUS pr 2026-06-22 — Folie auto-utlegg (gjenoppta-notat)
+
+**Hvor vi står:** Folie-auto-utlegget er omarbeidet til montør-stil og verifisert mot
+brukers eksakte 53 m²-rom (geometri hentet via konsoll; reprodusert lokalt innlogget).
+
+- **Automatisk-panelet:** to valg — **Horisontal / Vertikal**. Begge bruker sone-teknikken
+  for ikke-rektangulære rom (rektangler beholder dagens H/V). Bruker velger retning selv.
+- **Pr sone:** full-lengde, vegg-forankrede kolonner; smal strimmel (B=20) absorberer
+  forskyvninger/notch (montørens triks) → resten fulle. Ingen smale folier midt i arealet.
+- **Brukers rom:** Vertikal **91 %**, Horisontal **94 %**, **0 regelbrudd**. Aldri folie i
+  hindring; gap-/vegg-/overlapp-brudd = 0. Regresjon: rektangel 94 %, L 91 %, U 83 %.
+- **Sentrale funksjoner:** `_decomposeRoomToRects` (rutenett + maks-rektangel),
+  `_packZoneFullLength` (full-lengde + absorber), `_zonedDefsForDirection` (pr retning),
+  `showAutoFillComparison` (H/V bruker sone-teknikk), `_layoutRulePenalty` (scoring-straff),
+  `getStripViolations` (along-akse-vakt → ingen falske ⚠).
+
+**Neste (venter på brukers test i morgen):** visuell bekreftelse i appen (hard-refresh →
+folie → Automatisk → Vertikal). Mulig finjustering: enkelte soner kan fortsatt få en kort
+strimmel der absorber-logikken ikke treffer optimalt — be om skjermbilde og juster
+`_packZoneFullLength` (targetLen-toleranse / absorber-plassering) ved behov.
+
+**Alt committet og pushet til `origin/main`** (siste: `1b696e7`).
+
+---
+
 ## 2026-06-22 — Folie: montørens full-lengde + smal absorber-pakking — `1b696e7`
 
 Brukers manuelle teknikk: smal strimmel der en forskyvning er, så fulle lengder etter.
