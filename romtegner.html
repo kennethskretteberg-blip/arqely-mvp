@@ -3819,29 +3819,52 @@ function autoAddStrips(roomId, productId) {
 function _decomposeRoomToRects(room) {
   const pts = room.points;
   if (!pts || pts.length < 4) return null;
-  for (let i = 0; i < pts.length; i++) {            // kun ortogonale rom (alle kanter akse-justert)
-    const j = (i + 1) % pts.length;
-    if (Math.abs(pts[j].x - pts[i].x) > 1 && Math.abs(pts[j].y - pts[i].y) > 1) return null;
-  }
-  const round = v => Math.round(v * 100) / 100;
-  const xs = [...new Set(pts.map(p => round(p.x)))].sort((a, b) => a - b);
-  if (xs.length < 2) return null;
-  let rects = [];
-  for (let i = 0; i < xs.length - 1; i++) {          // én vertikal slabb pr x-intervall
-    const x0 = xs[i], x1 = xs[i + 1];
-    if (x1 - x0 < 1) continue;
-    for (const [lo, hi] of clipScanlineToPolygon('y', (x0 + x1) / 2, pts)) {
-      if (hi - lo >= 1) rects.push({ x0, x1, y0: lo, y1: hi });
+  const MIN = 8; // cm — ignorer slivere
+  const xsAll = pts.map(p => p.x), ysAll = pts.map(p => p.y);
+  const W = Math.max(...xsAll) - Math.min(...xsAll), H = Math.max(...ysAll) - Math.min(...ysAll);
+  if (W < 2 * MIN || H < 2 * MIN) return null;
+  // Toleranse for klyngning (håndtegnede rom er sjelden perfekt akse-justert).
+  const TOLX = Math.max(5, W * 0.02), TOLY = Math.max(5, H * 0.02);
+  const cluster = (vals, tol) => {
+    const s = [...vals].sort((a, b) => a - b); const reps = []; let bin = [s[0]];
+    for (let i = 1; i < s.length; i++) {
+      if (s[i] - bin[bin.length - 1] <= tol) bin.push(s[i]);
+      else { reps.push(bin.reduce((a, b) => a + b, 0) / bin.length); bin = [s[i]]; }
     }
+    reps.push(bin.reduce((a, b) => a + b, 0) / bin.length); return reps;
+  };
+  const xs = cluster(xsAll, TOLX), ys = cluster(ysAll, TOLY);
+  if (xs.length < 2) return null;
+  const snapY = v => { let best = v, bd = TOLY; for (const y of ys) { const d = Math.abs(y - v); if (d < bd) { bd = d; best = y; } } return best; };
+  let rects = [];
+  for (let i = 0; i < xs.length - 1; i++) {
+    const x0 = xs[i], x1 = xs[i + 1]; if (x1 - x0 < MIN) continue;
+    // y-intervall garantert INNE i rommet over HELE slabben → snitt av flere skann.
+    // (konservativt: litt udekket ut mot skjeve kanter, som montøren også aksepterer)
+    const eps = Math.min(2, (x1 - x0) * 0.25);
+    let inter = null;
+    for (const sx of [x0 + eps, (x0 + x1) / 2, x1 - eps]) {
+      const ints = clipScanlineToPolygon('y', sx, pts);
+      if (inter === null) { inter = ints.map(([a, b]) => [a, b]); continue; }
+      const next = [];
+      for (const [a0, a1] of inter) for (const [b0, b1] of ints) {
+        const lo = Math.max(a0, b0), hi = Math.min(a1, b1);
+        if (hi - lo >= MIN) next.push([lo, hi]);
+      }
+      inter = next;
+    }
+    if (!inter) continue;
+    for (const [lo, hi] of inter) if (hi - lo >= MIN) rects.push({ x0, x1, y0: snapY(lo), y1: snapY(hi) });
   }
-  rects.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);  // slå sammen x-tilstøtende slabber med lik y
+  rects.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);   // slå sammen x-tilstøtende slabber med (snappet) lik y
   const merged = [];
   for (const r of rects) {
-    const m = merged.find(q => Math.abs(q.y0 - r.y0) < 0.5 && Math.abs(q.y1 - r.y1) < 0.5 && Math.abs(q.x1 - r.x0) < 0.5);
+    const m = merged.find(q => Math.abs(q.y0 - r.y0) < TOLY && Math.abs(q.y1 - r.y1) < TOLY && Math.abs(q.x1 - r.x0) < TOLX);
     if (m) m.x1 = r.x1; else merged.push({ ...r });
   }
-  const MIN = 8; // cm — ignorer slivere
-  return merged.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
+  const out = merged.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
+  if (out.length > 12) return null;   // svært komplekst/skjevt → la H/V ta det (unngå fragmentering)
+  return out;
 }
 
 // Pakk ett rektangel i én retning (uten å mutere S.strips). Adaptiv bredde:
