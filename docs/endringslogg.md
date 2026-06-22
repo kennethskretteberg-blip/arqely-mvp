@@ -7,7 +7,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 ## 2026-06-22 — Kabel-tilbehør ved PDF-eksport (typeavhengig)
 
 Utvidet den deklarative tilbehørs-funksjonen til varmekabel, og gjorde hele tilbehørs-
-lista typeavhengig. Commits (nyeste først): `3720ce4`, `f445aec`.
+lista typeavhengig. Commits (nyeste først): `ff51e3b`, `c57c88c`, `3720ce4`, `f445aec`.
 
 **Typegating + kabel-tilbehør i modal** (`f445aec`)
 - `showAccessoriesModal()` viser Varmefolie-seksjon KUN ved folie og Varmekabel-seksjon
@@ -23,7 +23,18 @@ lista typeavhengig. Commits (nyeste først): `3720ce4`, `f445aec`.
   antall; stålnett viser valgte rom, manglende katalog-nr flagges «OBS:».
 - Excel Bestilling + Materialliste skiller tilbehør per type; stålnett-rom i Rom-kolonnen.
 
-Verifisert (rene auto-regler): 75 m → 300 strips / 3×100pk · bad 5,8 m² → 7 nett · 1 føler/rom.
+**Art.nr/EL-nr hardkodet + avhuket som standard** (`c57c88c`, `ff51e3b`)
+- Tilbehør ligger ikke i `heating_products`, så katalog-oppslaget fant dem ikke.
+  Hardkodet art.nr + EL-nr (hentet fra cenika.no produktsider):
+  - Strips svart **CV087193** · EL **1322300**
+  - Stålnett **CVA10900** · EL **1001896**
+  - Følerrør **CVA10526** · EL **5400784**
+- Alt kabel-tilbehør er `defaultEnabled:false` (ikke valgt som standard); antallet vises
+  fortsatt i feltene, så man bare huker av det som skal tilbys. Folie-tilbehør uendret.
+
+Verifisert mot ekte data (innlogget): auto-regler 75 m → 300 strips / 3×100pk · bad 5,8 m²
+→ 7 nett · 1 føler/rom; defaults avhuket m/ synlig antall; EL-nr følger med på items;
+exportPDF kjører ende-til-ende uten feil.
 
 ---
 
