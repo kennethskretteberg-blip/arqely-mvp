@@ -3970,6 +3970,54 @@ function _packZoneUniform(roomId, rect, productId, direction) {
   return defs;
 }
 
+// Pakk én sone «som montøren»: bredeste produkt som gir FULL lengde forankret til vegg;
+// der en forskyvning gjør at ingen bredde blir full lengde, legges en SMAL strimmel som
+// absorberer forskyvningen (montørens 20 cm-triks) → resten blir rene full-lengde kolonner.
+function _packZoneFullLength(roomId, rect, direction, productId) {
+  const family = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
+  if (!family.length) return [];
+  const ncOf = fp => (fp.netto_width_mm || fp.width_mm) / 10;
+  const narrow = family[family.length - 1];
+  const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
+  const basePos = direction === 'v' ? rect.x0 : rect.y0;
+  const limit = (direction === 'v' ? rect.x1 : rect.y1) - margin;
+  const aLo = direction === 'v' ? rect.y0 : rect.x0;
+  const aHi = direction === 'v' ? rect.y1 : rect.x1;
+  // Lengste segment (innenfor sonen) for en strimmel ved pos med gitt produkt.
+  const segAt = (pos, pid) => {
+    let best = null;
+    for (const s of computeClippedSegments(roomId, direction, pos, pid)) {
+      const lo = Math.max(s.start_cm, aLo), hi = Math.min(s.start_cm + s.length_cm, aHi);
+      if (hi - lo >= (best ? best.len : 0)) best = { start: lo, len: hi - lo };
+    }
+    return best;
+  };
+  // «Full lengde» = lengste oppnåelige i sonen (samplet med smaleste produkt).
+  let targetLen = 0;
+  for (let pos = basePos + margin; pos <= limit; pos += 15) { const s = segAt(pos, narrow.id); if (s && s.len > targetLen) targetLen = s.len; }
+  if (targetLen < 5) return [];
+  const tol = Math.max(10, targetLen * 0.08);
+  const defs = [];
+  let cursor = basePos + margin, guard = 0;
+  while (cursor + ncOf(narrow) <= limit + 0.01 && guard++ < 2000) {
+    let placed = false;
+    for (const fp of family) {           // bredeste produkt som gir FULL lengde her
+      const w = ncOf(fp);
+      if (cursor + w > limit + 0.01) continue;
+      const s = segAt(cursor, fp.id);
+      if (s && s.len >= targetLen - tol) {
+        defs.push({ productId: fp.id, direction, pos_cm: cursor, start_cm: s.start, length_cm: s.len });
+        cursor += w + gap; placed = true; break;
+      }
+    }
+    if (placed) continue;
+    const s = segAt(cursor, narrow.id);  // forskyvning → smal absorberende strimmel
+    if (s) defs.push({ productId: narrow.id, direction, pos_cm: cursor, start_cm: s.start, length_cm: s.len });
+    cursor += ncOf(narrow) + gap;
+  }
+  return defs;
+}
+
 // Sone-basert utlegg (strip-defs) i en GITT retning — brukes for både Horisontal og
 // Vertikal i panelet, så bruker velger retning selv. Montørens prinsipp: hver sone pakket
 // med UNIFORM bredde forankret inntil vegg (få, brede, lange kolonner; ingen smale folier
@@ -3985,17 +4033,7 @@ function _zonedDefsForDirection(room, productId, direction) {
   const allDefs = [], sentIds = [], SENT = -990000;
   try {
     for (const rect of rects) {
-      const zoneCm2 = Math.max(1, (rect.x1 - rect.x0) * (rect.y1 - rect.y0));
-      const best = _withFoilAvoid(room.id, replaced, () => {
-        let bd = [], bs = -Infinity;
-        for (const fp of family) {
-          const defs = _packZoneUniform(room.id, rect, fp.id, direction);
-          if (!defs.length) continue;
-          const sc = _scoreFoilLayout(defs, { profile: 'long', netCm2: zoneCm2 });
-          if (sc > bs) { bs = sc; bd = defs; }
-        }
-        return bd;
-      });
+      const best = _withFoilAvoid(room.id, replaced, () => _packZoneFullLength(room.id, rect, direction, productId));
       for (const d of best) {
         const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
         allDefs.push(sd);
