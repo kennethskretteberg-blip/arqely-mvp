@@ -4,6 +4,31 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — WBW-flyt (vegg-for-vegg): taster + mus
+
+Raskere og mer naturlig vegg-for-vegg-opprettelse, uten å bygge nytt. Commits
+(nyeste først): `6e023fe`, `601eb29`.
+
+**Taster** (`601eb29`)
+- Piltast (↑↓←→) legger veggen direkte i den retningen (var allerede på plass);
+  beholder fokus+merk på lengdefeltet etterpå → rask repetisjon for rektangler.
+- Skjerm-pilene speiler nå piltastene (`wbwDirPlace` = `setDir` + `addWbwWall`).
+- Enter lukker rommet; en vegg som lander på startpunktet auto-lukker.
+- Status + Taster-tooltip oppdatert til ny flyt.
+
+**Mus** (`6e023fe`)
+- Enter lukker nå i BEGGE moduser. Klikk nær startpunktet (≤ 14 px) lukker rommet
+  (≥3 vegger); pekeren blir «pointer» når et klikk lukker.
+- Grønn stiplet lukkelinje + forstørret start-prikk vises når musa er nær start,
+  så det er tydelig at neste klikk lukker.
+- Behold fast-lengde-forhåndsvisning som følger musa, Shift = frihånd, og auto-lukk
+  når en festet vegg lander på start. Mus-tooltip/hint oppdatert.
+
+Verifisert (innlogget): firkant via piltaster og via pek+klikk gir begge eksakt
+300×300-rom; klikk-på-start og Enter lukker i musemodus.
+
+---
+
 ## 2026-06-22 — Kabel-tilbehør ved PDF-eksport (typeavhengig)
 
 Utvidet den deklarative tilbehørs-funksjonen til varmekabel, og gjorde hele tilbehørs-
