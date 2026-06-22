@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Folie: montør-stil utlegg, bruker velger retning — `b1e9596`, `b36cbc6`
+
+Etter brukers referanse (folie_optimalt) + ønske om å velge retning selv:
+- **Én retning i hele rommet** + **uniform bredde forankret inntil vegg** pr sone (ingen
+  smale folier midt i arealet; det udekkede mot vegg). `_packZoneUniform` + «lange strimler»-
+  scoring (få, brede, lange kolonner).
+- **Horisontal og Vertikal i Automatisk-panelet bruker nå sone-teknikken** (`_zonedDefsForDirection`)
+  for ikke-rektangulære rom → bruker velger retning selv. Separat «Soner»-kort fjernet. Enkle
+  rom (≤1 sone) beholder dagens H/V (ingen regresjon).
+- Klamp sone-rektangler til rommets bbox (siste grid-celle stakk forbi vegg → 15 mm-brudd).
+- Falske gap-⚠ fjernet tidligere (along-akse-vakt i `getStripViolations`).
+- Verifisert på brukers rom: Vertikal 84 % / Horisontal 85 %, begge én retning, 0 regelbrudd,
+  få brede strimler forankret til vegg.
+
+---
+
 ## 2026-06-22 — Folie «Soner»: rutenett-dekomponering (fikser dårlig dekning) — `a2ee334`
 
 Brukerrapport: «Soner» ga store udekkede arealer på et ekte 53 m²-rom (stua <50 %).
