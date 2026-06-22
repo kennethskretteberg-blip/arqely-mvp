@@ -33006,6 +33006,53 @@ const RKK_PRODUCTS = [
   { id: 'rkk_25_bla',  name: 'FlexFoil RKK 2,5mm² blå',  art_no: 'CVA54122', el_no: '5418926', dim: '2.5', color: 'blå',  unit: 'rull 50m' },
   { id: 'rkk_25_sort', name: 'FlexFoil RKK 2,5mm² sort', art_no: 'CVA54123', el_no: '5418927', dim: '2.5', color: 'sort', unit: 'rull 50m' },
 ];
+
+// ─── CABLE ACCESSORIES (varmekabel-tilbehør, samme deklarative mønster) ──────
+// Auto-reglene ligger som data/funksjoner på oppføringen (4/m, 1/rom, 0,92 m²+10 %).
+// En ny tilbehørsartikkel = en ny oppføring, ikke ny spesial-logikk.
+//   group: 'auto'   → ett tall for hele prosjektet (calc(ctx))
+//          'perRoom' → kryss av rom; antall pr rom = calcRoom(netto_m2); total = sum
+const CABLE_ACCESSORIES = [
+  { id: 'kabel_strips', name: 'Strips svart 100×2,5 mm (100pk)', art_no: 'CV087193', el_no: '',
+    unit: 'stk', group: 'auto', defaultEnabled: true,
+    calc: (ctx) => 4 * ctx.totalCableM, overheadPct: 0, roundTo: 100,
+    basis: (ctx, qty) => `4 strips/m × ${ctx.totalCableM.toFixed(0)} m = ${Math.ceil(4 * ctx.totalCableM)} → ${qty / 100} × 100pk (${qty} stk)` },
+  { id: 'kabel_stalnett', name: 'Stålnett 5 mm, 80×120 cm, 25×25 mm', art_no: 'CVA10900', el_no: '',
+    unit: 'nett', group: 'perRoom', defaultEnabled: false,
+    netPerUnit_m2: 0.92, overheadPct: 10,
+    calcRoom: (m2) => Math.ceil(m2 * 1.10 / 0.92) },
+  { id: 'kabel_folerror', name: 'Følerrør Ø11,5/16 mm, L=2,5 m', art_no: '', el_no: '',
+    unit: 'stk', group: 'auto', defaultEnabled: true, fromCatalog: 'føler',
+    calc: (ctx) => ctx.cableRoomCount, overheadPct: 0, roundTo: 1,
+    basis: (ctx, qty) => `1 per kabel-rom × ${ctx.cableRoomCount} rom = ${qty} stk` },
+];
+
+// Slå opp et katalogprodukt på navn-fragment (lowercase). Returnerer {art_no, el_no, found}.
+function _catalogLookupByName(fragment) {
+  const frag = String(fragment || '').toLowerCase();
+  const p = (typeof HEATING_PRODUCTS !== 'undefined' ? HEATING_PRODUCTS : [])
+    .find(pr => (pr.name || '').toLowerCase().includes(frag));
+  return p ? { art_no: p.article_no || '', el_no: p.el_no || '', found: true }
+           : { art_no: '', el_no: '', found: false };
+}
+
+// Avled kabel-kontekst fra det som FAKTISK er lagt ut (S.cables), ikke antakelser.
+function _computeCableContext() {
+  const cables = S.cables || [];
+  let totalCableM = 0;
+  for (const c of cables) totalCableM += (c.totalLength_cm || 0) / 100;
+  // Distinkte kabel-rom, med netto areal (m²) til stålnett-beregning.
+  const roomIds = [...new Set(cables.map(c => c.roomId))];
+  const cableRooms = [];
+  for (const rid of roomIds) {
+    const r = (S.rooms || []).find(rr => rr.id === rid);
+    if (!r) continue;
+    const netM2 = (typeof _computeRoomStats === 'function') ? (_computeRoomStats(r).nettoM2 || 0) : ((r.area || 0) / 10000);
+    cableRooms.push({ id: r.id, name: r.name || ('Rom ' + r.id), netM2 });
+  }
+  return { cableCount: cables.length, totalCableM, cableRooms, cableRoomCount: cableRooms.length };
+}
+
 // El-nummer for tilbehør: bruk eksplisitt verdi hvis satt, ellers slå opp i produktkatalogen
 // via artikkelnummer (samme kilde som varmefolien får sitt el-nummer fra).
 function _accessoryElNo(artNo, explicit){
@@ -33075,12 +33122,14 @@ function _saveAccessoryPrefs(prefs) {
 //   { id, name, art_no, el_no, unit, qty, source: 'auto'|'manual'|'rkk' }
 function showAccessoriesModal() {
   return new Promise(resolve => {
-    const ctx = _computeFoilContext();
-    // FlexFoil-spesifikt tilbehør: vis KUN modalen når prosjektet faktisk har
-    // varmefolie. Kabel-/matte-prosjekter hopper over (egne tilbehørsvalg er en
-    // senere oppgave). Resolver tomt med en gang → ingen modal.
-    if (!ctx || !ctx.stripCount) { resolve({ items: [] }); return; }
-    const prefs = _loadAccessoryPrefs() || { enabled: {}, rkkDim: '1.5' };
+    // Typeavhengig: avled «hva er brukt» fra det som faktisk er lagt ut.
+    const foilCtx  = _computeFoilContext();
+    const cableCtx = _computeCableContext();
+    const foilUsed  = !!(foilCtx && foilCtx.stripCount);
+    const cableUsed = !!(cableCtx && cableCtx.cableCount);
+    // Verken folie eller kabel (f.eks. kun matte) → ingen tilbehørsmodal.
+    if (!foilUsed && !cableUsed) { resolve({ items: [] }); return; }
+    const prefs = _loadAccessoryPrefs() || { enabled: {}, rkkDim: '1.5', stalnettRooms: {} };
 
     let overlay = document.getElementById('modal-accessories');
     if (!overlay) {
@@ -33101,19 +33150,16 @@ function showAccessoriesModal() {
       return v === undefined ? a.defaultEnabled : v;
     };
 
-    const renderRow = (a, autoQty) => {
+    // Generisk rad. basisText = utregningsgrunnlag; warn = flagg (f.eks. mangler i katalog).
+    const renderRow = (a, autoQty, basisText, warn) => {
       const enabled = enabledFor(a);
       const isAuto = a.group === 'auto';
-      // Pre-fill the qty input with the auto suggestion (or 0 for manual
-      // group). User can override directly without remembering that empty
-      // means "use auto". A small hint shows the original suggestion so
-      // overrides are still distinguishable.
       const startVal = isAuto ? autoQty : 0;
       return `
         <div class="acc-row" style="display:flex;align-items:center;gap:10px;padding:6px 4px;border-bottom:1px solid var(--border,#eee)">
           <label style="display:flex;align-items:center;gap:6px;flex:1;cursor:pointer">
             <input type="checkbox" data-acc-id="${a.id}" data-role="enabled" tabindex="-1" ${enabled ? 'checked' : ''}>
-            <span style="font-size:13px">${esc(a.name)}</span>
+            <span style="font-size:13px">${esc(a.name)}${basisText ? `<br><span style="font-size:10px;color:var(--dim)">${esc(basisText)}</span>` : ''}${warn ? `<br><span style="font-size:10px;color:#d9822b">⚠ ${esc(warn)}</span>` : ''}</span>
           </label>
           ${isAuto
             ? `<span style="font-size:11px;color:var(--dim);min-width:56px;text-align:right" title="Auto-foreslått">forslag: ${autoQty}</span>`
@@ -33127,29 +33173,23 @@ function showAccessoriesModal() {
         </div>`;
     };
 
-    const autoList = FOIL_ACCESSORIES.filter(a => a.group === 'auto');
-    const manualList = FOIL_ACCESSORIES.filter(a => a.group === 'manual');
-    const autoQtys = {};
-    for (const a of autoList) autoQtys[a.id] = _applyAccessoryCalc(a, ctx);
+    const sectionHdr = (t) => `<div style="font-size:13px;font-weight:800;color:var(--text,#111);letter-spacing:.4px;text-transform:uppercase;margin-top:18px;margin-bottom:6px;border-bottom:2px solid var(--accent,#1a6fcc);padding-bottom:3px">${t}</div>`;
+    const subHdr = (t) => `<div style="font-size:11px;font-weight:700;color:var(--accent,#1a6fcc);letter-spacing:.5px;text-transform:uppercase;margin-top:12px;margin-bottom:4px">${t}</div>`;
 
-    overlay.innerHTML = `
-      <div style="background:var(--bg,#fff);border-radius:10px;padding:24px;max-width:560px;width:90%;max-height:90vh;overflow:auto;color:var(--text,#111)">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-          <h3 style="font-size:18px;font-weight:700;margin:0">Tilbehør for varmefolie</h3>
-          <button id="acc-close" style="background:none;border:none;color:var(--muted,#666);font-size:20px;cursor:pointer">&times;</button>
-        </div>
-        <div style="font-size:11px;color:var(--dim);margin-bottom:14px">
-          ${ctx.stripCount} strips · ${ctx.totalFoilArea_m2.toFixed(1)} m² folie · ${ctx.roomGrossArea_m2.toFixed(1)} m² brutto
-        </div>
+    // ── FOIL ──
+    const foilAuto   = FOIL_ACCESSORIES.filter(a => a.group === 'auto');
+    const foilManual = FOIL_ACCESSORIES.filter(a => a.group === 'manual');
+    const foilAutoQtys = {};
+    for (const a of foilAuto) foilAutoQtys[a.id] = _applyAccessoryCalc(a, foilCtx);
 
-        <div style="font-size:11px;font-weight:700;color:var(--accent,#1a6fcc);letter-spacing:.5px;text-transform:uppercase;margin-top:6px;margin-bottom:4px">Auto-foreslått</div>
-        <div id="acc-auto">${autoList.map(a => renderRow(a, autoQtys[a.id])).join('')}</div>
-
-        <div style="font-size:11px;font-weight:700;color:var(--accent,#1a6fcc);letter-spacing:.5px;text-transform:uppercase;margin-top:14px;margin-bottom:4px">Manuell inntasting</div>
-        <div id="acc-manual">${manualList.map(a => renderRow(a, 0)).join('')}</div>
-
-        <div style="font-size:11px;font-weight:700;color:var(--accent,#1a6fcc);letter-spacing:.5px;text-transform:uppercase;margin-top:14px;margin-bottom:4px">RKK</div>
-        <div style="padding:6px 4px;border-bottom:1px solid var(--border,#eee)">
+    let foilHtml = '';
+    if (foilUsed) {
+      foilHtml = sectionHdr('Varmefolie')
+        + `<div style="font-size:11px;color:var(--dim);margin-bottom:4px">${foilCtx.stripCount} strips · ${foilCtx.totalFoilArea_m2.toFixed(1)} m² folie · ${foilCtx.roomGrossArea_m2.toFixed(1)} m² brutto</div>`
+        + subHdr('Auto-foreslått') + `<div>${foilAuto.map(a => renderRow(a, foilAutoQtys[a.id])).join('')}</div>`
+        + subHdr('Manuell inntasting') + `<div>${foilManual.map(a => renderRow(a, 0)).join('')}</div>`
+        + subHdr('RKK')
+        + `<div style="padding:6px 4px;border-bottom:1px solid var(--border,#eee)">
           <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">
             <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:13px">
               <input type="radio" name="rkk-dim" value="1.5" tabindex="-1" ${prefs.rkkDim !== '2.5' ? 'checked' : ''}> 1,5mm
@@ -33169,8 +33209,60 @@ function showAccessoriesModal() {
             Selges kun som hele 50m-ruller. Begge farger må kjøpes hvis ikke på lager.<br>
             La stå tomt hvis kunden har RKK på lager.
           </div>
-        </div>
+        </div>`;
+    }
 
+    // ── CABLE ──
+    const cableAuto = CABLE_ACCESSORIES.filter(a => a.group === 'auto');
+    const stalnett  = CABLE_ACCESSORIES.find(a => a.group === 'perRoom');
+    const cableAutoQtys = {}, cableBasis = {}, cableResolved = {};
+    for (const a of CABLE_ACCESSORIES) {
+      // Art.nr/EL-nr: eksplisitt på oppføringen, ellers slå opp i katalogen (fromCatalog).
+      if (a.art_no) cableResolved[a.id] = { art_no: a.art_no, el_no: _accessoryElNo(a.art_no, a.el_no), found: true };
+      else if (a.fromCatalog) cableResolved[a.id] = _catalogLookupByName(a.fromCatalog);
+      else cableResolved[a.id] = { art_no: '', el_no: '', found: false };
+    }
+    for (const a of cableAuto) {
+      cableAutoQtys[a.id] = _applyAccessoryCalc(a, cableCtx);
+      cableBasis[a.id] = a.basis ? a.basis(cableCtx, cableAutoQtys[a.id]) : '';
+    }
+
+    let cableHtml = '';
+    if (cableUsed) {
+      cableHtml = sectionHdr('Varmekabel')
+        + `<div style="font-size:11px;color:var(--dim);margin-bottom:4px">${cableCtx.cableCount} kabel · ${cableCtx.totalCableM.toFixed(1)} m · ${cableCtx.cableRoomCount} rom</div>`
+        + subHdr('Auto-foreslått')
+        + `<div>${cableAuto.map(a => {
+              const warn = (!cableResolved[a.id].found && !cableResolved[a.id].art_no) ? 'Art.nr/EL-nr ikke funnet i katalogen' : '';
+              return renderRow(a, cableAutoQtys[a.id], cableBasis[a.id], warn);
+            }).join('')}</div>`;
+      if (stalnett) {
+        const rows = cableCtx.cableRooms.map(rm => {
+          const auto = stalnett.calcRoom(rm.netM2);
+          const checked = prefs.stalnettRooms?.[rm.id] ? 'checked' : '';
+          return `<div class="acc-row" style="display:flex;align-items:center;gap:10px;padding:5px 4px;border-bottom:1px solid var(--border,#eee)">
+            <label style="display:flex;align-items:center;gap:6px;flex:1;cursor:pointer">
+              <input type="checkbox" data-stalnett-room="${rm.id}" data-nett="${auto}" ${checked}>
+              <span style="font-size:13px">${esc(rm.name)} <span style="color:var(--dim);font-size:11px">(${rm.netM2.toFixed(1)} m²)</span></span>
+            </label>
+            <span style="font-size:11px;color:var(--dim);min-width:56px;text-align:right">${auto} nett</span>
+          </div>`;
+        }).join('');
+        cableHtml += subHdr('Stålnett — velg rom med brennbart underlag')
+          + `<div style="font-size:10px;color:var(--dim);margin:2px 0 6px">${esc(stalnett.name)} · ${stalnett.netPerUnit_m2} m²/nett · +${stalnett.overheadPct}% · art.nr ${esc(stalnett.art_no || '—')}</div>`
+          + (rows || '<div style="font-size:12px;color:var(--dim);padding:4px">Ingen kabel-rom</div>')
+          + `<div id="stalnett-total" style="font-size:12px;color:var(--accent,#1a6fcc);margin-top:6px;font-weight:700"></div>`;
+      }
+    }
+
+    overlay.innerHTML = `
+      <div style="background:var(--bg,#fff);border-radius:10px;padding:24px;max-width:560px;width:90%;max-height:90vh;overflow:auto;color:var(--text,#111)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <h3 style="font-size:18px;font-weight:700;margin:0">Tilbehør</h3>
+          <button id="acc-close" style="background:none;border:none;color:var(--muted,#666);font-size:20px;cursor:pointer">&times;</button>
+        </div>
+        ${foilHtml}
+        ${cableHtml}
         <div style="display:flex;gap:8px;margin-top:18px">
           <button id="acc-cancel" class="adm-btn ghost" style="flex:1">Avbryt</button>
           <button id="acc-confirm" class="adm-btn primary" style="flex:1">Generer rapport →</button>
@@ -33185,6 +33277,17 @@ function showAccessoriesModal() {
     overlay.style.alignItems = 'center';
     overlay.style.justifyContent = 'center';
 
+    // Live total for stålnett (sum av avhukede rom).
+    const _updateStalnettTotal = () => {
+      const el = document.getElementById('stalnett-total');
+      if (!el) return;
+      let total = 0, n = 0;
+      overlay.querySelectorAll('input[data-stalnett-room]:checked').forEach(cb => { total += Number(cb.getAttribute('data-nett')) || 0; n++; });
+      el.textContent = total > 0 ? `Total stålnett: ${total} nett (${n} rom)` : '';
+    };
+    overlay.querySelectorAll('input[data-stalnett-room]').forEach(cb => cb.addEventListener('change', _updateStalnettTotal));
+    _updateStalnettTotal();
+
     const done = (val) => { overlay.style.display = 'none'; resolve(val); };
 
     document.getElementById('acc-close').onclick = () => done(null);
@@ -33194,41 +33297,59 @@ function showAccessoriesModal() {
       const items = [];
       const newEnabled = { ...(prefs.enabled || {}) };
 
-      const readRow = (a, fallbackQty, source) => {
+      // type: 'foil' | 'cable' — for gruppering i PDF/Excel. resolved overstyrer art/el.
+      const readRow = (a, fallbackQty, source, type, resolved) => {
         const cb = overlay.querySelector(`input[data-acc-id="${a.id}"][data-role="enabled"]`);
         const qi = overlay.querySelector(`input[data-acc-id="${a.id}"][data-role="qty"]`);
         const enabled = !!cb?.checked;
         newEnabled[a.id] = enabled;
         if (!enabled) return;
         const raw = qi?.value?.trim();
-        const qty = raw !== '' && raw != null ? Math.max(0, Math.round(Number(raw))) : fallbackQty;
+        let qty = raw !== '' && raw != null ? Math.max(0, Math.round(Number(raw))) : fallbackQty;
+        if (a.roundTo > 1 && qty > 0) qty = Math.ceil(qty / a.roundTo) * a.roundTo;  // strips alltid multiplum av 100
         if (qty > 0) {
-          items.push({
-            id: a.id, name: a.name, art_no: a.art_no || '', el_no: _accessoryElNo(a.art_no, a.el_no),
-            unit: a.unit, qty, source,
-          });
+          const art = resolved ? resolved.art_no : (a.art_no || '');
+          const el  = resolved ? resolved.el_no  : _accessoryElNo(a.art_no, a.el_no);
+          const it = { id: a.id, name: a.name, art_no: art, el_no: el, unit: a.unit, qty, source, type };
+          if (resolved && !resolved.found && !art) it.flag = 'Art.nr/EL-nr ikke funnet i katalogen';
+          items.push(it);
         }
       };
 
-      for (const a of autoList) readRow(a, autoQtys[a.id], 'auto');
-      for (const a of manualList) readRow(a, 0, 'manual');
-
-      // RKK — only the two products of the selected dimension
-      const rkkDim = (overlay.querySelector('input[name="rkk-dim"]:checked')?.value) || '1.5';
-      const rkkBla  = Math.max(0, Math.round(Number(document.getElementById('rkk-bla')?.value || 0)));
-      const rkkSort = Math.max(0, Math.round(Number(document.getElementById('rkk-sort')?.value || 0)));
-      const rkkSet = RKK_PRODUCTS.filter(r => r.dim === rkkDim);
-      for (const r of rkkSet) {
-        const qty = r.color === 'blå' ? rkkBla : rkkSort;
-        if (qty > 0) {
-          items.push({
-            id: r.id, name: r.name, art_no: r.art_no || '', el_no: _accessoryElNo(r.art_no, r.el_no),
-            unit: r.unit, qty, source: 'rkk',
-          });
+      // FOIL
+      let rkkDim = prefs.rkkDim || '1.5';
+      if (foilUsed) {
+        for (const a of foilAuto)   readRow(a, foilAutoQtys[a.id], 'auto', 'foil');
+        for (const a of foilManual) readRow(a, 0, 'manual', 'foil');
+        rkkDim = (overlay.querySelector('input[name="rkk-dim"]:checked')?.value) || '1.5';
+        const rkkBla  = Math.max(0, Math.round(Number(document.getElementById('rkk-bla')?.value || 0)));
+        const rkkSort = Math.max(0, Math.round(Number(document.getElementById('rkk-sort')?.value || 0)));
+        for (const r of RKK_PRODUCTS.filter(r => r.dim === rkkDim)) {
+          const qty = r.color === 'blå' ? rkkBla : rkkSort;
+          if (qty > 0) items.push({ id: r.id, name: r.name, art_no: r.art_no || '', el_no: _accessoryElNo(r.art_no, r.el_no), unit: r.unit, qty, source: 'rkk', type: 'foil' });
         }
       }
 
-      _saveAccessoryPrefs({ enabled: newEnabled, rkkDim });
+      // CABLE
+      let newStal = { ...(prefs.stalnettRooms || {}) };
+      if (cableUsed) {
+        for (const a of cableAuto) readRow(a, cableAutoQtys[a.id], 'auto', 'cable', cableResolved[a.id]);
+        if (stalnett) {
+          let total = 0; const chosen = []; newStal = {};
+          for (const rm of cableCtx.cableRooms) {
+            const cb = overlay.querySelector(`input[data-stalnett-room="${rm.id}"]`);
+            const on = !!cb?.checked;
+            newStal[rm.id] = on;
+            if (on) { total += stalnett.calcRoom(rm.netM2); chosen.push(rm.name); }
+          }
+          if (total > 0) {
+            items.push({ id: stalnett.id, name: stalnett.name, art_no: stalnett.art_no || '', el_no: _accessoryElNo(stalnett.art_no, stalnett.el_no),
+              unit: stalnett.unit, qty: total, source: 'auto', type: 'cable', rooms: chosen });
+          }
+        }
+      }
+
+      _saveAccessoryPrefs({ enabled: newEnabled, rkkDim, stalnettRooms: newStal });
       done({ items });
     };
   });
