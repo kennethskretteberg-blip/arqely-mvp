@@ -1588,7 +1588,7 @@ body.present-mode #render-stats{display:none !important}
           <span id="wbw-panel-title" class="wbw-htitle">Vegg 1</span>
           <div style="display:flex;gap:4px">
             <button class="wbw-chip act" id="wbw-kbd-btn"   onclick="setWbwMode('keyboard')" title="Tastaturmodus: skriv lengde, trykk piltast (↑↓←→) for å legge vegg i den retningen. Enter lukker rommet.">⌨ Taster</button>
-            <button class="wbw-chip"     id="wbw-mouse-btn" onclick="setWbwMode('mouse')"    title="Musemodus: skriv lengde, pek med mus og klikk for å feste veggen">🖱 Mus</button>
+            <button class="wbw-chip"     id="wbw-mouse-btn" onclick="setWbwMode('mouse')"    title="Musemodus: skriv lengde, pek med musa (Shift = frihånd) og klikk for å feste veggen. Klikk på startpunktet eller Enter lukker rommet.">🖱 Mus</button>
           </div>
         </div>
         <!-- Main input row -->
@@ -1603,7 +1603,7 @@ body.present-mode #render-stats{display:none !important}
             <button class="dir-btn" data-dir="down"  onclick="wbwDirPlace('down')"  title="Legg vegg nedover (↓)">↓</button>
           </div>
           <!-- Mouse mode: hint text -->
-          <span id="wbw-mouse-hint" style="display:none;font-size:11px;color:var(--dim);white-space:nowrap">Pek og klikk · Shift: frihånd</span>
+          <span id="wbw-mouse-hint" style="display:none;font-size:11px;color:var(--dim);white-space:nowrap">Pek og klikk · Shift = frihånd · klikk start for å lukke</span>
           <!-- Action icon buttons -->
           <div style="display:flex;gap:3px;margin-left:4px">
             <button class="wbw-act"        id="wbw-add-btn"    onclick="addWbwWall()"    disabled title="Legg til vegg (Enter)">+</button>
@@ -20677,6 +20677,8 @@ function computeLShape(p1, p2, p3) {
 
 // ─── WBW MOUSE MODE ──────────────────────────────────────────
 let _wbwMouseAngleDeg = null; // current snapped angle for mouse mode
+let _wbwCloseHint = false;    // true når musepekeren er nær startpunktet (klikk lukker)
+const WBW_CLOSE_PX = 14;      // snap-toleranse (skjermpiksler) for «møter startpunkt»
 let _polyMouseAngleDeg = null; // snapped angle for polygon length input
 
 // ─── WBW HUD DRAG ─────────────────────────────────────────────
@@ -20795,6 +20797,7 @@ function setWbwMode(mode) {
   document.getElementById('wbw-dir-row').style.display     = mode === 'keyboard' ? 'flex' : 'none';
   document.getElementById('wbw-mouse-hint').style.display  = mode === 'mouse'    ? 'inline' : 'none';
   document.getElementById('wbw-add-btn').style.display     = mode === 'keyboard' ? 'flex'   : 'none';
+  _wbwCloseHint = false;
   if (mode === 'mouse') { _wbwMouseAngleDeg = null; canvas.style.cursor = 'crosshair'; _updWbwSnapHint(); }
   else {
     canvas.style.cursor = 'default';
@@ -20870,6 +20873,18 @@ function drawWbwLines() {
   // Start dot (accent) — always shown
   ctx.beginPath(); ctx.arc(sp0.x,sp0.y,6,0,Math.PI*2);
   ctx.fillStyle=_lc('#0891b2','#22d3ee'); ctx.fill();
+
+  // Mouse mode: når pekeren er nær startpunktet → vis grønn lukkelinje til start.
+  if (wbw.mouseMode && _wbwCloseHint && wbw.walls.length > 0) {
+    const lastPt = { x:wbw.walls[wbw.walls.length-1].x2, y:wbw.walls[wbw.walls.length-1].y2 };
+    const sl = w2s(lastPt.x, lastPt.y);
+    ctx.save();
+    ctx.setLineDash([8,5]); ctx.lineWidth=2.6; ctx.strokeStyle='#22c55e';
+    ctx.beginPath(); ctx.moveTo(sl.x,sl.y); ctx.lineTo(sp0.x,sp0.y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(sp0.x,sp0.y,9,0,Math.PI*2); ctx.fillStyle='#22c55e'; ctx.fill();
+    ctx.restore();
+    return;   // hopp over vanlig forhåndsvisning
+  }
 
   // Mouse mode: draw preview line + angle arc + label
   if (wbw.mouseMode && _wbwMouseAngleDeg !== null) {
@@ -27392,7 +27407,11 @@ canvas.addEventListener('mousemove', e=>{
     if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
       _wbwMouseAngleDeg = _snapAngleDeg(Math.atan2(dy, dx) * 180 / Math.PI);
     }
-    canvas.style.cursor = 'crosshair';
+    // Nær startpunktet (og nok vegger) → neste klikk lukker rommet.
+    const sp = w2s(wbw.startPoint.x, wbw.startPoint.y);
+    _wbwCloseHint = wbw.walls.length >= 3 &&
+      Math.hypot((e.clientX - cr.left) - sp.x, (e.clientY - cr.top) - sp.y) < WBW_CLOSE_PX;
+    canvas.style.cursor = _wbwCloseHint ? 'pointer' : 'crosshair';
     render();
     return;
   }
@@ -27749,9 +27768,11 @@ canvas.addEventListener('mouseup', e=>{
     _thDragging=false; _thDragMoved=false; _thConstraint='free'; canvas.style.cursor='default'; return;
   }
   if (_movingWall) { _movingWall=false; _mwRoomId=-1; _mwWallIdx=-1; canvas.style.cursor='default'; return; }
-  // WBW mouse mode: canvas click commits wall
-  if (S.ui.drawMode === 'wbw' && S.drawing.wbw.mouseMode && e.button === 0 && _wbwMouseAngleDeg !== null) {
-    addWbwWallMouse(); return;
+  // WBW mouse mode: klikk nær startpunkt lukker, ellers fest vegg i vist retning.
+  if (S.ui.drawMode === 'wbw' && S.drawing.wbw.mouseMode && e.button === 0) {
+    if (_wbwCloseHint && S.drawing.wbw.walls.length >= 3) { finishWbwRoom(); return; }
+    if (_wbwMouseAngleDeg !== null) addWbwWallMouse();
+    return;
   }
   if (e.button!==0) return;
   if ((S.ui.drawMode==='rect'||S.ui.drawMode==='hindring') && _dragging) {
@@ -32845,8 +32866,10 @@ document.getElementById('wbw-len').addEventListener('keydown', e=>{
 // regardless of focus. Capture phase so it runs before the length field's own keydown
 // (no double placement) and before global drawing shortcuts; only active in WBW keyboard mode.
 document.addEventListener('keydown', e=>{
-  if (S.ui.drawMode !== 'wbw' || S.drawing.wbw.mouseMode) return;
+  if (S.ui.drawMode !== 'wbw') return;
+  // Enter lukker rommet i BEGGE moduser (FELLES (b)).
   if (e.key==='Enter') { finishWbwRoom(); e.preventDefault(); e.stopPropagation(); return; }
+  if (S.drawing.wbw.mouseMode) return;   // piltastene gjelder kun Taster-modus
   const dirMap = { ArrowRight:'right', ArrowLeft:'left', ArrowUp:'up', ArrowDown:'down' };
   if (dirMap[e.key]) { setDir(dirMap[e.key]); addWbwWall(); e.preventDefault(); e.stopPropagation(); return; }
 }, true);
