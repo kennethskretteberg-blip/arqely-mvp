@@ -4,6 +4,16 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Folie: montørens full-lengde + smal absorber-pakking — `1b696e7`
+
+Brukers manuelle teknikk: smal strimmel der en forskyvning er, så fulle lengder etter.
+Ny `_packZoneFullLength` pr sone: bredeste produkt som gir FULL lengde forankret til vegg;
+der ingen bredde blir full (forskyvning), legg smaleste som absorberer, fortsett med fulle.
+Verifisert på brukers rom: nedre-høyre = B=20 absorber + 2× B=140 full lengde (var 1 kort
+B=100). V 91 % (var 84 %), H 94 %, 0 regelbrudd. Regresjon: rektangel 94 %, L 91 %, U 83 %.
+
+---
+
 ## 2026-06-22 — Folie: montør-stil utlegg, bruker velger retning — `b1e9596`, `b36cbc6`
 
 Etter brukers referanse (folie_optimalt) + ønske om å velge retning selv:
