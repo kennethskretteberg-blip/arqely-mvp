@@ -4,6 +4,20 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Folie «Soner»: rutenett-dekomponering (fikser dårlig dekning) — `a2ee334`
+
+Brukerrapport: «Soner» ga store udekkede arealer på et ekte 53 m²-rom (stua <50 %).
+Reprodusert med brukers EKSAKTE romgeometri (hentet via konsoll): slabb-dekomponeringen
+la soner oppå hindringer og trimmet stua til en tynn kolonne.
+
+- Ny `_decomposeRoomToRects`: rasteriser rom-interiør MINUS hindringer/forbudte soner i
+  et rutenett (~6–12 cm), og hent grådig ut største all-fyllbare rektangel (`_largestRectInGrid`,
+  histogram-metode), gjenta. Hindringer = naturlige hull; 25 mm-margin håndteres ved pakking.
+- Verifisert på brukers rom: stua fanges som ekte 324×333-sone; Soner-dekning 95 % (var 80 %;
+  H/V 52/46 %), 0 folie i hindring, 0 overlapp. Regresjon: rektangel → fallback; L 91 %, U 90 %.
+
+---
+
 ## 2026-06-22 — Folie: aldri folie i hindring + scoring-straff (Del A/B/C)
 
 Tre gjenstående folie-punkter, reprodusert empirisk FØRST (innlogget, ekte produkter).
