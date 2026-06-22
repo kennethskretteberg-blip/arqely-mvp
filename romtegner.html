@@ -3873,7 +3873,8 @@ function _decomposeRoomToRects(room) {
   for (let guard = 0; guard < 60; guard++) {
     const b = _largestRectInGrid(grid, cols, rows);
     if (!b || b.w < minCells || b.h < minCells) break;
-    rects.push({ x0: minX + b.c * CELL, y0: minY + b.r * CELL, x1: minX + (b.c + b.w) * CELL, y1: minY + (b.r + b.h) * CELL });
+    // Klamp til rommets bbox så siste celle ikke stikker forbi veggen (→ vegg-margin holdes).
+    rects.push({ x0: Math.max(minX, minX + b.c * CELL), y0: Math.max(minY, minY + b.r * CELL), x1: Math.min(maxX, minX + (b.c + b.w) * CELL), y1: Math.min(maxY, minY + (b.r + b.h) * CELL) });
     for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) grid[r * cols + c] = 0;
   }
   const out = rects.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
@@ -3969,53 +3970,43 @@ function _packZoneUniform(roomId, rect, productId, direction) {
   return defs;
 }
 
-// Sone-basert utlegg (strip-defs) for «Soner»-valget — etter montørens manuelle prinsipp:
-// SAMME retning i HELE rommet (den som dekker mest totalt), og hver sone pakket med UNIFORM
-// bredde forankret inntil vegg (ingen smale folier midt i arealet; det udekkede mot vegg).
-// Soner overlapper aldri (sentinel-strips). Null hvis rommet ikke deler seg i flere soner.
-function _zonedFoilDefs(room, productId) {
+// Sone-basert utlegg (strip-defs) i en GITT retning — brukes for både Horisontal og
+// Vertikal i panelet, så bruker velger retning selv. Montørens prinsipp: hver sone pakket
+// med UNIFORM bredde forankret inntil vegg (få, brede, lange kolonner; ingen smale folier
+// midt i arealet — det udekkede ligger mot vegg). Soner overlapper aldri (sentinel-strips).
+// Null hvis rommet ikke deler seg i flere soner (→ behold dagens H/V for enkle rom).
+function _zonedDefsForDirection(room, productId, direction) {
   const rects = _decomposeRoomToRects(room);
   if (!rects || rects.length <= 1) return null;
   rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
   const cat = (HEATING_PRODUCTS.find(p => p.id === productId) || {}).category_id;
   const replaced = new Set(_stripsForRoom(room.id).filter(s => { const sp = _stripProduct(s); return sp && sp.category_id === cat; }).map(s => s.id));
   const family = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
-  const wOf = id => { const pp = HEATING_PRODUCTS.find(x => x.id === id); return pp ? (pp.netto_width_mm || pp.width_mm) / 10 : 0; };
-  const _defArea = defs => defs.reduce((s, d) => s + wOf(d.productId) * d.length_cm, 0);
-  // Pakk ALLE soner i én gitt retning; pr sone velges UNIFORM bredde med «lange strimler»-
-  // scoring (få, brede, lange strimler — straffer mange smale; litt udekket er OK).
-  function packAll(direction) {
-    const allDefs = [], sentIds = [], SENT = -990000;
-    try {
-      for (const rect of rects) {
-        const zoneCm2 = Math.max(1, (rect.x1 - rect.x0) * (rect.y1 - rect.y0));
-        const best = _withFoilAvoid(room.id, replaced, () => {
-          let bd = [], bs = -Infinity;
-          for (const fp of family) {
-            const defs = _packZoneUniform(room.id, rect, fp.id, direction);
-            if (!defs.length) continue;
-            const sc = _scoreFoilLayout(defs, { profile: 'long', netCm2: zoneCm2 });
-            if (sc > bs) { bs = sc; bd = defs; }
-          }
-          return bd;
-        });
-        for (const d of best) {
-          const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
-          allDefs.push(sd);
-          const id = SENT - sentIds.length; S.strips.push({ ...sd, id }); sentIds.push(id);
+  const allDefs = [], sentIds = [], SENT = -990000;
+  try {
+    for (const rect of rects) {
+      const zoneCm2 = Math.max(1, (rect.x1 - rect.x0) * (rect.y1 - rect.y0));
+      const best = _withFoilAvoid(room.id, replaced, () => {
+        let bd = [], bs = -Infinity;
+        for (const fp of family) {
+          const defs = _packZoneUniform(room.id, rect, fp.id, direction);
+          if (!defs.length) continue;
+          const sc = _scoreFoilLayout(defs, { profile: 'long', netCm2: zoneCm2 });
+          if (sc > bs) { bs = sc; bd = defs; }
         }
+        return bd;
+      });
+      for (const d of best) {
+        const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
+        allDefs.push(sd);
+        const id = SENT - sentIds.length; S.strips.push({ ...sd, id }); sentIds.push(id);
       }
-    } finally {
-      S.strips = S.strips.filter(s => !(typeof s.id === 'number' && s.id <= SENT));
-      _invalidateStripCache();
     }
-    return allDefs;
+  } finally {
+    S.strips = S.strips.filter(s => !(typeof s.id === 'number' && s.id <= SENT));
+    _invalidateStripCache();
   }
-  const dv = packAll('v'), dh = packAll('h');
-  // Én global retning: den med høyest «lange strimler»-score (få, brede, lange strimler).
-  const roomCm2 = Math.max(1, Math.abs(compArea(room.points)));
-  const scoreAll = defs => _scoreFoilLayout(defs, { profile: 'long', netCm2: roomCm2 });
-  return scoreAll(dv) >= scoreAll(dh) ? dv : dh;
+  return allDefs;
 }
 
 // ─── PRODUKT-MENY ────────────────────────────────────────────
@@ -7494,17 +7485,20 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
     .map(s => s.id));
   const results = _withFoilAvoid(room.id, _replacedIds, () => _autoFillBothDirections(room, prods));
 
-  // Sone-basert alternativ (ulik retning per delareal) — kun for rom som deler seg i flere soner.
+  // Ikke-rektangulære rom: bruk sone-basert uniform, vegg-forankret pakking for BÅDE
+  // Horisontal og Vertikal (montørens prinsipp), så bruker velger retning selv. Enkle rom
+  // (≤1 sone) beholder dagens H/V-utlegg.
   try {
-    const zonedDefs = _zonedFoilDefs(room, prods[0].id);
-    if (zonedDefs && zonedDefs.length) results.zoned = { defs: zonedDefs, stats: _foilLayoutStats(zonedDefs, room, 'long') };
-  } catch (e) { console.warn('Soner-layout feilet:', e.message); }
+    for (const dir of ['h', 'v']) {
+      const zd = _zonedDefsForDirection(room, prods[0].id, dir);
+      if (zd && zd.length) results[dir] = { defs: zd, stats: _foilLayoutStats(zd, room, 'long') };
+    }
+  } catch (e) { console.warn('Sone-utlegg feilet:', e.message); }
 
   S.ui.autoFillCompare = results;
   S.ui.autoFillCompareCategoryId = categoryId;
 
-  let better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
-  if (results.zoned && results.zoned.stats.score > results[better].stats.score) better = 'zoned';
+  const better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
   _renderAutoFillComparePanel(results, better);
   _previewAutoFillOption(better);
 }
@@ -7553,14 +7547,6 @@ function _renderAutoFillComparePanel(results, selectedDir) {
         <div class="af-stat">${vSt.totalWatt} W (${vSt.wattPerM2} W/m²)</div>
         <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.v.defs)}</div>
       </div>
-      ${results.zoned ? (() => { const zSt = results.zoned.stats; const zBest = zSt.score >= hSt.score && zSt.score >= vSt.score;
-      return `<div class="af-option${selectedDir==='zoned'?' selected':''}" onclick="_selectAutoFillOption('zoned')" onmouseenter="_previewAutoFillOption('zoned')">
-        <div class="af-dir">${zBest ? '★ Soner' : 'Soner'}</div>
-        <div class="af-stat">${zSt.stripCount} striper</div>
-        <div class="af-stat">${zSt.coveragePct}% dekning</div>
-        <div class="af-stat">${zSt.totalWatt} W (${zSt.wattPerM2} W/m²)</div>
-        <div class="af-stat" style="font-size:10px;margin-top:4px">delarealer, hver i best retning</div>
-      </div>`; })() : ''}
     </div>
     <div style="display:flex;gap:6px;justify-content:center;margin-top:12px">
       ${(() => { const strat = (S.varmefolie && S.varmefolie.foilStrategy) || 'long';
@@ -7569,7 +7555,7 @@ function _renderAutoFillComparePanel(results, selectedDir) {
              + chip('coverage','Maks dekning','Tettest mulig dekning — flere/kortere strimler ved behov'); })()}
     </div>
     <div class="af-actions">
-      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':selectedDir==='v'?'vertikal':'soner'}</button>
+      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':'vertikal'}</button>
       <button class="af-btn-secondary" onclick="_closeAutoFillPanel()">Avbryt</button>
     </div>
   `;
