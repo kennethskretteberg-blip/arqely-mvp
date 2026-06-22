@@ -3945,37 +3945,77 @@ function autoAddStripsZoned(roomId, productId) {
   renderSidebar(); updateObjInfo(); render();
 }
 
-// Beregn (uten å plassere) et sone-basert utlegg som strip-defs — for «Soner»-valget i
-// sammenlikningspanelet. Hver sone i sin beste retning; klippet til sonen (hindringer
-// trekkes fra via room.id) og soner overlapper aldri (midlertidige sentinel-strips trekkes
-// tilbake til slutt). Returnerer null hvis rommet ikke deler seg i flere soner.
+// Pakk én sone med UNIFORM bredde, forankret til vegg (ingen smale midt-fyll). Full-lengde
+// kolonner klippet mot ROMMET (riktig 25 mm vegg-/hindring-margin) + begrenset til sonens
+// along-rekkevidde for sone-isolasjon. Det udekkede blir én rest mot motsatt vegg.
+function _packZoneUniform(roomId, rect, productId, direction) {
+  const p = HEATING_PRODUCTS.find(x => x.id === productId); if (!p) return [];
+  const nc = (p.netto_width_mm || p.width_mm) / 10;
+  const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
+  const basePos = direction === 'v' ? rect.x0 : rect.y0;
+  const limit = (direction === 'v' ? rect.x1 : rect.y1) - margin;
+  const aLo = direction === 'v' ? rect.y0 : rect.x0;
+  const aHi = direction === 'v' ? rect.y1 : rect.x1;
+  const defs = [];
+  let cursor = basePos + margin, guard = 0;
+  while (cursor + nc <= limit + 0.01 && guard++ < 3000) {
+    const segs = computeClippedSegments(roomId, direction, cursor, productId);
+    for (const seg of segs) {
+      const lo = Math.max(seg.start_cm, aLo), hi = Math.min(seg.start_cm + seg.length_cm, aHi);
+      if (hi - lo >= 5) defs.push({ productId, direction, pos_cm: cursor, start_cm: lo, length_cm: hi - lo });
+    }
+    cursor += nc + gap;
+  }
+  return defs;
+}
+
+// Sone-basert utlegg (strip-defs) for «Soner»-valget — etter montørens manuelle prinsipp:
+// SAMME retning i HELE rommet (den som dekker mest totalt), og hver sone pakket med UNIFORM
+// bredde forankret inntil vegg (ingen smale folier midt i arealet; det udekkede mot vegg).
+// Soner overlapper aldri (sentinel-strips). Null hvis rommet ikke deler seg i flere soner.
 function _zonedFoilDefs(room, productId) {
   const rects = _decomposeRoomToRects(room);
   if (!rects || rects.length <= 1) return null;
   rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
   const cat = (HEATING_PRODUCTS.find(p => p.id === productId) || {}).category_id;
   const replaced = new Set(_stripsForRoom(room.id).filter(s => { const sp = _stripProduct(s); return sp && sp.category_id === cat; }).map(s => s.id));
-  const _defArea = defs => defs.reduce((s, d) => { const pp = HEATING_PRODUCTS.find(x => x.id === d.productId); const w = pp ? (pp.netto_width_mm || pp.width_mm) / 10 : 0; return s + w * d.length_cm; }, 0);
-  const allDefs = [], sentIds = [], SENT = -990000;
-  try {
-    for (const rect of rects) {
-      // Velg retningen (adaptiv bredde) som dekker mest areal i nettopp denne sonen.
-      const best = _withFoilAvoid(room.id, replaced, () => {
-        const dv = _computeRectFillDefs(room.id, rect, productId, 'v');
-        const dh = _computeRectFillDefs(room.id, rect, productId, 'h');
-        return _defArea(dv) >= _defArea(dh) ? dv : dh;
-      });
-      for (const d of best) {
-        const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
-        allDefs.push(sd);
-        const id = SENT - sentIds.length; S.strips.push({ ...sd, id }); sentIds.push(id);  // sentinel så neste sone unngår denne
+  const family = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
+  const wOf = id => { const pp = HEATING_PRODUCTS.find(x => x.id === id); return pp ? (pp.netto_width_mm || pp.width_mm) / 10 : 0; };
+  const _defArea = defs => defs.reduce((s, d) => s + wOf(d.productId) * d.length_cm, 0);
+  // Pakk ALLE soner i én gitt retning; pr sone velges UNIFORM bredde med «lange strimler»-
+  // scoring (få, brede, lange strimler — straffer mange smale; litt udekket er OK).
+  function packAll(direction) {
+    const allDefs = [], sentIds = [], SENT = -990000;
+    try {
+      for (const rect of rects) {
+        const zoneCm2 = Math.max(1, (rect.x1 - rect.x0) * (rect.y1 - rect.y0));
+        const best = _withFoilAvoid(room.id, replaced, () => {
+          let bd = [], bs = -Infinity;
+          for (const fp of family) {
+            const defs = _packZoneUniform(room.id, rect, fp.id, direction);
+            if (!defs.length) continue;
+            const sc = _scoreFoilLayout(defs, { profile: 'long', netCm2: zoneCm2 });
+            if (sc > bs) { bs = sc; bd = defs; }
+          }
+          return bd;
+        });
+        for (const d of best) {
+          const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
+          allDefs.push(sd);
+          const id = SENT - sentIds.length; S.strips.push({ ...sd, id }); sentIds.push(id);
+        }
       }
+    } finally {
+      S.strips = S.strips.filter(s => !(typeof s.id === 'number' && s.id <= SENT));
+      _invalidateStripCache();
     }
-  } finally {
-    S.strips = S.strips.filter(s => !(typeof s.id === 'number' && s.id <= SENT));
-    _invalidateStripCache();
+    return allDefs;
   }
-  return allDefs;
+  const dv = packAll('v'), dh = packAll('h');
+  // Én global retning: den med høyest «lange strimler»-score (få, brede, lange strimler).
+  const roomCm2 = Math.max(1, Math.abs(compArea(room.points)));
+  const scoreAll = defs => _scoreFoilLayout(defs, { profile: 'long', netCm2: roomCm2 });
+  return scoreAll(dv) >= scoreAll(dh) ? dv : dh;
 }
 
 // ─── PRODUKT-MENY ────────────────────────────────────────────
