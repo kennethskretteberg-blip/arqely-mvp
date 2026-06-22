@@ -3814,56 +3814,70 @@ function autoAddStrips(roomId, productId) {
 // hindring-klipp via roomId) og _withFoilAvoid (soner overlapper aldri hverandre).
 // Faller tilbake til global autoAddStrips for enkle/konvekse rom (ingen regresjon).
 
-// Ortogonal-polygon → akse-justerte rektangler (vertikale slabber, slått sammen
-// horisontalt). Returnerer null hvis rommet ikke er ortogonalt (→ fallback).
+// Største all-1-rektangel i et binært rutenett (histogram-metode). Returnerer
+// {r,c,w,h} i celler, eller null.
+function _largestRectInGrid(grid, cols, rows) {
+  const heights = new Int32Array(cols);
+  let best = null;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) heights[c] = grid[r * cols + c] ? heights[c] + 1 : 0;
+    const stack = [];   // {c, h}
+    for (let c = 0; c <= cols; c++) {
+      const h = c < cols ? heights[c] : 0;
+      let start = c;
+      while (stack.length && stack[stack.length - 1].h > h) {
+        const top = stack.pop();
+        const area = top.h * (c - top.c);
+        if (!best || area > best.area) best = { area, r: r - top.h + 1, c: top.c, w: c - top.c, h: top.h };
+        start = top.c;
+      }
+      stack.push({ c: start, h });
+    }
+  }
+  return best;
+}
+
+// Rom-interiør MINUS hindringer (og forbudte soner) → et lite sett MAKSIMALE
+// akse-justerte rektangler. Rutenett-rasterisering + grådig uttak av største
+// rektangel. Robust for komplekse/håndtegnede rom og hindringer som hull.
+// (25 mm-margin mot hindring håndteres ved pakking via computeClippedSegments.)
 function _decomposeRoomToRects(room) {
   const pts = room.points;
   if (!pts || pts.length < 4) return null;
-  const MIN = 8; // cm — ignorer slivere
+  const MIN = 15; // cm — minste sonedimensjon
   const xsAll = pts.map(p => p.x), ysAll = pts.map(p => p.y);
-  const W = Math.max(...xsAll) - Math.min(...xsAll), H = Math.max(...ysAll) - Math.min(...ysAll);
+  const minX = Math.min(...xsAll), maxX = Math.max(...xsAll), minY = Math.min(...ysAll), maxY = Math.max(...ysAll);
+  const W = maxX - minX, H = maxY - minY;
   if (W < 2 * MIN || H < 2 * MIN) return null;
-  // Toleranse for klyngning (håndtegnede rom er sjelden perfekt akse-justert).
-  const TOLX = Math.max(5, W * 0.02), TOLY = Math.max(5, H * 0.02);
-  const cluster = (vals, tol) => {
-    const s = [...vals].sort((a, b) => a - b); const reps = []; let bin = [s[0]];
-    for (let i = 1; i < s.length; i++) {
-      if (s[i] - bin[bin.length - 1] <= tol) bin.push(s[i]);
-      else { reps.push(bin.reduce((a, b) => a + b, 0) / bin.length); bin = [s[i]]; }
+  const CELL = Math.max(6, Math.min(12, Math.round(Math.max(W, H) / 110)));   // ~6–12 cm celler
+  const cols = Math.ceil(W / CELL), rows = Math.ceil(H / CELL);
+  if (cols * rows > 45000) return null;   // ytelsesvakt → fallback
+  const hind = (S.hindrings || []).filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  const fz   = (S.zones || []).filter(z => z.roomId === room.id && z.type === 'forbidden' && z.points && z.points.length >= 3);
+  // Fyllbar celle = senter inne i rommet, IKKE inne i en hindring/forbudt sone.
+  const grid = new Uint8Array(cols * rows);
+  for (let r = 0; r < rows; r++) {
+    const cy = minY + (r + 0.5) * CELL;
+    for (let c = 0; c < cols; c++) {
+      const cx = minX + (c + 0.5) * CELL;
+      if (!ptInPoly(cx, cy, pts)) continue;
+      let blocked = false;
+      for (const h of hind) if (ptInPoly(cx, cy, h.points)) { blocked = true; break; }
+      if (!blocked) for (const z of fz) if (ptInPoly(cx, cy, z.points)) { blocked = true; break; }
+      if (!blocked) grid[r * cols + c] = 1;
     }
-    reps.push(bin.reduce((a, b) => a + b, 0) / bin.length); return reps;
-  };
-  const xs = cluster(xsAll, TOLX), ys = cluster(ysAll, TOLY);
-  if (xs.length < 2) return null;
-  const snapY = v => { let best = v, bd = TOLY; for (const y of ys) { const d = Math.abs(y - v); if (d < bd) { bd = d; best = y; } } return best; };
-  let rects = [];
-  for (let i = 0; i < xs.length - 1; i++) {
-    const x0 = xs[i], x1 = xs[i + 1]; if (x1 - x0 < MIN) continue;
-    // y-intervall garantert INNE i rommet over HELE slabben → snitt av flere skann.
-    // (konservativt: litt udekket ut mot skjeve kanter, som montøren også aksepterer)
-    const eps = Math.min(2, (x1 - x0) * 0.25);
-    let inter = null;
-    for (const sx of [x0 + eps, (x0 + x1) / 2, x1 - eps]) {
-      const ints = clipScanlineToPolygon('y', sx, pts);
-      if (inter === null) { inter = ints.map(([a, b]) => [a, b]); continue; }
-      const next = [];
-      for (const [a0, a1] of inter) for (const [b0, b1] of ints) {
-        const lo = Math.max(a0, b0), hi = Math.min(a1, b1);
-        if (hi - lo >= MIN) next.push([lo, hi]);
-      }
-      inter = next;
-    }
-    if (!inter) continue;
-    for (const [lo, hi] of inter) if (hi - lo >= MIN) rects.push({ x0, x1, y0: snapY(lo), y1: snapY(hi) });
   }
-  rects.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);   // slå sammen x-tilstøtende slabber med (snappet) lik y
-  const merged = [];
-  for (const r of rects) {
-    const m = merged.find(q => Math.abs(q.y0 - r.y0) < TOLY && Math.abs(q.y1 - r.y1) < TOLY && Math.abs(q.x1 - r.x0) < TOLX);
-    if (m) m.x1 = r.x1; else merged.push({ ...r });
+  // Grådig: ta ut største rektangel, nullstill det, gjenta.
+  const minCells = Math.max(2, Math.floor(MIN / CELL));
+  const rects = [];
+  for (let guard = 0; guard < 60; guard++) {
+    const b = _largestRectInGrid(grid, cols, rows);
+    if (!b || b.w < minCells || b.h < minCells) break;
+    rects.push({ x0: minX + b.c * CELL, y0: minY + b.r * CELL, x1: minX + (b.c + b.w) * CELL, y1: minY + (b.r + b.h) * CELL });
+    for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) grid[r * cols + c] = 0;
   }
-  const out = merged.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
-  if (out.length > 12) return null;   // svært komplekst/skjevt → la H/V ta det (unngå fragmentering)
+  const out = rects.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
+  if (!out.length || out.length > 16) return null;   // tomt eller for fragmentert → fallback til H/V
   return out;
 }
 
