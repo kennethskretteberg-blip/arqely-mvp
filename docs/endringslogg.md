@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Folie: aldri folie i hindring + scoring-straff (Del A/B/C)
+
+Tre gjenstående folie-punkter, reprodusert empirisk FØRST (innlogget, ekte produkter).
+Commits (nyeste først): `e701dce`, `2da21be`.
+
+**Del A — aldri folie i hindring** (`2da21be`)
+- Rotårsak: `_centerStripDefs` forskyver alle strimler perp (sentrering/skyv-mot-vegg)
+  men re-klipper ikke lengden → en strimmel som var hindring-fri i sin kolonne havner
+  over en hindring og beholder full lengde → folie i hindring (H/V «lange strimler»).
+- Fiks: `_reclipDefsAroundObstacles` re-klipper hver def mot hindringer/forbudte soner
+  ved sin (forskjøvne) pos og deler/forkorter. Brukt etter sentrering i begge strategier.
+  No-op uten hindringer → ingen regresjon. Verifisert: 2 hindringer → 0 folie i hindring.
+
+**Del C — straff regelbrudd + oppstykking i scoringen** (`e701dce`)
+- `_layoutRulePenalty` trekkes fra `_foilLayoutStats.score`: folie i hindring ~1× romareal
+  (dominerer), <25 mm 0,15×, svært korte strimler oppstykkingsstraff. → «Soner» blir kun
+  ★ når den faktisk er bedre enn H/V. Rene layouts: straff 0 (uendret rangering).
+
+**Del B — stable folie i samme kolonne manuelt** — ingen endring (allerede løst)
+- Reprodusert grundig ('v'+'h', under/over, ulik bredde, full kolonne, 2–3 stablet):
+  alle plasseres korrekt. `_withFoilAvoid`+`computeClippedSegments` deler faktisk kolonnen
+  rundt eksisterende folie; along-vakten i `_stripOverlapsAny` gjør stabling lovlig. Prompten
+  sin antatte rotårsak stemmer ikke. (Hard-refresh hvis det fortsatt feiler — send ev. repro.)
+
+---
+
 ## 2026-06-22 — Folie: sone-basert utlegg + hindring-varsel (verifiser-først)
 
 Fire sammenhengende folie-problemer (sone-utlegg, hindring-eksklusjon, uavhengige
