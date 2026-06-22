@@ -3844,20 +3844,27 @@ function _decomposeRoomToRects(room) {
   return merged.filter(r => (r.x1 - r.x0) >= MIN && (r.y1 - r.y0) >= MIN);
 }
 
-// Pakk ett rektangel i én retning (uten å mutere S.strips). Returnerer strip-defs.
+// Pakk ett rektangel i én retning (uten å mutere S.strips). Adaptiv bredde:
+// bredeste familieprodukt som får plass i resten av sonen → smalere fyller restbredden
+// (bedre dekning enn én fast bredde). Returnerer strip-defs.
 function _computeRectFillDefs(roomId, rect, productId, direction) {
-  const p = HEATING_PRODUCTS.find(x => x.id === productId); if (!p) return [];
-  const nc = (p.netto_width_mm || p.width_mm) / 10;
+  const fam = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
+  if (!fam.length) { const p = HEATING_PRODUCTS.find(x => x.id === productId); if (p) fam.push(p); }
+  if (!fam.length) return [];
   const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
   const rectPoly = [{x:rect.x0,y:rect.y0},{x:rect.x1,y:rect.y0},{x:rect.x1,y:rect.y1},{x:rect.x0,y:rect.y1}];
   const basePos = direction === 'v' ? rect.x0 : rect.y0;
-  const baseMax = direction === 'v' ? rect.x1 : rect.y1;
+  const limit = (direction === 'v' ? rect.x1 : rect.y1) - margin;
   const defs = [];
   let cursor = basePos + margin, guard = 0;
-  while (cursor + nc <= baseMax - margin + 0.01 && guard++ < 2000) {
-    const segs = computeClippedSegments(roomId, direction, cursor, productId, { clipPoly: rectPoly });
-    for (const seg of segs) defs.push({ productId, direction, pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm });
-    cursor += nc + gap;
+  while (cursor < limit - 0.01 && guard++ < 3000) {
+    const remaining = limit - cursor;
+    let chosen = null, cnc = 0;
+    for (const fp of fam) { const w = (fp.netto_width_mm || fp.width_mm) / 10; if (w <= remaining + 0.01) { chosen = fp; cnc = w; break; } }
+    if (!chosen) break;   // selv smaleste folie får ikke plass i resten
+    const segs = computeClippedSegments(roomId, direction, cursor, chosen.id, { clipPoly: rectPoly });
+    for (const seg of segs) defs.push({ productId: chosen.id, direction, pos_cm: cursor, start_cm: seg.start_cm, length_cm: seg.length_cm });
+    cursor += cnc + gap;
   }
   return defs;
 }
@@ -3866,7 +3873,7 @@ function _computeRectFillDefs(roomId, rect, productId, direction) {
 function _packRectBestDir(roomId, rect, productId) {
   const dv = _computeRectFillDefs(roomId, rect, productId, 'v');
   const dh = _computeRectFillDefs(roomId, rect, productId, 'h');
-  const cover = a => a.reduce((s, d) => s + d.length_cm, 0);
+  const cover = a => a.reduce((s, d) => { const pp = HEATING_PRODUCTS.find(x => x.id === d.productId); const w = pp ? (pp.netto_width_mm || pp.width_mm) / 10 : 0; return s + w * d.length_cm; }, 0);
   const best = cover(dv) >= cover(dh) ? dv : dh;
   for (const d of best) {
     S.strips.push({ id: S.counters.nextStripId++, roomId, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm });
@@ -3902,23 +3909,16 @@ function _zonedFoilDefs(room, productId) {
   if (!rects || rects.length <= 1) return null;
   rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
   const cat = (HEATING_PRODUCTS.find(p => p.id === productId) || {}).category_id;
-  const family = getProductFamily(productId);   // alle bredder i familien
   const replaced = new Set(_stripsForRoom(room.id).filter(s => { const sp = _stripProduct(s); return sp && sp.category_id === cat; }).map(s => s.id));
+  const _defArea = defs => defs.reduce((s, d) => { const pp = HEATING_PRODUCTS.find(x => x.id === d.productId); const w = pp ? (pp.netto_width_mm || pp.width_mm) / 10 : 0; return s + w * d.length_cm; }, 0);
   const allDefs = [], sentIds = [], SENT = -990000;
   try {
     for (const rect of rects) {
-      // Velg produkt-bredde × retning som dekker mest areal i nettopp denne sonen.
+      // Velg retningen (adaptiv bredde) som dekker mest areal i nettopp denne sonen.
       const best = _withFoilAvoid(room.id, replaced, () => {
-        let bestDefs = [], bestArea = -1;
-        for (const fp of family) {
-          const nc = (fp.netto_width_mm || fp.width_mm) / 10;
-          for (const dir of ['v', 'h']) {
-            const defs = _computeRectFillDefs(room.id, rect, fp.id, dir);
-            const area = nc * defs.reduce((s, d) => s + d.length_cm, 0);
-            if (area > bestArea) { bestArea = area; bestDefs = defs; }
-          }
-        }
-        return bestDefs;
+        const dv = _computeRectFillDefs(room.id, rect, productId, 'v');
+        const dh = _computeRectFillDefs(room.id, rect, productId, 'h');
+        return _defArea(dv) >= _defArea(dh) ? dv : dh;
       });
       for (const d of best) {
         const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
