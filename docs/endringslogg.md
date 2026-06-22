@@ -7,7 +7,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 ## 2026-06-22 — WBW-flyt (vegg-for-vegg): taster + mus
 
 Raskere og mer naturlig vegg-for-vegg-opprettelse, uten å bygge nytt. Commits
-(nyeste først): `6e023fe`, `601eb29`.
+(nyeste først): `e5ea346`, `6e023fe`, `601eb29`.
 
 **Taster** (`601eb29`)
 - Piltast (↑↓←→) legger veggen direkte i den retningen (var allerede på plass);
@@ -15,6 +15,10 @@ Raskere og mer naturlig vegg-for-vegg-opprettelse, uten å bygge nytt. Commits
 - Skjerm-pilene speiler nå piltastene (`wbwDirPlace` = `setDir` + `addWbwWall`).
 - Enter lukker rommet; en vegg som lander på startpunktet auto-lukker.
 - Status + Taster-tooltip oppdatert til ny flyt.
+- Fiks (`e5ea346`): `addWbwWall`/`undoWbwWall` kalte aldri `render()`, så en vegg lagt
+  med piltast dukket først opp ved musebevegelse → kaller nå `render()` umiddelbart.
+  Svak stiplet forhåndsvisning av neste vegg vises så snart en lengde er skrevet
+  (live mens lengden endres); blir grønn når veggen vil lukke rommet.
 
 **Mus** (`6e023fe`)
 - Enter lukker nå i BEGGE moduser. Klikk nær startpunktet (≤ 14 px) lukker rommet
