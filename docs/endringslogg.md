@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Gulvtype (toppgulv) + read-only prosjektpresentasjon
+
+To sammenhengende ting: gulvtype per rom med effekt-kompatibilitet, og en read-only
+«som prosjektert»-presentasjon. Commits (nyeste først): `87c0bc4`, `9487807`, `d8d89cb`,
+`1cab5da`, `5e75838`.
+
+**Del A — Gulvtype + kompatibilitet** (`5e75838`)
+- Nytt valgfritt `floorType` per rom (lagres automatisk via `_buildSaveData`).
+- `FLOOR_TYPES` som data: maks anbefalt flateeffekt per gulvtype (flis/mikrosement/betong
+  150, vinyl/laminat/parkett 100, teppe 60, annet/ukjent = ingen sjekk) — lett redigerbar.
+- Ren funksjon `floorTypeCompat(floorType, wm2)` → ok/advarsel/none + delt banner
+  `_floorCompatBannerHtml`. Toppgulv-velger + live varsel i UPC-panelet og hurtig-
+  prosjekteringskortet. Degraderer pent når gulvtype mangler.
+
+**Del B steg 1 — Presentasjonsmodus** (`1cab5da`)
+- «▶ Presentasjon»-knapp i topbar. Gjenbruker editor-canvas + `render()` via
+  `S.ui.present` (ingen ny tegning); `body.present-mode` skjuler all redigerings-chrome.
+- Topptekst (prosjektnavn, «Prosjektert av <leverandør> for <firma>», dato) + nøkkeltall
+  (antall rom, oppvarmet areal, total installert effekt). Leverandøruavhengig, nøytral
+  default «Varmeplan». Read-only input: kun panorering/zoom; Escape avslutter.
+
+**Del B steg 2 — Detaljpanel** (`d8d89cb`)
+- Hold over (desktop) / trykk (mobil) et rom → fremheving (cyan kontur/glød) + detaljpanel:
+  produkt + artikkelnr, installert W, flateeffekt, c/c, kabellengde, spenning, nominell
+  motstand (R = U²/P), og toppgulv + kompatibilitet. Treff-test via `ptInPoly`.
+
+**Del B steg 3 — Gulvtekstur + delelenke + PDF** (`9487807`, `87c0bc4`)
+- Subtil gulvtekstur per gulvtype UNDER leggemønsteret: rutenett (flis/mikrosement/betong),
+  bordmønster (laminat/parkett/vinyl), prikker (teppe).
+- «🔗 Del lenke» genererer/lagrer `present_token` og kopierer `?present=<token>`. Boot-sti
+  åpner prosjektet read-only uten innlogging via sikker `get_present_project`-RPC (anon kan
+  ikke liste andre delte prosjekter). «⬇ PDF» gjenbruker `exportPDF()`.
+- Ny migrasjon `supabase-migration-presentation.sql` (kjøres manuelt): `present_token`-kolonne,
+  RPC, anon-lesetilgang til katalogtabeller. Mockup i `docs/Varmeplan-prosjektpresentasjon.html`.
+- **NB:** Supabase-rundturen for delelenken er implementert men ikke testet mot live DB —
+  test «Del lenke» + åpne lenken i privat vindu etter at migrasjonen er kjørt.
+
+---
+
 ## 2026-06-18 — Hurtig prosjektering: «Lagre prosjekt»-knapp (commit 2f080da)
 
 Tydelig lagre-kontroll nederst i romlista, som komplement til autolagringen.
