@@ -7,7 +7,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 ## 2026-06-22 — Kabel-tilbehør ved PDF-eksport (typeavhengig)
 
 Utvidet den deklarative tilbehørs-funksjonen til varmekabel, og gjorde hele tilbehørs-
-lista typeavhengig. Commits (nyeste først): `ff51e3b`, `c57c88c`, `3720ce4`, `f445aec`.
+lista typeavhengig. Commits (nyeste først): `f4e108e`, `ff51e3b`, `c57c88c`, `3720ce4`, `f445aec`.
 
 **Typegating + kabel-tilbehør i modal** (`f445aec`)
 - `showAccessoriesModal()` viser Varmefolie-seksjon KUN ved folie og Varmekabel-seksjon
@@ -22,6 +22,13 @@ lista typeavhengig. Commits (nyeste først): `ff51e3b`, `c57c88c`, `3720ce4`, `f
 - PDF «Tilbehør» får egne underseksjoner (Varmefolie / Varmekabel) med art.nr/EL/enhet/
   antall; stålnett viser valgte rom, manglende katalog-nr flagges «OBS:».
 - Excel Bestilling + Materialliste skiller tilbehør per type; stålnett-rom i Rom-kolonnen.
+
+**Modal: ingenting forhåndsavhuket + ryddet stålnett-tekst** (`f4e108e`)
+- Alle avkrysninger (folie, kabel OG stålnett-rom) starter UAVHUKET. Antallet vises
+  fortsatt ferdig utfylt (redigerbart); kun avhukede poster tas med i rapport/PDF.
+  «Total stålnett» teller bare avhukede rom (0 når ingen er valgt).
+- Fjernet hjelpelinja over stålnett-lista (spec/art.nr) + «velg rom med brennbart
+  underlag» → kun «Stålnett» + romliste (navn, areal, antall nett). Beregninger uendret.
 
 **Art.nr/EL-nr hardkodet + avhuket som standard** (`c57c88c`, `ff51e3b`)
 - Tilbehør ligger ikke i `heating_products`, så katalog-oppslaget fant dem ikke.
