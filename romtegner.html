@@ -3893,6 +3893,46 @@ function autoAddStripsZoned(roomId, productId) {
   renderSidebar(); updateObjInfo(); render();
 }
 
+// Beregn (uten å plassere) et sone-basert utlegg som strip-defs — for «Soner»-valget i
+// sammenlikningspanelet. Hver sone i sin beste retning; klippet til sonen (hindringer
+// trekkes fra via room.id) og soner overlapper aldri (midlertidige sentinel-strips trekkes
+// tilbake til slutt). Returnerer null hvis rommet ikke deler seg i flere soner.
+function _zonedFoilDefs(room, productId) {
+  const rects = _decomposeRoomToRects(room);
+  if (!rects || rects.length <= 1) return null;
+  rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
+  const cat = (HEATING_PRODUCTS.find(p => p.id === productId) || {}).category_id;
+  const family = getProductFamily(productId);   // alle bredder i familien
+  const replaced = new Set(_stripsForRoom(room.id).filter(s => { const sp = _stripProduct(s); return sp && sp.category_id === cat; }).map(s => s.id));
+  const allDefs = [], sentIds = [], SENT = -990000;
+  try {
+    for (const rect of rects) {
+      // Velg produkt-bredde × retning som dekker mest areal i nettopp denne sonen.
+      const best = _withFoilAvoid(room.id, replaced, () => {
+        let bestDefs = [], bestArea = -1;
+        for (const fp of family) {
+          const nc = (fp.netto_width_mm || fp.width_mm) / 10;
+          for (const dir of ['v', 'h']) {
+            const defs = _computeRectFillDefs(room.id, rect, fp.id, dir);
+            const area = nc * defs.reduce((s, d) => s + d.length_cm, 0);
+            if (area > bestArea) { bestArea = area; bestDefs = defs; }
+          }
+        }
+        return bestDefs;
+      });
+      for (const d of best) {
+        const sd = { roomId: room.id, productId: d.productId, direction: d.direction, pos_cm: d.pos_cm, start_cm: d.start_cm, length_cm: d.length_cm };
+        allDefs.push(sd);
+        const id = SENT - sentIds.length; S.strips.push({ ...sd, id }); sentIds.push(id);  // sentinel så neste sone unngår denne
+      }
+    }
+  } finally {
+    S.strips = S.strips.filter(s => !(typeof s.id === 'number' && s.id <= SENT));
+    _invalidateStripCache();
+  }
+  return allDefs;
+}
+
 // ─── PRODUKT-MENY ────────────────────────────────────────────
 function showProduktDropdown(html, x, y) {
   const m = document.getElementById('produkt-menu');
@@ -7322,10 +7362,17 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
     .map(s => s.id));
   const results = _withFoilAvoid(room.id, _replacedIds, () => _autoFillBothDirections(room, prods));
 
+  // Sone-basert alternativ (ulik retning per delareal) — kun for rom som deler seg i flere soner.
+  try {
+    const zonedDefs = _zonedFoilDefs(room, prods[0].id);
+    if (zonedDefs && zonedDefs.length) results.zoned = { defs: zonedDefs, stats: _foilLayoutStats(zonedDefs, room, 'long') };
+  } catch (e) { console.warn('Soner-layout feilet:', e.message); }
+
   S.ui.autoFillCompare = results;
   S.ui.autoFillCompareCategoryId = categoryId;
 
-  const better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
+  let better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
+  if (results.zoned && results.zoned.stats.score > results[better].stats.score) better = 'zoned';
   _renderAutoFillComparePanel(results, better);
   _previewAutoFillOption(better);
 }
@@ -7374,6 +7421,14 @@ function _renderAutoFillComparePanel(results, selectedDir) {
         <div class="af-stat">${vSt.totalWatt} W (${vSt.wattPerM2} W/m²)</div>
         <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.v.defs)}</div>
       </div>
+      ${results.zoned ? (() => { const zSt = results.zoned.stats; const zBest = zSt.score >= hSt.score && zSt.score >= vSt.score;
+      return `<div class="af-option${selectedDir==='zoned'?' selected':''}" onclick="_selectAutoFillOption('zoned')" onmouseenter="_previewAutoFillOption('zoned')">
+        <div class="af-dir">${zBest ? '★ Soner' : 'Soner'}</div>
+        <div class="af-stat">${zSt.stripCount} striper</div>
+        <div class="af-stat">${zSt.coveragePct}% dekning</div>
+        <div class="af-stat">${zSt.totalWatt} W (${zSt.wattPerM2} W/m²)</div>
+        <div class="af-stat" style="font-size:10px;margin-top:4px">delarealer, hver i best retning</div>
+      </div>`; })() : ''}
     </div>
     <div style="display:flex;gap:6px;justify-content:center;margin-top:12px">
       ${(() => { const strat = (S.varmefolie && S.varmefolie.foilStrategy) || 'long';
@@ -7382,7 +7437,7 @@ function _renderAutoFillComparePanel(results, selectedDir) {
              + chip('coverage','Maks dekning','Tettest mulig dekning — flere/kortere strimler ved behov'); })()}
     </div>
     <div class="af-actions">
-      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':'vertikal'}</button>
+      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':selectedDir==='v'?'vertikal':'soner'}</button>
       <button class="af-btn-secondary" onclick="_closeAutoFillPanel()">Avbryt</button>
     </div>
   `;
@@ -7430,8 +7485,8 @@ function _applyAutoFillOption(dir) {
     S.strips.push({ ...def, id: S.counters.nextStripId++ });
   }
 
-  // Update direction
-  S.varmefolie.direction = dir;
+  // Update direction (kun for h/v — «soner» har egen retning per strip)
+  if (dir === 'h' || dir === 'v') S.varmefolie.direction = dir;
 
   // Track product usage
   const usedIds = new Set(results[dir].defs.map(d => d.productId));
