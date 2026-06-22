@@ -16,6 +16,13 @@ la soner oppå hindringer og trimmet stua til en tynn kolonne.
 - Verifisert på brukers rom: stua fanges som ekte 324×333-sone; Soner-dekning 95 % (var 80 %;
   H/V 52/46 %), 0 folie i hindring, 0 overlapp. Regresjon: rektangel → fallback; L 91 %, U 90 %.
 
+**Oppfølging — falske ⚠ + vegg-margin** (`d733cf1`, `b4ab12e`)
+- `getStripViolations` sin gap-sjekk manglet along-akse-vakten → strimler ende-til-ende i ulike
+  soner ble feilflagget. Lagt til vakt → ekte overlapp=0 gir 0 gap-⚠. Maks dekning: 91 % helt rent.
+- `_computeRectFillDefs` klippet mot sone-rektangelet (kan stikke litt utenfor rommet i grid-
+  oppløsning) → 3 vegg-brudd i stua. Nå klippes mot ROMMET (riktig 25 mm margin) + begrenses til
+  sonens along-rekkevidde. Soner på brukers rom: **94 % med 0 regelbrudd** (vegg/hindring/gap/overlapp).
+
 ---
 
 ## 2026-06-22 — Folie: aldri folie i hindring + scoring-straff (Del A/B/C)
