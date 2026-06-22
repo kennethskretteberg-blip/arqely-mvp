@@ -4,6 +4,38 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 2026-06-22 — Folie: sone-basert utlegg + hindring-varsel (verifiser-først)
+
+Fire sammenhengende folie-problemer (sone-utlegg, hindring-eksklusjon, uavhengige
+arealer). Diagnostisert empirisk i koden FØRST (innlogget, ekte produkter). Commits
+(nyeste først): `a591539`, `49c5e41`.
+
+**Verifisering (read-only) viste at 4/3/2 alt var helt/delvis løst siden prompten:**
+- **Problem 4 (uavhengige arealer)** — allerede løst: `_stripOverlapsAny`/`_clampStripToRoom`
+  er 2D-lokale (along-akse-vakt), og auto-folie-unngåelse trekker fra hver folie som
+  rektangel. Bekreftet med repro. Ingen endring.
+- **Problem 2 (auto rundt hindring)** — fungerer: `computeClippedSegments` klipper
+  strimler m/ margin rundt hindringer. Bekreftet. Ingen endring.
+
+**Problem 3 — varsle folie oppå/under hindring** (`49c5e41`)
+- `getStripViolations` sjekket bare avstand-til-kant, så en strimmel som overlappet
+  (delvis/helt inne i) en hindring ble aldri flagget. Ny `_rectIntersectsPoly` (rect ∩
+  polygon) → overlapp ⇒ avstand 0 ⇒ brudd. Samme varselmekanisme (modal + sidepanel),
+  ved drag og plassering. Ingen falsk positiv når strimmelen er klar av hindringen.
+
+**Problem 1 — sone-basert auto-utlegg** (`a591539`)
+- `_decomposeRoomToRects`: ortogonalt rom → akse-justerte rektangler. `_packRectBestDir`:
+  pakk hver sone uavhengig (clipPoly), velg retning (v/h) etter best dekning.
+  `autoAddStripsZoned` (auto-knappen peker hit) bruker `_withFoilAvoid` så soner aldri
+  overlapper; hindringer rutes rundt. Fallback til `autoAddStrips` for enkle/ikke-ortogonale
+  rom (ingen regresjon). Låste regler består.
+- Verifisert: L-form → 2 soner, 0 overlapp, sone-isolert, 0 folie under hindring;
+  rektangel → fallback. **Visuell bekreftelse gjenstår i appen** (offline-canvas kunne
+  ikke skjermdumpes). v1-begrensninger: romsligere søm mellom soner (per-sone margin),
+  fast produktbredde per sone.
+
+---
+
 ## 2026-06-22 — WBW-flyt (vegg-for-vegg): taster + mus
 
 Raskere og mer naturlig vegg-for-vegg-opprettelse, uten å bygge nytt. Commits
