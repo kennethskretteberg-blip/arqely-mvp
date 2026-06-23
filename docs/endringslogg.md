@@ -4,6 +4,39 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 🚧 PÅGÅR — 4A: Eier-styrt leverandørtilgang per bedrift (RLS) — `4f3c17a`
+
+**Status (pause 2026-06-22):** Migrasjonen er skrevet, committet OG kjørt i Supabase av
+bruker. Admin-UI (Del 3) gjenstår.
+
+**Gjort:**
+- `supabase-migration-org-supplier-access.sql` (committet `4f3c17a`) — **kjørt i Supabase**:
+  tabell `organization_supplier_access` + RLS (superadmin skriver, medlemmer leser egne),
+  seed av eksisterende installatør-orgs, og ny produkt-policy «Produkttilgang via
+  leverandor-grant» som erstatter «installatør ser alt». Verifisert: ny policy aktiv (1),
+  gammel borte (0), suppliers=1 (Cenika), **installer_orgs=0, grants_seeded=0**.
+- Bruker satte **kenneth.skretteberg@gmail.com = superadmin** (app_metadata) og logget inn på nytt.
+
+**Faktisk tilstand i DB nå (viktig kontekst):**
+- `kenneth.skretteberg@gmail.com`: **superadmin, tilhører INGEN firma** (ser alt via god-mode).
+- `ksk@cenika.no`: **admin i «Cenika AS»** (eneste org, type=supplier). Ser 213 Cenika-produkter.
+- Ingen installatør-orgs finnes → enhver ikke-superadmin/ikke-Cenika-bruker ser **0 produkter**.
+- «Delte prosjekter» mellom gmail og ksk skyldtes superadmin-innsyn, ikke samme firma.
+
+**Gjenstår (neste økt):**
+1. **Avklar med bruker:** A) gmail forblir ren superadmin uten firma, eller B) opprett
+   «Varmeplan» (installatør-org), meld gmail inn, og test installatør-flyten. (B anbefalt.)
+2. **Del 3 — Admin-UI (`admin.html`):** per installatør-bedrift en «Leverandør-tilgang»-liste
+   (alle `suppliers`) med av/på = innvilg/trekk tilbake → `organization_supplier_access`.
+   Speil mønsteret fra `toggleProductAccess` (~admin.html:700) / org-detalj-kortet (~588).
+   Ny `toggleSupplierAccess(orgId, supplierId, checked)` + last-funksjon.
+3. **Test med tre kontotyper:** installatør (kun innvilgede), leverandør (kun egne), superadmin (alt).
+
+**Filer:** [supabase-migration-org-supplier-access.sql](supabase-migration-org-supplier-access.sql),
+admin.html (Del 3 kommer).
+
+---
+
 ## 📌 STATUS pr 2026-06-22 — Folie auto-utlegg (gjenoppta-notat)
 
 **Hvor vi står:** Folie-auto-utlegget er omarbeidet til montør-stil og verifisert mot
