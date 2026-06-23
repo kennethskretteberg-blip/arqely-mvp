@@ -20,10 +20,11 @@ brukers eksakte 53 m²-rom (geometri hentet via konsoll; reprodusert lokalt innl
   `showAutoFillComparison` (H/V bruker sone-teknikk), `_layoutRulePenalty` (scoring-straff),
   `getStripViolations` (along-akse-vakt → ingen falske ⚠).
 
-**Neste (venter på brukers test i morgen):** visuell bekreftelse i appen (hard-refresh →
-folie → Automatisk → Vertikal). Mulig finjustering: enkelte soner kan fortsatt få en kort
-strimmel der absorber-logikken ikke treffer optimalt — be om skjermbilde og juster
-`_packZoneFullLength` (targetLen-toleranse / absorber-plassering) ved behov.
+**✅ GODKJENT av bruker (2026-06-22):** visuelt bekreftet i appen — fulle B=140-kolonner +
+smale B=20-absorbere ved forskyvninger, matcher montørens manuelle utlegg (`folie_optimalt`).
+
+Evt. senere finjustering (ikke påkrevd): absorber-logikken i `_packZoneFullLength`
+(targetLen-toleranse / plassering) hvis enkelte soner i andre rom får en uønsket kort strimmel.
 
 **Alt committet og pushet til `origin/main`** (siste: `1b696e7`).
 
