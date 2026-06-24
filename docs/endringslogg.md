@@ -4,6 +4,38 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## EL-nummer for InSnow utendørs-kabler (20T/30T/40T) — 2026-06-24
+
+**Mål:** Fylle inn EL-nummer (`el_no`) på alle InSnow-kabelprodukter. 85 av 104 manglet
+(kun InSnow 30T 230V hadde fra før).
+
+**Kilde + validering:** Bruker leverte Cenika-prisliste (`Bok1.xlsx`, 85 par CVA↔EL).
+Kryssvalidert mot skraping av cenika.no (5 parallelle subagenter, ett produkt-oppslag per
+artikkel): **100 % match, 0 avvik på 85**. Krysset mot DB: alle 85 `article_no` fantes,
+ingen hadde `el_no` fra før.
+
+**Gjort:**
+- **`supabase-migration-insnow-elno.sql`** (kjørt i Supabase, verifisert 85/85/0): 85
+  idempotente `update … where … and el_no is distinct from …`. DB bekreftet: 104/104
+  InSnow-kabelrader har nå `el_no` (stikkprøver CVA10340=1004181, CVA10713=1020496,
+  CVA10756=1042662).
+- **`romtegner.html` `_ensureOutdoorCableProducts`:** rettet latent feil — `add()` tok imot
+  `elNo` men lagret det aldri (`el_no: elNo` lagt til på produktobjektet), og fylte inn alle
+  85 EL-numre i `add()`-kallene. Klient-fallbacken (kun aktiv hvis produktene mangler i DB)
+  er nå komplett. App lastet uten feil (245 produkter).
+
+| Serie | Artikler | EL-blokk |
+|---|---|---|
+| InSnow 20T 230V | CVA10340–10356 | 1004181–1004197 |
+| InSnow 20T 400V | CVA10361–10377 | 1017939–1017955 |
+| InSnow 30T 400V | CVA10700–10716 | 1020483–1020499 |
+| InSnow 40T 230V | CVA10720–10736 | 1032638–1032654 |
+| InSnow 40T 400V | CVA10740–10756 | 1042646–1042662 |
+
+**Filer:** [supabase-migration-insnow-elno.sql](../supabase-migration-insnow-elno.sql), romtegner.html (`_ensureOutdoorCableProducts`).
+
+---
+
 ## Medlemssynlighet: alle i egen org (RLS + embed-fiks) — 2026-06-24
 
 **Problem:** En ikke-superadmin (ksk@cenika.no, admin i Cenika AS) så bare seg selv i
