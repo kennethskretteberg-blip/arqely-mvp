@@ -4,6 +4,38 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Medlemssynlighet: alle i egen org (RLS + embed-fiks) — 2026-06-24
+
+**Problem:** En ikke-superadmin (ksk@cenika.no, admin i Cenika AS) så bare seg selv i
+firma-panelets medlemsliste, ikke Fredrik.
+
+**To rotårsaker (begge bekreftet):**
+1. **RLS for snever.** `organization_members` SELECT = `using (user_id = auth.uid())` (kun
+   egen rad) og `profiles` SELECT = kun egen profil. Superadmin så alt via `is_superadmin()`.
+2. **Ødelagt PostgREST-embed.** `organization_members.user_id` har FK til `auth.users`
+   (ikke `profiles`), så appens `select('... profiles(...)')` feilet med «Could not find a
+   relationship … in the schema cache» → panelet viste «Ingen medlemmer» uansett RLS.
+
+**Fiks:**
+- **`supabase-migration-org-member-visibility.sql`** (kjørt i Supabase, verifisert 1/0/1/1):
+  - `user_org_ids()` — SECURITY DEFINER, stable, `search_path=public` (bypasser RLS →
+    ingen rekursjon/42P17 når brukt i policy PÅ `organization_members`).
+  - `organization_members` SELECT → `using (org_id in (select user_org_ids()))`.
+  - `profiles` SELECT → additiv policy: profiler til medlemmer i mine orgs. «Egen profil»
+    + superadmin beholdt. Skrive-policyer urørt.
+- **`romtegner.html` `_orgAdmRefresh`:** byttet ut den ødelagte embed-joinen med to separate
+  spørringer (medlemmer + profiler) joinet i JS — samme mønster som superadmin-panelet i
+  `admin.html`. Render-form `{user_id, role, profiles}` uendret.
+
+**Verifisert live (innlogget ksk@cenika.no):** firma-panelet → **Medlemmer (2)**: Kenneth
+(ksk@cenika.no, Administrator) + Fredrik (fki@cenika.no, Administrator), med navn/e-post/rolle.
+RLS-spørringer isolert: `organization_members` gir begge rader, `profiles` gir begge med
+e-post. Ingen tverr-org-lekkasje (policy begrenser til `user_org_ids()`). Superadmin uendret.
+
+**Filer:** [supabase-migration-org-member-visibility.sql](../supabase-migration-org-member-visibility.sql), romtegner.html (`_orgAdmRefresh`).
+
+---
+
 ## 🚧 PÅGÅR — 4A: Eier-styrt leverandørtilgang per bedrift (RLS) — `4f3c17a`
 
 **Status (pause 2026-06-22):** Migrasjonen er skrevet, committet OG kjørt i Supabase av
