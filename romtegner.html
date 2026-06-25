@@ -15404,6 +15404,7 @@ function _drawStairSide(stair) {
   ctx.save();
 
   const ox = stair.x_cm, oy = stair.y_cm;
+  const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
   const surfs = stair.surfaces;
   if (!surfs || !surfs.length) { ctx.restore(); return; }
 
@@ -15439,12 +15440,17 @@ function _drawStairSide(stair) {
   pts.push({x: cx, y: totalH + lastStepH}); // bottom-right
   pts.push({x: 0, y: totalH + lastStepH}); // bottom-left
 
+  // For "nedenfra og opp" speiles profilen vertikalt slik at forste flate (segs[0] =
+  // kabelstart / trinn 1) havner NEDERST og trappa stiger oppover — i sync med plan + preview.
+  const maxY = totalH + lastStepH;
+  const FY = (y) => bottomUp ? (maxY - y) : y;
+
   // Draw filled profile
   ctx.beginPath();
-  const fp = w2s(ox + pts[0].x, oy + pts[0].y);
+  const fp = w2s(ox + pts[0].x, oy + FY(pts[0].y));
   ctx.moveTo(fp.x, fp.y);
   for (let i = 1; i < pts.length; i++) {
-    const p = w2s(ox + pts[i].x, oy + pts[i].y);
+    const p = w2s(ox + pts[i].x, oy + FY(pts[i].y));
     ctx.lineTo(p.x, p.y);
   }
   ctx.closePath();
@@ -15474,8 +15480,8 @@ function _drawStairSide(stair) {
       const margin = stair.edgeMargin_cm || 5;
       for (const run of surfRuns) {
         ctx.strokeStyle = hasMultiCable ? (STAIR_CABLE_COLORS[run.cableIdx] || defaultColor) : defaultColor;
-        const px = w2s(ox + sc.xStart + margin, oy + sc.yTop);
-        const px2 = w2s(ox + sc.xStart + sc.depth - margin, oy + sc.yTop);
+        const px = w2s(ox + sc.xStart + margin, oy + FY(sc.yTop));
+        const px2 = w2s(ox + sc.xStart + sc.depth - margin, oy + FY(sc.yTop));
         ctx.beginPath();
         ctx.moveTo(px.x, px.y);
         ctx.lineTo(px2.x, px2.y);
@@ -15491,8 +15497,8 @@ function _drawStairSide(stair) {
       const sc = surfSideCoords[i];
       const scNext = surfSideCoords[i + 1];
       const dropX = sc.xStart + sc.depth;
-      const a = w2s(ox + dropX, oy + sc.yTop);
-      const b = w2s(ox + dropX, oy + scNext.yTop);
+      const a = w2s(ox + dropX, oy + FY(sc.yTop));
+      const b = w2s(ox + dropX, oy + FY(scNext.yTop));
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -16973,26 +16979,43 @@ function _migrateStairToSegments(stair) {
   stair.landingCC_cm = stair.landingCC_cm ?? (stair.cableSpacing_cm || 8);
 }
 
-/** Generate surfaces from segment-based model. Falls back to legacy if no segments. */
+/** Generate surfaces from segment-based model. Falls back to legacy if no segments.
+ *
+ * buildDirection styrer HVOR forste segment (segs[0]) plasseres, mens surfaces-arrayet
+ * alltid beholder segs[0]-forst rekkefolge. Dermed:
+ *   - kabelen starter alltid pa surfaces[0] (= segs[0] = trinn 1),
+ *   - trinn nummereres fra segs[0] (trinn 1 = forste segment),
+ * og kun PLASSERINGEN (y_cm) speiles:
+ *   'top'    (ovenfra og ned): segs[0] far minst y_cm => tegnes OVERST  => start oppe.
+ *   'bottom' (nedenfra og opp): segs[0] far storst y_cm => tegnes NEDERST => start nede.
+ * Side-tegningen (_drawStairSide) og forhandsvisningen speiler tilsvarende, sa plan,
+ * side, kabel, preview og liste er konsistente med etiketten. Kabel-/effektberegning
+ * per trinn er uendret (summen er rekkefolge-uavhengig).
+ */
 function _generateStairSurfaces(stair) {
   // Ensure segments exist (migrate if needed)
   if (!stair.segments || !stair.segments.length) _migrateStairToSegments(stair);
   const segs = stair.segments;
   if (!segs || !segs.length) return [];
 
+  const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
+  let totalDepth = 0;
+  for (const seg of segs) totalDepth += (seg.type === 'steps') ? seg.stepCount * seg.stepDepth_cm : (seg.depth_cm || 0);
+
   const surfs = [];
-  let yOff = 0;
+  let buildOff = 0;   // langs byggeretningen (segs[0] forst = kabelstart / trinn 1)
   let stepIdx = 0;
+  const yFor = (d) => bottomUp ? (totalDepth - buildOff - d) : buildOff;
   for (let si = 0; si < segs.length; si++) {
     const seg = segs[si];
     if (seg.type === 'landing') {
-      surfs.push({ type:'landing', segIdx:si, x_cm:0, y_cm:yOff, w_cm:seg.width_cm, d_cm:seg.depth_cm });
-      yOff += seg.depth_cm;
+      surfs.push({ type:'landing', segIdx:si, x_cm:0, y_cm:yFor(seg.depth_cm), w_cm:seg.width_cm, d_cm:seg.depth_cm });
+      buildOff += seg.depth_cm;
     } else if (seg.type === 'steps') {
       for (let i = 0; i < seg.stepCount; i++) {
-        surfs.push({ type:'tread', segIdx:si, stepIdx:stepIdx++, x_cm:0, y_cm:yOff,
+        surfs.push({ type:'tread', segIdx:si, stepIdx:stepIdx++, x_cm:0, y_cm:yFor(seg.stepDepth_cm),
           w_cm:seg.width_cm, d_cm:seg.stepDepth_cm, stepHeight_cm:seg.stepHeight_cm });
-        yOff += seg.stepDepth_cm;
+        buildOff += seg.stepDepth_cm;
       }
     }
   }
@@ -23686,7 +23709,12 @@ function _stairBuilderStats() {
 }
 
 function _stairBuilderPreviewSVG() {
-  const segs = _stairBuilderSegs;
+  // Preview tegner NEDENFRA og opp (forste tegnede segment havner nederst-venstre).
+  // Canvas legger ut "forste flate overst", sa for at det som ligger NEDERST skal
+  // matche pa begge: preview-rekkefolgen er motsatt av canvas-utlegget.
+  //   'bottom': segs[0] skal nederst => tegn segs[0] forst => array-rekkefolge.
+  //   'top'   : segs[0] skal overst  => tegn segs[last] forst => omvendt.
+  const segs = (_stairBuilderDir === 'top') ? _stairBuilderSegs.slice().reverse() : _stairBuilderSegs.slice();
   if (!segs.length) return '<div style="height:60px;color:var(--muted);font-size:11px;display:flex;align-items:center;justify-content:center">Ingen segmenter</div>';
 
   // Calculate total dimensions

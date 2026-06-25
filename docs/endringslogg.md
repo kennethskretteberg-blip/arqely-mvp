@@ -4,6 +4,34 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Trapp: «Byggeretning» styrer nå faktisk geometri/kabel/preview — 2026-06-25
+
+**Bug:** «Byggeretning» (Nedenfra og opp / Ovenfra og ned) ga feil resultat — `buildDirection`
+ble kun brukt til å reversere segment-LISTA i modalen ([23532]), ikke i geometrien, kabelen
+eller forhåndsvisningen. Reprodusert: `_generateStairSurfaces` ga identiske flater for begge
+retninger; `w2s` plasserte `segs[0]` (nederste) øverst → «nedenfra og opp» bygde motsatt.
+
+**Fiks (alt i sync med etiketten):**
+- `_generateStairSurfaces`: `surfaces` beholder `segs[0]`-først rekkefølge (kabelstart = trinn 1
+  = nederst), men **y_cm speiles** etter retning — «bottom» legger `segs[0]` nederst (størst
+  y_cm), «top» øverst. Trinn nummereres fra `segs[0]`.
+- `_drawStairSide`: vertikal speiling (`FY`) for «bottom» → profilen stiger oppover (var
+  synkende); kabel + risers følger med.
+- `_stairBuilderPreviewSVG`: tegner i retnings-bevisst rekkefølge så preview matcher canvas.
+- Plan, side, kabel, preview og liste er nå konsistente. Kabel-/effektberegning per trinn
+  uendret (sum er rekkefølge-uavhengig).
+
+**Testet (canvas + data):** trapp 3 trinn + repos + 2 trinn. «Nedenfra og opp» → trinn 1 og
+kabelstart nederst, side-profil stiger; «Ovenfra og ned» → speilvendt (trinn 1 + grønn
+kabelstart øverst). Kabel-total 3951 cm i begge (ingen regresjon). Verifisert med skjermbilde.
+
+**Merk:** eksisterende lagrede trapper oppdateres ved neste regenerering/redigering (lagret
+`surfaces` brukes til da).
+
+**Filer:** romtegner.html (`_generateStairSurfaces`, `_drawStairSide`, `_stairBuilderPreviewSVG`).
+
+---
+
 ## Kundekort → fullt CRM-kort (kontakter + prosjekter) — 2026-06-25
 
 Utvidet `_openCustomerCard` til et CRM-kort. Bygger på `contacts`-tabellen fra
