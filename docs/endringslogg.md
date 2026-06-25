@@ -28,9 +28,17 @@ Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika va
 - Verifisert live: kort i hub, default 2″/30/ΔT20/30m → 7 W/m · 210 W · MultiPipe 10 (Ready 30 m);
   1¼″/20/ΔT40 → 14,4 → IceFix. Skjermbilde matcher mockupen.
 
-### Del C–D 🚧 kommer
-Produktkatalog (skrap CVA/EL fra cenika.no → heating_products), lagre valgt produkt på prosjekt
-for dokumentasjon.
+### Del C — Produktkatalog (CVA/EL fra cenika.no) ✅
+- `_ensureFrostProtectionProducts()` (samme injeksjon-mønster som InSnow) legger 54 produkter i
+  `HEATING_PRODUCTS` + kategori «Frostsikring rør»: MultiPipe 10 Ready (26, 2–60 m) + metervare
+  CVA10220, IceFix 20W Ready (26, 2–52 m) + metervare CVA10210.
+- CVA + EL **skrapet og kryssverifisert** mot cenika.no (4 subagenter + uavhengig sjekk via
+  Cenikas søk-API: CVA10236→1021259, CVA10264→1010967, CVA10210→1003606 — alle matchet).
+- ⚠️ **MultiPipe 10 metervare CVA10220 er utgått og har ingen publisert EL-nr** → `el_no=null`
+  (flagget i koden). Alle andre 53 har EL.
+
+### Del D 🚧 kommer
+Vis ekte CVA/EL i kabelforslaget + lagre valgt produkt (type+CVA+EL) på prosjekt for dokumentasjon.
 
 ---
 
