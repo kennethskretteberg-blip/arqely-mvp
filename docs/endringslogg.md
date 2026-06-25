@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Raskere «Opprett prosjekt» — firma + kontakt inline (2026-06-25)
+
+Mål: velg/opprett firma og kontaktperson uten å forlate opprett-prosjekt-flyten.
+Bygger på eksisterende `_searchCustomers`/`_selectCustomer`/`_acNav`/`_createProjectInline`.
+
+### Del A — Firma: velg eller opprett inline ✅
+- `_searchCustomers`: viser nå alltid en inline **«＋ Legg til «<det du skrev>»»**-rad i
+  dropdownen (`data-ac` → pil/Enter via `_acNav` og museklikk funker likt). Skjules kun ved
+  eksakt navnetreff.
+- Ny **`_inlineCreateCustomer()`**: oppretter kunde (org-scopet, kun navn) der og da uten
+  dialog/avbrudd, og velger den. Leser navnet fra søkefeltet (unngår escaping i onclick).
+  `＋`-knappen → full `_showNewCustomerPopup` beholdt som «avansert».
+- Verifisert live (ksk@cenika.no): tastatur Enter oppretter+velger; museklikk likeså;
+  eksisterende kunde velges fortsatt; «+ Legg til» skjult ved eksakt treff. Test-rad ryddet.
+
+### Del B — Kontaktperson (mange per firma) 🚧 kommer
+Ny `contacts`-tabell (migrasjon kjøres manuelt) + kontakt-combobox etter valgt firma.
+
+---
+
 ## EL-nummer for InSnow utendørs-kabler (20T/30T/40T) — 2026-06-24
 
 **Mål:** Fylle inn EL-nummer (`el_no`) på alle InSnow-kabelprodukter. 85 av 104 manglet
