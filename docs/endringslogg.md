@@ -4,7 +4,20 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## Ny modul: Frostsikring rør — 2026-06-25
+## Ny modul: Snøsmelting – effektbehov — 2026-06-25
+
+Leverandørnøytral effektbehov-kalkulator for snøsmelting; produktene kommer fra valgt leverandørs
+katalog. Kilde: research-doc (ASHRAE/IEC 62395-2/HT2000) + verifisert mockup. Ingen merkenavn (DEVI/
+Danfoss) i UI.
+
+### Del A — Overflatelast (værstyrt, leverandørnøytral) ✅
+- `SNOW_IEC` (værhardhet × kritikalitet → W/m²-intervall), `_snowMidLoad` (midt, rundet til 25),
+  `_snowSurfaceLoad` (+100 W/m² per korreksjon: >1000 moh / vind >6 m/s / snø < −10 °C; gulv 250),
+  `_snowMinAir` (α=23: «holder +Ts ned til X °C luft»).
+- Verifisert: **streng/moderat → 350 W/m²**, **minAir(3, 350) → −12 °C**, floor 250, korreksjoner +100.
+
+### Del B–D 🚧 kommer
+Lagmodell (R_opp/R_ned/kabeltemp/bakketap), UI + produkt fra leverandørkatalog, værdata pr postnr.
 
 Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika varmekatalog
 (varmetap W/m) + verifisert mockup-flyt.
