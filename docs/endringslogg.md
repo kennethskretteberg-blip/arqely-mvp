@@ -27,9 +27,18 @@ og alle felt-ID-er uendret.
 - Verifisert live (light-theme, 1120px): 3×grid, 46px-felt, ＋-borte, kontakt disabled, toggle
   skjult ved åpning, combobokser virker. Skjermbilde matcher mockupen.
 
-### Del B/C — combobox firma + kontakt
-Funksjonelt allerede bygget (forrige økt: `_searchCustomers`/`_inlineCreateCustomer`,
-`contacts`-tabell + `_searchContacts`/`_inlineCreateContact`). Verifisert i nytt oppsett.
+### Del B — Kunde-combobox ✅
+Funksjonelt bygget forrige økt (`_searchCustomers` + `_inlineCreateCustomer`). Her: add-radens
+ordlyd justert til mockupens «＋ Legg til «<navn>» som nytt firma». Verifisert i nytt oppsett.
+
+### Del C — Kontaktperson ✅
+`contacts`-tabell + `_searchContacts`/`_inlineCreateContact` bygget forrige økt (migrasjon
+allerede kjørt). Her: feltet aktiveres etter firmavalg (Del A `_onCustomerChosen`). Aldri fast
+kontakt; `contact_id` + navn-snapshot lagres på prosjektet.
+
+**Verifisert (full tastatur-E2E i nytt oppsett):** prosjektnavn → nytt firma (Enter på add-rad)
+→ kontakt aktivert → ny kontakt (Enter) → Opprett. Prosjekt lagret med riktig kontakt; toggle
+gjenopprettet; RLS kun egen org. Test-data ryddet.
 
 ---
 
