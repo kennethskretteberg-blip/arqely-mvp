@@ -16,8 +16,17 @@ Danfoss) i UI.
   `_snowMinAir` (α=23: «holder +Ts ned til X °C luft»).
 - Verifisert: **streng/moderat → 350 W/m²**, **minAir(3, 350) → −12 °C**, floor 250, korreksjoner +100.
 
-### Del B–D 🚧 kommer
-Lagmodell (R_opp/R_ned/kabeltemp/bakketap), UI + produkt fra leverandørkatalog, værdata pr postnr.
+### Del B — Lagmodell (gulvoppbygging, R = tykkelse/λ) ✅
+- `SNOW_MATERIALS` (11 materialer m/λ), `SNOW_DEFAULT_LAYERS`, `_snowLayerR`/`_snowRsum`,
+  `_snowGroundModel` (kabeltemp = Ts + last×R_opp; bakketap = (T_kabel−bakke)/R_ned; installert =
+  last + bakketap; responstid ∝ R_opp). Dekketykkelse/-materiale endrer kabeltemp/bakketap/respons —
+  ikke overflatelasten.
+- Verifisert: **R_opp = 0,050** (40 mm asfalt), **R_ned = 1,4921 ≈ 1,493** (standardlag), respons
+  4cm→1×/8cm→2×. HT2000-case (q0=262): 269 (4cm)/278 (8cm) — eksakt som den verifiserte mockupen;
+  ~2 % under HT2000s 273/285 (iboende i enkel R-modell vs full ASHRAE; eksakte ankre stemmer).
+
+### Del C–D 🚧 kommer
+UI + produkt fra leverandørkatalog (hub-kort + modal), værdata pr postnr.
 
 Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika varmekatalog
 (varmetap W/m) + verifisert mockup-flyt.
