@@ -35887,6 +35887,23 @@ async function _loadContacts(customerId) {
   return _contactsCache[customerId];
 }
 
+// Last ALLE org-kontakter EN gang (RLS scoper til egen org) og fyll _contactsCache
+// per kunde. Brukes av kundeliste-soket sa et tastetrykk ikke utloser rundturer.
+// Mutasjoner (kort: add/rediger/fjern) holder _contactsCache oppdatert, sa cachen
+// forblir korrekt uten ny henting.
+let _allContactsLoaded = false;
+async function _loadAllContacts(force) {
+  if (_allContactsLoaded && !force) return;
+  try {
+    const { data } = await _db.from('contacts').select('*');
+    const byCust = {};
+    for (const ct of (data || [])) (byCust[ct.customer_id] = byCust[ct.customer_id] || []).push(ct);
+    for (const cid in byCust) _contactsCache[cid] = byCust[cid];
+    for (const c of (_cachedCustomers || [])) if (!_contactsCache[c.id]) _contactsCache[c.id] = [];
+    _allContactsLoaded = true;
+  } catch(e) { /* sok faller bare tilbake til kundefelt-matching */ }
+}
+
 // Combobox for kontaktperson. showAll=true (ved fokus) viser HELE lista selv uten
 // soketekst. Skriv for a filtrere. "+ Legg til ny" vises nar du har skrevet et navn.
 async function _searchContacts(query, showAll) {
@@ -37674,12 +37691,26 @@ async function _renderCustomerTable() {
     } catch(e) { _customerProjectCounts = {}; }
   }
   // Filter
-  const search = (document.getElementById('cust-search')?.value || '').toLowerCase();
+  const search = (document.getElementById('cust-search')?.value || '').toLowerCase().trim();
   const catFilter = document.getElementById('cust-filter-cat')?.value || '';
+  // Del C: last alle org-kontakter (cachet, RLS-scopet) sa soket OGSA matcher
+  // kontaktpersoners navn/tittel/telefon/e-post — uten rundtur per tastetrykk.
+  if (search) await _loadAllContacts();
+  const contactMatch = {};   // customer_id -> forste matchende kontakt (treff-undertekst)
   let filtered = customers.filter(c => {
-    if (search && !(c.name||'').toLowerCase().includes(search) && !(c.contact_person||'').toLowerCase().includes(search) && !(c.city||'').toLowerCase().includes(search) && !(c.email||'').toLowerCase().includes(search)) return false;
     if (catFilter && (c.category || 'business') !== catFilter) return false;
-    return true;
+    if (!search) return true;
+    const own = (c.name||'').toLowerCase().includes(search)
+      || (c.contact_person||'').toLowerCase().includes(search)
+      || (c.city||'').toLowerCase().includes(search)
+      || (c.email||'').toLowerCase().includes(search);
+    const cm = (_contactsCache[c.id] || []).find(ct =>
+      (ct.name||'').toLowerCase().includes(search) ||
+      (ct.title||'').toLowerCase().includes(search) ||
+      (ct.phone||'').toLowerCase().includes(search) ||
+      (ct.email||'').toLowerCase().includes(search));
+    if (cm) contactMatch[c.id] = cm;
+    return own || !!cm;
   });
   if (!filtered.length) {
     tbody.innerHTML = '';
@@ -37694,7 +37725,7 @@ async function _renderCustomerTable() {
       ? '<span style="background:#8b5cf622;color:#8b5cf6;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600">Privat</span>'
       : '<span style="background:#3b82f622;color:#3b82f6;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600">Bedrift</span>';
     return `<tr class="pl-tr" onclick="_openCustomerCard('${c.id}')" style="cursor:pointer">
-      <td class="pl-td pl-td-name">${_esc(c.name)} ${catBadge}</td>
+      <td class="pl-td pl-td-name">${_esc(c.name)} ${catBadge}${(search && contactMatch[c.id]) ? '<div style="font-size:11px;color:var(--muted);font-weight:400">Treff: '+_esc(contactMatch[c.id].name)+(contactMatch[c.id].title?' – '+_esc(contactMatch[c.id].title):'')+'</div>' : ''}</td>
       <td class="pl-td pl-td-desc">${_esc(c.contact_person || '')}</td>
       <td class="pl-td" style="white-space:nowrap">${c.phone ? '<a href="tel:'+_esc(c.phone)+'" onclick="event.stopPropagation()" style="color:var(--accent);text-decoration:none">'+_esc(c.phone)+'</a>' : '<span style="color:var(--dim)">—</span>'}</td>
       <td class="pl-td pl-td-desc">${c.email ? '<a href="mailto:'+_esc(c.email)+'" onclick="event.stopPropagation()" style="color:var(--accent);text-decoration:none">'+_esc(c.email)+'</a>' : '<span style="color:var(--dim)">—</span>'}</td>
