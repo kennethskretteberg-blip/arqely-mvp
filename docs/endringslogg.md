@@ -20,9 +20,17 @@ Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika va
   kildedataene, men begge bryter monotonitet (sannsynlige kopifeil) og er flagget i koden:
   ISO50/ΔT40/20″=66 og ISO100/ΔT60/1½″=8.0 — **bør bekreftes mot trykt katalog**.
 
-### Del B–E 🚧 kommer
-Modulkort i hub, beregnings-UI, produktkatalog (skrap CVA/EL fra cenika.no), lagre valgt produkt
-på prosjekt for dokumentasjon.
+### Del B — Modulkort i hub + beregnings-UI ✅
+- `frost` lagt i `MODULE_TYPES` (+ `_MOD_ICON.frost='droplet'`, nytt droplet-ikon, `PROJECT_TYPE_MAP`).
+  Kortet vises i hub-en; `_quickStartModule` ruter `frost` → `_openFrostModule()` (kalkulator, ikke canvas).
+- `_openFrostModule()` + `_frostCalc()`: modal i Varmeplan-stil (mockup-flyten) — diameter/iso/temp/
+  lengde → live ΔT + W/m + totaleffekt + fargekodet kabelforslag (MultiPipe 10 / IceFix 20W / >20-flagg).
+- Verifisert live: kort i hub, default 2″/30/ΔT20/30m → 7 W/m · 210 W · MultiPipe 10 (Ready 30 m);
+  1¼″/20/ΔT40 → 14,4 → IceFix. Skjermbilde matcher mockupen.
+
+### Del C–D 🚧 kommer
+Produktkatalog (skrap CVA/EL fra cenika.no → heating_products), lagre valgt produkt på prosjekt
+for dokumentasjon.
 
 ---
 
