@@ -2378,6 +2378,20 @@ function _frostSuggestCable(wpm, lengthM) {
     note:'Vurder spiral-/dobbeltlegging eller kontakt leverandor for dimensjonering.' };
 }
 
+// Resolver faktisk produkt fra katalogen (Del D): minste Ready-lengde >= rorlengde,
+// ellers metervare. Gir ekte CVA/EL til forslaget + lagring.
+function _frostResolveProduct(family, lengthM) {
+  const ready = (typeof HEATING_PRODUCTS !== 'undefined' ? HEATING_PRODUCTS : [])
+    .filter(p => p.product_family === family && p.frost_kind === 'ready' && p.cable_length_m != null)
+    .sort((a, b) => a.cable_length_m - b.cable_length_m);
+  const fit = ready.find(p => p.cable_length_m >= lengthM);
+  if (fit) return { product: fit, metervare: false };
+  const meter = HEATING_PRODUCTS.find(p => p.product_family === family && p.frost_kind === 'metervare');
+  return { product: meter || ready[ready.length - 1] || null, metervare: true };
+}
+
+let _frostState = null;  // siste gyldige beregning + valgt produkt (for lagring/dokumentasjon)
+
 // ─── Frostsikring rør: beregnings-modal (Del B) ───
 function _openFrostModule() {
   const existing = document.getElementById('frost-modal-bg'); if (existing) existing.remove();
@@ -2411,7 +2425,12 @@ function _openFrostModule() {
           <div id="frost-cablebox"></div>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--muted);margin-top:14px;line-height:1.5">Tabellverdier fra Cenika varmekatalog. Fasit: 30 mm iso · 2″ rør · ΔT 20 → 7 W/m.</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+        <input id="frost-save-name" class="dash-create-input" type="text" placeholder="Prosjektnavn…" style="flex:1;max-width:280px">
+        <button id="frost-save-btn" onclick="_frostSaveToProject()" class="dash-create-btn">${IC('save',15)} Lagre i prosjekt</button>
+        <span id="frost-save-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-top:12px;line-height:1.5">Tabellverdier fra Cenika varmekatalog. Fasit: 30 mm iso · 2″ rør · ΔT 20 → 7 W/m.</div>
     </div>
   </div>`;
   document.body.insertAdjacentHTML('beforeend', html);
@@ -2435,24 +2454,72 @@ function _frostCalc() {
   document.getElementById('frost-totw').textContent = tot.toLocaleString('no-NO') + ' W';
   const box = document.getElementById('frost-cablebox');
   const sug = _frostSuggestCable(wpm, len);
-  if (!sug) { box.innerHTML = '<div style="font-size:13px;color:var(--dim)">—</div>'; return; }
+  _frostState = null;
+  const saveBtn = document.getElementById('frost-save-btn');
+  if (!sug) { box.innerHTML = '<div style="font-size:13px;color:var(--dim)">—</div>'; if (saveBtn) saveBtn.disabled = true; return; }
   const nrChip = (txt) => `<div style="font-family:ui-monospace,monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:3px 8px;display:inline-block;margin-top:7px">${esc(txt)}</div>`;
-  if (sug.type === 'multipipe10') {
-    const ready = sug.readyLengthM
-      ? `Foreslått Ready-lengde: <b>${sug.readyLengthM} m</b> ${nrChip('CVA/EL fra katalog')} · alternativt metervare CVA10220`
-      : `Rørlengde over lengste Ready → metervare <b>CVA10220</b> (kappes) ${nrChip('EL-nr fra katalog')}`;
-    box.innerHTML = `<div style="border-radius:12px;padding:14px;background:color-mix(in srgb,var(--accent) 12%,transparent)">
-      <div style="font-weight:800;font-size:15px;color:var(--accent);display:flex;align-items:center;gap:8px">${IC('zap',16)} MultiPipe 10 (10 W/m)</div>
-      <div style="font-size:12.5px;color:var(--text);margin-top:6px;line-height:1.5">Selvbegrensende. Dekker behovet (${String(wpm).replace('.',',')} W/m ≤ 10) med ett løp langs røret.<br>${ready}</div></div>`;
-  } else if (sug.type === 'icefix20') {
-    box.innerHTML = `<div style="border-radius:12px;padding:14px;background:rgba(47,111,237,.12)">
-      <div style="font-weight:800;font-size:15px;color:#2f6fed;display:flex;align-items:center;gap:8px">${IC('snowflake',16)} IceFix 20W (20 W/m)</div>
-      <div style="font-size:12.5px;color:var(--text);margin-top:6px;line-height:1.5">Behov ${String(wpm).replace('.',',')} W/m er over MultiPipe 10 → bruk IceFix 20W.${nrChip('IceFix 20W Ready · CVA10264 (10 m) m.fl. · EL-nr fra katalog')}</div></div>`;
-  } else {
+  if (sug.type === 'over20') {
     box.innerHTML = `<div style="border-radius:12px;padding:14px;background:rgba(224,86,63,.12)">
       <div style="font-weight:800;font-size:15px;color:#e0563f;display:flex;align-items:center;gap:8px">${IC('zap',16)} Behov over 20 W/m</div>
       <div style="font-size:12.5px;color:var(--text);margin-top:6px;line-height:1.5">${String(wpm).replace('.',',')} W/m overstiger ett løp IceFix 20W. ${esc(sug.note||'')}</div></div>`;
+    if (saveBtn) saveBtn.disabled = true;
+    return;
   }
+  // Resolver ekte produkt (CVA/EL) fra katalogen.
+  const family = sug.type === 'icefix20' ? 'IceFix 20W' : 'MultiPipe 10';
+  const res = _frostResolveProduct(family, len);
+  const prod = res.product;
+  const elTxt = prod ? (prod.el_no ? 'EL ' + prod.el_no : 'ingen EL (utgått)') : '—';
+  const chip = prod ? nrChip(`${prod.article_no} · ${elTxt}`) : nrChip('CVA/EL fra katalog');
+  // Lagre tilstand for "Lagre i prosjekt" + dokumentasjon.
+  _frostState = {
+    diamLabel: FROST_DIAM[di][0], diamMm: FROST_DIAM[di][1], isoMm: iso,
+    tmaint: tm, tcold: tc, dt, dtTable: dtN, lengthM: len, wpm, totalW: tot, cableType: sug.type,
+    product: prod ? { type: sug.type, family, article_no: prod.article_no, el_no: prod.el_no || null,
+      length_m: prod.cable_length_m || null, name: prod.name, metervare: res.metervare } : null
+  };
+  if (saveBtn) saveBtn.disabled = !prod;
+  if (sug.type === 'multipipe10') {
+    const line = res.metervare
+      ? `Rørlengde over lengste Ready → metervare <b>${prod ? esc(prod.article_no) : 'CVA10220'}</b> (kappes) ${chip}`
+      : `Foreslått Ready-lengde: <b>${prod ? prod.cable_length_m : len} m</b> ${chip} · alternativt metervare CVA10220`;
+    box.innerHTML = `<div style="border-radius:12px;padding:14px;background:color-mix(in srgb,var(--accent) 12%,transparent)">
+      <div style="font-weight:800;font-size:15px;color:var(--accent);display:flex;align-items:center;gap:8px">${IC('zap',16)} MultiPipe 10 (10 W/m)</div>
+      <div style="font-size:12.5px;color:var(--text);margin-top:6px;line-height:1.5">Selvbegrensende. Dekker behovet (${String(wpm).replace('.',',')} W/m ≤ 10) med ett løp langs røret.<br>${line}</div></div>`;
+  } else {
+    const line = res.metervare
+      ? `Metervare <b>${prod ? esc(prod.article_no) : 'CVA10210'}</b> (kappes) ${chip}`
+      : `Foreslått Ready-lengde: <b>${prod ? prod.cable_length_m : len} m</b> ${chip}`;
+    box.innerHTML = `<div style="border-radius:12px;padding:14px;background:rgba(47,111,237,.12)">
+      <div style="font-weight:800;font-size:15px;color:#2f6fed;display:flex;align-items:center;gap:8px">${IC('snowflake',16)} IceFix 20W (20 W/m)</div>
+      <div style="font-size:12.5px;color:var(--text);margin-top:6px;line-height:1.5">Behov ${String(wpm).replace('.',',')} W/m er over MultiPipe 10 → bruk IceFix 20W.<br>${line}</div></div>`;
+  }
+}
+
+// Lagre frost-beregningen + valgt produkt (type+CVA+EL) som et prosjekt, klart for
+// dokumentasjon (snapshot i prosjekt-JSON: S.project.frost + en frost-part).
+async function _frostSaveToProject() {
+  if (!_frostState || !_frostState.product) { _frostSaveMsg('Velg gyldige verdier først.'); return; }
+  const nameEl = document.getElementById('frost-save-name');
+  const name = (nameEl?.value || '').trim();
+  if (!name) { if (nameEl) nameEl.focus(); _frostSaveMsg('Gi prosjektet et navn.'); return; }
+  try {
+    _resetProjectState();
+    S.project.name = name;
+    S.project.type = 'frost';
+    S.project.status = 'planned';
+    const part = { id: S.counters.nextPartId++, name: 'Frostsikring rør', moduleType: 'frost', createdAt: Date.now(), frost: _frostState };
+    S.project.parts.push(part);
+    S.project.frost = _frostState;   // toppnivaa-snapshot for enkel dokumentasjons-tilgang
+    _supabaseProjectId = null;
+    await _saveToSupabase();
+    _invalidateProjectCache && _invalidateProjectCache();
+    _frostSaveMsg(`✓ Lagret som prosjekt «${name}»`, true);
+  } catch(e) { _frostSaveMsg('Feil: ' + (e.message || e)); }
+}
+function _frostSaveMsg(txt, ok) {
+  const m = document.getElementById('frost-save-msg');
+  if (m) { m.textContent = txt; m.style.color = ok ? '#22c55e' : '#f87171'; }
 }
 
 // ─── LINE ICONS (Lucide-style, inline SVG) ───────────────────

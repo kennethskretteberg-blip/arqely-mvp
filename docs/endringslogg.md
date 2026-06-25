@@ -37,8 +37,18 @@ Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika va
 - ⚠️ **MultiPipe 10 metervare CVA10220 er utgått og har ingen publisert EL-nr** → `el_no=null`
   (flagget i koden). Alle andre 53 har EL.
 
-### Del D 🚧 kommer
-Vis ekte CVA/EL i kabelforslaget + lagre valgt produkt (type+CVA+EL) på prosjekt for dokumentasjon.
+### Del D — Ekte CVA/EL i forslaget + lagre på prosjekt ✅
+- `_frostResolveProduct(family, lengthM)`: minste Ready-lengde ≥ rørlengde fra katalogen, ellers
+  metervare. Forslaget viser nå **ekte CVA + EL** (f.eks. 2″/30/ΔT20/30m → MultiPipe 10 Ready 30 m
+  → CVA10246 · EL 1021269; IceFix-tilfelle → CVA10274 · EL 1010977).
+- «Lagre i prosjekt»-footer: `_frostSaveToProject()` oppretter et prosjekt (type `frost`) med en
+  frost-part + `S.project.frost`-snapshot `{inputs, wpm, totalW, product:{type,CVA,EL,lengde,navn}}`
+  — persistert i prosjekt-JSON, klart for dokumentasjon/garantibevis.
+- Verifisert live: ekte CVA/EL i begge kabeltyper; lagring skaper prosjekt med produkt-snapshot
+  (CVA10246/EL 1021269) + frost-part. Test-data ryddet.
+
+**Filer:** romtegner.html (`FROST_WM`/`_frost*`, `_openFrostModule`/`_frostCalc`,
+`_ensureFrostProtectionProducts`, `MODULE_TYPES`/`_MOD_ICON`/`PROJECT_TYPE_MAP`).
 
 ---
 
