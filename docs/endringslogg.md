@@ -48,7 +48,10 @@ Danfoss) i UI.
   (temp ≥ −15 mild / −25…−15 streng / ≤ −25 svært) + korreksjoner (moh>1000, vind>6, temp<−10),
   overstyrbart. Tom tabell / før migrasjon → degraderer pent til «fyll inn manuelt».
 - Verifisert: utledning (−28→svært+alle, −18→streng+snø, −8→mild); graceful fallback uten tabell.
-  Full auto-fyll aktiveres når migrasjonen er kjørt + arket importert.
+- **Værdata importert:** `supabase-import-weather-postcode.sql` (generert fra Postnummerregister-
+  Excel) — **5136 postnr** med dimensjonerende utetemp (Auslegungsaußentemperatur, −43,9…−7,0 °C),
+  høyde over havet, poststed/kommune. Idempotent upsert, 11 batcher. Kjøres som superadmin etter
+  migrasjonen. (Vind/snøfall finnes ikke i datasettet → null; korreksjon utledes fra temp/høyde.)
 
 **Filer:** romtegner.html (`SNOW_*`/`_snow*`, `_openSnowCalc`/`_snowCalc`, `_snowCatalogProducts`,
 `MODULE_TYPES`/`_MOD_ICON`), [supabase-migration-weather-postcode.sql](../supabase-migration-weather-postcode.sql).
