@@ -1055,6 +1055,11 @@ body.present-mode #render-stats{display:none !important}
             </div>
             <div id="dash-customer-results" class="cust-search-results" style="display:none"></div>
           </div>
+          <div class="dash-create-field" id="dash-proj-contact-wrap" style="position:relative;display:none">
+            <label>Kontaktperson</label>
+            <input id="dash-proj-contact" class="dash-create-input" type="text" placeholder="Velg eller legg til kontaktperson…" oninput="_searchContacts(this.value)" onfocus="_searchContacts(this.value,true)" onkeydown="_acNav(event,'dash-contact-results')" autocomplete="off">
+            <div id="dash-contact-results" class="cust-search-results" style="display:none"></div>
+          </div>
           <div class="dash-create-field">
             <label>Adresse / beskrivelse</label>
             <input id="dash-proj-desc" class="dash-create-input" type="text" placeholder="Valgfritt">
@@ -35768,6 +35773,7 @@ function _selectCustomer(id, name) {
   if (input) { input.value = name; input.dataset.customerId = id; }
   const results = document.getElementById('dash-customer-results');
   if (results) { results.style.display='none'; results.innerHTML=''; }
+  _onCustomerChosen(id);   // Del B: vis kontakt-feltet + forhandslast kontakter
 }
 
 // Oppretter en ny kunde inline i opprett-prosjekt-flyten (org-scopet, kun navn),
@@ -35790,6 +35796,89 @@ async function _inlineCreateCustomer() {
     if (document.getElementById('dash-tab-content-customers')?.style.display !== 'none') { try { _renderCustomerTable(); } catch(e) {} }
   } catch(e) {
     if (results) { results.style.display='block'; results.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:#f87171">Kunne ikke opprette kunde: ${_esc(e.message||e)}</div>`; }
+  }
+}
+
+// ─── Kontaktperson-plukker (Del B): mange kontakter per kunde ───
+let _contactsCache = {};   // customer_id -> [contacts]
+
+// Kalles nar et firma er valgt: vis kontakt-feltet, nullstill forrige valg, og
+// forhandslast firmaets kontakter (slik at fokus viser HELE lista umiddelbart).
+function _onCustomerChosen(customerId) {
+  const wrap = document.getElementById('dash-proj-contact-wrap');
+  const cf = document.getElementById('dash-proj-contact');
+  if (cf) { cf.value = ''; delete cf.dataset.contactId; }
+  const box = document.getElementById('dash-contact-results');
+  if (box) { box.style.display='none'; box.innerHTML=''; }
+  if (wrap) wrap.style.display = customerId ? '' : 'none';
+  if (customerId) _loadContacts(customerId);   // varm opp cachen
+}
+
+async function _loadContacts(customerId) {
+  if (!customerId) return [];
+  if (_contactsCache[customerId]) return _contactsCache[customerId];
+  try {
+    const { data } = await _db.from('contacts').select('*').eq('customer_id', customerId).order('name');
+    _contactsCache[customerId] = data || [];
+  } catch(e) { _contactsCache[customerId] = []; }
+  return _contactsCache[customerId];
+}
+
+// Combobox for kontaktperson. showAll=true (ved fokus) viser HELE lista selv uten
+// soketekst. Skriv for a filtrere. "+ Legg til ny" vises nar du har skrevet et navn.
+async function _searchContacts(query, showAll) {
+  const box = document.getElementById('dash-contact-results');
+  if (!box) return;
+  const custId = document.getElementById('dash-proj-customer')?.dataset?.customerId;
+  if (!custId) { box.style.display='none'; box.innerHTML=''; return; }
+  const raw = (query || '').trim();
+  if (!raw && !showAll) { box.style.display='none'; box.innerHTML=''; return; }
+  let list = _contactsCache[custId];
+  if (!list) {
+    list = await _loadContacts(custId);
+    // firma kan ha endret seg mens vi lastet
+    if (document.getElementById('dash-proj-customer')?.dataset?.customerId !== custId) return;
+  }
+  const q = raw.toLowerCase();
+  const matches = raw ? list.filter(c => (c.name||'').toLowerCase().includes(q)
+                                      || (c.email||'').toLowerCase().includes(q)
+                                      || (c.phone||'').toLowerCase().includes(q))
+                      : list;
+  const exact = list.some(c => (c.name||'').toLowerCase() === q);
+  const rows = matches.slice(0,8).map(c => `<div data-ac="1" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmouseover="this.style.background='var(--surface2)'" onmouseout="if(this.dataset.acActive!=='1')this.style.background=''" onclick="_selectContact('${c.id}','${_esc(c.name)}')">
+    <div style="font-weight:500;color:var(--text)">${_esc(c.name)}</div>
+    ${(c.phone||c.email)?`<div style="font-size:11px;color:var(--muted)">${_esc([c.phone,c.email].filter(Boolean).join(' · '))}</div>`:''}
+  </div>`).join('');
+  // "+ Legg til ny"-rad vises nar du har skrevet et navn (data-ac => pil/Enter + klikk likt).
+  const addRow = (raw && !exact) ? `<div data-ac="1" data-ac-add="1" style="padding:8px 12px;cursor:pointer;font-size:13px" onmouseover="this.style.background='var(--surface2)'" onmouseout="if(this.dataset.acActive!=='1')this.style.background=''" onclick="_inlineCreateContact()">
+    <span style="color:var(--accent);font-weight:600">＋ Legg til ny kontaktperson «${_esc(raw)}»</span>
+  </div>` : '';
+  const empty = (!rows && !addRow) ? `<div style="padding:8px 12px;font-size:12px;color:var(--dim)">Ingen kontakter ennå — skriv et navn for å legge til.</div>` : '';
+  box.style.display = 'block';
+  box.innerHTML = rows + addRow + empty;
+}
+
+function _selectContact(id, name) {
+  const input = document.getElementById('dash-proj-contact');
+  if (input) { input.value = name; input.dataset.contactId = id; }
+  const box = document.getElementById('dash-contact-results');
+  if (box) { box.style.display='none'; box.innerHTML=''; }
+}
+
+// Oppretter ny kontakt (minst navn) pa valgt firma, inline, og velger den.
+async function _inlineCreateContact() {
+  const custId = document.getElementById('dash-proj-customer')?.dataset?.customerId;
+  const input = document.getElementById('dash-proj-contact');
+  const name = (input?.value || '').trim();
+  const box = document.getElementById('dash-contact-results');
+  if (!custId || !name) return;
+  try {
+    const { data, error } = await _db.from('contacts').insert({ customer_id: custId, name }).select().single();
+    if (error) throw error;
+    _contactsCache[custId] = (_contactsCache[custId] || []).concat([data]);
+    _selectContact(data.id, data.name);
+  } catch(e) {
+    if (box) { box.style.display='block'; box.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:#f87171">Kunne ikke opprette kontakt: ${_esc(e.message||e)}</div>`; }
   }
 }
 
@@ -36186,6 +36275,8 @@ async function _docFetchProjectData(projectId) {
     if (error || !data) return null;
     const d = data.data || {};
     d._projectId = projectId; d._name = data.name; d._address = data.description || '';
+    d._contact = (d.project && d.project.contact_name) || '';
+    d._customer = (d.project && d.project.customer) || '';
     return d;
   } catch(e) { return null; }
 }
@@ -36268,6 +36359,7 @@ async function _showDocScreen(projectId, roomId) {
     ? HEATING_PRODUCTS.find(h=>h.id===products.find(p=>p.product_id)?.product_id)?.supplier : 'Cenika AS');
   _docState = {
     projectId, projectName: data._name || '', projectAddress: data._address || '',
+    customerName: data._customer || '', contactName: data._contact || '',
     roomRef: roomId, roomName: room?.name || ('Rom '+roomId),
     supplier, step: 0, products,
     install: { install_type:'innendors-gulv', install_underlag:'avrettingsmasse',
@@ -36282,7 +36374,7 @@ async function _showDocScreen(projectId, roomId) {
   const chip = document.getElementById('doc-supplier-chip');
   if (chip) { chip.textContent = supplier.display_name || 'Leverandør'; chip.style.background = supplier.color || '#E8742C'; }
   document.getElementById('doc-top-t1').textContent = _docState.roomName;
-  document.getElementById('doc-top-t2').textContent = _docState.projectName + (_docState.projectAddress ? ' · ' + _docState.projectAddress : '');
+  document.getElementById('doc-top-t2').textContent = _docState.projectName + (_docState.projectAddress ? ' · ' + _docState.projectAddress : '') + (_docState.contactName ? ' · ' + _docState.contactName : '');
   _docRenderWizard();
 }
 
@@ -37932,6 +38024,7 @@ async function _fetchProjectList() {
         parts: proj.parts || [],
         _customer: proj.customer || '',
         _customerId: proj.customer_id || null,
+        _contact: proj.contact_name || '',
         _type: proj.type || 'indoor',
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
@@ -38660,7 +38753,8 @@ function _toggleCreateProject() {
   if (isHidden) {
     document.getElementById('dash-proj-name').value = '';
     document.getElementById('dash-proj-desc').value = '';
-    const ce = document.getElementById('dash-proj-customer'); if (ce) ce.value = '';
+    const ce = document.getElementById('dash-proj-customer'); if (ce) { ce.value = ''; delete ce.dataset.customerId; }
+    _onCustomerChosen(null);   // skjul + nullstill kontakt-feltet
     const te = document.getElementById('dash-proj-type'); if (te) te.value = 'indoor';
     const re = document.getElementById('dash-proj-responsible'); if (re) re.value = '';
     document.getElementById('dash-proj-name').focus();
@@ -38682,6 +38776,8 @@ async function _createProjectInline() {
   S.project.description = desc;
   S.project.customer = customer;
   S.project.customer_id = document.getElementById('dash-proj-customer')?.dataset?.customerId || null;
+  S.project.contact_id = document.getElementById('dash-proj-contact')?.dataset?.contactId || null;
+  S.project.contact_name = (document.getElementById('dash-proj-contact')?.value || '').trim() || null;
   S.project.type = type;
   S.project.status = 'planned';
   S.project.responsible = responsible;
@@ -38822,7 +38918,7 @@ async function _renderProjectList() {
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
       <td class="pl-td pl-td-name"><span class="pl-proj-name" title="${esc(p.name)}">${esc(p.name)}</span>${custName ? '<span class="pl-td-sub">'+esc(custName)+'</span>' : ''}${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
-      <td class="pl-td pl-td-desc pl-td-cust" onclick="event.stopPropagation();_quickSetCustomer('${p.id}')" style="cursor:pointer" title="Klikk for å endre kunde">${customer}</td>
+      <td class="pl-td pl-td-desc pl-td-cust" onclick="event.stopPropagation();_quickSetCustomer('${p.id}')" style="cursor:pointer" title="Klikk for å endre kunde">${customer}${p._contact ? '<div style="font-size:11px;color:var(--muted)">'+esc(p._contact)+'</div>' : ''}</td>
       <td class="pl-td pl-td-type"><span class="pl-type-ico">${IC(_MOD_ICON[type]||'home',14)}</span>${typeObj.label}</td>
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${PROJECT_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select></td>
       <td class="pl-td pl-td-date">${date}</td>

@@ -19,8 +19,28 @@ Bygger på eksisterende `_searchCustomers`/`_selectCustomer`/`_acNav`/`_createPr
 - Verifisert live (ksk@cenika.no): tastatur Enter oppretter+velger; museklikk likeså;
   eksisterende kunde velges fortsatt; «+ Legg til» skjult ved eksakt treff. Test-rad ryddet.
 
-### Del B — Kontaktperson (mange per firma) 🚧 kommer
-Ny `contacts`-tabell (migrasjon kjøres manuelt) + kontakt-combobox etter valgt firma.
+### Del B — Kontaktperson: mange per firma ✅
+- **Migrasjon `supabase-migration-contacts.sql`** (kjørt, verifisert 6/6/2/1): tabell
+  `contacts(id, customer_id FK customers ON DELETE CASCADE, name not null, email, phone,
+  created_at)`. RLS org-scopet *gjennom* customer via `user_org_ids()` + superadmin.
+  `romtegner_projects.contact_id`-kolonne lagt til. Backfill: eksisterende
+  `customers.contact_person` → én kontakt per kunde (idempotent). `contact_person` beholdt.
+- **UI:** nytt `#dash-proj-contact`-combobox som vises **etter** valgt firma
+  (`_onCustomerChosen` avslører + forhåndslaster). Ved fokus vises HELE firmaets kontaktliste
+  umiddelbart (`_searchContacts(q, showAll)`); skriv for å filtrere; `_acNav` gjenbrukt
+  (pil/Enter/klikk). `+ Legg til ny kontaktperson «<navn>»` → `_inlineCreateContact` (org-scopet
+  via customer). Ingen fast standardkontakt — valget gjelder prosjektet.
+- **Persistering:** `S.project.contact_id` + `contact_name` (snapshot) i prosjekt-JSON (lest av
+  `_createProjectInline`, lagret via eksisterende save-sti — urørt). Kontaktnavn vises i
+  prosjektlista (under Kunde, `_fetchProjectList._contact`) og i dokumentasjons-headeren
+  (`_docFetchProjectData._contact` → `_docState.contactName`).
+- Verifisert live (ksk@cenika.no): fokus viser hele lista; nytt firma + ny kontakt + prosjekt
+  via **kun tastatur** på sekunder; prosjekt lagret med riktig kontakt; RLS: kun egen orgs
+  kontakter synlige (6). Test-data ryddet.
+
+**Filer:** [supabase-migration-contacts.sql](../supabase-migration-contacts.sql), romtegner.html
+(`_searchContacts`/`_selectContact`/`_inlineCreateContact`/`_onCustomerChosen`/`_loadContacts`,
++ `_createProjectInline`/`_fetchProjectList`/prosjektrad/doc-prefill).
 
 ---
 
