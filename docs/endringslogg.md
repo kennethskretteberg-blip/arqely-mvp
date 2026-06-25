@@ -21,8 +21,23 @@ opprett-firma/kontakt-arbeidet (allerede migrert — ingen ny migrasjon).
 - Verifisert live: la til 3 kontakter, rediger + fjern persisterer i DB; opprett-comboboxen
   (`_loadContacts`) ser samme kontakter. Test-data ryddet.
 
-### Del B — Prosjekter i listevisning + søk/filter 🚧 kommer
+### Del B — Prosjekter i listevisning + søk/filter ✅
+- Refaktor for ekte gjenbruk: heiset `_effDate` → modul-nivå `_projectEffDate`, og trakk ut
+  `_filterProjectsList(projects, {search,customer,status,type})` med dashboardets eksakte
+  filter-/sorteringslogikk. **Dashboardet (`_renderProjectList`) og kundekortet bruker samme
+  funksjon** — ingen parallell.
+- `_renderCustomerCardProjects(customerId)`: bruker dashboardets `_cachedProjects` scopet til
+  `_customerId === c.id`, oppsummering («N prosjekter · M ferdige»), søk + status- + type-filter,
+  og kompakt liste (navn, type-ikon, status-badge, dato) via `_cardProjectRowHtml`. Klikk åpner
+  prosjektet og lukker kortet.
+- Verifisert: dashboard uten regresjon (33 rader; status=ferdig → 32); kort viser «· 3 prosjekter
+  · 3 ferdige», søk «Espe»→1, type indoor→3, klikk åpner.
+
 ### Del C — delt contacts-kilde ✅ (verifisert i Del A)
+
+**Filer:** romtegner.html (`_openCustomerCard`, `_renderCardContacts` m.fl.,
+`_renderCustomerCardProjects`/`_cardProjectRowHtml`, `_projectEffDate`/`_filterProjectsList`,
+`_renderProjectList`).
 
 Bygget om det inline opprett-skjemaet til et proft, luftig kort som matcher mockupen
 `mockups/Varmeplan-opprett-prosjekt-redesign.html`. Kun markup + CSS; all opprett-logikk

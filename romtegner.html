@@ -36121,12 +36121,18 @@ function _openCustomerCard(customerId) {
       <div id="cc-contacts-list" style="color:var(--dim);font-size:13px">Laster…</div>
     </div>
     <div style="border-top:1px solid var(--border);padding-top:12px">
-      <div id="cust-card-projects" style="color:var(--dim);font-size:13px">Laster...</div>
+      <div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:8px">Prosjekter <span id="cc-proj-summary" style="font-weight:400;text-transform:none;color:var(--dim);margin-left:4px"></span></div>
+      <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+        <input id="cc-proj-search" type="text" placeholder="Søk prosjekt…" oninput="_renderCustomerCardProjects('${c.id}')" style="flex:1;min-width:130px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;box-sizing:border-box">
+        <select id="cc-proj-status" onchange="_renderCustomerCardProjects('${c.id}')" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;cursor:pointer"><option value="">Alle statuser</option>${PROJECT_STATUSES.filter(s=>s.id!=='archived').map(s=>`<option value="${s.id}">${s.label}</option>`).join('')}</select>
+        <select id="cc-proj-type" onchange="_renderCustomerCardProjects('${c.id}')" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;cursor:pointer"><option value="">Alle typer</option><option value="indoor">Innendørs gulvvarme</option><option value="stair">Snøsmelting trapper</option><option value="snow">Snøsmelting grunn</option><option value="roof">Tak og takrenner</option></select>
+      </div>
+      <div id="cust-card-projects" style="color:var(--dim);font-size:13px;max-height:280px;overflow-y:auto">Laster...</div>
     </div>
   </div>`;
   overlay.style.display = 'flex';
   _renderCardContacts(customerId);
-  _loadCustomerProjects(customerId);
+  _renderCustomerCardProjects(customerId);
 }
 
 async function _saveCustomerCard(customerId) {
@@ -36255,20 +36261,48 @@ async function _cardDeleteContact(id, customerId) {
   } catch(e) { alert('Kunne ikke fjerne: ' + (e.message||e)); }
 }
 
-async function _loadCustomerProjects(customerId) {
+// Kundekort: prosjekter i listevisning med søk/status/type-filter. Gjenbruker
+// dashboardets _cachedProjects + _filterProjectsList + _projectEffDate (ingen
+// parallell). Scopet til kundens prosjekter (_customerId === customerId).
+async function _renderCustomerCardProjects(customerId) {
   const el = document.getElementById('cust-card-projects');
   if (!el) return;
-  try {
-    const { data } = await _db.from('romtegner_projects').select('id, name, updated_at, data').eq('customer_id', customerId).order('updated_at',{ascending:false});
-    if (!data || !data.length) { el.innerHTML = '<div style="color:var(--dim)">Ingen prosjekter</div>'; return; }
-    el.innerHTML = data.map(p => {
-      const d = new Date(p.updated_at);
-      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer" onclick="document.getElementById('customer-card-overlay').style.display='none';_openCloudProject('${p.id}')">
-        <span style="font-weight:500">${_esc(p.name||'Uten navn')}</span>
-        <span style="font-size:11px;color:var(--muted)">${d.toLocaleDateString('nb-NO')}</span>
-      </div>`;
-    }).join('');
-  } catch(e) { el.innerHTML = '<div style="color:#ff6b6b">Feil</div>'; }
+  // Bruk dashboardets cache; hent ved behov (kortet kan apnes uten at lista er lastet).
+  if (!_cachedProjects) {
+    try { const fetched = await _fetchProjectList(); if (fetched) { _cachedProjects = fetched; _projectListDirty = false; } }
+    catch(e) {}
+  }
+  const all = (_cachedProjects || []).filter(p => p._customerId === customerId && !p._deletedAt);
+  // Oppsummering (før filter)
+  const total = all.length;
+  const done = all.filter(p => (p._status || 'in_progress') === 'completed').length;
+  const sumEl = document.getElementById('cc-proj-summary');
+  if (sumEl) sumEl.textContent = total ? `· ${total} ${total === 1 ? 'prosjekt' : 'prosjekter'}${done ? ` · ${done} ferdig${done > 1 ? 'e' : ''}` : ''}` : '· ingen prosjekter';
+  // Filter via delt hjelper (scopet til kundens prosjekter)
+  const filtered = _filterProjectsList(all, {
+    search: document.getElementById('cc-proj-search')?.value || '',
+    status: document.getElementById('cc-proj-status')?.value || '',
+    type: document.getElementById('cc-proj-type')?.value || ''
+  });
+  if (!filtered.length) { el.innerHTML = `<div style="color:var(--dim)">${total ? 'Ingen treff.' : 'Ingen prosjekter.'}</div>`; return; }
+  el.innerHTML = filtered.map(p => _cardProjectRowHtml(p)).join('');
+}
+
+function _cardProjectRowHtml(p) {
+  const d = _projectEffDate(p);
+  const date = d.toLocaleDateString('nb-NO', { day:'numeric', month:'short', year:'numeric' });
+  const status = p._status || 'in_progress';
+  const so = PROJECT_STATUSES.find(s => s.id === status) || PROJECT_STATUSES[0];
+  const type = p._type || 'indoor';
+  const to = PROJECT_TYPE_MAP[type] || PROJECT_TYPE_MAP.indoor;
+  return `<div onclick="document.getElementById('customer-card-overlay').style.display='none';_openCloudProject('${p.id}')" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer">
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:500;color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(p.name || 'Uten navn')}</div>
+      <div style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px">${IC(_MOD_ICON[type] || 'home', 11)} ${_esc(to.label)}</div>
+    </div>
+    <span style="background:${so.color}22;color:${so.color};font-size:11px;padding:2px 8px;border-radius:8px;font-weight:600;white-space:nowrap">${_esc(so.label)}</span>
+    <span style="font-size:11px;color:var(--muted);white-space:nowrap">${date}</span>
+  </div>`;
 }
 
 // ─── DASHBOARD TAB SWITCHING ───
@@ -38959,6 +38993,37 @@ function _toggleProjectSort() {
 let _cachedProjects = null;
 let _projectListDirty = true;
 
+// Effektiv "sist endret"-dato: savedAt (ekte prosjekt-lagring) når den finnes,
+// ellers updated_at. Modul-nivå sa bade dashboard og kundekort kan dele den.
+function _projectEffDate(p) { return p._savedAt != null ? new Date(p._savedAt) : new Date(p.updated_at); }
+
+// Delt filter+sortering for prosjektlister (dashboard OG kundekort bruker denne —
+// ingen parallell logikk). f: {search, customer, status, type}. Trash er en egen
+// visning (kun soft-deleted); ellers skjules soft-deleted, og arkiverte skjules
+// nar ingen status er valgt.
+function _filterProjectsList(projects, f = {}) {
+  let out = projects.slice();
+  const search = (f.search || '').toLowerCase().trim();
+  if (search) out = out.filter(p =>
+    (p.name || '').toLowerCase().includes(search) ||
+    (p.description || '').toLowerCase().includes(search) ||
+    (p._responsible || '').toLowerCase().includes(search));
+  const cust = (f.customer || '').toLowerCase().trim();
+  if (cust) out = out.filter(p => (p._customer || '').toLowerCase().includes(cust));
+  const status = f.status || '';
+  if (status === 'trash') {
+    out = out.filter(p => p._deletedAt);
+  } else {
+    out = out.filter(p => !p._deletedAt);
+    if (status) out = out.filter(p => (p._status || 'in_progress') === status);
+    else out = out.filter(p => (p._status || 'in_progress') !== 'archived');
+  }
+  const type = f.type || '';
+  if (type) out = out.filter(p => (p._type || 'indoor') === type);
+  out.sort((a, b) => { const da = _projectEffDate(a), db = _projectEffDate(b); return _plSortAsc ? da - db : db - da; });
+  return out;
+}
+
 async function _renderProjectList() {
   const tbody = document.getElementById('pl-tbody');
   const empty = document.getElementById('pl-empty');
@@ -38987,42 +39052,15 @@ async function _renderProjectList() {
   // Render stats from full list (before filtering)
   _renderDashStats(projects);
 
-  // Apply search — to separate felt: PROSJEKT (navn/beskrivelse/ansvarlig) og KUNDE.
-  // Begge kan brukes alene eller sammen (AND).
-  const searchVal = (document.getElementById('dash-search')?.value || '').toLowerCase().trim();
-  if (searchVal) {
-    projects = projects.filter(p =>
-      (p.name || '').toLowerCase().includes(searchVal) ||
-      (p.description || '').toLowerCase().includes(searchVal) ||
-      (p._responsible || '').toLowerCase().includes(searchVal)
-    );
-  }
-  const custVal = (document.getElementById('dash-search-customer')?.value || '').toLowerCase().trim();
-  if (custVal) {
-    projects = projects.filter(p => (p._customer || '').toLowerCase().includes(custVal));
-  }
-
-  // Apply status filter. Trash is a special view: show ONLY soft-deleted
-  // projects. Every other view EXCLUDES soft-deleted projects.
+  // Søk/kunde/status/type-filter + sortering via delt hjelper (samme som kundekortet).
   const statusFilter = document.getElementById('dash-filter-status')?.value || '';
   const inTrash = (statusFilter === 'trash');
-  if (inTrash) {
-    projects = projects.filter(p => p._deletedAt);
-  } else {
-    projects = projects.filter(p => !p._deletedAt);
-    if (statusFilter) {
-      projects = projects.filter(p => (p._status || 'in_progress') === statusFilter);
-    } else {
-      // hide archived by default (only show when explicitly filtered)
-      projects = projects.filter(p => (p._status || 'in_progress') !== 'archived');
-    }
-  }
-
-  // Apply type filter
-  const typeFilter = document.getElementById('dash-filter-type')?.value || '';
-  if (typeFilter) {
-    projects = projects.filter(p => (p._type || 'indoor') === typeFilter);
-  }
+  projects = _filterProjectsList(projects, {
+    search: document.getElementById('dash-search')?.value || '',
+    customer: document.getElementById('dash-search-customer')?.value || '',
+    status: statusFilter,
+    type: document.getElementById('dash-filter-type')?.value || ''
+  });
 
   if (!projects.length) {
     tbody.innerHTML = '';
@@ -39031,19 +39069,8 @@ async function _renderProjectList() {
   }
   empty.style.display = 'none';
 
-  // Effektiv "sist endret"-dato: savedAt (ekte prosjekt-lagring) når den finnes,
-  // ellers updated_at (eldre prosjekter). Statusendringer bumper updated_at
-  // server-side, men ikke savedAt — derfor brukes savedAt her.
-  const _effDate = (p) => p._savedAt != null ? new Date(p._savedAt) : new Date(p.updated_at);
-
-  // Sort by effective edit date
-  projects.sort((a, b) => {
-    const da = _effDate(a), db = _effDate(b);
-    return _plSortAsc ? da - db : db - da;
-  });
-
   tbody.innerHTML = projects.map(p => {
-    const _d = _effDate(p);
+    const _d = _projectEffDate(p);
     const date = _d.toLocaleDateString('nb-NO', {day:'numeric',month:'short',year:'numeric'}) + ' kl. ' + _d.toLocaleTimeString('nb-NO', {hour:'2-digit',minute:'2-digit'});
     const safeName = esc(p.name).replace(/'/g, '&#39;');
     const status = p._status || 'in_progress';
