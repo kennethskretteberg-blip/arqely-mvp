@@ -4,6 +4,35 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Opprett prosjekt»-skjema redesignet (luftig 3+3-kort) — 2026-06-25
+
+Bygget om det inline opprett-skjemaet til et proft, luftig kort som matcher mockupen
+`mockups/Varmeplan-opprett-prosjekt-redesign.html`. Kun markup + CSS; all opprett-logikk
+(`_toggleCreateProject`, `_createProjectInline`, `_searchCustomers`/`_acNav`/`_searchContacts`)
+og alle felt-ID-er uendret.
+
+### Del A — Layout ✅
+- Nytt `.npc-card` inni `#dash-create-form`: header (folder-plus i teal-chip + «Nytt prosjekt»
+  + undertittel), `.npc-grid` 3 kolonner, etiketter over hvert felt, 46px-felt med teal
+  fokus-ring (`color-mix` mot `--accent`), footer med delelinje + «✓ Opprett prosjekt» (primær)
+  + «Avbryt» + tastatur-tips. Rad 1: Prosjektnavn\*·Kunde/firma·Kontaktperson; rad 2:
+  Adresse·Type·Ansvarlig.
+- **Fjernet den overlappende `＋`-knappen** ved Kunde (opprett-nytt-firma ligger nederst i lista).
+- Kontaktfeltet ligger fast i rutenettet men er `disabled` til firma er valgt («Vises etter
+  firma…») — `_onCustomerChosen` byt/disabler i stedet for å skjule (stabil 3+3).
+- Toggle-knappen («＋ Opprett prosjekt») skjules mens kortet er åpent; Avbryt/Opprett viser den.
+- Søk/filtre flyttet til egen linje under kortet med topp-delelinje. Dropdown (`.cust-search-results`)
+  luftet opp (radius 12, skygge, avrundede rader). Bruker appens light-theme-tokens → matcher
+  mockupens palett; degraderer pent i dark-theme.
+- Verifisert live (light-theme, 1120px): 3×grid, 46px-felt, ＋-borte, kontakt disabled, toggle
+  skjult ved åpning, combobokser virker. Skjermbilde matcher mockupen.
+
+### Del B/C — combobox firma + kontakt
+Funksjonelt allerede bygget (forrige økt: `_searchCustomers`/`_inlineCreateCustomer`,
+`contacts`-tabell + `_searchContacts`/`_inlineCreateContact`). Verifisert i nytt oppsett.
+
+---
+
 ## Raskere «Opprett prosjekt» — firma + kontakt inline (2026-06-25)
 
 Mål: velg/opprett firma og kontaktperson uten å forlate opprett-prosjekt-flyten.
