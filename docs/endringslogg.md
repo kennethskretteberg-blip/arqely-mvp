@@ -4,6 +4,35 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kontaktpersoner: tittel-felt, tabell på kundekort, søkbare i Kunder — 2026-06-25
+
+Bygger på `contacts`-tabellen.
+
+### Del A — Tittel-felt ✅
+- **`supabase-migration-contact-title.sql`** (kjørt): `alter table contacts add column if not
+  exists title text`. RLS uendret. Add/edit-skjemaene på kortet tar nå navn (påkrevd) + tittel,
+  telefon, e-post (valgfrie); `title` skrives i `_cardCreateContact`/`_cardSaveContact`.
+
+### Del B — Kontaktpersoner som tabell på kundekortet ✅
+- `_renderCardContacts` rendrer nå en **tabell**: Navn · Tittel · Telefon · E-post · (handling).
+  Inline «＋ Legg til kontaktperson» (ny rad i tabellen), rediger/fjern per rad. Telefon er
+  `tel:`-lenke, e-post `mailto:`-lenke (teal). Tom tilstand: «Ingen kontaktpersoner ennå».
+  Felles `_ccEditCells` for ny/rediger-rad.
+
+### Del C — Søk i kontaktpersoner (Kunder-fanen) ✅
+- `_loadAllContacts()` laster alle org-kontakter én gang (RLS-scopet) inn i `_contactsCache` —
+  samme kilde som kortet; ingen rundtur per tastetrykk (mutasjoner holder cachen oppdatert).
+- `_renderCustomerTable`-søket matcher nå OGSÅ kontaktenes navn/tittel/telefon/e-post (i tillegg
+  til dagens kundefelt). Kunde-raden viser «Treff: <navn> – <tittel>» når treffet kom via en kontakt.
+- Verifisert: kort med 3 kontakter (tittel/tlf/e-post) i tabell, rediger/fjern + tel/mailto;
+  søk på kontaktnavn/tittel/telefon/e-post → riktig kunde + treff-markering; RLS kun egen org.
+
+**Filer:** [supabase-migration-contact-title.sql](../supabase-migration-contact-title.sql),
+romtegner.html (`_renderCardContacts`/`_cardContactRowHtml`/`_ccEditCells`/`_card*Contact`,
+`_loadAllContacts`, `_renderCustomerTable`).
+
+---
+
 ## Trapp: «Byggeretning» styrer nå faktisk geometri/kabel/preview — 2026-06-25
 
 **Bug:** «Byggeretning» (Nedenfra og opp / Ovenfra og ned) ga feil resultat — `buildDirection`
