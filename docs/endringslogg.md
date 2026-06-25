@@ -39,8 +39,19 @@ Danfoss) i UI.
 - Verifisert: default InSnow 30T → 350 W/m², C-C 8,3 cm, CVA10300/EL 1005753; 400 V → CVA10700/EL
   1020483; matte 360>300 → rød + advarsel; lagring skaper prosjekt + part. Ingen DEVI/Danfoss.
 
-### Del D 🚧 kommer
-Værdata pr postnummer (`weather_by_postcode` + auto-fyll).
+### Del D — Værdata pr postnummer (auto-fyll) ✅
+- **`supabase-migration-weather-postcode.sql`** (datakontrakt, kjøres manuelt): tabell
+  `weather_by_postcode(postcode pk, place, municipality, design_temp_c, design_wind_ms,
+  snowfall_cm_h, altitude_m, source, updated_at)`. RLS: les for innloggede, skriv kun superadmin.
+  Inkluderer import-mal for 40-årsarket.
+- `_snowLookupPostcode()` + `_snowDeriveFromWeather()`: postnr → auto-fyll værhardhet
+  (temp ≥ −15 mild / −25…−15 streng / ≤ −25 svært) + korreksjoner (moh>1000, vind>6, temp<−10),
+  overstyrbart. Tom tabell / før migrasjon → degraderer pent til «fyll inn manuelt».
+- Verifisert: utledning (−28→svært+alle, −18→streng+snø, −8→mild); graceful fallback uten tabell.
+  Full auto-fyll aktiveres når migrasjonen er kjørt + arket importert.
+
+**Filer:** romtegner.html (`SNOW_*`/`_snow*`, `_openSnowCalc`/`_snowCalc`, `_snowCatalogProducts`,
+`MODULE_TYPES`/`_MOD_ICON`), [supabase-migration-weather-postcode.sql](../supabase-migration-weather-postcode.sql).
 
 Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika varmekatalog
 (varmetap W/m) + verifisert mockup-flyt.
