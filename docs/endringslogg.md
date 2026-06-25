@@ -4,7 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## «Opprett prosjekt»-skjema redesignet (luftig 3+3-kort) — 2026-06-25
+## Kundekort → fullt CRM-kort (kontakter + prosjekter) — 2026-06-25
+
+Utvidet `_openCustomerCard` til et CRM-kort. Bygger på `contacts`-tabellen fra
+opprett-firma/kontakt-arbeidet (allerede migrert — ingen ny migrasjon).
+
+### Del A — Kontaktpersoner i listevisning ✅
+- Erstattet det enkle `cc-contact`-feltet med en **Kontaktpersoner**-seksjon: liste over alle
+  `contacts` for kunden (navn + telefon·e-post), hver rad med **rediger (✎)** og **fjern (✕)**.
+  «＋ Legg til kontaktperson» → inline rad (navn påkrevd, telefon/e-post valgfritt).
+- Funksjoner `_renderCardContacts`/`_cardContactRowHtml`/`_cardShowAddContact`/
+  `_cardCreateContact`/`_cardStartEditContact`/`_cardSaveContact`/`_cardDeleteContact` — deler
+  `contacts`-tabellen og `_contactsCache` med opprett-prosjekt-comboboxen (begge veier).
+- Lazy-backfill: hvis kunden har gammel `contact_person` men ingen kontakter, migreres den inn
+  som én kontakt ved åpning. `_saveCustomerCard` skriver ikke lenger `contact_person` (bevares).
+- Verifisert live: la til 3 kontakter, rediger + fjern persisterer i DB; opprett-comboboxen
+  (`_loadContacts`) ser samme kontakter. Test-data ryddet.
+
+### Del B — Prosjekter i listevisning + søk/filter 🚧 kommer
+### Del C — delt contacts-kilde ✅ (verifisert i Del A)
 
 Bygget om det inline opprett-skjemaet til et proft, luftig kort som matcher mockupen
 `mockups/Varmeplan-opprett-prosjekt-redesign.html`. Kun markup + CSS; all opprett-logikk
