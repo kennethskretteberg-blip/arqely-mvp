@@ -25,8 +25,22 @@ Danfoss) i UI.
   4cm→1×/8cm→2×. HT2000-case (q0=262): 269 (4cm)/278 (8cm) — eksakt som den verifiserte mockupen;
   ~2 % under HT2000s 273/285 (iboende i enkel R-modell vs full ASHRAE; eksakte ankre stemmer).
 
-### Del C–D 🚧 kommer
-UI + produkt fra leverandørkatalog (hub-kort + modal), værdata pr postnr.
+### Del C — UI + produkt fra leverandørens katalog ✅
+- Hub-kort «Snøsmelting – effektbehov» (datadrevet i `MODULE_TYPES`, `_quickStartModule` ruter til
+  `_openSnowCalc`). Modal i Varmeplan-stil (mockup-flyten): værforhold + lagbygger (over/under, R per
+  lag) + produkt-chips + resultat (overflatelast, holder-ned-til-X°C, kabeltemp, bakketap, installert,
+  C-C, total, responstid + advarsler).
+- **`_snowCatalogProducts()`**: resolver snøkabel/matte-familier fra `HEATING_PRODUCTS` (leverandør-
+  filtrert via `_filterProductsByOrg`; 230/400 V slått sammen). Ingen hardkoding/merkenavn — en annen
+  leverandør viser sine egne snøprodukter automatisk. Kabel → C-C = W/m ÷ installert × 100; matte →
+  sjekk W/m² ≥ installert (grønn/rød + advarsel). Ekte art./EL fra katalogen i produktkortet.
+- «Lagre i prosjekt» lagrer snapshot (`S.project.snowcalc` + snowcalc-part) med valgt produkt
+  (type/spenning/CVA/EL/C-C) for dokumentasjon.
+- Verifisert: default InSnow 30T → 350 W/m², C-C 8,3 cm, CVA10300/EL 1005753; 400 V → CVA10700/EL
+  1020483; matte 360>300 → rød + advarsel; lagring skaper prosjekt + part. Ingen DEVI/Danfoss.
+
+### Del D 🚧 kommer
+Værdata pr postnummer (`weather_by_postcode` + auto-fyll).
 
 Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika varmekatalog
 (varmetap W/m) + verifisert mockup-flyt.
