@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Ny modul: Frostsikring rør — 2026-06-25
+
+Ny forsidekort-modul (datadrevet, samme mønster som de andre). Kilde: Cenika varmekatalog
+(varmetap W/m) + verifisert mockup-flyt.
+
+### Del A — Varmetap-tabell + beregningskjerne ✅
+- `FROST_WM` (8 iso × 5 ΔT × 18 diametre), `FROST_DIAM`/`FROST_ISO`/`FROST_DT`, `_frostNearestDt`
+  (runder ΔT til 20/30/40/60/80), `_frostLookupWpm(diamIdx, iso, dt)`, og `_frostSuggestCable`
+  (≤10→MultiPipe 10; ≤20→IceFix 20W; >20→flagg; Ready-lengde nærmest ≥ rørlengde, ellers metervare).
+- Verifisert: **fasit 2″/30mm/ΔT20 → 7 W/m**, flere oppslag, ΔT-runding (+5/−15→20), og alle
+  kabelvalg-grenser (10/20). Alle rader = 18 verdier.
+- ⚠️ **To celler kunne ikke verifiseres mot trykt katalog** (dimensjonerings-tabellen finnes IKKE i
+  den offentlige 2024-katalog-PDF-en — bekreftet via full PDF-gjennomgang). Encodet EKSAKT som
+  kildedataene, men begge bryter monotonitet (sannsynlige kopifeil) og er flagget i koden:
+  ISO50/ΔT40/20″=66 og ISO100/ΔT60/1½″=8.0 — **bør bekreftes mot trykt katalog**.
+
+### Del B–E 🚧 kommer
+Modulkort i hub, beregnings-UI, produktkatalog (skrap CVA/EL fra cenika.no), lagre valgt produkt
+på prosjekt for dokumentasjon.
+
+---
+
 ## Kontaktpersoner: tittel-felt, tabell på kundekort, søkbare i Kunder — 2026-06-25
 
 Bygger på `contacts`-tabellen.
