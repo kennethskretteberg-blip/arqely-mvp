@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Tilbudspris: rabatt per produktgruppe (+ hierarki) — 2026-07-07
+
+Utvidet den enkle globale «Rabatt %» i PDF-eksport til et **rabatt-hierarki**: produkt > gruppe >
+leverandør > global (mest spesifikk vinner). Kjøperens rabatt, så den lagres på **prosjektet**
+(`S.project.pricing`), ikke som produktegenskap — forhåndsutfylt neste gang.
+
+Eksport-dialogen lister nå **produktgruppene som er i prosjektet** (via `product_family`) med et rabatt-felt
+hver (blank = standard). Skriver du f.eks. rabatt på «InFloor 17T», gjelder den ALLE InFloor 17T. `veil.pris`
+(`price_list`) ligger allerede per produkt. PDF-prisarket regner nå nettopris per linje via
+`_resolveDiscountPct(prod, opts)` og viser Veil.pris · Rabatt% · Pris · Sum; DG/DB/kostpris er bak «Vis
+DG/DB (intern)» (skjult for kunde som før).
+
+Nye: `_projectUsedProductIds`, `_projectProductGroups`, `_resolveDiscountPct`. Verifisert: hierarkiet
+(global 10 → gruppe 30 → produkt 45; leverandør 22), dialog lister EcoMat 60T + InFloor 17T med felt, og
+rabattene lagres på prosjektet.
+
+**Fil:** romtegner.html (`_showExportDialog`, `_runExportPDF`, PDF Tilbud-seksjon).
+
+---
+
 ## Produktkatalog (read-only, rolle-gatet) — 2026-07-07
 
 Ny read-only produktkatalog i admin-panelene. **Rolle-gating:** superadmin ser ALLE produkter (scope

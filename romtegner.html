@@ -32680,6 +32680,44 @@ function _updateNotes(text) {
 }
 
 // ─── PDF EXPORT DIALOG ──────────────────────────────────────
+// ─── PRISER / RABATT (tilbud) ───────────────────────────────────────────────
+// Unike produkt-id-er brukt i prosjektet.
+function _projectUsedProductIds() {
+  const ids = new Set();
+  for (const s of (S.strips || [])) if (s.productId != null) ids.add(s.productId);
+  for (const c of (S.cables || [])) if (c.productId != null) ids.add(c.productId);
+  for (const m of (S.mats || []))   if (m.productId != null) ids.add(m.productId);
+  for (const p of (S.plates || [])) if (p.productId != null) ids.add(p.productId);
+  for (const st of (S.stairs || [])) {
+    if (Array.isArray(st.cables)) st.cables.forEach(c => { if (c && c.productId != null) ids.add(c.productId); });
+    if (st.cableProductId != null) ids.add(st.cableProductId);
+  }
+  return ids;
+}
+// Produktgrupper (familier) i prosjektet → [{family, supplier, productIds}], sortert.
+function _projectProductGroups() {
+  const byFam = new Map();
+  for (const id of _projectUsedProductIds()) {
+    const p = HEATING_PRODUCTS.find(x => x.id === id); if (!p) continue;
+    const fam = p.product_family || p.name || ('#' + id);
+    if (!byFam.has(fam)) byFam.set(fam, { family: fam, supplier: p.supplier || '', productIds: [] });
+    byFam.get(fam).productIds.push(id);
+  }
+  return [...byFam.values()].sort((a, b) => a.family.localeCompare(b.family));
+}
+// Rabatt-% for et produkt: mest spesifikk vinner — produkt > gruppe > leverandør > global.
+function _resolveDiscountPct(prod, pricing) {
+  if (!prod || !pricing) return 0;
+  const pd = pricing.productDiscount || {}, gd = pricing.groupDiscount || {}, sd = pricing.supplierDiscount || {};
+  const fam = prod.product_family || prod.name;
+  const raw = (pd[prod.id] != null) ? pd[prod.id]
+            : (fam != null && gd[fam] != null) ? gd[fam]
+            : (prod.supplier && sd[prod.supplier] != null) ? sd[prod.supplier]
+            : (pricing.global != null ? pricing.global : (pricing.discount || 0));
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+}
+
 function _showExportDialog() {
   let overlay = document.getElementById('export-dialog');
   if (!overlay) { overlay = document.createElement('div'); overlay.id='export-dialog'; overlay.className='exp-overlay'; overlay.onclick=e=>{if(e.target===overlay)overlay.style.display='none'}; document.body.appendChild(overlay); }
@@ -32687,6 +32725,8 @@ function _showExportDialog() {
   const stairs = S.stairs || [];
   const hasStairs = stairs.length > 0;
   const hasPrices = HEATING_PRODUCTS.some(p => p.price_list > 0);
+  const _pp = (S.project && S.project.pricing) || {};   // lagrede rabatter per prosjekt
+  const priceGroups = _projectProductGroups();
 
   overlay.innerHTML = `<div style="background:var(--surface);border-radius:16px;width:85vw;max-width:1100px;height:80vh;overflow:hidden;border:1px solid var(--border)">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border)">
@@ -32712,11 +32752,18 @@ function _showExportDialog() {
         <div class="exp-group">
           <div class="exp-check"><input type="checkbox" id="exp-roomtable" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('roomtable')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Romoversikt</span></div>
           <div class="exp-check"><input type="checkbox" id="exp-matlist" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('matlist')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Materialliste</span></div>
-          ${hasPrices ? `<label class="exp-check"><input type="checkbox" id="exp-pricing"> Tilbudspris</label>
-            <div class="exp-check sub" style="padding-left:24px">
-              <label style="font-size:11px;color:var(--muted)">Rabatt %</label>
-              <input type="number" id="exp-discount" value="0" min="0" max="100" step="5" style="width:60px;padding:4px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text);font-size:12px;margin-left:4px">
-              <label class="exp-check" style="margin-left:12px"><input type="checkbox" id="exp-show-dgdb"> Vis DG/DB</label>
+          ${hasPrices ? `<label class="exp-check"><input type="checkbox" id="exp-pricing"${_pp.show ? ' checked' : ''}> Tilbudspris</label>
+            <div class="exp-check sub" style="padding-left:24px;flex-direction:column;align-items:stretch;gap:4px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <label style="font-size:11px;color:var(--muted);flex:1">Rabatt % (standard for alle)</label>
+                <input type="number" id="exp-discount" value="${_pp.global != null ? _pp.global : 0}" min="0" max="100" step="5" style="width:56px;padding:4px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text);font-size:12px">
+              </div>
+              ${priceGroups.length ? `<div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.3px;margin-top:2px">Rabatt per produktgruppe <span style="text-transform:none">(blank = standard)</span></div>
+              ${priceGroups.map(g => `<div style="display:flex;align-items:center;gap:6px">
+                <label style="font-size:11px;color:var(--muted);flex:1" title="${_esc(g.supplier)}">${_esc(g.family)}</label>
+                <input type="number" class="exp-grp-disc" data-family="${_esc(g.family)}" value="${(_pp.groupDiscount && _pp.groupDiscount[g.family] != null) ? _pp.groupDiscount[g.family] : ''}" placeholder="std" min="0" max="100" step="5" style="width:56px;padding:4px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text);font-size:12px">
+              </div>`).join('')}` : ''}
+              <label class="exp-check" style="margin-top:4px"><input type="checkbox" id="exp-show-dgdb"${_pp.showDGDB ? ' checked' : ''}> Vis DG/DB (intern)</label>
             </div>` : ''}
           <div class="exp-check"><input type="checkbox" id="exp-docs" title="Hak av for utskrift"><span onclick="_expPreviewSection('docs')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Dokumentasjon</span></div>
           <div class="exp-check"><input type="checkbox" id="exp-signature" title="Hak av for utskrift"><span onclick="_expPreviewSection('signature')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Signaturside</span></div>
@@ -32839,11 +32886,16 @@ function _runExportPDF() {
     materialList: document.getElementById('exp-matlist')?.checked,
     pricing: document.getElementById('exp-pricing')?.checked,
     discount: parseFloat(document.getElementById('exp-discount')?.value) || 0,
+    groupDiscount: (() => { const o = {}; document.querySelectorAll('.exp-grp-disc').forEach(i => { const v = (i.value || '').trim(); if (v !== '') o[i.dataset.family] = Math.max(0, Math.min(100, parseFloat(v) || 0)); }); return o; })(),
     showDGDB: document.getElementById('exp-show-dgdb')?.checked,
     docs: document.getElementById('exp-docs')?.checked,
     signature: document.getElementById('exp-signature')?.checked,
     freeText: document.getElementById('exp-freetext')?.value?.trim() || ''
   };
+  // Lagre rabattene på prosjektet (per-prosjekt), så de er forhåndsutfylt neste gang.
+  if (!S.project) S.project = {};
+  S.project.pricing = { show: opts.pricing, global: opts.discount, groupDiscount: opts.groupDiscount, showDGDB: opts.showDGDB };
+  if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
   document.getElementById('export-dialog').style.display = 'none';
   exportPDF(opts);
 }
@@ -33783,7 +33835,6 @@ async function exportPDF(opts) {
     if (_pageStarted) _addPage(); else _pageStarted = true;
     doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(20, 40, 80);
     doc.text('Tilbud', M, y); y += 10;
-    const discount = (opts.discount || 0) / 100;
     doc.setFontSize(8); doc.setFont('helvetica','bold'); doc.setTextColor(80,90,110);
     const tcols = [M, M+48, M+72, M+95, M+118, M+142, M+164];
     doc.text('Produkt', tcols[0], y);
@@ -33802,6 +33853,8 @@ async function exportPDF(opts) {
       if (!prod) continue;
       const listPrice = prod.price_list || 0;
       const costPrice = prod.cost_price || 0;
+      const dPct = _resolveDiscountPct(prod, opts);   // rabatt per produkt (produkt>gruppe>lev>global)
+      const discount = dPct / 100;
       const qty = info.type.includes('Kabel') ? (info.totalLen/100) : info.count;
       const qtyLabel = info.type.includes('Kabel') ? qty.toFixed(1)+' m' : qty+' stk';
       const unitPrice = listPrice * (1 - discount);
@@ -33813,7 +33866,7 @@ async function exportPDF(opts) {
       doc.text((prod.name||'').substring(0,26), tcols[0], y);
       doc.text(qtyLabel, tcols[1], y);
       doc.text(listPrice > 0 ? listPrice.toFixed(0)+',-' : '—', tcols[2], y);
-      doc.text(discount > 0 ? '-'+Math.round(discount*100)+'%' : '—', tcols[3], y);
+      doc.text(dPct > 0 ? '-'+Math.round(dPct)+'%' : '—', tcols[3], y);
       doc.text(unitPrice > 0 ? unitPrice.toFixed(0)+',-' : '—', tcols[4], y);
       doc.text(lineTotal > 0 ? lineTotal.toFixed(0)+',-' : '—', tcols[5], y);
       if (opts.showDGDB && lineTotal > 0) doc.text(dg.toFixed(0)+'%', tcols[6], y);
@@ -33830,7 +33883,8 @@ async function exportPDF(opts) {
       doc.setFontSize(8); doc.setTextColor(100,110,130);
       const totalDG = ((totalSales - totalCost) / totalSales * 100);
       const totalDB = totalSales - totalCost;
-      doc.text(`DG: ${totalDG.toFixed(1)}% | DB: ${totalDB.toFixed(0)},- | Rabatt fra veil: -${Math.round((opts.discount||0))}%`, tcols[0], y);
+      const _hasGrp = opts.groupDiscount && Object.keys(opts.groupDiscount).length > 0;
+      doc.text(`DG: ${totalDG.toFixed(1)}% | DB: ${totalDB.toFixed(0)},- | Std. rabatt: -${Math.round((opts.discount||0))}%${_hasGrp ? ' (+ egne per gruppe)' : ''}`, tcols[0], y);
     }
   }
 
