@@ -6478,7 +6478,10 @@ function autoFillMatSerpentine(productId, opts) {
     : 0;
   const effectiveGapCm = Math.max(gapCm, evenGapCm);
   const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * effectiveGapCm;
-  const acrossCenter = (acrossMin + acrossMax) / 2;
+  // «Sentrer» (standard): kaldt felt deles likt på begge vegger. «Fra vegg»: blokka legges inntil
+  // margen på start-siden, alt kaldt felt havner på motsatt vegg.
+  const fromWall = !!(S.varmematte && S.varmematte.fromWall);
+  const acrossCenter = fromWall ? (acrossMin + totalW / 2) : (acrossMin + acrossMax) / 2;
   const alongCenter = (alongMin + alongMax) / 2;
 
   // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
@@ -6503,7 +6506,8 @@ function autoFillMatSerpentine(productId, opts) {
     num_runs: actualRuns,
     gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0,
-    _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW)   // kaldt felt på tvers mot FULL romvegg (inkl. margin), deles likt ved sentrert — som mockup-fasiten
+    _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
+    _fromWall: fromWall                                             // true → alt kaldt felt på én side; false → deles likt
   };
   S.mats.push(mat);
 
@@ -17122,6 +17126,27 @@ function _matChangeRuns(delta) {
   updateCtxBar(); render();
 }
 
+// Veksle Sentrer ↔ Fra vegg for valgt matte, og legg matten ut på nytt i samme rom/retning.
+// autoFillMatSerpentine gjør pushUndo selv (snapshot med gammel matte) → vi fjerner den gamle
+// ETTER at ny er lagt, slik at ett angre-steg gjenoppretter originalen.
+function _matToggleFromWall() {
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return;
+  S.varmematte = S.varmematte || {};
+  S.varmematte.fromWall = !S.varmematte.fromWall;
+  if (typeof _savePrefs === 'function') _savePrefs();
+  const oldId = mat.id, roomId = mat.roomId, productId = mat.productId;
+  const dir = (mat.rotation_deg === 90) ? 'h' : 'v';                 // behold samme retning
+  const prevDir = S.varmefolie ? S.varmefolie.direction : undefined;
+  S.ui.selectedRoomId = roomId;
+  if (S.varmefolie) S.varmefolie.direction = dir;
+  const nm = autoFillMatSerpentine(productId);
+  if (S.varmefolie) S.varmefolie.direction = prevDir;
+  if (nm) { S.mats = S.mats.filter(m => m.id !== oldId); S.ui.selectedMatId = nm.id; }
+  _invalidateMatCache();
+  renderSidebar(); updateCtxBar(); updateObjInfo(); render();   // sidebar må re-rendres etter at gammel matte er fjernet
+}
+
 function _clampMatToRoom(mat, room) {
   if (!room || !room.points) return;
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -25707,7 +25732,7 @@ function updateObjInfo() {
       const ccCm = _ccMm/10;
       const kabelM = (ccCm>0) ? (dekketM2*100/ccCm) : 0;  // kabellengde \u2248 areal / cc
       const retning = (mat.rotation_deg||0)===90 ? 'Liggende' : 'St\u00e5ende';
-      const koldSideCm = (mat._coldTotalCm!=null) ? mat._coldTotalCm/2 : null;  // sentrert \u2192 likt hver side
+      const koldSideCm = (mat._coldTotalCm!=null) ? mat._coldTotalCm/2 : null;  // rapporteres symmetrisk (coldS/2) som mockup-fasiten, uavhengig av Sentrer/Fra vegg
       let _supHtml='';
       if(mp?.article_no) _supHtml+=`<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(mp.article_no)}</span></div>`;
       if(mp?.supplier) _supHtml+=`<div class="soi-row"><span class="soi-k">Leverand\u00f8r</span><span class="soi-v">${esc(mp.supplier)}</span></div>`;
@@ -30272,6 +30297,12 @@ function _ctxBarItems() {
       : '';
     const matGapCm = Math.max(5, S.varmematte?.gapCm || 10);
     const matRoom = mat ? S.rooms.find(r => r.id === mat.roomId) : null;
+    // «Sentrer / Fra vegg»-toggle (kun innendørs matte — snø pakkes annerledes).
+    const _matSnow = (typeof _roomModuleType === 'function' && matRoom) ? _roomModuleType(matRoom.id) === 'snow'
+                   : ((typeof _isSnowModule === 'function') && _isSnowModule());
+    const fromWallHtml = _matSnow ? '' :
+      `<span class="tc-sep"></span>
+       <button class="snap-chip${S.varmematte?.fromWall ? ' on' : ''}" onclick="_matToggleFromWall()" title="Sentrer matten (kaldt felt likt på begge vegger) eller legg den inntil veggen (alt kaldt felt på én side)">${S.varmematte?.fromWall ? 'Fra vegg' : 'Sentrer'}</button>`;
     return `<span class="ctxbar-lbl">\u{1F7EB} Matte</span>
       <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Matte'} \u2014 ${lenInfo} \u00b7 ${watt} W</span>
       ${excessHtml}${runsHtml}
@@ -30279,6 +30310,7 @@ function _ctxBarItems() {
       <span style="font-size:11px;padding:0 2px;color:var(--dim)">${rotDeg}\u00b0</span>
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="openMatGapPanel(event)" title="Avstand mellom matter (min 5 cm)">\u2194 <span style="font-family:var(--font-mono)">${matGapCm}</span> cm</button>
+      ${fromWallHtml}
       <span class="tc-sep"></span>
       <button class="snap-chip${matRoom?.matDimSnap?' on':''}" id="chip-dim-matte" onclick="toggleMatDimSnap()" title="Vis avstander mellom matter og til vegg"><span class="snap-dot"></span>M\u00e5lsett Matte</button>
       <span class="tc-sep"></span>

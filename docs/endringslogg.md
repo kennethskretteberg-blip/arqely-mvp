@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: «Sentrer / Fra vegg»-toggle (Del 3b) — 2026-07-07
+
+Auto-utlegget sentrerte alltid matten (kaldt felt likt på begge vegger). La til mockupens **«Fra vegg»**-
+valg: blokka legges inntil margen på start-siden, alt kaldt felt havner på motsatt vegg. Ctxbar-chip
+(Sentrer ↔ Fra vegg, kun innendørs matte — snø pakkes annerledes) via `_matToggleFromWall`, som legger
+matten ut på nytt i samme rom og retning (`autoFillMatSerpentine` leser `S.varmematte.fromWall`;
+`acrossCenter` = margin-flush vs sentrert). Gammel matte fjernes etter at ny er lagt (ett angre-steg
+gjenoppretter originalen), og sidebaren re-rendres.
+
+Kaldt felt rapporteres fortsatt symmetrisk (`coldS/2`) i info-panelet, som mockup-fasiten. Verifisert:
+toggle-syklus Sentrer→Fra vegg→Sentrer beholder retning (rot 90) + antall baner (4), holder seg på ÉN
+matte, og y-posisjon flytter (−10 → −15 → −10); matten ligger visuelt flush mot vegg i «Fra vegg».
+
+**Fil:** romtegner.html (`autoFillMatSerpentine`, `_matToggleFromWall`, ctxbar-matteblokk).
+
+---
+
 ## Varmematte: rom-nivå resultat-labels for valgt matte (Del 3a) — 2026-07-07
 
 Info-panelet for en valgt matte viste villedende **én-bane**-tall (`Areal 1,20 m²`, `Effekt 72 W`) selv
