@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## PDF-materialliste: antall + fjern Lengde/Areal/Effekt — 2026-06-25
+
+Materiallisten i PDF-eksporten (`exportPDF`) skal kun være en oversikt over hvilke produkter
+som er medtatt. Kolonnene er endret fra Produkt·Lengde·Areal·Effekt·El.nr·Lev.art.nr til
+**Produkt · Antall · El.nr · Lev.art.nr** (bruker `info.count` fra aggregeringen, som allerede
+telte antall per produkt men ikke ble vist). «Total installert effekt»-linja i materialliste-
+delen er fjernet (samme tall vises i sammendraget/INSTALLERT EFFEKT). Rom-/spesifikasjonsdelen
+(lengde/areal/effekt per rom) er urørt. Verifisert: eksport fullfører uten feil på ekte prosjekt.
+
+**Fil:** romtegner.html (`exportPDF` — materialliste-seksjonen).
+
+---
+
 ## Trapp: tre fikser (fjern/legg til kabel, riktig antall strenger, side-visning) — 2026-06-25
 
 1. **Fjern/legg til varmekabel** (`67e16b6`+`1057df0` er 2/3; denne er 1+2): ny «Fjern varmekabel»-
