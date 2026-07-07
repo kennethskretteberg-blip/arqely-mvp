@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard platesystem (Varmecomfort) — Del 4+5: panel + materialliste + varsler — 2026-07-07
+
+Panel-inngang og materialliste for Aluboard, wiret inn i den delte produktvelgeren (`_upcRefreshResults`
+→ ny `aluboard`-gren). Modulen nås via «Aluboard»-produkttype-chip (rolle-gated: elektrobedrift +
+Varmecomfort ser den, Cenika ikke).
+
+- `_aluboardRenderPanel(container, roomId)`: **retning Vertikal/Horisontal** (eneste montørvalg) + «Fyll
+  rom automatisk». Resultater: fast CC 10, flateeffekt ≈80 W/m², kabelbehov, valgt kabel ≤ behov (m + EL),
+  effekt/motstand fra katalog.
+- **Del 4 (kabelvalg):** største katalog-lengde ≤ behov (aldri mer kabel enn nødvendig), siste streng
+  kappes (`restM`), og **kanttilfelle < 10 m** gir overskudds-varsel (grønn OK-boks ellers).
+- **Del 5 (materialliste):** rett plate (EL 5402067) + vendeplate (EL 5402066) med «del plate på to»-
+  telling, FLXHEAT-kabel (valgt m + EL), aluminiumstape (≈ (rette+vende)×1,2 m), byggplast «ved behov».
+
+Verifisert (360×300 vertikal): behov 87,9 m → 86,0 m EL 1006058 · 720 W · 73 Ω; 12 rette + 12 vende;
+overskudds-varsel ved 70×70 (behov 1,15 m < 10 m); chip gated (installatør+VC ja, Cenika nei). Andre
+moduler uendret.
+
+**Fil:** romtegner.html (`_upcRefreshResults`-gren, `_aluboardRenderPanel`, `_aluboardSetDir/FillRoom`).
+
+---
+
 ## Aluboard platesystem (Varmecomfort) — Del 3: plater fyller feltet — 2026-07-07
 
 Plater fyller HELE feltet i begge retninger: **vendeplater** (28 cm) i de to v-endene der kabelen snur,
