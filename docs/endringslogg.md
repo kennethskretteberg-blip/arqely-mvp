@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Leverandør-branding — Del 2: admin-panel (logo-opplasting + plassering) — 2026-07-07
+
+Ny «Logo & branding»-fane i org-admin-panelet (for alle orgs — leverandør + installatør; gated owner/admin +
+superadmin som før). Last opp / bytt / fjern logo (PNG/JPG/SVG, maks 2 MB) → `branding`-bucket
+(`<org_id>/logo.<ext>`, upsert) + `logo_path`/`logo_updated_at` på organizations. Forhåndsvisning viser
+**co-branding: org-logo ǀ «Varmeplan»** alltid sammen. Tre plasserings-toggler (Forside PDF / Alle sider PDF /
+I appen) lagres direkte på org-en.
+
+- `_orgAdmRenderBranding`, `_brandingUploadLogo`/`_brandingRemoveLogo`/`_brandingSetFlag`, `_orgLogoUrl`
+  (public URL + cache-bust på `logo_updated_at`).
+- `_loadOrgBranding(orgId)` henter logo-kolonnene **separat og tolerant** (try/catch) etter org-resolve, så
+  org-lasting ikke brekker om branding-migrasjonen ikke er kjørt ennå.
+- Kaller `_applyAppBranding()` (kommer Del 4) via `typeof`-guard.
+
+Verifisert: panel rendrer logo-boks + «Varmeplan» + «Last opp», 3 toggler reflekterer lagret state;
+alle handler-funksjoner definert. Nøytral fallback («Ingen logo ǀ Varmeplan»).
+
+**Fil:** romtegner.html (`_orgAdmRenderBranding` + branding-helpers, nav-item, `_loadUserOrg`).
+
+---
+
 ## Leverandør-branding — Del 1: DB + Storage (logo + plasserings-flagg) — 2026-07-07
 
 Første del av leverandør-/org-logo-branding. Kun DB/Storage — ingen app-kode ennå (så trygt å kjøre migrasjonen
