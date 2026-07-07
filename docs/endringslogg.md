@@ -4,6 +4,21 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## PDF-eksport: forhåndsvisning for dokument-seksjonene — 2026-06-25
+
+Utvider forrige (navn = preview, boks = hake) til de øvrige seksjonene: **Forside,
+Prosjektoversikt, Romoversikt, Materialliste, Dokumentasjon, Signaturside**. Radene er nå `<div>`
+med navn-`<span onclick=_expPreviewSection(kind)>` (klikk = forhåndsvisning) + avkrysningsboks som
+kun toggler. Ny `_expPreviewSection(kind)` rendrer en HTML-representasjon fra ekte prosjektdata:
+forside (navn/kunde/dato), prosjektoversikt (KPI: effekt/areal/rom/trapper), romoversikt (tabell),
+materialliste (Produkt/Antall/El.nr/Art.nr), dokumentasjon (antall dok. rom), signaturside (mal).
+Verifisert: alle 6 navn-klikk rendrer riktig preview uten å endre haken; boks-klikk toggler uten
+preview.
+
+**Fil:** romtegner.html (`_showExportDialog`, `_expPreviewSection`).
+
+---
+
 ## PDF-eksport: respekter rom-utvalg + skill preview fra hake — 2026-06-25
 
 1. **Bug:** deselekterte rom kom likevel med i PDF-en. `exportPDF` brukte
