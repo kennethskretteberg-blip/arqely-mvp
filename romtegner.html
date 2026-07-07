@@ -12716,6 +12716,51 @@ function selectCableByPower(roomId, familyProducts, targetWm2) {
   return { allValid, below, above, closest, desiredW, nettoM2, candidates };
 }
 
+// Generer gyldige kombinasjoner av 2 ULIKE kabler fra samme familie som summerer til
+// desiredW (±tol), med gyldig felles CC (netM2/Σlengde). Rangert LIKEST split forst, sa
+// naermest behov. Den balanserte (2×like) markeres `balanced:true` = anbefalt (★).
+// Del B — brukes av forslags-/produktpanelet (Del C).
+function _generateMixedCombos(familyProducts, desiredW, netM2, tol) {
+  tol = (tol != null) ? tol : 0.12;
+  const prods = (familyProducts || []).filter(p => p.cable_length_m > 0 && p.watt_per_m > 0);
+  if (prods.length < 1 || netM2 <= 0 || desiredW <= 0) return [];
+  const wOf = p => p.watt_per_m * p.cable_length_m;
+  const p0 = prods[0];
+  const minSp = (p0.min_spacing_mm || 50) / 10, maxSp = (p0.max_spacing_mm || 200) / 10;
+  const minBend = (p0.min_bend_radius_mm || 0) / 10;
+  const ccFor = (totalLen_m) => {
+    const cc = (netM2 / totalLen_m) * 100;
+    if (cc < minSp || cc > maxSp) return null;
+    if (minBend > 0 && cc / 2 < minBend) return null;
+    return cc;
+  };
+  const combos = [], seen = new Set();
+  for (let i = 0; i < prods.length; i++) {
+    for (let j = i; j < prods.length; j++) {
+      const a = prods[i], b = prods[j];
+      const totalW = wOf(a) + wOf(b);
+      const dev = Math.abs(totalW - desiredW);
+      if (dev > tol * desiredW) continue;
+      const cc = ccFor(a.cable_length_m + b.cable_length_m);
+      if (cc == null) continue;
+      const key = [Math.round(wOf(a)), Math.round(wOf(b))].sort((x, y) => x - y).join('+');
+      if (seen.has(key)) continue; seen.add(key);
+      combos.push({
+        products: [a, b], productIds: [a.id, b.id], cableCount: 2,
+        totalW: Math.round(totalW), cc_cm: Math.round(cc * 10) / 10,
+        wm2: Math.round(totalW / netM2), imbalance: Math.abs(wOf(a) - wOf(b)),
+        deviation: dev, balanced: (i === j), valid: true,
+        label: `${Math.round(wOf(a))} W + ${Math.round(wOf(b))} W`
+      });
+    }
+  }
+  // Rangér NÆRMEST behov først (så alle eksakt-treff samles øverst med felles CC), deretter
+  // LIKEST split. Gir 1500+1500 (★), 1400+1600, 1300+1700 … før under-/over-effekt-varianter.
+  combos.sort((x, y) => x.deviation - y.deviation || x.imbalance - y.imbalance);
+  if (combos.length) combos[0].recommended = true;   // balansert eksakt-treff = anbefalt
+  return combos;
+}
+
 /**
  * Select multi-cable configuration when single cable cannot cover the room.
  * Strategy: 2× identical cable, each covering half the room.
@@ -12790,12 +12835,17 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
   const perpMin = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
   const perpMax = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
 
+  // Del B: alternative kombinasjoner av ULIKE effekter som summerer til behovet, rangert
+  // likest-split forst (2×like = balansert ★, deretter 1300+1700, 1400+1600 …).
+  const mixedCombos = _generateMixedCombos(familyProducts, desiredW, nettoM2, TOL);
+
   return {
     strategy: 'multi', cableCount: best.cableCount, desiredW, nettoM2,
     direction: dir,
     singleResult,
     cables: byN.slice(0, 5),
     bestMulti: best,
+    mixedCombos,
     zoneSplit: { perpMin, perpMax }
   };
 }

@@ -19,9 +19,16 @@ InFloor 10T: anbefalt 2×1500, men ved lagermangel 1300+1700.
 - Verifisert (30 m² rom, InFloor 10T): 130+170 → soner **43,3 %/56,7 %**, felles CC 10 cm, 3000 W;
   2×150 → like soner, CC 10 cm (ingen regresjon).
 
-### Del B–D 🚧 kommer
-Forslag med alt. kombinasjoner (★ N×like først), UI med valgbare alt. + manuell komponering,
-validering (sum±tol, gyldig CC, samme familie).
+### Del B — Forslag: alternative ulike-kombinasjoner ✅
+- Ny `_generateMixedCombos(familyProducts, desiredW, netM2, tol)`: alle gyldige 2-kabel-kombinasjoner
+  fra familien som summerer til behovet (±tol), med gyldig felles CC (`netM2/Σlengde`). Rangert
+  **nærmest behov først, så likest split** → eksakt-treff samles øverst med felles CC. Balansert
+  eksakt-treff får `recommended:true` (★). Returneres som `mixedCombos` fra `selectMultiCables`.
+- Verifisert (3000 W): 1500+1500 (★) · 1400+1600 · 1300+1700 · 1200+1800 · 1000+2000 — alle CC 10 cm,
+  deretter nær-treff (2900/3100 …) under.
+
+### Del C–D 🚧 kommer
+UI med valgbare alternativer + manuell komponering; validering (sum±tol, gyldig CC, samme familie).
 
 ---
 
