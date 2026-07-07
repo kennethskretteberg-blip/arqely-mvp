@@ -53,9 +53,9 @@ alter table heating_products add column if not exists max_temp_c        numeric;
 --    Enkeltvis eller via Produktimport. Eksempel for de to platene:
 with cat as (select id from product_categories where name = 'Aluboard platesystem' limit 1)
 insert into heating_products (category_id, name, product_family, supplier, el_no, article_no, active,
-                              plate_role, plate_width_mm, plate_length_mm, plate_area_m2, available_contexts)
+                              plate_role, plate_width_mm, plate_length_mm, plate_area_m2)
 select cat.id, v.name, 'Aluboard', 'Varmecomfort', v.el, v.el, true,
-       v.role, v.w, v.l, v.area, array['indoor']
+       v.role, v.w, v.l, v.area
 from cat, (values
   ('Aluboard rett plate 60×120', '5402067', 'straight', 600, 1200, 0.72),
   ('Aluboard vendeplate 28×60',  '5402066', 'turn',     600,  280, 0.168)
@@ -67,9 +67,9 @@ where not exists (select 1 from heating_products hp where hp.el_no = v.el);
 with cat as (select id from product_categories where name = 'Aluboard platesystem' limit 1)
 insert into heating_products (category_id, name, product_family, supplier, el_no, article_no, active,
                               cable_length_m, total_effect_w, watt_per_m, voltage, nominal_ohm,
-                              aluboard_cc_mm, min_bend_radius_mm, max_temp_c, available_contexts)
+                              aluboard_cc_mm, min_bend_radius_mm, max_temp_c)
 select cat.id, 'FLXHEAT 3mm 8W/m ' || v.w || 'W ' || v.m || 'm', 'FLXHEAT 8W/m', 'Varmecomfort',
-       v.el, v.el, true, v.m, v.w, 8, 230, v.ohm, 100, 36, 90, array['indoor']
+       v.el, v.el, true, v.m, v.w, 8, 230, v.ohm, 100, 36, 90
 from cat, (values
   (10.0,   80, '1006049', 660.0),
   (15.9,  130, '1006050', 413.0),
