@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Innendørs multi-kabel: bevar ULIKE kabler ved re-layout — 2026-06-25
+
+**Bug:** manuelt 1300 W + 1700 W (InFloor 10T) → den lengste kabelen la seg feil (ekstra bue),
+soner ble LIK-store.
+
+**Funn (bekreftet):** selve initial-plasseringen er allerede proporsjonal (forrige økt): 33,4 m²,
+CC 11,1 cm, soner 56,7 %/43,3 %, ingen overflyt. Bug-en lå i **re-layout-stiene**:
+`_cableFlipDirection`, `_reapplyCableDirection` og `_cableToggleMultiMode` re-utla gruppa via
+`autoFillMultiCable(roomId, cable.productId, group.length)` = ett produkt × antall = N IDENTISKE
+→ en mikset gruppe ble revertert til like soner (begge kabler = valgt produkt) → avvikende kabel
+overflyter (buen i bildet).
+
+**Fiks:** ny `_relayoutCableGroup(roomId, group, cable, dir)` som bevarer per-kabel-produktene for
+MIKSEDE grupper (`_autoFillMixedCables` → proporsjonale soner, felles CC); like grupper beholder
+N×like/korridor. Brukt i flip + reapply. Korridor-modus blokkeres for miksede grupper (krever like).
+
+**Verifisert (canvas + tall):** flip [170,130]→[170,130] (56,7/43,3, retning snudd), reapply likeså,
+N×like uendret (50/50), ren serpentin uten bue.
+
+**Filer:** romtegner.html (`_relayoutCableGroup`/`_groupIsMixed`/`_groupProductIdsOrdered`,
+`_cableFlipDirection`, `_reapplyCableDirection`, `_cableToggleMultiMode`).
+
+---
+
 ## Innendørs: ULIKE kabler i samme rom (soner ∝ effekt) — 2026-06-25
 
 Mål: tillate 2+ ulike kabler (samme familie) i ett rom, ikke bare N×like. F.eks. 3000 W med
