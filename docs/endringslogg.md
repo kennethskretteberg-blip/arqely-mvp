@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## EcoMat matte — Del 3: eksakt mattelengde (N−1 like + kortere siste) — 2026-07-08
+
+Auto-utlegget legger nå ut HELE rullelengden: **N−1 like bredder** (`Lc = ceil((total/N)/raster)·raster`) +
+**1 kortere siste** (`last = total − (N−1)·Lc`) → summen = nøyaktig mattelengden. Tidligere ble N like
+bredder snappet NED → for lite (f.eks. 9,6 av 10 m).
+
+- **Datamodell:** nytt nullbart felt **`last_run_length_cm`** på matte-objektet (minst-invasivt; beholder
+  ubrutt kabel — ikke eget matte-objekt). `num_runs` = N.
+- **drawMats:** siste bane tegnes kortere (rektangel + serpentin med færre strenger), forankret i skjøt-enden
+  (up-bane → bunn, down-bane → topp) så første streng flukter; kort ende = kald sone.
+- **Kalkyler:** ny `_matLaidLengthCm(mat)` = `(N−1)·length_cm + last` brukt i areal/kabel/effekt/materialliste
+  (`_computeRoomStats`, `_matRatedW`, PDF- + Excel-matList, info-panel, ctxbar, overskudds-varsel).
+
+Verifisert (300×220, EcoMat 60T 0.5×10m, raster 24): **3 × 2,64 m + 1 × 2,08 m = 10,00 m**; areal 5,0 m²;
+ctxbar «10,0/10,0m»; ingen overskudds-varsel. Regresjon: matte uten `last_run_length_cm` (manuell/snø/normal)
+uendret. Buesving/flukt-skjøt/ingen Y-splitt intakt.
+
+**Fil:** romtegner.html (`autoFillMatSerpentine`, `drawMats`, `_matLaidLengthCm` + kalkyle-steder).
+
+---
+
 ## EcoMat matte — Del 2: kaldskjøt- + ende-markør — 2026-07-08
 
 I `drawMats` fanges kabelens **startpunkt** (første `moveTo`) + retning og **endepunkt** (`pen`). Etter

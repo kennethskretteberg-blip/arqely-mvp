@@ -3815,7 +3815,7 @@ function _computeRoomStats(room) {
       continue;
     }
     const n = mat.num_runs || 1;
-    matAreaM2 += (n * mat.width_cm * mat.length_cm) / 10000; // coverage = laid geometry
+    matAreaM2 += (mat.width_cm * _matLaidLengthCm(mat)) / 10000; // coverage = laid geometry (eksakt, inkl. kortere siste)
     matW += _matRatedW(mp, mat);                              // power = product rated per physical mat
   }
   let plateW = 0, plateAreaM2 = 0, plateCount = 0;
@@ -5805,7 +5805,7 @@ function _snowMatSummaryHtml(roomId) {
     if (!byProd[m.productId]) byProd[m.productId] = { count: 0, colors: [] };
     byProd[m.productId].count++;
     byProd[m.productId].colors.push(_matColor(m) || '#3080e0');
-    areaCm2 += (m.num_runs || 1) * m.width_cm * m.length_cm;
+    areaCm2 += m.width_cm * _matLaidLengthCm(m);
     ratedW += _matRatedW(HEATING_PRODUCTS.find(p => p.id === m.productId), m);
   }
   const room = S.rooms.find(r => r.id === roomId);
@@ -6154,14 +6154,21 @@ function _matColor(mat) {
 // Rated power of ONE physical mat = the product's nominal effect (fixed snow mats), NOT the
 // laid geometry (a partly-folded remainder still consumes the whole product). Falls back to
 // watt_per_m2 × nominal area, then to placed geometry for cuttable mats without a nominal area.
+// Faktisk utlagt lengde-ekvivalent for en matte: (N−1) fulle bredder + evt. kortere siste bredde.
+// Brukes til areal/kabellengde/materialliste så de reflekterer den EKSAKTE mattelengden (Del 3).
+function _matLaidLengthCm(mat) {
+  if (!mat) return 0;
+  const n = mat.num_runs || 1;
+  const last = (mat.last_run_length_cm != null) ? mat.last_run_length_cm : mat.length_cm;
+  return (n - 1) * mat.length_cm + last;
+}
 function _matRatedW(prod, mat) {
   // «Kun label»-matte (Hurtig prosjektering) bærer ferdig beregnet ratet effekt for romdekning.
   if (mat && mat.labelOnly && mat._loW != null) return Math.round(mat._loW);
   if (!prod) return 0;
   if (prod.total_effect_w) return prod.total_effect_w;
   if (prod.watt_per_m2 && prod.mat_area_m2) return Math.round(prod.watt_per_m2 * prod.mat_area_m2);
-  const n = (mat && mat.num_runs) || 1;
-  const areaM2 = mat ? (n * mat.width_cm * mat.length_cm) / 10000 : 0;
+  const areaM2 = mat ? (mat.width_cm * _matLaidLengthCm(mat)) / 10000 : 0;
   return Math.round((prod.watt_per_m2 || 0) * areaM2);
 }
 
@@ -6547,14 +6554,19 @@ function autoFillMatSerpentine(productId, opts) {
   const totalLengthCm = totalLenMm ? totalLenMm / 10 : null;
   const isFixedLength = totalLengthCm !== null;
 
-  // EcoMat: divide the WHOLE roll into N equal widths → each width-length = total ÷ N, snapped DOWN
-  // to the cut interval (±tolerance absorbs the remainder). Bounded by the usable along-span.
+  // EcoMat: legg ut HELE rullelengden — verken mer eller mindre. N−1 LIKE bredder (rundet OPP til raster)
+  // + 1 KORTERE siste (= resten) → summen = nøyaktig mattelengden. Den korte siste er en egen run-lengde
+  // (last_run_length_cm), forankret i skjøt-enden så første streng flukter.
+  let matLastRunLen = null;
   if (prod.mat_equal_widths && isFixedLength) {
     const N = maxRuns;
-    let rl = cutCm > 0 ? Math.floor((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);
-    if (rl > alongSpan) rl = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;
-    if (rl < minLenCm) rl = Math.min(minLenCm, totalLengthCm / N, alongSpan);
-    runLengthCm = rl;
+    let Lc = cutCm > 0 ? Math.ceil((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);   // like bredder, rundet OPP
+    if (Lc > alongSpan) Lc = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;       // maks romlengde
+    if (Lc < minLenCm) Lc = Math.min(minLenCm, alongSpan);
+    let lastLen = totalLengthCm - (N - 1) * Lc;                                                    // resten
+    while (lastLen <= 0 && Lc - cutCm >= minLenCm - 0.01) { Lc -= cutCm; lastLen = totalLengthCm - (N - 1) * Lc; }
+    runLengthCm = Lc;
+    matLastRunLen = (lastLen > 0.5 && lastLen < Lc - 0.5) ? Math.round(lastLen * 10) / 10 : null;  // kun hvis genuint kortere
   }
 
   // Cap each run to the mat's physical length. Without this a "0.5×2m"
@@ -6570,7 +6582,8 @@ function autoFillMatSerpentine(productId, opts) {
   // For fixed-length products, runs are capped at totalLengthCm/runLengthCm
   // so the order doesn't exceed what the user actually has.
   let actualRuns = maxRuns;
-  if (isFixedLength) {
+  if (isFixedLength && !(prod.mat_equal_widths && matLastRunLen != null)) {
+    // equal_widths med kortere siste bruker ALLTID N (siste er kortere, ikke droppet).
     const neededRuns = Math.floor(totalLengthCm / runLengthCm);
     actualRuns = Math.min(maxRuns, neededRuns);
   }
@@ -6616,6 +6629,7 @@ function autoFillMatSerpentine(productId, opts) {
     width_cm: matWidthCm,
     length_cm: runLengthCm,
     num_runs: actualRuns,
+    last_run_length_cm: matLastRunLen,   // kortere siste bredde (null = alle like) — for eksakt mattelengde
     gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0,
     _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
@@ -6632,7 +6646,7 @@ function autoFillMatSerpentine(productId, opts) {
   }
   renderSidebar(); updateCtxBar(); render();
 
-  const usedLengthCm = actualRuns * runLengthCm;
+  const usedLengthCm = _matLaidLengthCm(mat);   // eksakt utlagt (inkl. kortere siste bredde)
   if (isFixedLength) {
     const excessCm = totalLengthCm - usedLengthCm;
     if (excessCm > 10) {
@@ -15745,14 +15759,22 @@ function drawMats() {
         : _lc('rgba(40, 100, 200, 0.55)', 'rgba(80, 160, 240, 0.5)');
     }
 
-    // Draw each run as a separate rectangle
+    // Draw each run as a separate rectangle. Siste bredde kan være KORTERE (last_run_length_cm),
+    // forankret i skjøt-enden (up-bane → bunn, down-bane → topp).
+    const _upLast = (numRuns - 1) % 2 === 0;
     for (let r = 0; r < numRuns; r++) {
       const runCenterX = -htw + hw + r * (mat.width_cm + gapCm) * sc;
+      let ry0 = -hl, rh = hl * 2;
+      if (r === numRuns - 1 && mat.last_run_length_cm) {
+        const lastPx = mat.last_run_length_cm * sc;
+        ry0 = _upLast ? (hl - lastPx) : -hl;
+        rh = lastPx;
+      }
       ctx.fillStyle = fillColor;
-      ctx.fillRect(runCenterX - hw, -hl, hw * 2, hl * 2);
+      ctx.fillRect(runCenterX - hw, ry0, hw * 2, rh);
       ctx.strokeStyle = strokeColor;
       ctx.lineWidth = isSel ? 2 : 1.5;
-      ctx.strokeRect(runCenterX - hw, -hl, hw * 2, hl * 2);
+      ctx.strokeRect(runCenterX - hw, ry0, hw * 2, rh);
     }
 
     // Serpentine cable pattern inside each run + U-turn arcs between runs
@@ -15762,6 +15784,10 @@ function drawMats() {
       const minLenMgn = 2.0;
       const usableLen = mat.length_cm - 2 * minLenMgn;
       const nCableRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
+      // Kortere siste bredde → færre strenger i den banen (forankret i skjøt-enden via k-rekkefølgen).
+      const nCableRunsLast = mat.last_run_length_cm
+        ? Math.max(1, Math.min(nCableRuns, Math.floor((mat.last_run_length_cm - 2 * minLenMgn) / ccCm) + 1))
+        : nCableRuns;
       const totalSpan = (nCableRuns - 1) * ccCm;
       const edgeMgn = (mat.length_cm - totalSpan) / 2;
       const ccPx = ccCm * sc;
@@ -15787,7 +15813,8 @@ function drawMats() {
         const cxr = -htw + hw + r * (mat.width_cm + gapCm) * sc;
         const loX = cxr - hw + insetPx, hiX = cxr + hw - insetPx;      // strengens tverr-endepunkter
         const up = (vi % 2 === 0);                                     // vekslende skann-retning per bane
-        for (let jj = 0; jj < nCableRuns; jj++) {
+        const runsThisBane = (vi === numRuns - 1) ? nCableRunsLast : nCableRuns;
+        for (let jj = 0; jj < runsThisBane; jj++) {
           const k = up ? (nCableRuns - 1 - jj) : jj;
           const y = yOf(k);
           const startHi = (jj % 2 === 1);                              // første streng starter VENSTRE → første sving på HØYRE
@@ -26290,7 +26317,7 @@ function updateObjInfo() {
       const wm2=mp?.watt_per_m2||0;
       const nBaner=mat.num_runs||1;
       const perBaneM2=mat.width_cm*mat.length_cm/10000;   // ett bane
-      const dekketM2=perBaneM2*nBaner;                    // hele matten
+      const dekketM2=mat.width_cm*_matLaidLengthCm(mat)/10000;  // hele matten (eksakt, inkl. kortere siste bredde)
       const watt=Math.round(wm2*dekketM2);                // total effekt
       const _ccMm = mp?.mat_cc_mm || 0;
       const _cutMm = mp?.mat_cut_interval_mm || 0;
@@ -30864,7 +30891,7 @@ function _ctxBarItems() {
     // Excess calculation for fixed-length products
     const _tlMm = _matTotalLengthMm(prod);
     const totalLenCm = _tlMm ? _tlMm / 10 : null;
-    const usedLenCm = mat ? nR * mat.length_cm : 0;
+    const usedLenCm = mat ? _matLaidLengthCm(mat) : 0;
     const usedM = (usedLenCm / 100).toFixed(1);
     const totalM = totalLenCm ? (totalLenCm / 100).toFixed(1) : null;
     const excessCm = totalLenCm ? totalLenCm - usedLenCm : 0;
@@ -33562,7 +33589,7 @@ async function exportPDF(opts) {
     }
     for (const m of _matsForRoom(room.id)) {
       const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
-      const a = (m.width_cm * (m.num_runs || 1) * m.length_cm) / 10000;
+      const a = (m.width_cm * _matLaidLengthCm(m)) / 10000;
       add(m.productId, (p?.watt_per_m2 || 0) * a);
     }
     for (const pl of _platesForRoom(room.id)) {
@@ -33905,7 +33932,7 @@ async function exportPDF(opts) {
       const mp = HEATING_PRODUCTS.find(pr => pr.id === k);
       if (!matByProd[k]) matByProd[k] = { count: 0, totalLen: 0, totalArea: 0, watt: 0 };
       const nRuns = m.num_runs || 1;
-      const totLen = nRuns * m.length_cm;
+      const totLen = _matLaidLengthCm(m);
       matByProd[k].count++;
       matByProd[k].totalLen += totLen;
       matByProd[k].totalArea += (m.width_cm * totLen) / 10000;
@@ -34165,8 +34192,8 @@ async function exportPDF(opts) {
     // — total cable length is num_runs × length_cm, covered area uses the same
     // multiplier so area + watt reflect the full mat.
     const nRuns = m.num_runs || 1;
-    matList[k].totalLen += nRuns * m.length_cm;
-    const matAreaM2 = (m.width_cm * nRuns * m.length_cm) / 10000;
+    matList[k].totalLen += _matLaidLengthCm(m);
+    const matAreaM2 = (m.width_cm * _matLaidLengthCm(m)) / 10000;
     matList[k].areaM2 += matAreaM2;
     const p = HEATING_PRODUCTS.find(pr => pr.id === k);
     matList[k].watt += _matRatedW(p, m); // rated power per physical mat (not laid geometry)
