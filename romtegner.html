@@ -5525,6 +5525,11 @@ function _upcRenderCableResults(container, familyName, categoryId, roomId) {
     html += '</div>';
   }
 
+  // Manuell komponering (Del C.2): tilgjengelig nar multi-kabel er relevant.
+  if (multiResult && multiResult.strategy === 'multi' && multiResult.bestMulti) {
+    html += `<button onclick="_openMixComposer(${roomId}, ${multiResult.bestMulti.product.id})" style="display:flex;align-items:center;gap:6px;width:100%;padding:7px 9px;margin-top:6px;border:1px dashed var(--border);border-radius:8px;background:var(--surface);cursor:pointer;text-align:left;font-family:inherit;color:var(--accent);font-size:11px;font-weight:600">＋ Komponer ulike kabler selv…</button>`;
+  }
+
   // Extra valid options (collapsed)
   const extras = result.allValid?.filter(c => !picks.find(p => p.product.id === c.product.id)).slice(0, 5) || [];
   if (extras.length > 0) {
@@ -5573,12 +5578,12 @@ function _upcPlaceCable(productId, mode, nCables) {
 }
 
 // Del C: plasser en kombinasjon av ULIKE kabler (soner ∝ effekt). idsCsv = produkt-IDer
-// kommaseparert i onsket sone-rekkefolge.
-function _placeMixedCables(idsCsv) {
+// kommaseparert i onsket sone-rekkefolge. reason = valgfri arsak (f.eks. "lagermangel").
+function _placeMixedCables(idsCsv, reason) {
   const roomId = S.ui.selectedRoomId;
-  if (!roomId) return;
+  if (!roomId) return false;
   const productIds = String(idsCsv).split(',').map(s => +s).filter(Boolean);
-  if (productIds.length < 2) return;
+  if (productIds.length < 2) return false;
   pushUndo();
   S.cables = S.cables.filter(c => c.roomId !== roomId);
   S.strips = S.strips.filter(s => s.roomId !== roomId);
@@ -5586,13 +5591,112 @@ function _placeMixedCables(idsCsv) {
   S.plates = S.plates.filter(p => p.roomId !== roomId);
   const cables = _autoFillMixedCables(roomId, productIds);
   if (cables && cables.length >= 2) {
+    if (reason) cables.forEach(c => c.mixReason = reason);
     S.cables.push(...cables);
     S.ui.selectedCableId = cables[0].id;
-  } else if (typeof _showToast === 'function') {
-    _showToast('Kunne ikke legge ut disse kablene i rommet (ugyldig C-C eller form).');
+    _invalidateMatCache();
+    renderSidebar(); updateCtxBar(); render();
+    return true;
   }
+  if (typeof _showToast === 'function') _showToast('Kunne ikke legge ut disse kablene i rommet (ugyldig C-C eller form).');
   _invalidateMatCache();
   renderSidebar(); updateCtxBar(); render();
+  return false;
+}
+
+// ── Manuell komponering av ULIKE kabler (Del C.2 + D) ──
+let _mixComposer = null;
+const _mixFamOf = p => p.product_family || p.name.split(' ').slice(0, 2).join(' ');
+
+function _openMixComposer(roomId, seedProductId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  let seed = HEATING_PRODUCTS.find(p => p.id === +seedProductId) || null;
+  if (!seed) { const c = S.cables.find(c => c.roomId === roomId); seed = c && HEATING_PRODUCTS.find(x => x.id === c.productId); }
+  if (!seed) return;
+  const fam = _mixFamOf(seed), volt = seed.voltage || 230;
+  const familyProducts = HEATING_PRODUCTS.filter(p => _mixFamOf(p) === fam && (p.voltage || 230) === volt && p.cable_length_m > 0 && p.watt_per_m > 0)
+    .sort((a, b) => (a.watt_per_m * a.cable_length_m) - (b.watt_per_m * b.cable_length_m));
+  if (familyProducts.length < 1) return;
+  const netM2 = roomAreas(room).net / 10000;
+  const tw = room.targetWm2 || (S.varmekabel && S.varmekabel.targetWm2) || 100;
+  const desiredW = netM2 * tw;
+  const half = desiredW / 2;
+  const nearest = familyProducts.reduce((p, c) => Math.abs(c.watt_per_m * c.cable_length_m - half) < Math.abs(p.watt_per_m * p.cable_length_m - half) ? c : p);
+  _mixComposer = { roomId, fam, volt, familyProducts, netM2, desiredW, rows: [nearest.id, nearest.id], reason: '' };
+  _renderMixComposer();
+}
+
+function _mixComposerStats() {
+  const mc = _mixComposer;
+  const rows = mc.rows.map(id => mc.familyProducts.find(p => p.id === id)).filter(Boolean);
+  const wOf = p => p.watt_per_m * p.cable_length_m;
+  const sumW = rows.reduce((s, p) => s + wOf(p), 0);
+  const totalLen = rows.reduce((s, p) => s + p.cable_length_m, 0);
+  const p0 = mc.familyProducts[0];
+  const minSp = (p0.min_spacing_mm || 50) / 10, maxSp = (p0.max_spacing_mm || 200) / 10, minBend = (p0.min_bend_radius_mm || 0) / 10;
+  const cc = totalLen > 0 ? (mc.netM2 / totalLen) * 100 : 0;
+  const ccOk = totalLen > 0 && cc >= minSp && cc <= maxSp && !(minBend > 0 && cc / 2 < minBend);
+  const dev = Math.abs(sumW - mc.desiredW);
+  const sumOk = mc.desiredW > 0 && dev <= 0.12 * mc.desiredW;
+  return { rows, sumW, totalLen, cc, ccOk, sumOk, minSp, maxSp, valid: rows.length >= 2 && ccOk && sumOk };
+}
+
+function _renderMixComposer() {
+  document.getElementById('mixcomp-bg')?.remove();
+  const mc = _mixComposer; if (!mc) return;
+  const st = _mixComposerStats();
+  const wOf = p => Math.round(p.watt_per_m * p.cable_length_m);
+  const opt = (selId) => mc.familyProducts.map(p => `<option value="${p.id}"${p.id === selId ? ' selected' : ''}>${wOf(p)} W (${p.cable_length_m} m)</option>`).join('');
+  const rowsHtml = mc.rows.map((id, i) => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <span style="font-size:11px;font-weight:700;color:var(--accent);min-width:26px">K${i + 1}</span>
+      <select onchange="_mixComposerSetRow(${i},this.value)" style="flex:1;height:36px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px;padding:0 8px">${opt(id)}</select>
+      <button title="Fjern" onclick="_mixComposerRemoveRow(${i})"${mc.rows.length <= 2 ? ' disabled style="opacity:.35;cursor:not-allowed;background:none;border:none;color:var(--muted);font-size:15px;padding:2px 6px"' : ' style="background:none;border:none;color:#e0563f;cursor:pointer;font-size:15px;padding:2px 6px"'}>✕</button>
+    </div>`).join('');
+  const sumColor = st.sumOk ? '#22c55e' : '#e0563f';
+  const ccColor = st.ccOk ? 'var(--text)' : '#e0563f';
+  const pill = st.valid
+    ? '<span style="background:rgba(34,197,94,.15);color:#22c55e;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px">✓ Gyldig</span>'
+    : '<span style="background:rgba(224,86,63,.15);color:#e0563f;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px">⚠ Ugyldig</span>';
+  const inp = 'width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px;box-sizing:border-box';
+  const html = `<div class="modal-backdrop" id="mixcomp-bg" onclick="if(event.target===this)this.remove()">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px 22px;width:min(460px,94vw);max-height:90vh;overflow-y:auto;box-shadow:0 24px 64px rgba(0,0,0,.4)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <div style="font-size:16px;font-weight:800;color:var(--text);flex:1">Komponer kabler — ${_esc(mc.fam)} ${mc.volt} V</div>
+        <button onclick="document.getElementById('mixcomp-bg').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Behov: <b style="color:var(--text)">${Math.round(mc.desiredW)} W</b> · ${mc.netM2.toFixed(1)} m² · samme familie ⇒ soner ∝ effekt, felles C-C</div>
+      ${rowsHtml}
+      <button onclick="_mixComposerAddRow()" style="font-size:12px;font-weight:600;color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border:none;border-radius:8px;padding:7px 11px;cursor:pointer;margin-bottom:12px">＋ Legg til kabel</button>
+      <div style="border-top:1px solid var(--border);padding-top:10px;margin-bottom:10px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Sum effekt</span><b style="color:${sumColor}">${Math.round(st.sumW)} W</b></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span>Felles C-C</span><b style="color:${ccColor}">${st.totalLen > 0 ? st.cc.toFixed(1) + ' cm' : '—'}</b></div>
+        <div style="display:flex;justify-content:space-between;align-items:center"><span>Status</span>${pill}</div>
+        ${!st.ccOk && st.totalLen > 0 ? `<div style="font-size:11px;color:#e0563f;margin-top:4px">C-C utenfor gyldig område (${st.minSp}–${st.maxSp} cm) — endre effekter.</div>` : ''}
+        ${!st.sumOk ? `<div style="font-size:11px;color:#e0563f;margin-top:4px">Sum avviker >12 % fra behovet (${Math.round(mc.desiredW)} W).</div>` : ''}
+      </div>
+      <div style="margin-bottom:12px"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">Årsak (valgfritt)</label>
+        <input id="mixcomp-reason" type="text" value="${_esc(mc.reason || '')}" placeholder="F.eks. lagermangel" oninput="_mixComposer.reason=this.value" style="${inp}"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="document.getElementById('mixcomp-bg').remove()" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Avbryt</button>
+        <button onclick="_mixComposerApply()"${st.valid ? '' : ' disabled'} style="padding:8px 18px;border-radius:8px;border:none;background:${st.valid ? 'var(--accent)' : 'var(--surface2)'};color:${st.valid ? '#0d0e10' : 'var(--dim)'};font-size:13px;font-weight:700;cursor:${st.valid ? 'pointer' : 'not-allowed'}">Plasser i rom</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  const bg = document.getElementById('mixcomp-bg');
+  Object.assign(bg.style, { position: 'fixed', inset: '0', zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.45)' });
+}
+
+function _mixComposerSetRow(i, productId) { if (_mixComposer) { _mixComposer.rows[i] = +productId; _renderMixComposer(); } }
+function _mixComposerAddRow() { if (_mixComposer) { _mixComposer.rows.push(_mixComposer.rows[_mixComposer.rows.length - 1]); _renderMixComposer(); } }
+function _mixComposerRemoveRow(i) { if (_mixComposer && _mixComposer.rows.length > 2) { _mixComposer.rows.splice(i, 1); _renderMixComposer(); } }
+function _mixComposerApply() {
+  if (!_mixComposer) return;
+  const st = _mixComposerStats();
+  if (!st.valid) return;
+  const ok = _placeMixedCables(_mixComposer.rows.join(','), _mixComposer.reason);
+  if (ok) { document.getElementById('mixcomp-bg')?.remove(); _mixComposer = null; }
 }
 
 // Material list for the mats currently placed in a room: "N× product + M× product, dekning %".

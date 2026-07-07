@@ -33,12 +33,23 @@ InFloor 10T: anbefalt 2×1500, men ved lagermangel 1300+1700.
   → `_autoFillMixedCables` legger ut proporsjonale soner (K1/K2, felles CC).
 - Verifisert visuelt: 130+170 i ett rom → to soner (oransje K1 1300 W / blå K2 1700 W), felles CC
   10 cm, riktige produkter/EL. N×like og enkeltkabel uendret.
-- 🚧 Gjenstår: **manuell komponering** (legg til/fjern kabelrader, produkt/effekt per rad, løpende
-  sum vs behov, «årsak»-felt) og validerings-panel (Del D). Validering er delvis dekket alt:
-  `_generateMixedCombos`/`_autoFillMixedCables` gir kun gyldige (samme familie/W/m, gyldig CC, ±tol).
+### Del C.2 — Manuell komponering ✅
+- «＋ Komponer ulike kabler selv…» i kabel-panelet åpner en modal (`_openMixComposer`/
+  `_renderMixComposer`): kabelrader (K1/K2/…) med produkt/effekt-dropdown per rad fra familien,
+  «＋ Legg til kabel», fjern per rad. Valgfritt «Årsak»-felt (f.eks. lagermangel), lagres på
+  kablene (`mixReason`). «Plasser i rom» → `_placeMixedCables`.
 
-### Del D 🚧 kommer
-Validerings-panel for manuell komponering (tydelig avvik-flagg).
+### Del D — Validering ✅
+- `_mixComposerStats`: løpende **Sum effekt** vs behov, **Felles C-C**, og **Gyldig/Ugyldig**-pill.
+  Avvik flagges tydelig: sum >12 % fra behov, eller C-C utenfor produktets område. «Plasser»
+  deaktiveres når ugyldig. (`_generateMixedCombos`/`_autoFillMixedCables` slipper uansett kun
+  gyldige gjennom: samme familie/W/m, gyldig CC, ±tol.)
+- Verifisert: 130+170 → Sum 3000 W, CC 10 cm, ✓ Gyldig; 200+200 → 4000 W, ⚠ Ugyldig (apply av);
+  legg til/fjern rad; «lagermangel» lagret; apply plasserte K1 1300 W + K2 1700 W.
+
+**Filer:** romtegner.html (`_buildNCableZones`/`_weightedBandBounds`, `_autoFillCableZonesCore`/
+`_autoFillMixedCables`, `_generateMixedCombos`/`selectMultiCables`, `_placeMixedCables`,
+`_openMixComposer`/`_renderMixComposer`/`_mixComposer*`, kabel-panel-render).
 
 ---
 
