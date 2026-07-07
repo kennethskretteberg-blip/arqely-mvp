@@ -50,8 +50,42 @@ from cat, (values
 ) as v(name, el, role, w, l, area)
 where not exists (select 1 from heating_products hp where hp.el_no = v.el);
 
--- FLXHEAT-kablene (17 lengder) legges inn tilsvarende — se katalogtabellen i prompten/
--- _ensureVarmecomfortProducts (m/watt/EL/ohm), med watt_per_m=8, voltage=230, aluboard_cc_mm=100.
+-- 6) FLXHEAT 3 mm 8 W/m-kablene (17 lengder). watt_per_m=8, voltage=230, aluboard_cc_mm=100,
+--    min_bend_radius_mm=36, max_temp_c=90. Navn = "FLXHEAT 3mm 8W/m {W}W {m}m".
+with cat as (select id from product_categories where name = 'Aluboard platesystem' limit 1)
+insert into heating_products (category_id, name, product_family, supplier, el_no, article_no, active,
+                              cable_length_m, total_effect_w, watt_per_m, voltage, nominal_ohm,
+                              aluboard_cc_mm, min_bend_radius_mm, max_temp_c, available_contexts)
+select cat.id, 'FLXHEAT 3mm 8W/m ' || v.w || 'W ' || v.m || 'm', 'FLXHEAT 8W/m', 'Varmecomfort',
+       v.el, v.el, true, v.m, v.w, 8, 230, v.ohm, 100, 36, 90, array['indoor']
+from cat, (values
+  (10.0,   80, '1006049', 660.0),
+  (15.9,  130, '1006050', 413.0),
+  (19.1,  150, '1006051', 346.0),
+  (25.0,  200, '1006052', 255.0),
+  (32.0,  250, '1006053', 211.0),
+  (37.0,  300, '1006054', 178.0),
+  (52.0,  420, '1006055', 127.0),
+  (66.0,  520, '1006056', 102.0),
+  (77.0,  620, '1006057',  85.0),
+  (86.0,  720, '1006058',  73.0),
+  (106.0, 820, '1006059',  65.0),
+  (117.0, 920, '1006060',  57.0),
+  (120.0,1000, '1006061',  52.8),
+  (137.0,1100, '1006062',  48.0),
+  (163.0,1300, '1006063',  40.8),
+  (196.0,1500, '1006064',  35.3),
+  (216.0,1750, '1006065',  30.2)
+) as v(m, w, el, ohm)
+where not exists (select 1 from heating_products hp where hp.el_no = v.el);
+
+-- 7) VEIL.PRIS (B6) — appen har feltet price_list per produkt, men Varmecomfort-prisene er IKKE
+--    med her (leveres av Varmecomfort). Fyll inn fra prislista, f.eks.:
+-- update heating_products set price_list = <kr>, cost_price = <kr> where el_no = '5402067'; -- rett plate
+-- update heating_products set price_list = <kr>, cost_price = <kr> where el_no = '5402066'; -- vendeplate
+-- update heating_products set price_list = <kr> where el_no = '1006058';                    -- FLXHEAT 86 m
+--    (… tilsvarende for de øvrige EL-numrene.) Uten priser blir tilbudspris-arket tomt for Aluboard.
 
 -- Kontroll:
--- select name, supplier, el_no, plate_role, nominal_ohm from heating_products where supplier='Varmecomfort' order by sort_order;
+-- select name, supplier, el_no, plate_role, cable_length_m, total_effect_w, nominal_ohm, price_list
+--   from heating_products where supplier = 'Varmecomfort' order by plate_role nulls last, cable_length_m;

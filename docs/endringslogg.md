@@ -4,6 +4,18 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard: fullført DB-migrasjon (B5+B6) — 2026-07-07
+
+Fullført `supabase-migration-varmecomfort-aluboard.sql`: alle **17 FLXHEAT 3 mm 8 W/m-kabler** som ferdige
+`insert`-rader (m/watt/EL/nominell Ω, watt_per_m 8, 230 V, aluboard_cc_mm 100, bøyeradius 36 mm, maks 90 °C),
+i tillegg til de 2 platene. Lagt til `price_list`/`cost_price`-mal (B6) med `update`-eksempler — faktiske
+Varmecomfort-priser fylles inn fra prislista. Idempotent (guard på `el_no`). Kun DB-fil; app-koden
+(fallback-seed) hadde allerede kablene.
+
+**Fil:** supabase-migration-varmecomfort-aluboard.sql
+
+---
+
 ## Aluboard: prosjekt-brede integrasjoner (A1–A4) — 2026-07-07
 
 Koblet `S.aluboard` inn i de prosjekt-brede aggregeringene (var «silo» etter Del 1–6). Sentral helper
