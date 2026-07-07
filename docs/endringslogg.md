@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: unifisert kappbar-modell for snø-manuell (retting) — 2026-07-07
+
+Domeneretting: **alle** varmekabelmatter (innendørs EcoMat OG snø InSnow 300T) har fast kabel + KAPPBART
+nett — nettet kappes ved raster (2×cc) for å folde/vende matta. Den forrige snø-manuell-antakelsen («faste
+pre-fabrikerte lengder, ingen nett-kapp») var feil.
+
+Snø-manuell bruker nå **samme kappbar-modell som innendørs**: fritt lengde-felt per bane, snappet til
+raster. `snow`-flagget styrer nå BARE installasjonsreglene — ingen veggmargin (pakkes til kanten) + gap
+min 5 cm — mot 5 cm margin + 0–5 cm gap innendørs. Fjernet snø-særtilfellet for lengde i `_matManualApply`,
+byttet variant-dropdownen med tall-felt, og slettet nå-overflødige `_matSnowVariants`/`_matManualSetBaneProduct`.
+
+Verifisert: snø-bane 250/300 cm → snappet 240/288 (raster 16 cm), flush til kant (margin 0), kabel 15+18 m;
+panelet bruker tall-felt (ingen dropdown). Innendørs manuell uendret (ingen regresjon).
+
+**Fil:** romtegner.html (`_matManualApply`, `_matSnowManualStart`, `_matManualRenderPanel`, add/del-bane).
+
+---
+
 ## Varmematte: manuell bane-liste også for snø-matter (Del 5b) — 2026-07-07
 
 Utvidet den manuelle bane-lista til **snø-matter** (InSnow 300T). Samme motor (`_matManualApply`),
