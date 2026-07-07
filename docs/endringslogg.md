@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Leverandør-branding — Del 1: DB + Storage (logo + plasserings-flagg) — 2026-07-07
+
+Første del av leverandør-/org-logo-branding. Kun DB/Storage — ingen app-kode ennå (så trygt å kjøre migrasjonen
+uavhengig).
+
+- **`organizations`** (baade leverandør- OG installatør-org kan ha logo): `logo_path`, `logo_show_cover`,
+  `logo_show_allpages`, `logo_show_inapp` (default true), `logo_updated_at`.
+- **Storage-bucket `branding`** (public read — logoer er ikke hemmelige → direkte URL i app + PDF).
+- **RLS** på `storage.objects` for branding: skriv = superadmin ELLER owner/admin i org-en som eier stien
+  (`<org_id>/…`); les = public. Superadmin-sjekk via `app_metadata` (aldri `auth.users`).
+
+Prinsipp: **«Varmeplan» vises alltid sammen med org-logoen** (co-branding); ingen logo → nøytral Varmeplan.
+`_effectiveOrg()` (kommer i Del 5) skal styre branding + produkt-tilgang for superbruker «vis som».
+
+**Fil:** supabase-migration-branding.sql
+
+---
+
 ## Aluboard: fullført DB-migrasjon (B5+B6) — 2026-07-07
 
 Fullført `supabase-migration-varmecomfort-aluboard.sql`: alle **17 FLXHEAT 3 mm 8 W/m-kabler** som ferdige
