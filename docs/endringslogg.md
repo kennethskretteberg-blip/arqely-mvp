@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Leverandør-branding — Del 5: superbruker «vis som» — 2026-07-07
+
+Superbruker kan vise appen **som en valgt org** (elektrobedrift eller leverandør) — branding + produkt-
+tilgang + meny — uten å endre innlogging. Siste del av branding-featuren; hele Del 1–5 er nå komplett.
+
+- `_viewAsOrg` (full org-objekt) + `_effectiveOrg()` som allerede brukes av branding (header + PDF).
+  **`_productVisibleToOrg` bruker nå `_effectiveOrg()`:** superadmin uten «vis som» ser alt; med «vis som»
+  gjelder valgt org sine regler (leverandør → kun egne produkter; installatør → alle).
+- Avatar-meny (kun superadmin): **«Vis som…»** → `_viewAsPicker` (modal med alle orgs + type-badge) →
+  `_viewAsSet`; **«Avslutt vis som»** når aktiv. Oransje topp-banner «👁 Viser som: <org> — avslutt»
+  (`_viewAsBanner`). `_viewAsRefresh` re-rendrer branding + produkt-chips + panel + sidebar + ctxbar.
+- Vanlige brukere ser aldri «vis som». RLS uendret (superadmin ser bredt uansett; «vis som» filtrerer
+  visning/branding klient-side).
+
+Verifisert: superadmin ser alt → vis som Cenika skjuler Varmecomfort (branding+gating+banner) → vis som
+installatør ser alt → avslutt gjenoppretter. Script parser OK (node-sjekk).
+
+**Fil:** romtegner.html (`_viewAsOrg`/`_viewAsPicker`/`_viewAsSet`/`_viewAsEnd`/`_viewAsBanner`,
+`_productVisibleToOrg`, avatar-meny).
+
+---
+
 ## Leverandør-branding — Del 4: app-header (co-brand i verktøylinja) — 2026-07-07
 
 `_applyAppBranding()` brander editor-verktøylinja (`.tb-logo`): **[org-logo] Varmeplan** når «I appen»-flagget
