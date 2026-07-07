@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Produkt-tilgjengelighet per modul-kontekst (indoor/outdoor) — 2026-07-07
+
+Erstatter den gamle navne-hacken (`c.name.includes('utendørs')`) for hvilke produkter som vises i hvilke
+moduler, med en eksplisitt, data-drevet parameter på produktkategorien (gruppen):
+**`available_contexts text[]`** — delmengde av `{indoor, outdoor}`. En gruppe kan være i BEGGE (f.eks.
+InFloor-kabel = `{indoor,outdoor}`), noe navne-hacken ikke kunne uttrykke.
+
+Design-modulene mapper til kontekst i appen (`_moduleEnv`): **snø + trapp = outdoor**, resten (indoor,
+list) = **indoor**. Nytt filter `_catAvailableInModule(cat, modul)` bruker `available_contexts` når satt,
+ellers **back-compat** til dagens navne-logikk — så koden virker uendret FØR migrasjonen er kjørt. Byttet
+i `_upcScopeProducts`, `_upcRenderTypeChips` og `_listIndoorCat`. Kategoriene lastes rått fra Supabase, så
+den nye kolonnen følger automatisk med.
+
+Migrasjon: `supabase-migration-product-contexts.sql` (idempotent) — legger til kolonnen, backfiller fra
+navn (`utend…` → outdoor, ellers indoor), og setter InFloor-kabel til `{indoor,outdoor}` (juster
+kategorinavn). Reglene (margin/CC) er fortsatt modul-styrt, ikke gruppe-styrt.
+
+Verifisert: `_moduleEnv` (snow/stair→outdoor), tagget indoor-only/outdoor-only/both filtreres presist,
+utaggede kategorier beholder gammel oppførsel; indoor-scope returnerer produkter som før.
+
+**Fil:** romtegner.html (`_moduleEnv`, `_catAvailableInModule`, 3 filter-steder), supabase-migration-product-contexts.sql.
+
+---
+
 ## Varmematte: unifisert kappbar-modell for snø-manuell (retting) — 2026-07-07
 
 Domeneretting: **alle** varmekabelmatter (innendørs EcoMat OG snø InSnow 300T) har fast kabel + KAPPBART
