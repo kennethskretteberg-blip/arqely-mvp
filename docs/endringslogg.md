@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard platesystem (Varmecomfort) — Del 6: interaksjon + dok-kobling — 2026-07-07
+
+Siste del: velg/slett + kobling av Varmecomfort-målregler til dok-/garantimodulen. (Lagring + undo/redo var
+allerede på plass fra Del 1.)
+
+- **Interaksjon:** `hitAluboard` (treff = punkt i feltet — rom-fyllende, så ingen «flytt»), `selectAluboard`
+  (rydder andre seleksjoner, `S.ui.selectedAluboardId`), `deleteAluboard`, wiret inn i hit-syklusen
+  (`_buildCycleCandidates`/`_applyCycleSelection`). Ctxbar for valgt Aluboard: **retning Vertikal/Horisontal**
+  (`_aluboardSetDirSel` re-legger + beholder valg), kabel-lengde, **Slett**. Valgt felt får accent-omriss.
+- **Dok/garanti — asymmetrisk toleranse:** ny `_supResistanceBounds(sup, nominal)` støtter
+  `resistance_tol_minus_pct`/`plus_pct` (Varmecomfort **−5 %/+10 %**), faller tilbake til symmetrisk
+  `resistance_tolerance_pct`. `_docMeasOk` + kravtekst + lo–hi-visning bruker den nå.
+
+Verifisert: hit→velg fester, ctxbar (Aluboard/Vertikal/Slett), retning-toggle beholder valg, slett + undo;
+VC-grenser for 73 Ω = 69,35–80,3 Ω («−5 %/+10 %»), måling 80 Ω OK / 68 Ω ikke OK; Cenika = ±10 %. Andre
+moduler uendret. **Aluboard-modulen (Del 1–6) er nå komplett.**
+
+**Fil:** romtegner.html (`hitAluboard`/`selectAluboard`/`deleteAluboard`/`_aluboardSetDirSel`, ctxbar-gren,
+`_supResistanceBounds`, `_docMeasOk`).
+
+---
+
 ## Aluboard platesystem (Varmecomfort) — Del 4+5: panel + materialliste + varsler — 2026-07-07
 
 Panel-inngang og materialliste for Aluboard, wiret inn i den delte produktvelgeren (`_upcRefreshResults`
