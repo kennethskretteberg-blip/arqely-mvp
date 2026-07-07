@@ -6116,6 +6116,42 @@ function _roomDominantProduct(room) {
   return best;
 }
 
+// Produkt-breakdown i et rom: én oppføring PER UNIK produkt-variant (ikke ett dominant
+// produkt). count = antall identiske elementer av varianten, effectW = sum RATET effekt for
+// de elementene (samme formel som _roomRatedEffectW). Brukes av Romoversikten så rom med
+// FLERE ULIKE kabler/produkter får én rad per variant (Antall/W korrekt per variant),
+// mens rommets felles CC og areal hører til rom-nivå. Sortert dominant (størst effekt) først.
+function _roomProductBreakdown(room) {
+  const map = new Map(); // productId -> { product, kind, count, effectW }
+  const add = (p, kind, w) => {
+    if (!p) return;
+    let e = map.get(p.id);
+    if (!e) { e = { product: p, kind, count: 0, effectW: 0 }; map.set(p.id, e); }
+    e.count += 1; e.effectW += w;
+  };
+  for (const c of _cablesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
+    const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
+    add(p, 'Kabel', w);
+  }
+  for (const m of _matsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
+    add(p, 'Matte', _matRatedW(p, m));
+  }
+  for (const s of _stripsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
+    const nc = p ? (p.netto_width_mm || p.width_mm || 500) / 10 : 0;
+    add(p, 'Folie', p ? (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000 : 0);
+  }
+  for (const pl of _platesForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
+    add(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0);
+  }
+  return [...map.values()]
+    .map(e => ({ product: e.product, kind: e.kind, count: e.count, effectW: Math.round(e.effectW) }))
+    .sort((a, b) => b.effectW - a.effectW);
+}
+
 function _matTotalLengthMm(prod) {
   if (!prod) return null;
   if (prod.mat_total_length_mm) return prod.mat_total_length_mm;
@@ -32901,34 +32937,40 @@ async function exportPDF(opts) {
     _rDrawHead();
     for (const fs of floorSummaries) {
       for (const rs of fs.rooms) {
-        if (y + 5 > H - M) { _addPage(); _rDrawHead(); }
         const room = rs.room, st = rs.stats;
         const nettoM2 = st.nettoM2 || 0;
-        const productCount = _stripsForRoom(room.id).length + _cablesForRoom(room.id).length +
-                             _matsForRoom(room.id).length + _platesForRoom(room.id).length;
         const ratedW = _roomRatedEffectW(room);
         const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2) : (rs.targetWm2 || 0);
-        const dom = _roomDominantProduct(room);
-        const dp = dom?.product || null;
         const ccCm = st.cableCcCm > 0 ? st.cableCcCm.toFixed(1) : '';
-        const cells = [
-          fs.floor ? fs.floor.name : '',
-          room.name || 'Rom',
-          nettoM2 ? nettoM2.toFixed(1) : '',
-          String(productCount),
-          dp?.el_no || '',
-          dp?.article_no || '',
-          dp?.name || '',
-          dp?.product_family || '',
-          dom?.kind || '',
-          ratedW ? String(ratedW) : '',
-          wm2 ? String(wm2) : '',
-          ccCm
-        ];
-        doc.setFontSize(7);
-        doc.setTextColor(30, 40, 60);
-        for (let i = 0; i < cells.length; i++) doc.text(_fit(cells[i], rColW[i]), rColX[i], y);
-        y += 5;
+        // Én rad PER UNIK produkt-variant (mikset multi-kabel-rom → én rad per kabel-variant,
+        // Antall/W korrekt per variant). Rom/Areal/W-m² står kun på første variantrad (rom-nivå),
+        // CC (rommets felles) vises på hver rad. Tomt rom → én rad med Ant 0.
+        const variants = _roomProductBreakdown(room);
+        const rowsForRoom = variants.length ? variants : [null];
+        for (let vi = 0; vi < rowsForRoom.length; vi++) {
+          if (y + 5 > H - M) { _addPage(); _rDrawHead(); }
+          const v = rowsForRoom[vi];
+          const first = vi === 0;
+          const dp = v?.product || null;
+          const cells = [
+            first ? (fs.floor ? fs.floor.name : '') : '',
+            first ? (room.name || 'Rom') : '',
+            first ? (nettoM2 ? nettoM2.toFixed(1) : '') : '',
+            v ? String(v.count) : '0',
+            dp?.el_no || '',
+            dp?.article_no || '',
+            dp?.name || '',
+            dp?.product_family || '',
+            v?.kind || '',
+            v ? String(v.effectW) : '',
+            first ? (wm2 ? String(wm2) : '') : '',
+            ccCm
+          ];
+          doc.setFontSize(7);
+          doc.setTextColor(30, 40, 60);
+          for (let i = 0; i < cells.length; i++) doc.text(_fit(cells[i], rColW[i]), rColX[i], y);
+          y += 5;
+        }
       }
     }
     _pageStarted = true;
@@ -38925,31 +38967,33 @@ async function _exportMaterialListXLSX() {
     const floor = (S.floors||[]).find(f => f.id === room.floorId);
     const stats = (typeof _computeRoomStats === 'function') ? _computeRoomStats(room) : { nettoM2: 0, cableCcCm: 0 };
     const nettoM2 = stats.nettoM2 || 0;
-    const productCount =
-      (S.strips||[]).filter(s => s.roomId === room.id).length +
-      (S.cables||[]).filter(c => c.roomId === room.id).length +
-      (S.mats||[]).filter(m => m.roomId === room.id).length +
-      (S.plates||[]).filter(p => p.roomId === room.id).length;
     const ratedW = (typeof _roomRatedEffectW === 'function') ? _roomRatedEffectW(room) : 0;
     const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2)
       : ((typeof _roomTargetWm2 === 'function') ? (_roomTargetWm2(room.id) || '') : '');
-    const dom = (typeof _roomDominantProduct === 'function') ? _roomDominantProduct(room) : null;
-    const dp = dom?.product || null;
     const ccCm = (stats.cableCcCm > 0) ? +stats.cableCcCm.toFixed(1) : '';
-    roomRows.push([
-      floor ? floor.name : '',
-      room.name || 'Rom',
-      +nettoM2.toFixed(2),
-      productCount,
-      dp?.el_no || '',
-      dp?.article_no || '',
-      dp?.name || '',
-      dp?.product_family || '',
-      dom?.kind || '',
-      ratedW || '',
-      wm2,
-      ccCm
-    ]);
+    // Én rad PER UNIK produkt-variant (jf. PDF-Romoversikten). Etasje/Rom/Areal/W-m² kun på
+    // første variantrad; Antall/Effekt W = per variant (Σ Effekt W = romtotal); CC = felles.
+    const variants = (typeof _roomProductBreakdown === 'function') ? _roomProductBreakdown(room) : [];
+    const rowsForRoom = variants.length ? variants : [null];
+    for (let vi = 0; vi < rowsForRoom.length; vi++) {
+      const v = rowsForRoom[vi];
+      const first = vi === 0;
+      const dp = v?.product || null;
+      roomRows.push([
+        first ? (floor ? floor.name : '') : '',
+        first ? (room.name || 'Rom') : '',
+        first ? +nettoM2.toFixed(2) : '',
+        v ? v.count : 0,
+        dp?.el_no || '',
+        dp?.article_no || '',
+        dp?.name || '',
+        dp?.product_family || '',
+        v?.kind || '',
+        v ? v.effectW : '',
+        first ? wm2 : '',
+        ccCm
+      ]);
+    }
   }
   const wsRooms = XLSX.utils.aoa_to_sheet(roomRows);
   wsRooms['!cols'] = [{wch:14},{wch:20},{wch:10},{wch:14},{wch:14},{wch:16},{wch:28},{wch:18},{wch:10},{wch:10},{wch:10},{wch:8}];

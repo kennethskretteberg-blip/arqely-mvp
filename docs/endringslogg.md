@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Romoversikt: én rad per unik produkt-variant (fiks mikset multi-kabel) — 2026-07-07
+
+**Bug:** Romoversikten (PDF-tabell + Excel «Per rom») antok ett dominant produkt per rom. Et rom med
+FLERE ULIKE kabler (multiCableGroup, f.eks. 1× 1700W + 1× 1300W) kollapset til én rad der Antall =
+antall elementer (2), W = romtotal (3000) sto ved siden av kun det dominante produktet (1700W), og den
+andre kabelen forsvant. CC var også feil på avledede rader.
+
+**Fiks:** ny `_roomProductBreakdown(room)` grupperer rommets elementer per produkt →
+`[{product, kind, count, effectW}]` (effekt som i `_roomRatedEffectW`, dominant først). Begge tabellene
+(`_runExportPDF` Romoversikt ~32874 + Excel «Per rom» ~38923) skriver nå **én rad per unik variant**:
+Antall = antall identiske av varianten, W = variantens effekt (Σ = romtotal), CC = rommets FELLES CC på
+hver rad. Etasje/Rom/Areal/W-m² kun på første variantrad (rom-nivå, unngår dobbelt-areal).
+
+**Ingen regresjon:** enkeltkabel og N LIKE kabler → nøyaktig én rad som før (samme produkt ⇒ én gruppe).
+Materiallista uendret. Verifisert (syntetiske rom): MIX 1700+1300 → to rader (1700 / 1300, Σ 3000);
+SINGLE → én rad; TWOSAME (2× 1300) → én rad (Ant 2, W 2600).
+
+**Test:** kjør Romoversikt-PDF (eller Materialliste-Excel, arket «Per rom») på et prosjekt med et rom som
+har to ulike kabler → rommet får én rad per kabel-variant med riktig Antall/W og felles CC.
+
+**Fil:** romtegner.html (`_roomProductBreakdown`, `_runExportPDF`, `_exportMaterialListXLSX`).
+
+---
+
 ## PDF-eksport: forhåndsvisning for dokument-seksjonene — 2026-06-25
 
 Utvider forrige (navn = preview, boks = hake) til de øvrige seksjonene: **Forside,
