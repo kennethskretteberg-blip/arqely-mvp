@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard platesystem (Varmecomfort) — Del 3: plater fyller feltet — 2026-07-07
+
+Plater fyller HELE feltet i begge retninger: **vendeplater** (28 cm) i de to v-endene der kabelen snur,
+**rette plater** (120 cm) imellom — kuttes i lengde. Kappede plater markeres stiplet i tegningen; kabelen
+tegnes oppå platene.
+
+- `_aluboardPlates(L)` → felt-koordinat-rekter per kolonne (2 vende-bånd + rette plater vA→vB), med `cut`-flagg.
+- `_aluboardPlateCount(L)` → antall til materiallista med **«del plate på to»**: kolonne-remse < ½ plate →
+  `ceil(n/2)`, rad-remse < ½ plate → `ceil(n/2)`, + hjørnebit. (Materiallista vises i Del 5.)
+- `drawAluboard` rendrer nå platene (vende #f4e6db, rette #e6eef1, kappet = stiplet) UNDER kabelen.
+
+Verifisert (rom 360×300 vertikal): plate-telling **12 rette + 12 vende** (fasit); 24 fysiske plate-rekter
+(6 kolonner × 2 vende + 2 rette), 9 kappede. Renderer som mockup. Andre moduler uendret.
+
+**Fil:** romtegner.html (`_aluboardPlates`, `_aluboardPlateCount`, `drawAluboard`).
+
+---
+
 ## Aluboard platesystem (Varmecomfort) — Del 2: auto-geometri (kabel-serpentin) — 2026-07-07
 
 Auto-geometri for Aluboard: én sammenhengende varmekabel-serpentin i de faste sporene (CC 10), U-svinger
