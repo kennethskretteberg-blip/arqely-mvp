@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Innendørs: ULIKE kabler i samme rom (soner ∝ effekt) — 2026-06-25
+
+Mål: tillate 2+ ulike kabler (samme familie) i ett rom, ikke bare N×like. F.eks. 3000 W med
+InFloor 10T: anbefalt 2×1500, men ved lagermangel 1300+1700.
+
+### Del A — Sone-motor for ulike kabler ✅
+- `_buildNCableZones` generalisert fra ett produkt × N til en **produktliste** (ett per kabel).
+  Ny `_weightedBandBounds` (generalisering av `_equalAreaBandBounds`) gir bånd med areal ∝ vekt
+  (= kabellengde = effekt). Felles CC fra total lengde → samme W/m² i alle soner. Hjørne-snap
+  brukes kun for LIKE soner. N×like er spesialtilfellet (like vekter) → ingen regresjon.
+- Delt kjerne `_autoFillCableZonesCore` (retnings-heuristikk uendret); `_autoFillNCables` (N×like)
+  + ny `_autoFillMixedCables(roomId, productIds, forcedDir)` (krever samme familie + W/m).
+- Verifisert (30 m² rom, InFloor 10T): 130+170 → soner **43,3 %/56,7 %**, felles CC 10 cm, 3000 W;
+  2×150 → like soner, CC 10 cm (ingen regresjon).
+
+### Del B–D 🚧 kommer
+Forslag med alt. kombinasjoner (★ N×like først), UI med valgbare alt. + manuell komponering,
+validering (sum±tol, gyldig CC, samme familie).
+
+---
+
 ## PDF-materialliste: antall + fjern Lengde/Areal/Effekt — 2026-06-25
 
 Materiallisten i PDF-eksporten (`exportPDF`) skal kun være en oversikt over hvilke produkter

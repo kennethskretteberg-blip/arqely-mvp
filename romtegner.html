@@ -12874,6 +12874,44 @@ function _equalAreaBandBounds(room, direction, nBands) {
   return bounds.length === nBands + 1 ? bounds : null;
 }
 
+// Som _equalAreaBandBounds, men baandene faar areal PROPORSJONALT med weights[i]
+// (normalisert). For ULIKE kabler i samme familie: vekt = kabellengde (∝ effekt),
+// sa sone_i-areal ∝ effekt_i og felles CC gir samme W/m². Like vekter => samme som
+// _equalAreaBandBounds. Returnerer nBands+1 grenser, eller null hvis degenerert.
+function _weightedBandBounds(room, direction, weights) {
+  const n = weights.length;
+  const wsum = weights.reduce((s, w) => s + (w > 0 ? w : 0), 0);
+  if (n < 1 || wsum <= 0) return null;
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perpVals = room.points.map(p => direction === 'v' ? p.x : p.y);
+  const lo = Math.min(...perpVals), hi = Math.max(...perpVals);
+  const steps = 240, dp = (hi - lo) / steps;
+  if (dp <= 0) return null;
+  const cum = new Array(steps + 1); cum[0] = 0;
+  for (let i = 0; i < steps; i++) {
+    const p = lo + (i + 0.5) * dp;
+    const iv = clipScanlineToPolygon(sweepAxis, p, room.points);
+    const w = iv.reduce((s, seg) => s + (seg[1] - seg[0]), 0);
+    cum[i + 1] = cum[i] + w * dp;
+  }
+  const total = cum[steps];
+  if (total <= 0) return null;
+  // Kumulative mål-areal ved hver interne grense (etter vekt-andel).
+  const targets = []; let acc = 0;
+  for (let k = 0; k < n - 1; k++) { acc += weights[k] / wsum; targets.push(acc * total); }
+  const bounds = [lo];
+  let k = 0;
+  for (let i = 1; i <= steps && k < targets.length; i++) {
+    while (k < targets.length && cum[i] >= targets[k] - 1e-9) {
+      const t = (targets[k] - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1);
+      bounds.push(lo + (i - 1 + t) * dp);
+      k++;
+    }
+  }
+  bounds.push(hi);
+  return bounds.length === n + 1 ? bounds : null;
+}
+
 /** Clip a polygon to an axis-aligned slab lo ≤ coord ≤ hi (Sutherland–Hodgman against
  *  two half-planes). Returns the REAL sub-polygon — for an L/notch/slant room the slab
  *  cut yields the actual part of the room in that band. Returns null if degenerate. */
@@ -13004,27 +13042,38 @@ function _pinCableSeamToCut(cable, dir, seam, loCut, hiCut, room, margin) {
 // — for irregular rooms (gable/notch) the dominant direction is NOT always the best coverage:
 // e.g. a slanted gable defeats vertical cuts (sub-room 0 → skew/0%) but horizontal top/middle/
 // bottom bands isolate the gable in one band and tile the rest cleanly.
-function _buildNCableZones(room, productId, prod, nCables, dir) {
+function _buildNCableZones(room, products, dir) {
+  // products: liste med produkt-objekter (ett per kabel). N×like => alle like; ULIKE
+  // kabler => soner ∝ kabellengde (= ∝ effekt for samme familie), felles CC.
   const roomId = room.id;
+  const nCables = products.length;
+  const prod = products[0];                 // felles familie -> lik margin/spacing-range
+  const productId = prod.id;
   const axis = dir === 'v' ? 'x' : 'y';   // perpendicular axis the cuts run across
   const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
   const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
   const margin = _effectiveMarginCm(productId);
   const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
   const netM2 = roomAreas(room).net / 10000;
+  const lengths = products.map(p => p.cable_length_m || 0);
+  const totalLen = lengths.reduce((s, l) => s + l, 0) || (nCables * (prod.cable_length_m || 1));
+  const mixed = lengths.some(l => Math.abs(l - lengths[0]) > 1e-6);
   // ONE shared CC for ALL zones → identical W/m² across the whole room (Kenneth's priority).
-  // Each zone is forced to this spacing; small length differences are absorbed by the sweep
-  // trim (sweep-to-wall margin), never by varying CC.
-  const sharedCC = Math.max(minSp, Math.min(maxSp, (netM2 / (nCables * prod.cable_length_m)) * 100));
+  // Beregnet fra TOTAL lengde, sa felles CC gjelder ogsa nar sonene er ulike (areal ∝ lengde).
+  const sharedCC = Math.max(minSp, Math.min(maxSp, (netM2 / totalLen) * 100));
   // (1) EQUAL-AREA cuts are the baseline (equal area → equal length → equal CC). On a complex room
   // they can slice through the middle and leave an IRREGULAR sub-room → the fill falls to skew and
   // makes «rare former» (skew runs, irregular U-turns) that don't reach the walls. So: CONDITIONALLY
   // snap each interior cut to the nearest room vertex (notch/step edge) → sub-rooms become as
   // RECTANGULAR as possible → clean axis-aligned serpentine. Only adopt the snap when it keeps the
   // zones ~equal area (≤10% deviation) so lik CC is preserved; otherwise keep the equal-area cut.
-  let bounds = _equalAreaBandBounds(room, dir, nCables);
-  if (!bounds) { bounds = []; for (let i = 0; i <= nCables; i++) bounds.push(perpMin + i * (perpMax - perpMin) / nCables); }
-  if (bounds && nCables >= 2) {
+  let bounds = mixed ? _weightedBandBounds(room, dir, lengths) : _equalAreaBandBounds(room, dir, nCables);
+  if (!bounds) {
+    bounds = [perpMin]; let acc = 0;
+    for (let i = 0; i < nCables; i++) { acc += (lengths[i] || 1) / totalLen; bounds.push(perpMin + Math.min(1, acc) * (perpMax - perpMin)); }
+  }
+  // Snap interne kutt til rom-hjørner KUN for LIKE soner (der ~lik areal er malet).
+  if (bounds && nCables >= 2 && !mixed) {
     const snapped = _snapBoundsToVertices(room, axis, bounds);
     let moved = false;
     for (let i = 1; i < bounds.length - 1; i++) if (Math.abs(snapped[i] - bounds[i]) > 0.5) moved = true;
@@ -13042,6 +13091,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
   const _savedDir = S.varmefolie.direction;     // (2) force this run direction for ALL sub-rooms
   try {
     for (let i = 0; i < nCables; i++) {
+      const prodI = products[i]; const productIdI = prodI.id;
       const sub = _clipPolygonToSlab(room.points, axis, bounds[i], bounds[i + 1]);
       if (!sub) continue;
       const subAreaM2 = compArea(sub) / 10000;
@@ -13059,16 +13109,16 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
       try {
         // (2) Same direction for every sub-room → all strings parallel, cables tile evenly.
         S.varmefolie.direction = dir;
-        cable = autoFillCable(tempRoom.id, productId);
+        cable = autoFillCable(tempRoom.id, productIdI);
         // A cable has geometry if it has serpentine runs OR a skew path (skew stores its rotated
         // path in pathEls, not runs — e.g. the slanted gable zone, where skew gives ~full coverage
         // while plain serpentine under-fills). Only fall back to the simple serpentine if NEITHER.
         if (!_cableHasGeom(cable)) {
-          const raw = generateCableSerpentine(tempRoom.id, productId, dir, sharedCC, 'bl', null);
+          const raw = generateCableSerpentine(tempRoom.id, productIdI, dir, sharedCC, 'bl', null);
           if (raw && raw.runs && raw.runs.length) {
-            cable = { id: S.counters.nextCableId++, roomId, productId, direction: dir,
+            cable = { id: S.counters.nextCableId++, roomId, productId: productIdI, direction: dir,
               spacing_cm: sharedCC, startCorner: 'bl', runs: raw.runs,
-              totalLength_cm: raw.totalLength_cm || prod.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
+              totalLength_cm: raw.totalLength_cm || prodI.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
           }
         }
       } finally { S.varmefolie.direction = _savedDir; S.rooms = S.rooms.filter(r => r !== tempRoom); }
@@ -13077,7 +13127,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
         // outer zone's shared edge sits half-CC from the cut → one CC over the seam.
         _pinCableSeamToCut(cable, dir, seam, bounds[i], bounds[i + 1], room, margin);
         // (6) Clamp length: never require more cable than the physical product length.
-        _trimCableToLength(cable, prod.cable_length_m * 100);
+        _trimCableToLength(cable, prodI.cable_length_m * 100);
       }
       // (4) Coverage book-keeping per sub-room → direction score for the caller. Skew cables
       // report their own coverage (no runs to sum).
@@ -13097,6 +13147,7 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
         continue;   // truly degenerate sub-polygon (rare); warned, not silent
       }
       cable.roomId = roomId;               // re-key to the real room
+      cable.productId = productIdI;        // sonens eget produkt (ulike kabler)
       cable.multiCableIndex = i;
       cable.multiCableGroup = null;
       cable.zoneBounds = { perpMin: bounds[i], perpMax: bounds[i + 1] };
@@ -13111,28 +13162,11 @@ function _buildNCableZones(room, productId, prod, nCables, dir) {
   return { cables, score: (areaSum ? covSum / areaSum : 0) - 0.6 * maxSplitFrac, dir, invalid, maxSplitFrac };
 }
 
-function _autoFillNCables(roomId, productId, nCables, forcedDir) {
-  const room = S.rooms.find(r => r.id === roomId);
-  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!room || !prod || !prod.cable_length_m) return null;
-  nCables = Math.max(2, Math.floor(nCables));
-
-  // DIRECTION: honour the direction picker (S.varmefolie.direction) exactly like the single-cable
-  // engine — if the user explicitly chose a direction, the zones (and runs) follow it. When no
-  // direction is set (auto), try BOTH and keep whichever tiles the room best: the dominant-
-  // direction heuristic alone fails on gable/notch rooms (vertical cuts through a slanted gable
-  // leave a whole sub-room uncovered), so coverage picks the winner.
-  // Bias toward the picker direction (S.varmefolie.direction), but always try both and switch
-  // only on a clear coverage win (>2%). So a deliberate pick (or a tie, e.g. a rectangle) is
-  // honoured, while a default 'v' that would leave a gable uncovered still flips to 'h'.
-  // forcedDir (from the "↻ Retning" toggle) overrides everything → only that direction is built,
-  // so the user always gets the orientation they asked for (e.g. vertical zones when a doorway
-  // notch would split a horizontal top band). Otherwise bias toward the picker and switch only on
-  // a clear coverage-minus-split win.
-  // A deliberate picker choice (dirExplicit) OR forcedDir = HARD override → build ONLY
-  // that direction, never flip on a coverage win. The "try both, switch on >2%" bias is
-  // kept ONLY for auto/default direction (dirExplicit false), so a default 'v' that would
-  // leave a gable uncovered can still flip to 'h'.
+// Kjerne: bygg soner for en LISTE produkter (ett per kabel) i beste retning. Deles av
+// N×like (_autoFillNCables) og ulike kabler (_autoFillMixedCables). Retnings-heuristikken
+// (picker/forcedDir/coverage) er uendret fra for.
+function _autoFillCableZonesCore(room, products, forcedDir) {
+  if (!room || !products || products.length < 2) return null;
   const explicitDir = (S.varmefolie?.dirExplicit && (S.varmefolie.direction === 'h' || S.varmefolie.direction === 'v')) ? S.varmefolie.direction : null;
   const hardDir = forcedDir || explicitDir;
   const userDir = hardDir || ((S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null);
@@ -13140,15 +13174,11 @@ function _autoFillNCables(roomId, productId, nCables, forcedDir) {
   const dirs = hardDir ? [hardDir] : (primary === 'v' ? ['v', 'h'] : ['h', 'v']);
   const results = [];
   for (const dir of dirs) {
-    const res = _buildNCableZones(room, productId, prod, nCables, dir);
+    const res = _buildNCableZones(room, products, dir);
     if (res && res.cables.length >= 2) results.push(res);
   }
   if (!results.length) return null;
-  // A direction that divides a zone in two is INVALID. Drop all invalid directions; if NONE
-  // remain valid, there is no acceptable N-cable solution in either orientation → return null
-  // (auto-fill upstream can then try fewer/larger cables; the "↻ Retning" toggle reports it
-  // can't switch to a splitting direction).
-  const valid = results.filter(r => !r.invalid);
+  const valid = results.filter(r => !r.invalid);   // en sone delt i to av et tomrom er ugyldig
   if (!valid.length) return null;
   let best = null;
   for (const res of valid) {
@@ -13159,6 +13189,28 @@ function _autoFillNCables(roomId, productId, nCables, forcedDir) {
   const groupId = cables[0].id;
   cables.forEach(c => c.multiCableGroup = groupId);
   return cables;
+}
+
+// N×LIKE kabler (uendret oppforsel — bygger en liste med N identiske produkter).
+function _autoFillNCables(roomId, productId, nCables, forcedDir) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod || !prod.cable_length_m) return null;
+  nCables = Math.max(2, Math.floor(nCables));
+  return _autoFillCableZonesCore(room, Array(nCables).fill(prod), forcedDir);
+}
+
+// ULIKE kabler i samme rom (samme familie): soner ∝ effekt (= lengde). productIds i
+// onsket sone-rekkefolge. Krever samme familie + W/m (felles CC / proporsjonale soner).
+function _autoFillMixedCables(roomId, productIds, forcedDir) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !Array.isArray(productIds) || productIds.length < 2) return null;
+  const products = productIds.map(id => HEATING_PRODUCTS.find(p => p.id === id)).filter(Boolean);
+  if (products.length !== productIds.length || products.some(p => !p.cable_length_m)) return null;
+  const _fam = p => p.product_family || p.name.split(' ').slice(0, 2).join(' ');
+  const fam0 = _fam(products[0]), wm0 = products[0].watt_per_m;
+  if (products.some(p => _fam(p) !== fam0 || p.watt_per_m !== wm0)) return null;
+  return _autoFillCableZonesCore(room, products, forcedDir);
 }
 
 function autoFillMultiCable(roomId, productId, nCables, forcedDir, mode) {
