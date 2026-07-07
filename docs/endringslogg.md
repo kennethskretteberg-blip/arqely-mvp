@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## EcoMat matte — Del 2: kaldskjøt- + ende-markør — 2026-07-08
+
+I `drawMats` fanges kabelens **startpunkt** (første `moveTo`) + retning og **endepunkt** (`pen`). Etter
+`ctx.stroke()` tegnes OVER kabelen: **kaldskjøt** = sort strek (`#111`, tykkere enn kabel, ~8 cm langs første
+streng, rund cap) ved start, og **ende-markør** = liten fylt sort sirkel ved siste strengs slutt. Én av hver
+per sammenhengende matte-kabel (auto/manuell/snø, delt `drawMats`).
+
+Verifisert (instrumentert canvas): nøyaktig 1 kaldskjøt-strek + 1 ende-fyll per matte.
+
+**Fil:** romtegner.html (`drawMats` — start/slutt-fangst + markør-tegning).
+
+---
+
 ## EcoMat matte — Del 1: serpentin-retning (venstre→høyre) — 2026-07-08
 
 Fikset at kabelen startet på høyre ytterste matte og at matte 2 snudde feil vei. I `drawMats()`-serpentinen:
