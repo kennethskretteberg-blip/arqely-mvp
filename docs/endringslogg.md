@@ -27,8 +27,18 @@ InFloor 10T: anbefalt 2×1500, men ved lagermangel 1300+1700.
 - Verifisert (3000 W): 1500+1500 (★) · 1400+1600 · 1300+1700 · 1200+1800 · 1000+2000 — alle CC 10 cm,
   deretter nær-treff (2900/3100 …) under.
 
-### Del C–D 🚧 kommer
-UI med valgbare alternativer + manuell komponering; validering (sum±tol, gyldig CC, samme familie).
+### Del C — UI: valgbare ulike-kabel-alternativer ✅ (manuell komponering gjenstår)
+- Kabel-panelet viser nå en «Ulike kabler (samme dekning)»-seksjon med de eksakte ulike-
+  kombinasjonene fra `mixedCombos` (jevnest først) som valgbare knapper. Klikk → `_placeMixedCables`
+  → `_autoFillMixedCables` legger ut proporsjonale soner (K1/K2, felles CC).
+- Verifisert visuelt: 130+170 i ett rom → to soner (oransje K1 1300 W / blå K2 1700 W), felles CC
+  10 cm, riktige produkter/EL. N×like og enkeltkabel uendret.
+- 🚧 Gjenstår: **manuell komponering** (legg til/fjern kabelrader, produkt/effekt per rad, løpende
+  sum vs behov, «årsak»-felt) og validerings-panel (Del D). Validering er delvis dekket alt:
+  `_generateMixedCombos`/`_autoFillMixedCables` gir kun gyldige (samme familie/W/m, gyldig CC, ±tol).
+
+### Del D 🚧 kommer
+Validerings-panel for manuell komponering (tydelig avvik-flagg).
 
 ---
 
