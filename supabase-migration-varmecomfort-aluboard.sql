@@ -40,6 +40,8 @@ where not exists (select 1 from product_categories where name = 'Aluboard plates
 
 -- 4) Nye produkt-kolonner (plate-rolle/dims + aluboard-regler). Tilpass om de finnes.
 alter table heating_products add column if not exists plate_role        text;     -- 'straight' | 'turn'
+alter table heating_products add column if not exists plate_width_mm    numeric;
+alter table heating_products add column if not exists plate_length_mm   numeric;
 alter table heating_products add column if not exists plate_area_m2     numeric;
 alter table heating_products add column if not exists nominal_ohm       numeric;
 alter table heating_products add column if not exists aluboard_cc_mm    numeric;
