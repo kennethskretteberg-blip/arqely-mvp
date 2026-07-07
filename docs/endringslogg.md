@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## PDF-eksport: respekter rom-utvalg + skill preview fra hake — 2026-06-25
+
+1. **Bug:** deselekterte rom kom likevel med i PDF-en. `exportPDF` brukte
+   `opts.rooms && opts.rooms.length > 0 ? … : S.rooms` → tomt utvalg falt tilbake til ALLE rom.
+   Fikset til `Array.isArray(opts.rooms)` (og tilsvarende for `opts.stairs`) → et eksplisitt TOMT
+   utvalg gir ingen romsider; kun `undefined` (ingen dialog) faller tilbake til alle.
+2. **UX:** rom-/trapp-radene i eksport-dialogen er nå `<div>` (ikke `<label>`): **navnet** er en
+   `<span onclick=_expPreviewRoom>` (klikk = kun forhåndsvisning), og **avkrysningsboksen** toggler
+   kun ved klikk i boksen. Så man kan se hva hvert rom viser før man velger hva som skal med.
+- Verifisert: navn-klikk rendrer preview uten å endre haken; boks-klikk toggler uten preview;
+  hak av alle → 0 romsider; default-eksport uendret.
+
+**Fil:** romtegner.html (`_showExportDialog`, `exportPDF` `_selectedRooms`/`_selectedStairs`).
+
+---
+
 ## Innendørs multi-kabel: bevar ULIKE kabler ved re-layout — 2026-06-25
 
 **Bug:** manuelt 1300 W + 1700 W (InFloor 10T) → den lengste kabelen la seg feil (ekstra bue),
