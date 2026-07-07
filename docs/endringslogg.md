@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: serpentin-geometri = LÅST mockup-fasit (Del 2) — 2026-07-07
+
+`drawMats`-serpentinen avvek fra den låste geometrien: U-svingene var **ellipser** (`xR = min(cc/2, 2,5)`
+× `cc/2`), hver bane hadde sin **egen** `beginPath` og banene ble koblet med **U-sving-arcer** i skjøten —
+i strid med «halvsirkel radius cc/2», «én sammenhengende kabel» og «rett flukt-skjøt».
+
+Skrevet om til **én sammenhengende kabel** som følger mockupen: baner tas høyre→venstre, strenger går på
+tvers av 50 cm-bredden og avanserer cc langs lengden, **halvsirkel-U-svinger radius cc/2** med cc/2-inntrekk
+(svingen lander på 2,5 cm-margen, aldri utenfor 50 cm), og **rett flukt-overgang** i skjøten mellom baner
+(ingen sving, ingen Y-splitt).
+
+Verifisert på 300×220 (4 baner) ved å instrumentere canvas-kallene: 1 `moveTo` (én kabel), 76 `arc` alle
+med radius cc/2, 3 rette skjøt-linjer, **0 `ellipse`**. num_runs=1 (én bane) rendrer uten feil. Snø-matter
+bruker samme `drawMats` — endringen er generell.
+
+**Fil:** romtegner.html (`drawMats`).
+
+---
+
 ## Varmematte auto: retning = best dekning (Del 1) — 2026-07-07
 
 Del av verifisering-mot-mockup + gap-tetting for den eksisterende innendørs Varmematte-modulen
