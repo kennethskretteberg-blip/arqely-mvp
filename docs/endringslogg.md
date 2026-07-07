@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard platesystem (Varmecomfort) — Del 1: leverandør + katalog + gating — 2026-07-07
+
+Første del av ny modul for **Aluboard platesystem** fra leverandøren **Varmecomfort** (eget datasett, IKKE
+Cenika). Kun data + tilgang + state-slot — ingen geometri/UI ennå.
+
+- **State:** `S.aluboard = []` + `nextAluboardId`-teller; med i pushUndo/undo-restore, `_buildSaveData` og
+  `_restoreProject` (lagres i prosjekt-JSON, tåler gamle prosjekt uten feltet).
+- **Leverandør-gating (ny dimensjon i tegneverktøyet):** `_productVisibleToOrg(prod)` — en LEVERANDØR-org
+  ser kun egne produkter (`p.supplier === org.supplier_name`); elektrobedrift + superadmin ser ALLE.
+  Anvendt i `_upcScopeProducts` + `_upcRenderTypeChips`. Skjuler Varmecomfort for Cenika-org.
+- **Katalog (fallback-seed `_ensureVarmecomfortProducts`):** kategori «Aluboard platesystem»
+  (`module_type:'aluboard'`, `available_contexts:['indoor']`), 2 plater (rett 60×120 EL 5402067,
+  vende 28×60 EL 5402066) + 17 FLXHEAT 3 mm 8 W/m-kabler (meter·watt·EL·nominell Ω). Type-chip-label «Aluboard».
+- **Migrasjon:** `supabase-migration-varmecomfort-aluboard.sql` — asymmetrisk resistanstoleranse på
+  `suppliers` (−5 %/+10 %, lengde ±2 %), Varmecomfort-rad, Aluboard-kategori, produkt-inserts (tilpass
+  kolonnenavn).
+
+Verifisert: gating (installatør ser alle, Cenika-org ser 0 Varmecomfort, Varmecomfort-org ser kun sine,
+superadmin alle); 19 produkter seedet; EL 1006058 = 86 m/720 W/73 Ω (fasit). Andre moduler uendret.
+
+**Fil:** romtegner.html (state, `_productVisibleToOrg`, `_ensureVarmecomfortProducts`), migrasjon.
+
+---
+
 ## Tilbudspris: rabatt per produktgruppe (+ hierarki) — 2026-07-07
 
 Utvidet den enkle globale «Rabatt %» i PDF-eksport til et **rabatt-hierarki**: produkt > gruppe >
