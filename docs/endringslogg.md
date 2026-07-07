@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Trapp: tre fikser (fjern/legg til kabel, riktig antall strenger, side-visning) — 2026-06-25
+
+1. **Fjern/legg til varmekabel** (`67e16b6`+`1057df0` er 2/3; denne er 1+2): ny «Fjern varmekabel»-
+   knapp i trappens innstillings-panel (`_stairRemoveCable`) — tømmer kabelen (løp/produkt) men
+   beholder geometrien (`stair.noCable`-flagg; `generateStairCable` returnerer tomme løp). «Legg til
+   varmekabel» (`_stairAddCable`) regenererer og åpner forslag. Å velge kabel/forslag fjerner flagget.
+2. **Valgt forslag → riktig antall strenger:** `_applyStairProposal` lagret bare avrundet `stepCC`;
+   `generateStairCable` re-utledet `N=floor(usableDepth/cc)+1`, og opprundet CC kunne senke N med 1
+   (forslag «4 strenger» ble bygd som 3). Lagrer nå `runsPerStep` og bruker den direkte for trinn
+   (+ epsilon-guard). Verifisert: `runsPerStep=4` → 4 strenger (var 3).
+3. **Side-visning opp-ned:** forrige buildDirection-fiks speilet side-profilen vertikalt (FY), som
+   snudde trappa opp-ned. Reverterte FY i `_drawStairSide` → normal trinn-opp-profil. Byggeretning
+   styrer fortsatt plan-visningen via `y_cm`. Verifisert på canvas.
+
+**Filer:** romtegner.html (`_drawStairSide`, `generateStairCable`, `_applyStairProposal`,
+`_stairRemoveCable`/`_stairAddCable`, `_renderStairSettingsPanel`, `_setStairCableProduct`).
+
+---
+
 ## Ny modul: Snøsmelting – effektbehov — 2026-06-25
 
 Leverandørnøytral effektbehov-kalkulator for snøsmelting; produktene kommer fra valgt leverandørs
