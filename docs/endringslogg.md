@@ -4,6 +4,21 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte auto: retning = best dekning (Del 1) — 2026-07-07
+
+Del av verifisering-mot-mockup + gap-tetting for den eksisterende innendørs Varmematte-modulen
+(EcoMat). **Del 1:** `autoFillMatSerpentine` valgte retning via `_suggestDirection` (PCA på romform),
+ikke «prøv begge, best dekning» som mockup-fasiten. Bytta til en **mat-lokal** best-dekning-velger som
+regner baner×lengde for både stående/liggende på den brukbare (margin- + hindring-innskrenkede) rekta og
+velger størst dekket areal; uavgjort → stående (som mockup). Bruker-overstyrt retning vinner fortsatt.
+
+`_suggestDirection` er **urørt** (folie/kabel bruker den) → ingen regresjon. Verifisert: 260×250 gikk fra
+liggende 4 baner (4,80 m²) til stående 5 baner (6,00 m²); 300×220 forblir liggende 4; overstyring virker.
+
+**Fil:** romtegner.html (`autoFillMatSerpentine`).
+
+---
+
 ## Romoversikt: én rad per unik produkt-variant (fiks mikset multi-kabel) — 2026-07-07
 
 **Bug:** Romoversikten (PDF-tabell + Excel «Per rom») antok ett dominant produkt per rom. Et rom med
