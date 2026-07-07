@@ -3495,6 +3495,7 @@ function render() {
   drawCables();
   drawMats();
   drawPlates();
+  drawAluboard();
   drawStairs();
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
@@ -15884,6 +15885,116 @@ function drawMatMoveGizmo() {
 
 // ─── PLATES (plate systems with cable grooves) ──────────────
 let _hoveredPlateId = null;
+
+// ─── ALUBOARD PLATESYSTEM (Varmecomfort) — geometri + render (Del 2) ─────────
+// Fasit: mockups/Varmeplan-aluboard-platesystem.html. Felt-lokale koordinater: u = på tvers av
+// strengene (plater 60 cm + CC 10 stables), v = langs strengene (kabelretning). Vendeplater (28 cm)
+// i begge v-ender der kabelen snur (U-sving radius CC/2 = 5 cm), rette plater imellom.
+const _ALU = { EDGE: 4, PLATE_W: 60, RETTE_L: 120, VENDE_D: 28, CC: 10, WPM: 8, RUN_EDGE: 5 };
+
+// FLXHEAT-katalog (Varmecomfort) sortert korteste→lengste: {m, w, el, r, productId}.
+function _aluboardCableCatalog() {
+  return HEATING_PRODUCTS
+    .filter(p => (p.supplier || '').toLowerCase() === 'varmecomfort' && p.cable_length_m > 0)
+    .map(p => ({ m: p.cable_length_m, w: p.total_effect_w, el: p.el_no || p.el_number, r: p.nominal_ohm, productId: p.id }))
+    .sort((a, b) => a.m - b.m);
+}
+
+// Derivér hele utlegget fra rom + retning. Alt geometri utledes (ingenting lagres som piksler).
+function _aluboardCompute(room, direction) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys);
+  const rw = maxX - minX, rl = maxY - minY;
+  const useH = direction === 'h';
+  const { EDGE, VENDE_D, CC, RUN_EDGE } = _ALU;
+  const Wfield = (useH ? rl : rw) - 2 * EDGE;   // på tvers av strenger
+  const Lfield = (useH ? rw : rl) - 2 * EDGE;   // langs strenger (kabel)
+  const vA = VENDE_D, vB = Lfield - VENDE_D, runLen = Math.max(0, vB - vA), r = CC / 2;
+  const runsU = [];
+  for (let u = RUN_EDGE; u <= Wfield - RUN_EDGE + 0.01; u += CC) runsU.push(u);
+  const fullNeedM = (runsU.length * runLen + Math.max(0, runsU.length - 1) * Math.PI * r) / 100;
+  const cat = _aluboardCableCatalog();
+  const fit = [...cat].reverse().find(c => c.m <= fullNeedM);
+  const overshoot = !fit;
+  const chosen = fit || cat[0] || null;
+  const budget = (chosen ? chosen.m : fullNeedM) * 100;   // cm
+  const restM = chosen ? Math.max(0, fullNeedM - chosen.m) : 0;
+  const MAP = (u, v) => useH ? { x: minX + EDGE + v, y: minY + EDGE + u } : { x: minX + EDGE + u, y: minY + EDGE + v };
+  return { minX, minY, rw, rl, useH, Wfield, Lfield, vA, vB, runLen, r, runsU, fullNeedM, cat, chosen, overshoot, budget, restM, MAP };
+}
+
+// Sammenhengende kabel-polyline i FELT-koordinater (rette strenger + U-sving-buer approksimert som
+// polylinje). SISTE streng kappes der budsjettet (valgt kabel) tar slutt. Returnerer {pts, used, shortLast}.
+function _aluboardCablePath(L) {
+  const pts = []; let used = 0, shortLast = false;
+  for (let i = 0; i < L.runsU.length; i++) {
+    const u = L.runsU[i], down = (i % 2 === 0), vStart = down ? L.vA : L.vB;
+    const turn = i > 0 ? Math.PI * L.r : 0;
+    if (used + turn + 0.5 >= L.budget) break;   // ikke plass til mer kabel
+    if (i === 0) {
+      pts.push({ u, v: vStart });
+    } else {
+      const uPrev = L.runsU[i - 1], sign = down ? -1 : 1, Cu = (uPrev + u) / 2;   // bulge inn i vendesonen
+      for (let t = 1; t <= 8; t++) { const tt = t / 8; pts.push({ u: Cu - Math.cos(Math.PI * tt) * L.r, v: vStart + sign * Math.sin(Math.PI * tt) * L.r }); }
+      used += turn;
+    }
+    const drawLen = Math.min(L.runLen, L.budget - used);
+    const vEnd = down ? vStart + drawLen : vStart - drawLen;
+    pts.push({ u, v: vEnd });
+    used += drawLen;
+    if (drawLen < L.runLen - 0.5) { shortLast = true; break; }
+  }
+  return { pts, used, shortLast };
+}
+
+function _aluboardsForRoom(roomId) { return (S.aluboard || []).filter(a => a.roomId === roomId); }
+
+// Legg ut Aluboard i rommet (eneste montørvalg = retning). Én oppføring per rom.
+function _aluboardAutoFill(roomId, direction) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) { alert('Velg et rom først'); return; }
+  const dir = (direction === 'h' || direction === 'v') ? direction : 'v';
+  pushUndo();
+  S.aluboard = (S.aluboard || []).filter(a => a.roomId !== roomId);
+  const L = _aluboardCompute(room, dir);
+  const ab = {
+    id: S.counters.nextAluboardId++, roomId, direction: dir,
+    cableProductId: L.chosen ? L.chosen.productId : null,
+    cableNeedM: +L.fullNeedM.toFixed(1), cableChosenM: L.chosen ? L.chosen.m : 0, restM: +L.restM.toFixed(1)
+  };
+  S.aluboard.push(ab);
+  if (typeof renderSidebar === 'function') renderSidebar();
+  if (typeof updateCtxBar === 'function') updateCtxBar();
+  render();
+  return ab;
+}
+
+// Tegn Aluboard: felt-omriss (stiplet) + én sammenhengende serpentin-kabel. Plater kommer i Del 3.
+function drawAluboard() {
+  const list = S.aluboard || [];
+  for (const ab of list) {
+    const room = S.rooms.find(r => r.id === ab.roomId);
+    if (!room) continue;
+    if (typeof _roomOnActiveFloor === 'function' && !_roomOnActiveFloor(room)) continue;
+    const L = _aluboardCompute(room, ab.direction);
+    // felt-omriss
+    const c0 = w2s(L.minX + _ALU.EDGE, L.minY + _ALU.EDGE);
+    const c1 = w2s(L.minX + (L.useH ? L.Lfield : L.Wfield) + _ALU.EDGE, L.minY + (L.useH ? L.Wfield : L.Lfield) + _ALU.EDGE);
+    ctx.save();
+    ctx.setLineDash([4, 3]); ctx.strokeStyle = 'rgba(159,179,189,0.7)'; ctx.lineWidth = 1;
+    ctx.strokeRect(Math.min(c0.x, c1.x), Math.min(c0.y, c1.y), Math.abs(c1.x - c0.x), Math.abs(c1.y - c0.y));
+    ctx.setLineDash([]);
+    // kabel-serpentin
+    const path = _aluboardCablePath(L);
+    if (path.pts.length) {
+      ctx.beginPath();
+      path.pts.forEach((p, i) => { const w = L.MAP(p.u, p.v), s = w2s(w.x, w.y); if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y); });
+      ctx.strokeStyle = '#e0563f'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
 
 function drawPlates() {
   for (const plate of S.plates) {
@@ -32283,6 +32394,7 @@ function _restoreProject(data) {
   if (!S.counters.nextZoneId) S.counters.nextZoneId = 1;
   if (!S.counters.nextMatId) S.counters.nextMatId = 1;
   if (!S.counters.nextPlateId) S.counters.nextPlateId = 1;
+  if (!S.counters.nextAluboardId) S.counters.nextAluboardId = 1;
   if (!S.counters.nextStairId) S.counters.nextStairId = 1;
   if (!S.counters.nextPartId) S.counters.nextPartId = 1;
   S.snap      = data.snap      || S.snap;
@@ -41699,7 +41811,7 @@ function _resetProjectState() {
   S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; S.zones = []; _invalidateStripCache();
   S.cables   = []; S.mats = []; S.plates = []; S.stairs = [];
   _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache(); _invalidateStairCache();
-  S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextPlateId:1, nextStairId:1, nextPartId:1 };
+  S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextPlateId:1, nextAluboardId:1, nextStairId:1, nextPartId:1 };
   S.view     = { zoom:1, panX:0, panY:0 };
   S.drawing.active=false; S.drawing.points=[]; S.drawing.rectStart=null;
   Object.assign(S.ui, {

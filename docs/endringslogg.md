@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard platesystem (Varmecomfort) — Del 2: auto-geometri (kabel-serpentin) — 2026-07-07
+
+Auto-geometri for Aluboard: én sammenhengende varmekabel-serpentin i de faste sporene (CC 10), U-svinger
+som halvsirkler (radius CC/2 = 5 cm) i vendeplate-sonene, retning H/V (eneste montørvalg). Alt derivert
+fra state (`_aluboardCompute(room, dir)` — ingenting lagret som piksler).
+
+- Konstanter `_ALU` (EDGE 4, PLATE_W 60, RETTE_L 120, VENDE_D 28, CC 10, RUN_EDGE 5) fra mockup-fasit.
+- `_aluboardCableCatalog` (FLXHEAT sortert), `_aluboardCompute` (felt/strenger/kabelbehov/valgt kabel),
+  `_aluboardCablePath` (sammenhengende polyline, siste streng kappet ved budsjett = valgt kabel).
+- `_aluboardAutoFill(roomId, dir)` lager S.aluboard-oppføring (én per rom); `drawAluboard()` tegner felt-
+  omriss + serpentin i «Heating elements»-laget (etter drawPlates). `_aluboardsForRoom`.
+- Bugfiks: `nextAluboardId` manglet i nytt-prosjekt-counters-reset + migrasjonsguard for lastede prosjekt.
+
+Verifisert mot fasit (rom 360×300 vertikal): 35 strenger × 236 cm → **kabelbehov 87,94 m** → valgt
+**86,0 m (EL 1006058, 720 W, 73 Ω)**, siste streng **1,94 m kortere** (shortLast), path = 86,0 m.
+Renderer som mockup (én ubrutt kabel, halvsirkel-U-svinger). Andre moduler uendret.
+
+**Fil:** romtegner.html (`_ALU`, `_aluboardCompute/CablePath/AutoFill`, `drawAluboard`, render-hook).
+
+---
+
 ## Aluboard platesystem (Varmecomfort) — Del 1: leverandør + katalog + gating — 2026-07-07
 
 Første del av ny modul for **Aluboard platesystem** fra leverandøren **Varmecomfort** (eget datasett, IKKE
