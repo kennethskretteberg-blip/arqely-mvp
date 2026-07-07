@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: manuell modus — bane-liste (Del 5) — 2026-07-07
+
+La til manuell utlegg som mockupen: montøren bygger en **bane-liste** (legg bane for bane, bland Stå/Ligg
+fritt, lengde snappes til raster 2×cc). **Hver bane = en egen matte** (`num_runs:1`) med egen serpentin/
+kabel — gjenbruker `drawMats`/hit/select/lagring. Banene **hylle-pakkes** venstre→høyre fra rommets
+margin-hjørne og brytes til ny hylle ved rombredden (fra mockupens `renderManual`).
+
+Kjerne: `_matManualApply` (bygger mat-objektene tagget `_manualGroup`, regner om verdens-topp-venstre →
+pre-rotasjons x/y for rot 0/90), `_matBaneCableM` (kabel = areal ÷ cc), `_matStdSizes` (standardstørrelser
+fra katalogen). UI: «Manuell (bane-liste)»-knapp i mat-panelet → bane-liste med Stå/Ligg-toggle, lengde,
+«≈ X m kabel», slett, «+ Legg til bane», og totaler (baner, dekket areal, kabellengde, effekt, foreslått
+matte ≤ areal). Live re-pakking ved hver endring.
+
+Verifisert mot mockup-matematikken: baner v192+h240 → 2 matter (0,96 m²/8 m + 1,20 m²/10 m, tot 2,16 m²/
+18 m); 3-bane mikset utlegg (Stå+Ligg+Ligg) rendrer 3 separate matter med egen kabel, riktig hylle-pakking
+og totaler (3,00 m² · 25 m · 180 W). Kjent begrensning: å gå inn i manuell modus på nytt starter en fersk
+liste (eksisterende manuell-gruppe erstattes).
+
+**Fil:** romtegner.html (`_matManualApply` m.fl., `showMatPlacePanel`).
+
+---
+
 ## Varmematte: «Sentrer / Fra vegg»-toggle (Del 3b) — 2026-07-07
 
 Auto-utlegget sentrerte alltid matten (kaldt felt likt på begge vegger). La til mockupens **«Fra vegg»**-

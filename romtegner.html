@@ -5964,7 +5964,9 @@ function showMatPlacePanel(familyName, categoryId) {
           onclick="_startMatPlacementFromSelect(${firstP.id})">Plasser matte</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
           onclick="autoFillMatSerpentine(${firstP.id})">Fyll rom</div>
-      </div>`;
+      </div>
+      <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px"
+        onclick="_matManualStart(${firstP.id})">Manuell (bane-liste)</div>`;
     } else {
       // Test products or single-product family — show length input
       const p = firstP;
@@ -5982,7 +5984,9 @@ function showMatPlacePanel(familyName, categoryId) {
           onclick="_startMatPlacement(${p.id})">Plasser matte</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
           onclick="autoFillMatSerpentine(${p.id})">Fyll rom</div>
-      </div>`;
+      </div>
+      <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px"
+        onclick="_matManualStart(${p.id})">Manuell (bane-liste)</div>`;
     }
 
     html += '</div>';
@@ -6538,6 +6542,151 @@ function autoFillMatSerpentine(productId, opts) {
 
   console.log(`autoFillMatSerpentine: 1 matte, ${actualRuns} lengder × ${runLengthCm}cm = ${usedLengthCm}cm total, retning=${dir}`);
   return mat;
+}
+
+// ─── MANUELL MATTE-MODUS (bane-liste) ──────────────────────────────────────
+// Hver bane = en EGEN matte (num_runs=1) med egen serpentin/kabel (som mockupen). Banene
+// hylle-pakkes venstre→høyre fra rommets margin-hjørne og brytes til ny hylle ved rombredden.
+// Arbeidslista ligger i _matManual; _matManualApply materialiserer den til mat-objekter tagget
+// med _manualGroup, slik at all eksisterende rendering/hit/lagring gjenbrukes.
+let _matManual = null;   // { roomId, productId, banes: [{orient:'v'|'h', len}] }
+
+function _matRasterCm(prod) { return 2 * ((prod?.mat_cc_mm || 80) / 10); }
+
+// Kabellengde (m) for én bane: areal / cc  (som mockup: (NET·Ls/1e4)/(cc/100)).
+function _matBaneCableM(prod, LsCm) {
+  const NET = (prod?.mat_width_mm || 500) / 10, cc = (prod?.mat_cc_mm || 80) / 10;
+  if (cc <= 0) return 0;
+  return (NET * LsCm / 1e4) / (cc / 100);
+}
+
+// Bygg (på nytt) mat-objektene for den manuelle bane-lista i _matManual. Fjerner forrige
+// _manualGroup for rommet først. Returnerer de opprettede mattene.
+function _matManualApply() {
+  if (!_matManual) return [];
+  const { roomId, productId } = _matManual;
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod || !room.points || room.points.length < 3) return [];
+  const NET = (prod.mat_width_mm || 500) / 10;
+  const cutCm = _matRasterCm(prod);
+  const marginCm = Math.max(5, (prod.min_wall_margin_mm || 50) / 10);
+  const gap = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const uX0 = Math.min(...xs) + marginCm, uX1 = Math.max(...xs) - marginCm;
+  const uY0 = Math.min(...ys) + marginCm;
+  // Fjern forrige manuelle gruppe for dette rommet
+  S.mats = S.mats.filter(m => !(m.roomId === roomId && m._manualGroup));
+  let cx = uX0, cy = uY0, shelfH = 0;
+  const created = [];
+  (_matManual.banes || []).forEach((b, idx) => {
+    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
+    const w = b.orient === 'v' ? NET : Ls;   // verdensbredde (langs hylla)
+    const hh = b.orient === 'v' ? Ls : NET;  // verdenshøyde (hylle-tykkelse)
+    if (cx + w > uX1 + 0.1 && cx > uX0 + 0.001) { cx = uX0; cy += shelfH + gap; shelfH = 0; }
+    // verdens-topp-venstre = (cx, cy); regn om til pre-rotasjons x_cm/y_cm (rot 90 for liggende)
+    let x_cm, y_cm, rot;
+    if (b.orient === 'v') { x_cm = cx; y_cm = cy; rot = 0; }
+    else { x_cm = cx + Ls / 2 - NET / 2; y_cm = cy - Ls / 2 + NET / 2; rot = 90; }
+    const mat = {
+      id: S.counters.nextMatId++, roomId, productId, x_cm, y_cm,
+      width_cm: NET, length_cm: Ls, num_runs: 1, gap_cm: 0, rotation_deg: rot,
+      _manualGroup: true, _manualBaneIdx: idx
+    };
+    S.mats.push(mat); created.push(mat);
+    cx += w + gap; shelfH = Math.max(shelfH, hh);
+  });
+  _invalidateMatCache();
+  return created;
+}
+
+// Standard mattestørrelser (m²) for familien — fra katalogen, ellers fallback.
+function _matStdSizes(prod) {
+  const fam = prod?.product_family;
+  const cat = HEATING_PRODUCTS.filter(p => fam && p.product_family === fam && p.mat_area_m2 > 0)
+    .map(p => p.mat_area_m2);
+  const uniq = [...new Set(cat)].sort((a, b) => a - b);
+  return uniq.length ? uniq : [1, 1.5, 2, 3, 4, 5, 6, 7, 8, 10, 12];
+}
+
+// Start manuell modus for et produkt: init bane-lista (én stående bane) og vis panelet.
+function _matManualStart(productId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { alert('Velg et rom først'); return; }
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  pushUndo();
+  _matManual = { roomId, productId, banes: [{ orient: 'v', len: 8 * _matRasterCm(prod) }] };
+  _matManualApply();
+  S.ui.selectedMatId = null;
+  _matManualRenderPanel();
+  updateCtxBar(); render();
+}
+
+function _matManualRenderPanel() {
+  const section = document.getElementById('rwp-product-actions');
+  if (!section || !_matManual) return;
+  const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
+  const NET = (prod?.mat_width_mm || 500) / 10, cutCm = _matRasterCm(prod);
+  let totArea = 0, totCable = 0, rows = '';
+  _matManual.banes.forEach((b, i) => {
+    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
+    const cable = _matBaneCableM(prod, Ls);
+    totArea += NET * Ls / 1e4; totCable += cable;
+    rows += `<div style="display:flex;align-items:center;gap:3px;margin:3px 0">
+      <span style="width:12px;color:var(--dim);font-size:11px">${i + 1}</span>
+      <button class="snap-chip${b.orient === 'v' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'v')">Stå</button>
+      <button class="snap-chip${b.orient === 'h' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'h')">Ligg</button>
+      <input type="number" value="${b.len}" min="0" step="1" style="width:52px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matManualSetLen(${i},this.value)"><span style="font-size:10px;color:var(--dim)">cm</span>
+      <span style="flex:1;text-align:right;font-size:10px;color:var(--dim)">${cable.toFixed(1)} m</span>
+      <button class="snap-chip" style="font-size:10px;padding:2px 5px" onclick="_matManualDelBane(${i})" title="Slett bane">✕</button>
+    </div>`;
+  });
+  const STD = _matStdSizes(prod);
+  const suggest = [...STD].reverse().find(a => a <= totArea) || STD[0];
+  const wm2 = prod?.watt_per_m2 || 0, totW = Math.round(totArea * wm2);
+  section.innerHTML = `<div class="rwp-section-label">\u{1F7EB} Manuell — ${esc(prod?.product_family || prod?.name || 'Matte')}</div>
+    <div style="font-size:11px;color:var(--dim);margin:2px 0 4px">Bland Stå/Ligg. Hver bane = egen matte med egen kabel. Lengde snappes til raster (${cutCm} cm).</div>
+    ${rows}
+    <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px" onclick="_matManualAddBane()">+ Legg til bane</div>
+    <div style="border-top:1px solid var(--brd);margin-top:6px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
+      <div style="display:flex;justify-content:space-between"><span>Antall baner</span><b>${_matManual.banes.length}</b></div>
+      <div style="display:flex;justify-content:space-between"><span>Dekket areal</span><b>${totArea.toFixed(2)} m²</b></div>
+      <div style="display:flex;justify-content:space-between"><span>Kabellengde</span><b>≈ ${totCable.toFixed(1)} m</b></div>
+      <div style="display:flex;justify-content:space-between"><span>Effekt</span><b>${totW} W (${wm2} W/m²)</b></div>
+      <div style="display:flex;justify-content:space-between;color:var(--dim)"><span>Foreslått matte ≤</span><b>${suggest} m²</b></div>
+    </div>
+    <div class="ctx-item vfp-btn" style="text-align:center;margin-top:6px;background:var(--accent);color:#fff" onclick="_matManualExit()">Ferdig</div>`;
+  section.style.display = 'block';
+  if (typeof showRoomWorkflowPanel === 'function') showRoomWorkflowPanel();
+}
+
+function _matManualAddBane() {
+  if (!_matManual) return;
+  const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
+  _matManual.banes.push({ orient: 'v', len: 8 * _matRasterCm(prod) });
+  _matManualApply(); _matManualRenderPanel(); render();
+}
+function _matManualDelBane(i) {
+  if (!_matManual) return;
+  _matManual.banes.splice(i, 1);
+  if (!_matManual.banes.length) { const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId); _matManual.banes.push({ orient: 'v', len: 2 * _matRasterCm(prod) }); }
+  _matManualApply(); _matManualRenderPanel(); render();
+}
+function _matManualSetOrient(i, o) {
+  if (!_matManual || !_matManual.banes[i]) return;
+  _matManual.banes[i].orient = o;
+  _matManualApply(); _matManualRenderPanel(); render();
+}
+function _matManualSetLen(i, v) {
+  if (!_matManual || !_matManual.banes[i]) return;
+  _matManual.banes[i].len = Math.max(0, +v || 0);
+  _matManualApply(); _matManualRenderPanel(); render();
+}
+function _matManualExit() {
+  _matManual = null;
+  renderSidebar(); updateCtxBar(); render();
+  if (typeof showMatPlacePanel === 'function' && S.ui.manualFamilyName) showMatPlacePanel(S.ui.manualFamilyName, S.ui.manualCategoryId);
 }
 
 function showVfPlacePanel(familyName, categoryId) {
