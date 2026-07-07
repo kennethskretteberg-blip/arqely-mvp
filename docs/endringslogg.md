@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: rom-nivå resultat-labels for valgt matte (Del 3a) — 2026-07-07
+
+Info-panelet for en valgt matte viste villedende **én-bane**-tall (`Areal 1,20 m²`, `Effekt 72 W`) selv
+når matten hadde flere baner. Endret til **rom-nivå**-resultater som mockup-fasiten: Retning
+(Liggende/Stående), Antall baner (× lengde/bane), Dekket areal (total), **Kaldt felt/side**, CC,
+**Kabellengde** (≈ areal ÷ cc), Klipp, og **Effekt (total)**.
+
+Kaldt felt lagres på matten ved auto-utlegg (`_coldTotalCm = acrossSpan + 2·margin − block`, målt mot
+FULL romvegg inkl. margin, deles likt ved sentrert) → 300×220 EcoMat 60T gir 10 cm/side (fasit).
+Verifisert: panelet viser Dekket 4,80 m², Kaldt felt/side 10 cm, Kabellengde ≈ 40 m, Effekt 288 W.
+
+Gjenstår (Del 3b): «Fra vegg»-toggle (veggflukt-plassering i stedet for sentrert).
+
+**Fil:** romtegner.html (`autoFillMatSerpentine`, `updateObjInfo`).
+
+---
+
 ## Varmematte: serpentin-geometri = LÅST mockup-fasit (Del 2) — 2026-07-07
 
 `drawMats`-serpentinen avvek fra den låste geometrien: U-svingene var **ellipser** (`xR = min(cc/2, 2,5)`
