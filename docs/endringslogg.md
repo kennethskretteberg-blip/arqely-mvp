@@ -4,6 +4,28 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmematte: manuell bane-liste også for snø-matter (Del 5b) — 2026-07-07
+
+Utvidet den manuelle bane-lista til **snø-matter** (InSnow 300T). Samme motor (`_matManualApply`),
+generalisert med en `snow`-modus: snø bruker **faste pre-fabrikerte lengder** (per-bane produktvalg,
+ingen raster-kapp), **ingen veggmargin** (pakkes til kanten) og **gap min 5 cm** — mens innendørs beholder
+kappbar rull (raster-snap), 5 cm margin, 0–5 cm gap. Hver bane er fortsatt en egen matte med egen serpentin.
+
+UI: «Manuell (bane-liste)»-knapp i snø-panelet (`_upcRenderMatResults`) → `_matSnowManualStart`; bane-lista
+rendres i `#upc-results` med **lengde-dropdown per bane** (InSnow-varianter) i stedet for fritt tall.
+`_upcRefreshResults` gir bane-lista forrang så den ikke overskrives av produktlista når panelet re-rendres.
+
+Verifisert: snø-rom med 2m stå + 6m liggende → 2 faste matter (1,0 + 3,0 m², kabel 12,5 + 37,5 = 50 m, 1200 W),
+flush mot kant uten margin, riktig serpentin. Innendørs manuell uendret (ingen regresjon).
+
+**Fil:** romtegner.html (`_matManualApply`, `_matSnowManualStart`, `_matSnowVariants`, `_matManualRenderPanel`,
+`_upcRenderMatResults`, `_upcRefreshResults`).
+
+**Merk (delt kode):** snø-matter fikk allerede Del 2 (serpentin-geometri, halvsirkel cc/2, én kabel per
+matte) og Del 3a (resultat-labels) gratis, siden de deler `drawMats`/`updateObjInfo` med innendørs.
+
+---
+
 ## Varmematte: manuell modus — bane-liste (Del 5) — 2026-07-07
 
 La til manuell utlegg som mockupen: montøren bygger en **bane-liste** (legg bane for bane, bland Stå/Ligg

@@ -5380,6 +5380,9 @@ function _upcRefreshResults() {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) { container.innerHTML = '<div style="color:var(--dim)">Velg et rom først</div>'; return; }
 
+  // Manuell matte-modus (snø) eier #upc-results mens den er aktiv → vis bane-lista, ikke produktlista.
+  if (_matManual && _matManual.snow && _matManual.roomId === roomId) { _matManualRenderPanel(); return; }
+
   if (modType === 'cable') {
     _upcRenderCableResults(container, familyName, categoryId, roomId);
   } else if (modType === 'mat') {
@@ -5754,6 +5757,9 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
     onclick="_upcPlaceMat(${prods[0].id},'auto')">
     <svg class="ic ic-zap" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg> Fyll rom automatisk <span style="color:var(--accent)">★ Anbefalt</span>
   </div>`;
+  // Manuell bane-liste (faste InSnow-matter, bland retning)
+  html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:6px 12px;font-size:12px"
+    onclick="_matSnowManualStart(${prods[0].id})">\u{1F7EB} Manuell (bane-liste)</div>`;
 
   // Individual mat products — click previews the EXACT variant's coverage area on the canvas.
   for (const p of prods) {
@@ -6562,16 +6568,21 @@ function _matBaneCableM(prod, LsCm) {
 
 // Bygg (på nytt) mat-objektene for den manuelle bane-lista i _matManual. Fjerner forrige
 // _manualGroup for rommet først. Returnerer de opprettede mattene.
+//
+// To modeller:
+//  • Innendørs (snow=false): kappbar rull → bane-lengden er fri, snappes til raster (2×cc);
+//    veggmargin (min 5 cm); gap 0–5 cm.
+//  • Snø (snow=true): FASTE pre-fabrikerte matter → bane-lengden = produktets faste lengde
+//    (per-bane produktvalg, ingen raster-kapp); ingen veggmargin (pakkes til kanten); gap min 5 cm.
 function _matManualApply() {
   if (!_matManual) return [];
-  const { roomId, productId } = _matManual;
+  const { roomId, snow } = _matManual;
   const room = S.rooms.find(r => r.id === roomId);
-  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!room || !prod || !room.points || room.points.length < 3) return [];
-  const NET = (prod.mat_width_mm || 500) / 10;
-  const cutCm = _matRasterCm(prod);
-  const marginCm = Math.max(5, (prod.min_wall_margin_mm || 50) / 10);
-  const gap = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  if (!room || !room.points || room.points.length < 3) return [];
+  const defProd = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
+  const gap = snow ? Math.max(5, (S.varmematte && S.varmematte.gapCm > 0) ? S.varmematte.gapCm : 10)
+                   : Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  const marginCm = snow ? 0 : Math.max(5, (defProd?.min_wall_margin_mm || 50) / 10);
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const uX0 = Math.min(...xs) + marginCm, uX1 = Math.max(...xs) - marginCm;
   const uY0 = Math.min(...ys) + marginCm;
@@ -6580,7 +6591,12 @@ function _matManualApply() {
   let cx = uX0, cy = uY0, shelfH = 0;
   const created = [];
   (_matManual.banes || []).forEach((b, idx) => {
-    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
+    const prod = HEATING_PRODUCTS.find(p => p.id === (b.productId || _matManual.productId)) || defProd;
+    if (!prod) return;
+    const NET = (prod.mat_width_mm || 500) / 10;
+    const cutCm = _matRasterCm(prod);
+    const Ls = snow ? (((_matTotalLengthMm(prod) || 0) / 10) || Math.max(cutCm, b.len || 0))
+                    : Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
     const w = b.orient === 'v' ? NET : Ls;   // verdensbredde (langs hylla)
     const hh = b.orient === 'v' ? Ls : NET;  // verdenshøyde (hylle-tykkelse)
     if (cx + w > uX1 + 0.1 && cx > uX0 + 0.001) { cx = uX0; cy += shelfH + gap; shelfH = 0; }
@@ -6589,7 +6605,7 @@ function _matManualApply() {
     if (b.orient === 'v') { x_cm = cx; y_cm = cy; rot = 0; }
     else { x_cm = cx + Ls / 2 - NET / 2; y_cm = cy - Ls / 2 + NET / 2; rot = 90; }
     const mat = {
-      id: S.counters.nextMatId++, roomId, productId, x_cm, y_cm,
+      id: S.counters.nextMatId++, roomId, productId: prod.id, x_cm, y_cm,
       width_cm: NET, length_cm: Ls, num_runs: 1, gap_cm: 0, rotation_deg: rot,
       _manualGroup: true, _manualBaneIdx: idx
     };
@@ -6616,37 +6632,79 @@ function _matManualStart(productId) {
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return;
   pushUndo();
-  _matManual = { roomId, productId, banes: [{ orient: 'v', len: 8 * _matRasterCm(prod) }] };
+  _matManual = { roomId, productId, snow: false, banes: [{ orient: 'v', len: 8 * _matRasterCm(prod), productId }] };
   _matManualApply();
   S.ui.selectedMatId = null;
   _matManualRenderPanel();
   updateCtxBar(); render();
 }
 
+// Snø-variant: faste pre-fabrikerte matter. Hver bane velger en InSnow-lengde (ingen raster-kapp),
+// ingen veggmargin, gap min 5 cm. Egen inngang fra snø-panelet.
+function _matSnowManualStart(productId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { alert('Velg et rom først'); return; }
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  pushUndo();
+  // rydd rommet (som snø-auto gjør før utlegg)
+  S.mats = S.mats.filter(m => m.roomId !== roomId);
+  _matManual = { roomId, productId, snow: true, banes: [{ orient: 'v', productId }] };
+  _matManualApply();
+  S.ui.selectedMatId = null;
+  _matManualRenderPanel();
+  updateCtxBar(); render();
+}
+
+// InSnow-varianter (samme kategori/spenning/familie, med fast lengde) sortert korteste→lengste.
+function _matSnowVariants(prod) {
+  if (!prod) return [];
+  const cat = prod.category_id, volt = prod.voltage || 230, fam = prod.product_family;
+  return HEATING_PRODUCTS.filter(p => p.category_id === cat && (p.voltage || 230) === volt
+      && (fam ? p.product_family === fam : true) && p.active !== false && _matTotalLengthMm(p) > 0)
+    .sort((a, b) => (_matTotalLengthMm(a) || 0) - (_matTotalLengthMm(b) || 0));
+}
+function _matManualSetBaneProduct(i, pid) {
+  if (!_matManual || !_matManual.banes[i]) return;
+  _matManual.banes[i].productId = +pid;
+  _matManualApply(); _matManualRenderPanel(); render();
+}
+
 function _matManualRenderPanel() {
-  const section = document.getElementById('rwp-product-actions');
-  if (!section || !_matManual) return;
-  const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-  const NET = (prod?.mat_width_mm || 500) / 10, cutCm = _matRasterCm(prod);
+  if (!_matManual) return;
+  const snow = !!_matManual.snow;
+  const section = document.getElementById(snow ? 'upc-results' : 'rwp-product-actions');
+  if (!section) return;
+  const defProd = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
+  const variants = snow ? _matSnowVariants(defProd) : null;
   let totArea = 0, totCable = 0, rows = '';
   _matManual.banes.forEach((b, i) => {
-    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
+    const prod = HEATING_PRODUCTS.find(p => p.id === (b.productId || _matManual.productId)) || defProd;
+    const NET = (prod?.mat_width_mm || 500) / 10, cutCm = _matRasterCm(prod);
+    const Ls = snow ? (((_matTotalLengthMm(prod) || 0) / 10) || 0)
+                    : Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
     const cable = _matBaneCableM(prod, Ls);
     totArea += NET * Ls / 1e4; totCable += cable;
+    const lenControl = snow
+      ? `<select style="width:64px;padding:2px 3px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matManualSetBaneProduct(${i},this.value)">${variants.map(v => `<option value="${v.id}"${v.id === prod.id ? ' selected' : ''}>${((_matTotalLengthMm(v) || 0) / 1000).toFixed(1)}m</option>`).join('')}</select>`
+      : `<input type="number" value="${b.len}" min="0" step="1" style="width:52px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matManualSetLen(${i},this.value)"><span style="font-size:10px;color:var(--dim)">cm</span>`;
     rows += `<div style="display:flex;align-items:center;gap:3px;margin:3px 0">
       <span style="width:12px;color:var(--dim);font-size:11px">${i + 1}</span>
       <button class="snap-chip${b.orient === 'v' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'v')">Stå</button>
       <button class="snap-chip${b.orient === 'h' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'h')">Ligg</button>
-      <input type="number" value="${b.len}" min="0" step="1" style="width:52px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matManualSetLen(${i},this.value)"><span style="font-size:10px;color:var(--dim)">cm</span>
+      ${lenControl}
       <span style="flex:1;text-align:right;font-size:10px;color:var(--dim)">${cable.toFixed(1)} m</span>
       <button class="snap-chip" style="font-size:10px;padding:2px 5px" onclick="_matManualDelBane(${i})" title="Slett bane">✕</button>
     </div>`;
   });
-  const STD = _matStdSizes(prod);
+  const STD = _matStdSizes(defProd);
   const suggest = [...STD].reverse().find(a => a <= totArea) || STD[0];
-  const wm2 = prod?.watt_per_m2 || 0, totW = Math.round(totArea * wm2);
-  section.innerHTML = `<div class="rwp-section-label">\u{1F7EB} Manuell — ${esc(prod?.product_family || prod?.name || 'Matte')}</div>
-    <div style="font-size:11px;color:var(--dim);margin:2px 0 4px">Bland Stå/Ligg. Hver bane = egen matte med egen kabel. Lengde snappes til raster (${cutCm} cm).</div>
+  const wm2 = defProd?.watt_per_m2 || 0, totW = Math.round(totArea * wm2);
+  const hint = snow
+    ? 'Bland Stå/Ligg. Hver bane = en fast InSnow-matte med egen kabel. Velg lengde per bane.'
+    : `Bland Stå/Ligg. Hver bane = egen matte med egen kabel. Lengde snappes til raster (${_matRasterCm(defProd)} cm).`;
+  section.innerHTML = `<div class="rwp-section-label">\u{1F7EB} Manuell — ${esc(defProd?.product_family || defProd?.name || 'Matte')}</div>
+    <div style="font-size:11px;color:var(--dim);margin:2px 0 4px">${hint}</div>
     ${rows}
     <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px" onclick="_matManualAddBane()">+ Legg til bane</div>
     <div style="border-top:1px solid var(--brd);margin-top:6px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
@@ -6658,19 +6716,24 @@ function _matManualRenderPanel() {
     </div>
     <div class="ctx-item vfp-btn" style="text-align:center;margin-top:6px;background:var(--accent);color:#fff" onclick="_matManualExit()">Ferdig</div>`;
   section.style.display = 'block';
-  if (typeof showRoomWorkflowPanel === 'function') showRoomWorkflowPanel();
+  if (!snow && typeof showRoomWorkflowPanel === 'function') showRoomWorkflowPanel();
 }
 
 function _matManualAddBane() {
   if (!_matManual) return;
   const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-  _matManual.banes.push({ orient: 'v', len: 8 * _matRasterCm(prod) });
+  _matManual.banes.push(_matManual.snow
+    ? { orient: 'v', productId: _matManual.productId }
+    : { orient: 'v', len: 8 * _matRasterCm(prod), productId: _matManual.productId });
   _matManualApply(); _matManualRenderPanel(); render();
 }
 function _matManualDelBane(i) {
   if (!_matManual) return;
   _matManual.banes.splice(i, 1);
-  if (!_matManual.banes.length) { const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId); _matManual.banes.push({ orient: 'v', len: 2 * _matRasterCm(prod) }); }
+  if (!_matManual.banes.length) {
+    const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
+    _matManual.banes.push(_matManual.snow ? { orient: 'v', productId: _matManual.productId } : { orient: 'v', len: 2 * _matRasterCm(prod), productId: _matManual.productId });
+  }
   _matManualApply(); _matManualRenderPanel(); render();
 }
 function _matManualSetOrient(i, o) {
@@ -6684,9 +6747,11 @@ function _matManualSetLen(i, v) {
   _matManualApply(); _matManualRenderPanel(); render();
 }
 function _matManualExit() {
+  const wasSnow = _matManual && _matManual.snow;
   _matManual = null;
   renderSidebar(); updateCtxBar(); render();
-  if (typeof showMatPlacePanel === 'function' && S.ui.manualFamilyName) showMatPlacePanel(S.ui.manualFamilyName, S.ui.manualCategoryId);
+  if (wasSnow) { if (typeof _upcRefreshResults === 'function') _upcRefreshResults(); }
+  else if (typeof showMatPlacePanel === 'function' && S.ui.manualFamilyName) showMatPlacePanel(S.ui.manualFamilyName, S.ui.manualCategoryId);
 }
 
 function showVfPlacePanel(familyName, categoryId) {
