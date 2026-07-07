@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Leverandør-branding — Del 4: app-header (co-brand i verktøylinja) — 2026-07-07
+
+`_applyAppBranding()` brander editor-verktøylinja (`.tb-logo`): **[org-logo] Varmeplan** når «I appen»-flagget
+er på + logo finnes; ellers nøytral «Varmeplan». Bruker `_effectiveOrg()` så superbruker «vis som» (Del 5)
+også brander headeren. Kalles etter `_loadOrgBranding` (login/org-bytte) og fra branding-panelets toggler.
+
+Verifisert: nøytral → «Varmeplan»; logo + «I appen» på → `<img>` (branding-URL) + «Varmeplan»; «I appen» av
+→ nøytral igjen. (Dashboardets store «Varmeplan»-tittel er ikke brandet — mulig senere utvidelse.)
+
+**Fil:** romtegner.html (`_applyAppBranding`, `_loadOrgBranding`).
+
+---
+
 ## Leverandør-branding — Del 3: logo i PDF (forside/alle sider) — 2026-07-07
 
 Org-logo (co-brand) i **prosjekt-PDF** (`exportPDF`) og **garanti-PDF** (`_docBuildPDF`) iht. plasserings-
