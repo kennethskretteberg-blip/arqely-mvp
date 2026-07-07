@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Aluboard: prosjekt-brede integrasjoner (A1–A4) — 2026-07-07
+
+Koblet `S.aluboard` inn i de prosjekt-brede aggregeringene (var «silo» etter Del 1–6). Sentral helper
+`_aluboardComponents(ab)` / `_aluboardRoomItems(roomId)` ekspanderer en Aluboard til rette plate + vendeplate
++ valgt FLXHEAT-kabel (med antall/meter/effekt); alt gjenbruker den.
+
+- **A1 Materialliste/Bestilling/Tilbudspris (PDF + Excel):** Aluboard-produktene (12 rette + 12 vende + kabel)
+  telles nå i eksportens materialliste, ordreliste og tilbudspris-ark.
+- **A2 Effekt/areal:** `_computeRoomStats` + `_roomRatedEffectW` teller Aluboard (kabelens ratede effekt +
+  areal = kabel_m / 10 fra fast CC 10). Rom med Aluboard viser nå riktig W i Prosjekt-/Romoversikt (ikke 0).
+- **A3 Rom-detalj i sidepanelet:** «Varme (N)» lister nå Aluboard (klikk → velg).
+- **A4 Rabatt per gruppe:** `_projectUsedProductIds`/`_roomProductBreakdown`/`_roomDominantProduct` inkluderer
+  Aluboard → familiene «Aluboard» + «FLXHEAT 8W/m» får rabatt-felt i tilbudspris, og vises i Romoversikten.
+
+Verifisert (rom 360×300): ratedW 720, totalW 720, heatedM2 8,6; breakdown = kabel (720 W) + 12 rett + 12 vende;
+tilbudspris-grupper «Aluboard»/«FLXHEAT 8W/m». Andre moduler uendret.
+
+**Fil:** romtegner.html (`_aluboardComponents`/`_aluboardRoomItems`/`_aluboardRoomEffectW`, `_computeRoomStats`,
+`_roomRatedEffectW`, `_roomProductBreakdown`, `_roomDominantProduct`, `_projectUsedProductIds`, PDF- + Excel-
+materialliste, sidepanel-liste).
+
+---
+
 ## Aluboard platesystem (Varmecomfort) — Del 6: interaksjon + dok-kobling — 2026-07-07
 
 Siste del: velg/slett + kobling av Varmecomfort-målregler til dok-/garantimodulen. (Lagring + undo/redo var

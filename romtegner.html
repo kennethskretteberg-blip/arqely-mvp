@@ -3823,9 +3823,15 @@ function _computeRoomStats(room) {
     plateW += (pp?.watt_per_m2 || 0) * areaM2;
     plateCount++;
   }
-  const totalW = Math.round(foilW + cableW + matW + plateW);
+  // Aluboard (Varmecomfort platesystem) — effekt + oppvarmet areal (fast CC 10 → 10 lm/m²)
+  let aluboardW = 0, aluboardAreaM2 = 0;
+  for (const ab of _aluboardsForRoom(room.id)) {
+    const c = _aluboardComponents(ab);
+    if (c) { aluboardW += c.effectW; aluboardAreaM2 += c.areaM2; }
+  }
+  const totalW = Math.round(foilW + cableW + matW + plateW + aluboardW);
   // Heated area: total area covered by heating products
-  const heatedM2 = stripM2 + cableAreaM2 + matAreaM2 + plateAreaM2;
+  const heatedM2 = stripM2 + cableAreaM2 + matAreaM2 + plateAreaM2 + aluboardAreaM2;
   // W/m² over total room area (brutto)
   const wm2Total = bruttoM2 > 0 ? Math.round(totalW / bruttoM2) : 0;
   // W/m² over heated area only (flateeffekt)
@@ -6181,6 +6187,7 @@ function _roomRatedEffectW(room) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
     w += (p?.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000;
   }
+  w += _aluboardRoomEffectW(room.id);   // Aluboard: valgt FLXHEAT-kabels ratede effekt
   return Math.round(w);
 }
 
@@ -6208,6 +6215,7 @@ function _roomDominantProduct(room) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
     consider(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0);
   }
+  for (const it of _aluboardRoomItems(room.id)) consider(it.product, it.kind, it.effectW);
   return best;
 }
 
@@ -6241,6 +6249,12 @@ function _roomProductBreakdown(room) {
   for (const pl of _platesForRoom(room.id)) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
     add(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0);
+  }
+  for (const it of _aluboardRoomItems(room.id)) {
+    if (!it.product) continue;
+    let e = map.get(it.product.id);
+    if (!e) { e = { product: it.product, kind: it.kind, count: 0, effectW: 0 }; map.set(it.product.id, e); }
+    e.count += it.count; e.effectW += it.effectW;
   }
   return [...map.values()]
     .map(e => ({ product: e.product, kind: e.kind, count: e.count, effectW: Math.round(e.effectW) }))
@@ -16042,6 +16056,39 @@ function _aluboardPlateCount(L) {
 
 function _aluboardsForRoom(roomId) { return (S.aluboard || []).filter(a => a.roomId === roomId); }
 
+// Ekspander en Aluboard til produkt-komponentene (rette plate, vendeplate, kabel) + effekt/areal.
+// Delt av alle prosjekt-brede aggregeringer (effekt, materialliste, romoversikt, tilbudspris).
+function _aluboardComponents(ab) {
+  const room = S.rooms.find(r => r.id === ab.roomId);
+  if (!room) return null;
+  const L = _aluboardCompute(room, ab.direction);
+  const cnt = _aluboardPlateCount(L);
+  const isVC = p => (p.supplier || '').toLowerCase() === 'varmecomfort';
+  const rette = HEATING_PRODUCTS.find(p => isVC(p) && (p.plate_role === 'straight' || p.el_no === '5402067' || p.el_number === '5402067'));
+  const vende = HEATING_PRODUCTS.find(p => isVC(p) && (p.plate_role === 'turn' || p.el_no === '5402066' || p.el_number === '5402066'));
+  const cable = HEATING_PRODUCTS.find(p => p.id === ab.cableProductId) || (L.chosen ? HEATING_PRODUCTS.find(p => p.id === L.chosen.productId) : null);
+  const chosenM = ab.cableChosenM || (L.chosen ? L.chosen.m : 0);
+  const effectW = cable ? (cable.total_effect_w || Math.round((cable.watt_per_m || 8) * chosenM)) : 0;
+  const areaM2 = chosenM / 10; // fast CC 10 cm → 10 lm/m²
+  return { L, cnt, rette, vende, cable, chosenM, effectW, areaM2 };
+}
+// Aluboard-bidrag i et rom: [{product, kind, count, meters, effectW}] for plate + vende + kabel.
+function _aluboardRoomItems(roomId) {
+  const out = [];
+  for (const ab of _aluboardsForRoom(roomId)) {
+    const c = _aluboardComponents(ab); if (!c) continue;
+    if (c.rette && c.cnt.rette > 0) out.push({ product: c.rette, kind: 'Plate', count: c.cnt.rette, meters: 0, effectW: 0 });
+    if (c.vende && c.cnt.vende > 0) out.push({ product: c.vende, kind: 'Plate', count: c.cnt.vende, meters: 0, effectW: 0 });
+    if (c.cable) out.push({ product: c.cable, kind: 'Kabel', count: 1, meters: c.chosenM, effectW: c.effectW });
+  }
+  return out;
+}
+function _aluboardRoomEffectW(roomId) {
+  let w = 0;
+  for (const ab of _aluboardsForRoom(roomId)) { const c = _aluboardComponents(ab); if (c) w += c.effectW; }
+  return w;
+}
+
 // Interaksjon (Del 6): treff = punkt innenfor Aluboard-feltet (rom-fyllende, så ingen «flytt»).
 function hitAluboard(wx, wy) {
   for (let i = (S.aluboard || []).length - 1; i >= 0; i--) {
@@ -24467,12 +24514,14 @@ function _renderDetailPanel(roomId) {
   const roomMats = _matsForRoom(roomId);
   // Plates
   const roomPlates = _platesForRoom(roomId);
+  // Aluboard platesystem
+  const roomAluboard = _aluboardsForRoom(roomId);
   // Zones
   const roomZones = S.zones.filter(z => z.roomId === roomId);
   // Hindrings
   const roomHindrings = S.hindrings.filter(h => h.roomId === roomId);
 
-  const totalElements = roomStrips.length + roomCables.length + roomMats.length + roomPlates.length;
+  const totalElements = roomStrips.length + roomCables.length + roomMats.length + roomPlates.length + roomAluboard.length;
   if (totalElements > 0 || roomGroups.length > 0) {
     h += `<div class="sb-detail-section">
       <div class="sb-detail-section-hdr" onclick="_toggleDetailSection(this)">
@@ -24538,6 +24587,18 @@ function _renderDetailPanel(roomId) {
         <span class="strip-ico">\u25A6</span>
         <span class="strip-nm">${pnm}</span>
         <span class="strip-len">${Math.round(p.width_cm)}\u00d7${Math.round(p.length_cm)} cm \u00b7 ${watt}W</span>
+      </div>`;
+    }).join('');
+
+    h += roomAluboard.map(ab => {
+      const asel = S.ui.selectedAluboardId === ab.id ? ' sel' : '';
+      const c = _aluboardComponents(ab);
+      const w = c ? c.effectW : 0;
+      return `<div class="strip-item${asel}"
+        onclick="selectAluboard(${ab.id});event.stopPropagation()">
+        <span class="strip-ico">\u{1F7E7}</span>
+        <span class="strip-nm">Aluboard</span>
+        <span class="strip-len">${ab.cableChosenM ? ab.cableChosenM.toFixed(1) + ' m' : ''}${w ? ' \u00b7 ' + w + 'W' : ''}</span>
       </div>`;
     }).join('');
 
@@ -32992,6 +33053,9 @@ function _projectUsedProductIds() {
     if (Array.isArray(st.cables)) st.cables.forEach(c => { if (c && c.productId != null) ids.add(c.productId); });
     if (st.cableProductId != null) ids.add(st.cableProductId);
   }
+  for (const ab of (S.aluboard || [])) {
+    for (const it of _aluboardRoomItems(ab.roomId)) if (it.product && it.product.id != null) ids.add(it.product.id);
+  }
   return ids;
 }
 // Produktgrupper (familier) i prosjektet → [{family, supplier, productIds}], sortert.
@@ -34066,6 +34130,18 @@ async function exportPDF(opts) {
       const p = HEATING_PRODUCTS.find(pr => pr.id === k);
       if (p?.watt_per_m) matList[k].watt += p.watt_per_m * (stair.totalCableLength_cm || 0) / 100;
     }
+  }
+  // Aluboard (Varmecomfort platesystem) — rette + vende plater + valgt FLXHEAT-kabel
+  for (const ab of (S.aluboard || [])) {
+    const c = _aluboardComponents(ab); if (!c) continue;
+    const push = (prod, cnt, meters, watt, type) => {
+      if (!prod) return; const k = prod.id;
+      if (!matList[k]) matList[k] = { type, count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+      matList[k].count += cnt; matList[k].totalLen += meters * 100; matList[k].watt += watt;
+    };
+    push(c.rette, c.cnt.rette, 0, 0, 'Plate (Aluboard)');
+    push(c.vende, c.cnt.vende, 0, 0, 'Plate (Aluboard)');
+    push(c.cable, 1, c.chosenM, c.effectW, 'Kabel (Aluboard)');
   }
 
   for (const [pid, info] of Object.entries(matList)) {
@@ -39505,6 +39581,12 @@ async function _exportMaterialListXLSX() {
       const watt = (p.watt_per_m2||0) * areaM2;
       items.push({ product: p, kind: 'Plate', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2, lenM: 0, watt });
     });
+    for (const ab of _aluboardsForRoom(room.id)) {   // Aluboard (Varmecomfort platesystem)
+      const c = _aluboardComponents(ab); if (!c) continue;
+      if (c.rette && c.cnt.rette > 0) items.push({ product: c.rette, kind: 'Plate (Aluboard)', roomName, floorName, qtyStr: c.cnt.rette + ' stk', count: c.cnt.rette, areaM2: 0, lenM: 0, watt: 0 });
+      if (c.vende && c.cnt.vende > 0) items.push({ product: c.vende, kind: 'Plate (Aluboard)', roomName, floorName, qtyStr: c.cnt.vende + ' stk', count: c.cnt.vende, areaM2: 0, lenM: 0, watt: 0 });
+      if (c.cable) items.push({ product: c.cable, kind: 'Kabel (Aluboard)', roomName, floorName, qtyStr: c.chosenM.toFixed(1) + ' m', count: 1, areaM2: c.areaM2, lenM: c.chosenM, watt: c.effectW });
+    }
   });
   (S.stairs||[]).forEach(stair => {
     const stairName = stair.name || 'Trapp';
