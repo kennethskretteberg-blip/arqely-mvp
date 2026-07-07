@@ -4,6 +4,21 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## EcoMat matte — Del 1: serpentin-retning (venstre→høyre) — 2026-07-08
+
+Fikset at kabelen startet på høyre ytterste matte og at matte 2 snudde feil vei. I `drawMats()`-serpentinen:
+`const r = numRuns-1-vi` → **`const r = vi`** (venstre→høyre, kabel starter nederst-venstre) og
+`startHi = jj%2===0` → **`startHi = jj%2===1`** (første streng starter venstre → første sving på høyre).
+Buesving (halvsirkel cc/2) og flukt-skjøt urørt — låste kabelregler intakt. Gjelder auto/manuell/snø
+(delt `drawMats`); ingen duplikat i PDF (mat-serpentinen finnes kun ett sted).
+
+Verifisert: 412×253 med EcoMat 150T (8 baner) → ren serpentin, halvsirkel-U-svinger, flukt-skjøter,
+ingen Y-splitt.
+
+**Fil:** romtegner.html (`drawMats` serpentin-blokk).
+
+---
+
 ## Leverandør-branding — Del 5: superbruker «vis som» — 2026-07-07
 
 Superbruker kan vise appen **som en valgt org** (elektrobedrift eller leverandør) — branding + produkt-
