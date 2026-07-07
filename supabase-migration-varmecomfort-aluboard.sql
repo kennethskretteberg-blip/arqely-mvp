@@ -8,6 +8,16 @@
 -- faktiske skjema foer du kjoerer (spesielt heating_products-kolonnene).
 -- ---------------------------------------------------------------------------
 
+-- ===========================================================================
+-- STEG 0 (KJOR DENNE LINJEN ALENE FORST, saa resten) — module_type er en enum,
+-- og en NY enum-verdi kan IKKE brukes i samme transaksjon som den opprettes.
+-- Marker kun linjen under og kjor den; kjor deretter resten av fila.
+-- ===========================================================================
+alter type module_type add value if not exists 'aluboard';
+
+-- ---------------------------------------------------------------------------
+-- STEG 1+ (kjor etter at STEG 0 er committet):
+
 -- 1) Asymmetrisk resistanstoleranse paa suppliers (Varmecomfort: -5 % / +10 %, lengde +/-2 %).
 --    (Dagens felt resistance_tolerance_pct er symmetrisk; disse utvider uten aa endre det.)
 alter table suppliers add column if not exists resistance_tol_minus_pct numeric;
