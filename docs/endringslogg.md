@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Produktkatalog (read-only, rolle-gatet) — 2026-07-07
+
+Ny read-only produktkatalog i admin-panelene. **Rolle-gating:** superadmin ser ALLE produkter (scope
+`all`, med leverandør-filter); en **leverandør-org** ser kun sine egne (scope = orgens `supplier_name`,
+matchet mot `p.supplier`); **installatør-orgs har ingen inngang** (nav-item gated på `org_type='supplier'`
++ superadmin, pluss defense-in-depth i `_orgAdmRenderCatalog`).
+
+Delt renderer `_renderProductCatalog(el, scope)`: gruppert per kategori (med kategoriens
+`available_contexts`-badges), kolonner El-nr · Art.nr · Produkt · Familie · Effekt · CC · Veggmargin, med
+søk + type-filter (+ leverandør-filter for superadmin). Wiret inn i superadmin-panelet (ny «Produktkatalog»-
+fane ved siden av «Produktimport») og org-admin-panelet for leverandører (ny «Produktkatalog»-fane; den
+gamle «Produkter»-fanen ble «Produktimport»).
+
+Verifisert: 6 kategorier / 299 produkter i scope `all`; type-filter (mat → kun matte-kategorier);
+leverandør-scope filtrerer på `p.supplier`; kontekst-badges vises (bekrefter at migrasjonen satte
+Varmekabel/InFloor = {indoor,outdoor}, Varmefolie = {indoor}).
+
+**Fil:** romtegner.html (`_renderProductCatalog`, `_admRenderCatalog`, `_orgAdmRenderCatalog`, nav + switch).
+
+---
+
 ## Produkt-tilgjengelighet per modul-kontekst (indoor/outdoor) — 2026-07-07
 
 Erstatter den gamle navne-hacken (`c.name.includes('utendørs')`) for hvilke produkter som vises i hvilke
