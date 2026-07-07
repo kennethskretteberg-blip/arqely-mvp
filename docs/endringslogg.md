@@ -4,6 +4,27 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Leverandør-branding — Del 3: logo i PDF (forside/alle sider) — 2026-07-07
+
+Org-logo (co-brand) i **prosjekt-PDF** (`exportPDF`) og **garanti-PDF** (`_docBuildPDF`) iht. plasserings-
+flaggene. Nøytral Varmeplan-fallback når ingen logo/flagg.
+
+- `_pdfBranding()` (async) laster org-logoen til data-URL via `_loadLogoImage` (canvas-rasterisering, takler
+  PNG/JPG/SVG), cacher `_pdfBrandCache`. `_pdfStampBranding(doc, M)` stempler etterpå: **forside** = logo
+  øverst til høyre (forsiden har allerede «VARMEPLAN»-tekst → ingen dobbel), **øvrige sider** = logo + liten
+  «Varmeplan» når «Alle sider» er på.
+- `exportPDF`: `await _pdfBranding()` før bygging, `_pdfStampBranding` før `save`. Garanti: `await _pdfBranding()`
+  før den sync `_docBuildPDF`, som stempler før `doc.output('blob')`.
+- `_effectiveOrg()` innført (returnerer `_userOrg` nå; «vis som»-org i Del 5).
+
+Verifisert: funksjoner definert; ingen logo → `_pdfBranding` = null (nøytral, ingen regresjon); stempling
+kjører feilfritt på fler-siders doc med begge flagg. Ekte logo på PDF testes etter at Del 1-migrasjonen +
+opplasting er gjort.
+
+**Fil:** romtegner.html (`_pdfBranding`/`_pdfStampBranding`/`_loadLogoImage`/`_effectiveOrg`, `exportPDF`, `_docBuildPDF`).
+
+---
+
 ## Leverandør-branding — Del 2: admin-panel (logo-opplasting + plassering) — 2026-07-07
 
 Ny «Logo & branding»-fane i org-admin-panelet (for alle orgs — leverandør + installatør; gated owner/admin +
