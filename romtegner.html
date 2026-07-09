@@ -6939,6 +6939,46 @@ function _matFreeCatalog(mp) {
   return { fam, product: prod, totalCm, chosenA, rollCm, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), watt, wm2, ohm, tooShort };
 }
 
+// Kabel-margin mot vegg/hindring: 5 cm INNENDØRS EcoMat; InSnow (utendørs) pakkes til kanten
+// (0) som i de andre snø-modulene. Meshen kan uansett gå helt inntil — dette gjelder KABELEN.
+function _matFreeCableMarginCm(mp) {
+  const snow = (typeof _roomModuleType === 'function' && _roomModuleType(mp.roomId) === 'snow')
+    || (typeof _isSnowModule === 'function' && _isSnowModule());
+  return snow ? 0 : 5;
+}
+
+// Klamp en bane-lengde slik at MESHEN holder seg innenfor rom-polygonet (kan gå til vegg) og
+// ikke legger seg oppå en hindring. Full-polygon: skann-linje langs baneaksen ved banens
+// tverr-posisjon; kort ned til rom-kant / hindring-kant i baneretningen. Snappet ned til raster.
+function _matFreeClampLen(mp, axis, dir, from, len) {
+  const room = S.rooms.find(r => r.id === mp.roomId);
+  if (!room || !room.points || room.points.length < 3) return len;
+  const cross = axis === 'h' ? from.y : from.x;   // fast tverr-koordinat
+  const along = axis === 'h' ? from.x : from.y;   // start langs banen
+  let intervals;
+  try { intervals = clipScanlineToPolygon(axis === 'h' ? 'x' : 'y', cross, room.points); }
+  catch (e) { return len; }
+  if (!intervals || !intervals.length) return len;
+  const iv = intervals.find(([lo, hi]) => along >= lo - 1 && along <= hi + 1);
+  if (!iv) return len;                             // start utenfor rommet → ikke klamp
+  let limit = dir > 0 ? iv[1] : iv[0];            // rom-grense i baneretningen
+  // Hindringer: meshen kan ikke ligge oppå → stopp ved hindring-kant (bbox) i baneretningen.
+  for (const h of (S.hindrings || [])) {
+    if (h.roomId !== mp.roomId || !h.points || h.points.length < 3) continue;
+    const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
+    const cLo = (axis === 'h' ? Math.min(...hy) : Math.min(...hx));
+    const cHi = (axis === 'h' ? Math.max(...hy) : Math.max(...hx));
+    if (cross < cLo || cross > cHi) continue;      // hindring ikke i denne tverr-linjen
+    const aLo = (axis === 'h' ? Math.min(...hx) : Math.min(...hy));
+    const aHi = (axis === 'h' ? Math.max(...hx) : Math.max(...hy));
+    if (dir > 0 && aLo > along && aLo < limit) limit = aLo;
+    if (dir < 0 && aHi < along && aHi > limit) limit = aHi;
+  }
+  const maxLen = Math.abs(limit - along);
+  const { RASTER } = _matFreeConsts(_matFreeProdOf(mp));
+  return Math.max(0, Math.floor(Math.min(len, maxLen) / RASTER) * RASTER);
+}
+
 // Kandidat-move fra fri ende mot verdenspunkt P (snap len til raster; utled kobling).
 function _matFreeCandidate(mp, P) {
   const runs = _matFreeDeriveRuns(mp), E = _matFreeEnd(mp), prev = runs.length ? runs[runs.length - 1] : null;
@@ -6947,10 +6987,18 @@ function _matFreeCandidate(mp, P) {
   const axis = horiz ? 'h' : 'v', dir = horiz ? (dx >= 0 ? 1 : -1) : (dy >= 0 ? 1 : -1);
   const raw = horiz ? Math.abs(dx) : Math.abs(dy);
   const len = Math.max(RASTER, Math.round(raw / RASTER) * RASTER);
-  if (!prev) return { axis, dir, len, conn: 'first', side: 1 };
-  const anti = (axis === prev.axis) && (dir === -prev.dir);
-  if (anti) { const side = axis === 'h' ? ((P.y >= E.y) ? 1 : -1) : ((P.x >= E.x) ? 1 : -1); return { axis, dir, len, conn: 'uturn', side }; }
-  return { axis, dir, len, conn: 'corner', side: 1 };
+  let move;
+  if (!prev) move = { axis, dir, len, conn: 'first', side: 1 };
+  else {
+    const anti = (axis === prev.axis) && (dir === -prev.dir);
+    if (anti) { const side = axis === 'h' ? ((P.y >= E.y) ? 1 : -1) : ((P.x >= E.x) ? 1 : -1); move = { axis, dir, len, conn: 'uturn', side }; }
+    else move = { axis, dir, len, conn: 'corner', side: 1 };
+  }
+  // #1: klamp mesh til rom-polygon + hindringer (banen kan gå til vegg, men ikke utenfor / oppå hindring).
+  const tentative = _matFreeDeriveRuns({ ...mp, moves: [...(mp.moves || []), move] });
+  const bane = tentative[tentative.length - 1];
+  if (bane) move.len = _matFreeClampLen(mp, axis, dir, bane.a, len);
+  return move;
 }
 
 // Start frihånds-modus for et produkt: start i rommets nedre-venstre indre hjørne (+margin).
@@ -7129,7 +7177,7 @@ function _drawMatPathCable(mp, coverCm, opts) {
   const sc = S.view.zoom * BASE_SCALE; if (sc <= 0.1) return;
   if (coverCm == null) coverCm = Infinity;
   if (opts.lastOnly) runs = runs.slice(-1);   // ghost: bare siste (nye) bane, svakt
-  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2, uL = _matFreeUTurnLen(mp);
+  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2, uL = _matFreeUTurnLen(mp), mgn = _matFreeCableMarginCm(mp);
   ctx.save();
   ctx.strokeStyle = opts.faint ? 'rgba(224,86,63,0.40)' : _lc('rgba(200,60,30,0.5)', 'rgba(255,100,60,0.45)');
   ctx.lineWidth = Math.max(0.7, sc * 0.4); ctx.lineCap = 'round';
@@ -7151,8 +7199,30 @@ function _drawMatPathCable(mp, coverCm, opts) {
     const fullLo = horiz ? full.x0 : full.y0, fullHi = horiz ? full.x1 : full.y1;
     const covLo = horiz ? R.x0 : R.y0, covHi = horiz ? R.x1 : R.y1;
     const wLo = (horiz ? R.y0 : R.x0) + im, wHi = (horiz ? R.y1 : R.x1) - im, wCtr = (wLo + wHi) / 2;
+    // #1: hold KABELEN ≥ margin fra vegg + hindring (mesh kan gå inntil). Klipp langs-området
+    // til rom-skannlinjen ⊖ margin, og trekk fra hindringer (bbox ⊕ margin) i denne tverr-linjen.
+    let allowLo = -Infinity, allowHi = Infinity; const obsRanges = [];
+    { const room = S.rooms.find(rr => rr.id === mp.roomId);
+      const cross = horiz ? (R.y0 + R.y1) / 2 : (R.x0 + R.x1) / 2, mid = (covLo + covHi) / 2;
+      if (room && room.points && room.points.length >= 3) {
+        let ivs; try { ivs = clipScanlineToPolygon(horiz ? 'x' : 'y', cross, room.points); } catch (e) { ivs = null; }
+        if (ivs && ivs.length) { const iv = ivs.find(([lo, hi]) => mid >= lo - 1 && mid <= hi + 1) || ivs[0]; allowLo = iv[0] + mgn; allowHi = iv[1] - mgn; }
+      }
+      for (const h of (S.hindrings || [])) {
+        if (h.roomId !== mp.roomId || !h.points || h.points.length < 3) continue;
+        const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
+        const cLo = (horiz ? Math.min(...hy) : Math.min(...hx)) - mgn, cHi = (horiz ? Math.max(...hy) : Math.max(...hx)) + mgn;
+        if (cross < cLo || cross > cHi) continue;
+        obsRanges.push([(horiz ? Math.min(...hx) : Math.min(...hy)) - mgn, (horiz ? Math.max(...hx) : Math.max(...hy)) + mgn]);
+      }
+    }
+    const loLim = Math.max(covLo, allowLo), hiLim = Math.min(covHi, allowHi);
     const positions = [];
-    for (let p = fullLo + cc / 2; p <= fullHi - cc / 2 + 0.01; p += cc) if (p >= covLo - 0.01 && p <= covHi + 0.01) positions.push(+p.toFixed(3));
+    for (let p = fullLo + cc / 2; p <= fullHi - cc / 2 + 0.01; p += cc) {
+      if (p < loLim - 0.01 || p > hiLim + 0.01) continue;
+      if (obsRanges.some(([lo, hi]) => p >= lo && p <= hi)) continue;
+      positions.push(+p.toFixed(3));
+    }
     if (!positions.length) continue;
     if (laneIdx % 2 === 1) positions.reverse();  // vekslende skann → flukt-skjøt
     for (let j = 0; j < positions.length; j++, si++) {
