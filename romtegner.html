@@ -6904,6 +6904,27 @@ function _matFreeUTurnLen(mp) { const { NET } = _matFreeConsts(_matFreeProdOf(mp
 function _matFreeTotalCm(mp) { let L = 0; for (const r of _matFreeDeriveRuns(mp)) { L += _matFreeRunLen(r); if (r.uturn) L += _matFreeUTurnLen(mp); } return L; }
 function _matFreeEnd(mp) { const runs = _matFreeDeriveRuns(mp); return runs.length ? runs[runs.length - 1].b : { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }; }
 
+// Katalog-matte ≤ tegnet: EcoMat-rull (0,5 m bred → rull-lengde = 2×areal m). Velg STØRSTE
+// familie-areal med rull-lengde ≤ tegnet total. Kabelen kappes ikke → dekker coverCm, resten
+// udekket. Effekt/motstand fra det valgte produktet (R=U²/P hvis ikke oppgitt).
+function _matFreeCatalog(mp) {
+  const fam = _matFreeProdOf(mp);
+  const totalCm = _matFreeTotalCm(mp);
+  const areas = _matStdSizes(fam);                 // familiens m²-varianter (sortert)
+  let chosenA = null;
+  for (const a of areas) if (a * 200 <= totalCm + 1e-6) chosenA = a;   // rull = 2×a m = 200×a cm
+  const tooShort = (chosenA == null);
+  if (tooShort) chosenA = areas[0];
+  const rollCm = chosenA * 200;
+  const coverCm = Math.min(totalCm, rollCm);
+  const prod = HEATING_PRODUCTS.find(p => fam && p.product_family === fam.product_family && Math.abs((p.mat_area_m2 || 0) - chosenA) < 1e-6) || fam;
+  const wm2 = prod?.watt_per_m2 || 0;
+  const watt = prod?.total_effect_w || Math.round(wm2 * chosenA);
+  const volt = prod?.rated_volt || 230;
+  const ohm = prod?.resistance_ohm || (watt > 0 ? Math.round(volt * volt / watt * 10) / 10 : null);
+  return { fam, product: prod, totalCm, chosenA, rollCm, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), watt, wm2, ohm, tooShort };
+}
+
 // Kandidat-move fra fri ende mot verdenspunkt P (snap len til raster; utled kobling).
 function _matFreeCandidate(mp, P) {
   const runs = _matFreeDeriveRuns(mp), E = _matFreeEnd(mp), prev = runs.length ? runs[runs.length - 1] : null;
@@ -6938,9 +6959,16 @@ function _matFreeExit(commit) {
   if (!S.matPaths) S.matPaths = [];   // eldre prosjekt lastet uten feltet
   if (_matFree && commit && _matFree.moves.length >= 1) {
     pushUndo();
-    S.matPaths.push({ id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
-      start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 });
+    const mpNew = { id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
+      start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 };
+    S.matPaths.push(mpNew);
     _invalidateMatCache && _invalidateMatCache();
+    // Katalog-oppsummering (≤ tegnet) — effekt/motstand fra valgt produkt.
+    if (typeof _showToast === 'function') {
+      const c = _matFreeCatalog(mpNew);
+      const und = c.uncoveredCm > 5 ? ` · ${(c.uncoveredCm / 100).toFixed(1)} m udekket` : '';
+      _showToast(`${c.product?.name || 'Matte'} — ${c.chosenA} m² (rull ${(c.rollCm / 100)} m), ${c.watt} W${c.ohm ? ' · ' + c.ohm + ' Ω' : ''} · tegnet ${(c.totalCm / 100).toFixed(1)} m${und}`, c.tooShort ? 'warn' : 'success');
+    }
   }
   _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
   if (typeof updMode === 'function') updMode();
@@ -6956,17 +6984,34 @@ function _matFreeLaneRectWorld(r, NET) {
     ? { x0: Math.min(r.a.x, r.b.x), y0: r.a.y - NET / 2, x1: Math.max(r.a.x, r.b.x), y1: r.a.y + NET / 2 }
     : { x0: r.a.x - NET / 2, y0: Math.min(r.a.y, r.b.y), x1: r.a.x + NET / 2, y1: Math.max(r.a.y, r.b.y) };
 }
-function _drawMatLane(r, NET, ghost) {
-  const R = _matFreeLaneRectWorld(r, NET);
+// Tegn ett lane-rektangel (verden). ghost = under tegning; covered=false → udekket (grå stiplet).
+function _drawMatLaneRect(R, ghost, covered) {
+  if (!R || (R.x1 - R.x0) < 0.05 || (R.y1 - R.y0) < 0.05) return;
   const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
   const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y), w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
   ctx.save();
-  ctx.fillStyle = ghost ? 'rgba(224,86,63,0.10)' : _lc('rgba(60,130,200,0.16)', 'rgba(80,160,240,0.18)');
-  ctx.strokeStyle = ghost ? 'rgba(224,86,63,0.55)' : _lc('rgba(40,100,200,0.55)', 'rgba(80,160,240,0.5)');
+  if (ghost) { ctx.fillStyle = 'rgba(224,86,63,0.10)'; ctx.strokeStyle = 'rgba(224,86,63,0.55)'; ctx.setLineDash([5, 4]); }
+  else if (covered) { ctx.fillStyle = _lc('rgba(60,130,200,0.16)', 'rgba(80,160,240,0.18)'); ctx.strokeStyle = _lc('rgba(40,100,200,0.55)', 'rgba(80,160,240,0.5)'); }
+  else { ctx.fillStyle = 'rgba(150,150,160,0.10)'; ctx.strokeStyle = 'rgba(150,150,160,0.55)'; ctx.setLineDash([5, 4]); }   // udekket (rull tok slutt)
   ctx.lineWidth = 1.4;
-  if (ghost) ctx.setLineDash([5, 4]);
   ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
   ctx.restore();
+}
+// Del opp en lane i dekket (fra a-enden, covLen) + udekket rest.
+function _matFreeCoveredSplit(r, NET, covLen) {
+  const R = _matFreeLaneRectWorld(r, NET), horiz = r.axis === 'h';
+  const full = horiz ? (R.x1 - R.x0) : (R.y1 - R.y0);
+  const cov = Math.max(0, Math.min(full, covLen));
+  const aLow = horiz ? (r.b.x >= r.a.x) : (r.b.y >= r.a.y);   // a på lav-siden av løpet?
+  let covR, uncR;
+  if (horiz) {
+    if (aLow) { covR = { x0: R.x0, y0: R.y0, x1: R.x0 + cov, y1: R.y1 }; uncR = { x0: R.x0 + cov, y0: R.y0, x1: R.x1, y1: R.y1 }; }
+    else { covR = { x0: R.x1 - cov, y0: R.y0, x1: R.x1, y1: R.y1 }; uncR = { x0: R.x0, y0: R.y0, x1: R.x1 - cov, y1: R.y1 }; }
+  } else {
+    if (aLow) { covR = { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y0 + cov }; uncR = { x0: R.x0, y0: R.y0 + cov, x1: R.x1, y1: R.y1 }; }
+    else { covR = { x0: R.x0, y0: R.y1 - cov, x1: R.x1, y1: R.y1 }; uncR = { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y1 - cov }; }
+  }
+  return { covR, uncR, cov, full };
 }
 // Halvsirkel-bue (radius r) fra a til b som buler mot retning (bx,by). Velger vri-flagget
 // hvis bue-midtpunkt ligger nærmest bule-retningen (robust uansett orientering).
@@ -6984,18 +7029,26 @@ function _matArcHalf(a, b, r, bx, by) {
 // ÉN sammenhengende serpentin-kabel pr lane (strenger på tvers av 50 cm-bredden, cc langs
 // lengden; U-svinger = halvsirkel cc/2 som lander 2,5 cm fra kant → aldri kabel utenfor).
 // Kaldskjøt ved global start, ende-markør ved global slutt. (Del 3 trimmer mot valgt rull.)
-function _drawMatPathCable(mp) {
+function _drawMatPathCable(mp, coverCm) {
   const prod = _matFreeProdOf(mp); const { NET, cc } = _matFreeConsts(prod);
   const runs = _matFreeDeriveRuns(mp); if (!runs.length || cc <= 0) return;
   const sc = S.view.zoom * BASE_SCALE; if (sc <= 0.1) return;
-  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2;
+  if (coverCm == null) coverCm = Infinity;
+  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2, uL = _matFreeUTurnLen(mp);
   ctx.save();
   ctx.strokeStyle = _lc('rgba(200,60,30,0.5)', 'rgba(255,100,60,0.45)');
   ctx.lineWidth = Math.max(0.7, sc * 0.4); ctx.lineCap = 'round';
-  let gStart = null, gStartDir = null, gEnd = null;
+  let gStart = null, gStartDir = null, gEnd = null, acc = 0;
   for (const r of runs) {
-    const R = _matFreeLaneRectWorld(r, NET); const horiz = r.axis === 'h';
+    if (r.uturn) acc += uL;
+    const rl = _matFreeRunLen(r);
+    const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
+    acc += rl;
+    if (covLen < 1) continue;                    // udekket lane → ingen kabel
+    const R = _matFreeCoveredSplit(r, NET, covLen).covR;   // kabel kun i dekket del
+    const horiz = r.axis === 'h';
     const L = horiz ? (R.x1 - R.x0) : (R.y1 - R.y0);
+    if (L < 5) continue;
     const N = Math.max(1, Math.floor((L - 5) / cc) + 1);
     const span = (N - 1) * cc, edge = (L - span) / 2;
     const wLo = (horiz ? R.y0 : R.x0) + im, wHi = (horiz ? R.y1 : R.x1) - im;
@@ -7031,12 +7084,29 @@ function _drawMatPathCable(mp) {
 function _drawMatPathObj(mp, active) {
   if (!_roomIdOnActiveFloor(mp.roomId)) return;
   const { NET } = _matFreeConsts(_matFreeProdOf(mp));
-  for (const r of _matFreeDeriveRuns(mp)) _drawMatLane(r, NET, false);
-  if (S.view.zoom > 0.25 && (mp.moves || []).length) _drawMatPathCable(mp);
+  const runs = _matFreeDeriveRuns(mp);
+  // Committet matte trimmes mot valgt katalog-rull (dekket vs udekket); under tegning ingen trim.
+  const cat = active ? null : _matFreeCatalog(mp);
+  const coverCm = cat ? cat.coverCm : Infinity;
+  const uL = _matFreeUTurnLen(mp);
+  let acc = 0;
+  for (const r of runs) {
+    if (r.uturn) acc += uL;
+    const rl = _matFreeRunLen(r);
+    const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
+    acc += rl;
+    if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
+    else {
+      const sp = _matFreeCoveredSplit(r, NET, covLen);
+      if (covLen > 0.5) _drawMatLaneRect(sp.covR, false, true);
+      if (covLen < rl - 0.5) _drawMatLaneRect(sp.uncR, false, false);
+    }
+  }
+  if (S.view.zoom > 0.25 && (mp.moves || []).length) _drawMatPathCable(mp, coverCm);
   if (active && mp.ghost) {
     const gr = _matFreeDeriveRuns({ ...mp, moves: [...mp.moves, mp.ghost] });
     const gr0 = gr[gr.length - 1];
-    _drawMatLane(gr0, NET, true);
+    _drawMatLaneRect(_matFreeLaneRectWorld(gr0, NET), true, true);
     // live «+X m»-etikett ved ghost-midtpunkt
     const mid = w2s((gr0.a.x + gr0.b.x) / 2, (gr0.a.y + gr0.b.y) / 2);
     const gLen = _matFreeRunLen(gr0);
