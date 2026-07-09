@@ -3013,6 +3013,7 @@ const S = {
     selectedCableId: null,       // selected cable id
     selectedZoneId: null,        // selected zone id
     selectedMatId: null,         // selected mat id
+    selectedMatPathId: null,     // selected frihånds-matte (S.matPaths)
     selectedPlateId: null,       // selected plate id
     selectedAluboardId: null,    // selected Aluboard platesystem id
     selectedStairId: null,       // selected stair id
@@ -3819,6 +3820,13 @@ function _computeRoomStats(room) {
     const n = mat.num_runs || 1;
     matAreaM2 += (mat.width_cm * _matLaidLengthCm(mat)) / 10000; // coverage = laid geometry (eksakt, inkl. kortere siste)
     matW += _matRatedW(mp, mat);                              // power = product rated per physical mat
+  }
+  // Frihånds-matter: areal + effekt fra valgt katalog-rull (dekket del).
+  for (const mpath of (S.matPaths || [])) {
+    if (mpath.roomId !== room.id) continue;
+    const c = _matFreeCatalog(mpath);
+    matAreaM2 += c.chosenA;   // katalog-mattas areal (rull dekker denne)
+    matW += c.watt;
   }
   let plateW = 0, plateAreaM2 = 0, plateCount = 0;
   for (const plate of _platesForRoom(room.id)) {
@@ -6962,6 +6970,7 @@ function _matFreeExit(commit) {
     const mpNew = { id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
       start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 };
     S.matPaths.push(mpNew);
+    S.ui.selectedMatPathId = mpNew.id;   // vis justerings-panelet med en gang
     _invalidateMatCache && _invalidateMatCache();
     // Katalog-oppsummering (≤ tegnet) — effekt/motstand fra valgt produkt.
     if (typeof _showToast === 'function') {
@@ -6974,9 +6983,87 @@ function _matFreeExit(commit) {
   if (typeof updMode === 'function') updMode();
   if (typeof renderSidebar === 'function') renderSidebar();
   if (typeof updateCtxBar === 'function') updateCtxBar();
+  if (typeof _matPathPanel === 'function') _matPathPanel();
   render();
 }
 function _matFreeUndoMove() { if (_matFree && _matFree.moves.length) { _matFree.moves.pop(); render(); } }
+
+// ── Del 4: justering (avstand mellom baner + Sentrer) + valg/slett ──
+// Sentrer: midtstill mattas bounding-box i ROMMETS bbox → i størst mulig grad like store
+// udekkede felt mot ALLE vegger. Behold tegnet form (like løp; katalog-trimmet siste kortere).
+function _matFreeCenter(mp) {
+  const room = S.rooms.find(r => r.id === mp.roomId); if (!room || !room.points || room.points.length < 3) return;
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const runs = _matFreeDeriveRuns({ ...mp, offX: 0, offY: 0 }); if (!runs.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const r of runs) { const R = _matFreeLaneRectWorld(r, NET); x0 = Math.min(x0, R.x0); y0 = Math.min(y0, R.y0); x1 = Math.max(x1, R.x1); y1 = Math.max(y1, R.y1); }
+  const rxs = room.points.map(p => p.x), rys = room.points.map(p => p.y);
+  const rx0 = Math.min(...rxs), rx1 = Math.max(...rxs), ry0 = Math.min(...rys), ry1 = Math.max(...rys);
+  mp.offX = (rx0 + rx1) / 2 - (x0 + x1) / 2;
+  mp.offY = (ry0 + ry1) / 2 - (y0 + y1) / 2;
+}
+// Frihånds-matte under et verdenspunkt (treffer en lane) → id, ellers null.
+function _matPathAtWorld(wp) {
+  for (let i = (S.matPaths || []).length - 1; i >= 0; i--) {
+    const mp = S.matPaths[i]; if (!_roomIdOnActiveFloor(mp.roomId)) continue;
+    const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+    for (const r of _matFreeDeriveRuns(mp)) {
+      const R = _matFreeLaneRectWorld(r, NET);
+      if (wp.x >= R.x0 - 1 && wp.x <= R.x1 + 1 && wp.y >= R.y0 - 1 && wp.y <= R.y1 + 1) return mp.id;
+    }
+  }
+  return null;
+}
+function _matPathSelect(id) {
+  S.ui.selectedMatPathId = id; S.ui.selectedMatId = null;
+  if (typeof updateCtxBar === 'function') updateCtxBar();
+  _matPathPanel(); render();
+}
+function _matPathSetGap(id, v) {
+  const mp = (S.matPaths || []).find(m => m.id === id); if (!mp) return;
+  pushUndo(); mp.gapCm = Math.max(0, +v || 0); if (mp.centered) _matFreeCenter(mp);
+  _invalidateMatCache && _invalidateMatCache(); _matPathPanel(); render();
+}
+function _matPathToggleCenter(id) {
+  const mp = (S.matPaths || []).find(m => m.id === id); if (!mp) return;
+  pushUndo(); mp.centered = !mp.centered;
+  if (mp.centered) _matFreeCenter(mp); else { mp.offX = 0; mp.offY = 0; }
+  _invalidateMatCache && _invalidateMatCache(); _matPathPanel(); render();
+}
+function _matPathDelete(id) {
+  if (!S.matPaths) return; pushUndo();
+  S.matPaths = S.matPaths.filter(m => m.id !== id);
+  if (S.ui.selectedMatPathId === id) S.ui.selectedMatPathId = null;
+  _invalidateMatCache && _invalidateMatCache();
+  if (typeof renderSidebar === 'function') renderSidebar();
+  if (typeof updateCtxBar === 'function') updateCtxBar();
+  render();
+}
+function _matPathPanel() {
+  const section = document.getElementById('rwp-product-actions'); if (!section) return;
+  const mp = (S.matPaths || []).find(m => m.id === S.ui.selectedMatPathId);
+  if (!mp) { section.style.display = 'none'; return; }
+  const c = _matFreeCatalog(mp);
+  const row = (l, v) => `<div style="display:flex;justify-content:space-between"><span>${l}</span><b>${v}</b></div>`;
+  section.innerHTML = `<div class="rwp-section-label">✏️ Frihånds-matte — ${esc(c.product?.name || 'Matte')}</div>
+    <div style="border-top:1px solid var(--brd);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
+      ${row('Tegnet lengde', (c.totalCm / 100).toFixed(1) + ' m')}
+      ${row('Valgt matte (≤ tegnet)', c.chosenA + ' m² · rull ' + (c.rollCm / 100) + ' m')}
+      ${row('Dekker', (c.coverCm / 100).toFixed(1) + ' m')}
+      ${row('Udekket', c.uncoveredCm > 5 ? (c.uncoveredCm / 100).toFixed(1) + ' m' : '—')}
+      ${row('Effekt', c.watt + ' W' + (c.ohm ? ' · ' + c.ohm + ' Ω' : ''))}
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px">
+      <span>Avstand mellom baner</span>
+      <input type="number" value="${mp.gapCm || 0}" min="0" step="0.5" style="width:56px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matPathSetGap(${mp.id},this.value)"><span>cm</span>
+    </div>
+    <div style="display:flex;gap:4px;margin-top:8px">
+      <div class="ctx-item vfp-btn${mp.centered ? ' on' : ''}" style="flex:1;text-align:center" onclick="_matPathToggleCenter(${mp.id})">Sentrer</div>
+      <div class="ctx-item vfp-btn" style="flex:1;text-align:center;color:#e5484d" onclick="_matPathDelete(${mp.id})">Slett</div>
+    </div>`;
+  section.style.display = 'block';
+  if (typeof showRoomWorkflowPanel === 'function') showRoomWorkflowPanel();
+}
 
 // ── Render: lane-rektangler (Del 1). Kabel/markør kommer i Del 2. ──
 function _matFreeLaneRectWorld(r, NET) {
@@ -27787,6 +27874,7 @@ function _buildCycleCandidates(wx, wy) {
   const hc = hitCable(wx, wy);            if (hc)            list.push({type:'cable',    id:hc.id});
   const hz = hitZone(wx, wy);             if (hz)            list.push({type:'zone',     id:hz.id});
   const hm = hitMat(wx, wy);              if (hm !== null)   list.push({type:'mat',      id:hm});
+  const hmp = _matPathAtWorld({x:wx, y:wy}); if (hmp !== null) list.push({type:'matpath', id:hmp});
   const hp = hitPlate(wx, wy);            if (hp !== null)   list.push({type:'plate',    id:hp});
   const hal = hitAluboard(wx, wy);        if (hal !== null)  list.push({type:'aluboard', id:hal});
   const hst = hitStair(wx, wy);           if (hst)           list.push({type:'stair',    id:hst.id});
@@ -27800,6 +27888,9 @@ function _buildCycleCandidates(wx, wy) {
 
 /** Select a single cycle candidate (no drag) — reuses existing select flows. */
 function _applyCycleSelection(cand) {
+  // Rydd frihånds-matte-valg når noe annet velges (skjuler justerings-panelet).
+  if (cand.type !== 'matpath' && S.ui.selectedMatPathId != null) { S.ui.selectedMatPathId = null; if (typeof _matPathPanel === 'function') _matPathPanel(); }
+  if (cand.type === 'matpath') { _matPathSelect(cand.id); renderSidebar(); return; }
   if (cand.type === 'strip')  { selStrip(cand.id, false); updateCtxBar(); render(); return; }
   if (cand.type === 'cable')  { selectCable(cand.id); return; }
   if (cand.type === 'zone')   { selectZone(cand.id); renderSidebar(); return; }
@@ -30291,6 +30382,7 @@ document.addEventListener('keydown', e=>{
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
   if (e.key==='Delete'&&S.ui.selectedMatId!==null) { deleteMat(S.ui.selectedMatId); return; }
+  if (e.key==='Delete'&&S.ui.selectedMatPathId!=null) { _matPathDelete(S.ui.selectedMatPathId); return; }
   if (e.key==='Delete'&&S.ui.selectedPlateId!==null) { deletePlate(S.ui.selectedPlateId); return; }
   if (e.key==='Delete'&&S.ui.selectedStairId!==null) { deleteStair(S.ui.selectedStairId); return; }
   // Arrow keys nudge the selected background; Shift = larger step.
@@ -32819,6 +32911,7 @@ function _buildSaveData() {
     cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),
     zones    : S.zones.map(z=>({...z, points:z.points.map(p=>({...p}))})),
     mats     : S.mats.map(m=>({...m})),
+    matPaths : (S.matPaths||[]).map(mp=>({...mp, start:{...mp.start}, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates   : S.plates.map(p=>({...p})),
     aluboard : (S.aluboard||[]).map(a=>({...a})),
     stairs   : S.stairs.map(s=>({...s, segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
@@ -33003,6 +33096,8 @@ function _restoreProject(data) {
   S.zones     = data.zones     || [];
   S.mats      = data.mats      || [];
   for (const m of S.mats) { if (m.num_runs == null) m.num_runs = 1; }
+  S.matPaths  = data.matPaths  || [];   // frihånds-matter
+  for (const mp of S.matPaths) { if (mp.roomId != null) mp.roomId = +mp.roomId; if (mp.id != null) mp.id = +mp.id; if (mp.productId != null) mp.productId = +mp.productId; }
   S.plates    = data.plates    || [];
   S.aluboard  = data.aluboard  || [];
   // Normalize IDs: ensure roomId/floorId/productId are numbers (Supabase JSON may stringify)
@@ -33465,6 +33560,7 @@ function _projectUsedProductIds() {
   for (const s of (S.strips || [])) if (s.productId != null) ids.add(s.productId);
   for (const c of (S.cables || [])) if (c.productId != null) ids.add(c.productId);
   for (const m of (S.mats || []))   if (m.productId != null) ids.add(m.productId);
+  for (const mp of (S.matPaths || [])) if (mp.productId != null) ids.add(mp.productId);
   for (const p of (S.plates || [])) if (p.productId != null) ids.add(p.productId);
   for (const st of (S.stairs || [])) {
     if (Array.isArray(st.cables)) st.cables.forEach(c => { if (c && c.productId != null) ids.add(c.productId); });
@@ -33643,6 +33739,7 @@ function _expPreviewSection(kind) {
     (S.strips || []).forEach(s => addP(s.productId, s.length_cm, 'Varmefolie'));
     (S.cables || []).forEach(c => addP(c.productId, 0, 'Varmekabel'));
     (S.mats || []).forEach(m => addP(m.productId, 0, 'Varmematte'));
+    (S.matPaths || []).forEach(mp => addP(_matFreeCatalog(mp).product?.id, 0, 'Varmematte'));
     (S.plates || []).forEach(p => addP(p.productId, 0, 'Varmeplate'));
     (S.stairs || []).forEach(st => { if (st.cables && st.cables.length) st.cables.forEach(c => addP(c.productId || st.cableProductId, 0, 'Varmekabel (trapp)')); else if (st.cableProductId) addP(st.cableProductId, 0, 'Varmekabel (trapp)'); });
     const _entries = Object.entries(mat).map(([pid, info]) => ({ info, pr: HEATING_PRODUCTS.find(p => p.id === +pid) }));
@@ -34584,6 +34681,15 @@ async function exportPDF(opts) {
     matList[k].areaM2 += matAreaM2;
     const p = HEATING_PRODUCTS.find(pr => pr.id === k);
     matList[k].watt += _matRatedW(p, m); // rated power per physical mat (not laid geometry)
+  }
+  // Frihånds-matter → valgt katalog-produkt (1 stk pr matte); areal/effekt fra katalog.
+  for (const mp of (S.matPaths || [])) {
+    const c = _matFreeCatalog(mp); const k = c.product?.id; if (k == null) continue;
+    if (!matList[k]) matList[k] = { type: 'Matte', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+    matList[k].count++;
+    matList[k].totalLen += c.coverCm;
+    matList[k].areaM2 += c.chosenA;
+    matList[k].watt += c.watt;
   }
   for (const pl of S.plates) {
     const k = pl.productId;
