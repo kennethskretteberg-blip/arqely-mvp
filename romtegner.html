@@ -31969,15 +31969,33 @@ async function _pdfImportPickLayers(file){
   _pdfImportShowModal(file, layers);
 }
 
+// Gjensidig utelukkelse pr lag: et lag er enten Vegg, Hindring eller ingen — aldri begge.
+function _pdfLayerPick(el){
+  if(!el.checked) return;
+  const layer = el.dataset.layer, role = el.dataset.role;
+  const other = role==='wall' ? 'obs' : 'wall';
+  const box = el.closest('#_pdf-import-ov');
+  const twin = box && box.querySelector(`input.${other==='wall'?'_pdf-wall':'_pdf-obs'}[data-layer="${CSS.escape(layer)}"]`);
+  if(twin) twin.checked = false;
+}
+
 function _pdfImportShowModal(file, layers){
   const wallRe = /vegg|wall/i;
+  // Auto-hukes som hindring KUN for tydelig FASTE ting (kjøkken, skap, garderobe, innredning,
+  // pipe, benk). Flyttbare møbler (sofa/bord/generisk «møbler») auto-hukes IKKE — brukeren
+  // kan alltid markere et lag som Hindring manuelt.
+  const obsRe  = /kj.kken|kitchen|garderobe|innredning|\bskap|pipe|benk|counter/i;
   const entries = Object.entries(layers);
   const rows = entries.length
-    ? entries.map(([name,count]) => `
-        <label style="display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;cursor:pointer">
-          <input type="checkbox" class="_pdf-layer" value="${_pdfEsc(name)}" ${wallRe.test(name)?'checked':''}>
-          <span style="flex:1">${_pdfEsc(name)}</span><span style="color:var(--dim)">${count}</span>
-        </label>`).join('')
+    ? entries.map(([name,count]) => {
+        const isWall = wallRe.test(name), isObs = obsRe.test(name) && !isWall;
+        return `
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px">
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_pdfEsc(name)} <span style="color:var(--dim)">${count}</span></span>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--text)"><input type="checkbox" class="_pdf-wall" data-role="wall" data-layer="${_pdfEsc(name)}" ${isWall?'checked':''} onchange="_pdfLayerPick(this)"> Vegg</label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--text)"><input type="checkbox" class="_pdf-obs" data-role="obs" data-layer="${_pdfEsc(name)}" ${isObs?'checked':''} onchange="_pdfLayerPick(this)"> Hindring</label>
+        </div>`;
+      }).join('')
     : `<div style="font-size:12px;color:var(--dim)">Ingen lag i PDF-en — hele tegningen brukes.</div>`;
   const ov = document.createElement('div');
   ov.id = '_pdf-import-ov';
@@ -31990,8 +32008,9 @@ function _pdfImportShowModal(file, layers){
       </div>
       <div style="font-size:12px;color:var(--muted)">${_pdfEsc(file.name)}</div>
       <div>
-        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px">Vegg-lag (huk av hvilke lag som er vegger)</div>
-        <div style="max-height:200px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${rows}</div>
+        <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:2px">Lag — marker vegger og faste hindringer</div>
+        <div style="font-size:11px;color:var(--dim);margin-bottom:6px">«Vegg» = rom leses av. «Hindring» = faste ting (kjøkken, skap) blir hindringer (brutto/netto). La flyttbare møbler stå umerket.</div>
+        <div style="max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${rows}</div>
       </div>
       <div>
         <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px">Målestokk</div>
@@ -32011,14 +32030,16 @@ function _pdfImportShowModal(file, layers){
     </div>`;
   document.body.appendChild(ov);
   document.getElementById('_pdf-import-go').onclick = () => {
-    const sel = [...ov.querySelectorAll('._pdf-layer:checked')].map(c => c.value);
+    const sel = [...ov.querySelectorAll('._pdf-wall:checked')].map(c => c.dataset.layer);
+    const obs = [...ov.querySelectorAll('._pdf-obs:checked')].map(c => c.dataset.layer);
     const ratio = parseFloat(document.getElementById('_pdf-scale').value) || 100;
-    _pdfImportRun(file, sel, ratio);
+    _pdfImportRun(file, sel, ratio, obs);
   };
   const _cs = document.getElementById('_pdf-clickscale');
   if (_cs) _cs.onclick = () => {
-    const sel = [...ov.querySelectorAll('._pdf-layer:checked')].map(c => c.value);
-    _listImportStartTwoPoint(file, sel);
+    const sel = [...ov.querySelectorAll('._pdf-wall:checked')].map(c => c.dataset.layer);
+    const obs = [...ov.querySelectorAll('._pdf-obs:checked')].map(c => c.dataset.layer);
+    _listImportStartTwoPoint(file, sel, obs);
   };
 }
 
@@ -32030,8 +32051,8 @@ function _pdfImportClose(){ const ov = document.getElementById('_pdf-import-ov')
 let _listImportJob = null;
 let _bgAutoStartTwoPoint = false;   // _installBgImage hopper over overlay → starter to-punkts direkte
 
-function _listImportStartTwoPoint(file, layers){
-  _listImportJob = { file, layers };
+function _listImportStartTwoPoint(file, layers, obstacleLayers){
+  _listImportJob = { file, layers, obstacleLayers: obstacleLayers||[] };
   _pdfImportClose();
   if(typeof _hideListModule==='function') _hideListModule();   // vis lerretet så man kan klikke i tegningen
   _bgAutoStartTwoPoint = true;
@@ -32042,10 +32063,10 @@ function _listImportStartTwoPoint(file, layers){
 function _listImportIfPending(){
   if(!_listImportJob) return;
   const job=_listImportJob; _listImportJob=null;
-  _listImportRunEngine(job.file, job.layers);
+  _listImportRunEngine(job.file, job.layers, job.obstacleLayers);
 }
 
-async function _listImportRunEngine(file, layers){
+async function _listImportRunEngine(file, layers, obstacleLayers){
   const bg=(typeof activeBg==='function')?activeBg():null;
   if(!bg || !bg.img || !(bg.widthCm>0)){ if(typeof _showToast==='function') _showToast('Kalibrer tegningen først.'); if(typeof _showListModule==='function') _showListModule(); return; }
   const Wpt = bg.paperWidthCm>0 ? bg.paperWidthCm/2.54*72 : bg.img.naturalWidth;
@@ -32056,6 +32077,7 @@ async function _listImportRunEngine(file, layers){
     const fd=new FormData(); fd.append('file', file);
     const qs=new URLSearchParams();
     (layers||[]).forEach(l=>qs.append('layers', l));
+    (obstacleLayers||[]).forEach(l=>qs.append('obstacle_layers', l));
     qs.append('min_area_pt','3000');
     qs.append('meters_per_point', String(mpp));
     const r=await fetch(_engineUrl()+'/import/pdf?'+qs.toString(), {method:'POST', body:fd});
@@ -32068,7 +32090,7 @@ async function _listImportRunEngine(file, layers){
   _pdfOpenReview(result);
 }
 
-async function _pdfImportRun(file, layers, ratio){
+async function _pdfImportRun(file, layers, ratio, obstacleLayers){
   const go = document.getElementById('_pdf-import-go'), msg = document.getElementById('_pdf-import-msg');
   if(go){ go.disabled = true; go.textContent = 'Importerer…'; }
   // PDF-punkt → meter: 1 pt = 1/72" = 0.0254/72 m på papir; ved 1:ratio → × ratio.
@@ -32078,6 +32100,7 @@ async function _pdfImportRun(file, layers, ratio){
     const fd = new FormData(); fd.append('file', file);
     const qs = new URLSearchParams();
     layers.forEach(l => qs.append('layers', l));
+    (obstacleLayers||[]).forEach(l => qs.append('obstacle_layers', l));
     qs.append('min_area_pt', '3000');
     qs.append('meters_per_point', String(mpp));
     const r = await fetch(_engineUrl() + '/import/pdf?' + qs.toString(), { method:'POST', body:fd });
@@ -32175,8 +32198,15 @@ function _pdfOpenReview(result){
   const rooms = er0.map((er,i)=>{
     const poly=(er.polygon||[]).map(p=>[p[0],p[1]]);
     const type=_pdfGuessRoomType(er.name);
+    // Motorens faste hindringer (fra obstacle_layers) — polygon i meter, samme akse som rom.
+    // Robust mot form: obstacle = [[x,y]…] eller {polygon|points:[…]}, punkt = [x,y] eller {x,y}.
+    const obstacles=(er.obstacles||[]).map(o=>{
+      const op = Array.isArray(o) ? o : (o.polygon || o.points || []);
+      return op.map(p => Array.isArray(p) ? [p[0],p[1]] : [p.x, p.y])
+               .filter(pt => pt.length===2 && isFinite(pt[0]) && isFinite(pt[1]));
+    }).filter(poly => poly.length>=3);
     const r={ id: er.id || ('r'+i), name: er.name || ('Rom '+(i+1)), areaM2: Math.round(_pdfPolyAreaM2(poly)*100)/100,
-      type, heat:_reviewIsSuggested(type), poly, review:[], _named:!!er.name };
+      type, heat:_reviewIsSuggested(type), poly, obstacles, review:[], _named:!!er.name };
     return r;
   });
   // Fordel motorens review-notater til rom via where-punkt; rom uten navn flagges «Sjekk navn».
@@ -32221,6 +32251,12 @@ function _reviewRenderPlan(){
     const cx=r.poly.reduce((a,p)=>a+tx(p[0]),0)/r.poly.length;
     const cy=r.poly.reduce((a,p)=>a+ty(p[1]),0)/r.poly.length;
     svg+=`<polygon class="rv-poly ${cls}" data-rid="${_pdfEsc(r.id)}" points="${pts}" onclick="_reviewToggleHeat('${_pdfEsc(r.id)}')" onmouseenter="_reviewHover('${_pdfEsc(r.id)}',true)" onmouseleave="_reviewHover('${_pdfEsc(r.id)}',false)"></polygon>`;
+    // Faste hindringer (fra inventar-lag) — vises som oransje felt, opprettes som ekte
+    // hindringer ved commit (flyttes/slettes på lerretet før godkjenning).
+    for(const ob of (r.obstacles||[])){
+      const optsPts=ob.map(p=>`${tx(p[0]).toFixed(3)},${ty(p[1]).toFixed(3)}`).join(' ');
+      svg+=`<polygon class="rv-obs" points="${optsPts}" fill="rgba(230,120,40,0.28)" stroke="#e07828" stroke-width="${(span*0.004)||0.02}"></polygon>`;
+    }
     svg+=`<text class="rv-plabel" x="${cx.toFixed(3)}" y="${cy.toFixed(3)}">${_pdfEsc(r.name)}</text>`;
   }
   el.innerHTML=svg+'</svg>';
@@ -32337,7 +32373,20 @@ function _drawCreateRoomsFromReview(rooms){
     if(!rr.poly || rr.poly.length<3) continue; // manuelt tillagte uten geometri kan ikke tegnes
     const pts = rr.poly.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
     const room = createRoom(pts, 'polygon', rr.name||('Rom '+(n+1)), floorId, /*keepPosition*/true);
-    if(room){ if(rr.type){ room.roomType=rr.type; if(typeof _roomTypeDefaults==='function') room.targetWm2=_roomTypeDefaults(rr.type).targetWm2; } n++; }
+    if(room){
+      if(rr.type){ room.roomType=rr.type; if(typeof _roomTypeDefaults==='function') room.targetWm2=_roomTypeDefaults(rr.type).targetWm2; }
+      // Faste hindringer fra import → ekte S.hindrings i samme verdenskoordinater som rommet
+      // (createRoom med keepPosition=true bevarer koordinatene). Slettes/flyttes på lerretet.
+      for(const ob of (rr.obstacles||[])){
+        const hp = ob.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
+        if(hp.length<3) continue;
+        const hcx=hp.reduce((a,p)=>a+p.x,0)/hp.length, hcy=hp.reduce((a,p)=>a+p.y,0)/hp.length;
+        if(typeof ptInPoly==='function' && !ptInPoly(hcx,hcy,room.points)) continue; // hindring utenfor rommet → hopp over
+        S.hindrings.push({ id:S.counters.nextHindringId++, type:'annet', label:'Importert hindring',
+          roomId:room.id, floorId:(typeof _hindringFloorId==='function'?_hindringFloorId(room.id):floorId), points:hp });
+      }
+      n++;
+    }
   }
   if(n){ if(typeof fitAll==='function') fitAll(); if(typeof render==='function') render(); if(typeof _scheduleAutoSave==='function') _scheduleAutoSave(); }
   return n;
