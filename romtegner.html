@@ -2978,6 +2978,7 @@ const S = {
   cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm,multiCableIndex?,multiCableGroup?,leadRun?}]
   zones    : [],   // [{id,roomId,type:'forbidden'|'preferred',purpose,points:[{x,y}],label}]
   mats     : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,rotation_deg}]
+  matPaths : [],   // frihånds-matte: [{id,roomId,productId,start:{x,y},moves:[{axis,dir,len,conn,side}],gapCm,centered,offX,offY}] — relativ, deriveres ved render
   plates   : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,direction}]
   aluboard : [],   // [{id,roomId,direction:'h'|'v',plateProductId,vendeProductId,cableProductId, ...derived}] — Varmecomfort Aluboard platesystem
   stairs   : [],   // [{id,name,x_cm,y_cm,width_cm,step_depth_cm,step_height_cm,step_count,landing_depth_cm,landing_position,cableProductId,cableSpacing_cm,edgeMargin_cm,viewMode,runs,connections,totalCableLength_cm,surfaces}]
@@ -3083,7 +3084,7 @@ const S = {
     outerWallLiveSide: 'out'
   },
   snap     : { grid:false, a90:true, a45:false },
-  counters : { nextPartId:1, nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextPlateId:1, nextAluboardId:1, nextStairId:1 },
+  counters : { nextPartId:1, nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextMatPathId:1, nextPlateId:1, nextAluboardId:1, nextStairId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   varmekabel: { targetWm2: 130, screedThicknessCm: 4, multiCableMode: 'soner' },
@@ -3498,6 +3499,7 @@ function render() {
   drawStrips();
   drawCables();
   drawMats();
+  drawMatPaths();
   drawPlates();
   drawAluboard();
   drawStairs();
@@ -6065,8 +6067,12 @@ function showMatPlacePanel(familyName, categoryId) {
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
           onclick="autoFillMatSerpentine(${firstP.id})">Fyll rom</div>
       </div>
-      <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px"
-        onclick="_matManualStart(${firstP.id})">Manuell (bane-liste)</div>`;
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_matManualStart(${firstP.id})">Manuell (bane-liste)</div>
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_matFreeStart(${firstP.id})">✏️ Frihånd</div>
+      </div>`;
     } else {
       // Test products or single-product family — show length input
       const p = firstP;
@@ -6085,8 +6091,12 @@ function showMatPlacePanel(familyName, categoryId) {
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
           onclick="autoFillMatSerpentine(${p.id})">Fyll rom</div>
       </div>
-      <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px"
-        onclick="_matManualStart(${p.id})">Manuell (bane-liste)</div>`;
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_matManualStart(${p.id})">Manuell (bane-liste)</div>
+        <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
+          onclick="_matFreeStart(${p.id})">✏️ Frihånd</div>
+      </div>`;
     }
 
     html += '</div>';
@@ -6847,6 +6857,140 @@ function _matManualExit() {
   renderSidebar(); updateCtxBar(); render();
   if (wasSnow) { if (typeof _upcRefreshResults === 'function') _upcRefreshResults(); }
   else if (typeof showMatPlacePanel === 'function' && S.ui.manualFamilyName) showMatPlacePanel(S.ui.manualFamilyName, S.ui.manualCategoryId);
+}
+
+// ─── FRIHÅNDS-MATTE (Del 1: tegning + geometri + lane-render) ─────────────────
+// Relativ moves-modell (som mockup «Varmeplan-matte-frihand»). Verden Y ned.
+// Arbeids-sesjon i _matFree; committes til S.matPaths ved «Avslutt matte».
+let _matFree = null;   // { roomId, productId, start:{x,y}, moves:[], ghost, gapCm, offX, offY }
+let _matFreeLastClick = null;   // for dobbeltklikk-deteksjon i mousedown
+
+function _matFreeConsts(prod) {
+  const NET = (prod?.mat_width_mm || 500) / 10;   // 50 cm bred (netto)
+  const cc  = (prod?.mat_cc_mm || 120) / 10;      // cc (12 cm på 60T)
+  return { NET, cc, RASTER: 2 * cc };             // kuttraster = 2×cc
+}
+function _matFreeProdOf(mp) { return HEATING_PRODUCTS.find(p => p.id === mp.productId); }
+
+// Relativ moves → absolutte løp (verden cm). Start + off; uturn forskyver NET+gap på
+// musesiden; 90°-hjørne trekker ½NET inn på begge akser så ytterkantene linjerer.
+function _matFreeDeriveRuns(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const gap = Math.max(0, mp.gapCm || 0);
+  let E = { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }, prev = null;
+  const out = [];
+  for (const m of (mp.moves || [])) {
+    let a, b, uturn = null;
+    if (m.conn === 'uturn') {
+      const off = NET + gap;
+      if (m.axis === 'h') { const y = E.y + m.side * off; a = { x: E.x, y }; b = { x: E.x + m.dir * m.len, y }; uturn = { x: E.x, y0: E.y, y1: y }; }
+      else { const x = E.x + m.side * off; a = { x, y: E.y }; b = { x, y: E.y + m.dir * m.len }; uturn = { y: E.y, x0: E.x, x1: x }; }
+    } else if (m.conn === 'corner' && prev) {
+      const pd = prev.axis === 'h' ? { x: prev.dir, y: 0 } : { x: 0, y: prev.dir };
+      const nd = m.axis === 'h' ? { x: m.dir, y: 0 } : { x: 0, y: m.dir };
+      const A = { x: E.x - pd.x * (NET / 2) - nd.x * (NET / 2), y: E.y - pd.y * (NET / 2) - nd.y * (NET / 2) };
+      if (m.axis === 'h') { a = { ...A }; b = { x: A.x + m.dir * m.len, y: A.y }; }
+      else { a = { ...A }; b = { x: A.x, y: A.y + m.dir * m.len }; }
+    } else {
+      if (m.axis === 'h') { a = { ...E }; b = { x: E.x + m.dir * m.len, y: E.y }; }
+      else { a = { ...E }; b = { x: E.x, y: E.y + m.dir * m.len }; }
+    }
+    out.push({ a, b, axis: m.axis, dir: m.dir, uturn }); E = { ...b }; prev = out[out.length - 1];
+  }
+  return out;
+}
+function _matFreeRunLen(r) { return Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); }
+function _matFreeUTurnLen(mp) { const { NET } = _matFreeConsts(_matFreeProdOf(mp)); return Math.PI * (NET + Math.max(0, mp.gapCm || 0)) / 2; }
+function _matFreeTotalCm(mp) { let L = 0; for (const r of _matFreeDeriveRuns(mp)) { L += _matFreeRunLen(r); if (r.uturn) L += _matFreeUTurnLen(mp); } return L; }
+function _matFreeEnd(mp) { const runs = _matFreeDeriveRuns(mp); return runs.length ? runs[runs.length - 1].b : { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }; }
+
+// Kandidat-move fra fri ende mot verdenspunkt P (snap len til raster; utled kobling).
+function _matFreeCandidate(mp, P) {
+  const runs = _matFreeDeriveRuns(mp), E = _matFreeEnd(mp), prev = runs.length ? runs[runs.length - 1] : null;
+  const { RASTER } = _matFreeConsts(_matFreeProdOf(mp));
+  const dx = P.x - E.x, dy = P.y - E.y, horiz = Math.abs(dx) >= Math.abs(dy);
+  const axis = horiz ? 'h' : 'v', dir = horiz ? (dx >= 0 ? 1 : -1) : (dy >= 0 ? 1 : -1);
+  const raw = horiz ? Math.abs(dx) : Math.abs(dy);
+  const len = Math.max(RASTER, Math.round(raw / RASTER) * RASTER);
+  if (!prev) return { axis, dir, len, conn: 'first', side: 1 };
+  const anti = (axis === prev.axis) && (dir === -prev.dir);
+  if (anti) { const side = axis === 'h' ? ((P.y >= E.y) ? 1 : -1) : ((P.x >= E.x) ? 1 : -1); return { axis, dir, len, conn: 'uturn', side }; }
+  return { axis, dir, len, conn: 'corner', side: 1 };
+}
+
+// Start frihånds-modus for et produkt: start i rommets nedre-venstre indre hjørne (+margin).
+function _matFreeStart(productId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { alert('Velg et rom først'); return; }
+  const room = S.rooms.find(r => r.id === roomId), prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod || !room.points || room.points.length < 3) return;
+  const margin = Math.max(5, (prod.min_wall_margin_mm || 50) / 10);
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const start = { x: Math.min(...xs) + margin, y: Math.max(...ys) - margin }; // nedre-venstre (verden Y ned)
+  _matFree = { roomId, productId, start, moves: [], ghost: null, gapCm: 0, offX: 0, offY: 0 };
+  S.ui.drawMode = 'mat-freehand'; S.ui.selectedMatId = null;
+  if (canvas) canvas.style.cursor = 'crosshair';
+  if (typeof updMode === 'function') updMode();
+  if (typeof _showToast === 'function') _showToast('Frihånd: før musa fra nedre venstre, klikk der matta snur/stopper, dobbeltklikk for å avslutte', 'info');
+  render();
+}
+function _matFreeExit(commit) {
+  if (!S.matPaths) S.matPaths = [];   // eldre prosjekt lastet uten feltet
+  if (_matFree && commit && _matFree.moves.length >= 1) {
+    pushUndo();
+    S.matPaths.push({ id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
+      start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 });
+    _invalidateMatCache && _invalidateMatCache();
+  }
+  _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
+  if (typeof updMode === 'function') updMode();
+  if (typeof renderSidebar === 'function') renderSidebar();
+  if (typeof updateCtxBar === 'function') updateCtxBar();
+  render();
+}
+function _matFreeUndoMove() { if (_matFree && _matFree.moves.length) { _matFree.moves.pop(); render(); } }
+
+// ── Render: lane-rektangler (Del 1). Kabel/markør kommer i Del 2. ──
+function _matFreeLaneRectWorld(r, NET) {
+  return r.axis === 'h'
+    ? { x0: Math.min(r.a.x, r.b.x), y0: r.a.y - NET / 2, x1: Math.max(r.a.x, r.b.x), y1: r.a.y + NET / 2 }
+    : { x0: r.a.x - NET / 2, y0: Math.min(r.a.y, r.b.y), x1: r.a.x + NET / 2, y1: Math.max(r.a.y, r.b.y) };
+}
+function _drawMatLane(r, NET, ghost) {
+  const R = _matFreeLaneRectWorld(r, NET);
+  const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
+  const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y), w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
+  ctx.save();
+  ctx.fillStyle = ghost ? 'rgba(224,86,63,0.10)' : _lc('rgba(60,130,200,0.16)', 'rgba(80,160,240,0.18)');
+  ctx.strokeStyle = ghost ? 'rgba(224,86,63,0.55)' : _lc('rgba(40,100,200,0.55)', 'rgba(80,160,240,0.5)');
+  ctx.lineWidth = 1.4;
+  if (ghost) ctx.setLineDash([5, 4]);
+  ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+  ctx.restore();
+}
+function _drawMatPathObj(mp, active) {
+  if (!_roomIdOnActiveFloor(mp.roomId)) return;
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  for (const r of _matFreeDeriveRuns(mp)) _drawMatLane(r, NET, false);
+  if (active && mp.ghost) {
+    const gr = _matFreeDeriveRuns({ ...mp, moves: [...mp.moves, mp.ghost] });
+    const gr0 = gr[gr.length - 1];
+    _drawMatLane(gr0, NET, true);
+    // live «+X m»-etikett ved ghost-midtpunkt
+    const mid = w2s((gr0.a.x + gr0.b.x) / 2, (gr0.a.y + gr0.b.y) / 2);
+    const gLen = _matFreeRunLen(gr0);
+    ctx.save();
+    ctx.fillStyle = '#111';
+    const label = '+' + (gLen / 100).toFixed(1).replace('.', ',') + ' m';
+    ctx.font = '11px sans-serif'; const tw = ctx.measureText(label).width;
+    ctx.fillRect(mid.x - tw / 2 - 5, mid.y - 9, tw + 10, 16); ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mid.x, mid.y - 1);
+    ctx.restore();
+  }
+}
+function drawMatPaths() {
+  for (const mp of (S.matPaths || [])) _drawMatPathObj(mp, false);
+  if (_matFree) _drawMatPathObj(_matFree, true);
 }
 
 function showVfPlacePanel(familyName, categoryId) {
@@ -27583,6 +27727,21 @@ function _showCycleBadge(clientX, clientY, idx, total) {
 function _hideCycleBadge() { if (_cycleBadgeEl) _cycleBadgeEl.style.display = 'none'; }
 
 canvas.addEventListener('mousedown', e=>{
+  // Frihånds-matte: klikk setter neste bane (snappet til raster). Dobbeltklikk avslutter
+  // (dobbeltklikkets første klikk la til en bane → angre den før commit).
+  if (S.ui.drawMode === 'mat-freehand' && _matFree) {
+    if (e.button !== 0) return;
+    const now = performance.now();
+    if (_matFreeLastClick && (now - _matFreeLastClick.t) < 320 &&
+        Math.hypot(e.clientX - _matFreeLastClick.sx, e.clientY - _matFreeLastClick.sy) < 6) {
+      _matFree.moves.pop(); _matFreeLastClick = null; _matFreeExit(true);
+      e.preventDefault(); return;
+    }
+    const m = _matFreeCandidate(_matFree, getWorldPos(e));
+    if (m.len > 0) { _matFree.moves.push(m); _matFree.ghost = null; render(); }
+    _matFreeLastClick = { t: now, sx: e.clientX, sy: e.clientY };
+    e.preventDefault(); return;
+  }
   // Presentasjonsmodus: kun panorering (ingen redigering). Klikk-for-detalj
   // håndteres i mouseup (skiller tap fra drag).
   if (S.ui.present) {
@@ -28747,6 +28906,11 @@ canvas.addEventListener('mousedown', e=>{
 });
 
 canvas.addEventListener('mousemove', e=>{
+  // Frihånds-matte: ghost følger musa (vannrett/loddrett ut fra retning, snappet raster).
+  if (S.ui.drawMode === 'mat-freehand' && _matFree) {
+    _matFree.ghost = _matFreeCandidate(_matFree, getWorldPos(e));
+    render(); return;
+  }
   // Safety net: any active drag/interaction triggers a re-render this frame,
   // regardless of whether the specific branch below calls render()/markDirty().
   // This is what makes the conditional rAF loop safe — see _anyInteractionActive().
@@ -29720,6 +29884,8 @@ canvas.addEventListener('mouseup', e=>{
 });
 
 canvas.addEventListener('dblclick', e=>{
+  // Frihånds-matte: dobbeltklikk avslutter og committer matta.
+  if (S.ui.drawMode === 'mat-freehand') { _matFreeExit(true); e.preventDefault(); return; }
   // dblclick closing removed — use Enter or click first point to close polygons
 });
 
