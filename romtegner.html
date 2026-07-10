@@ -15429,7 +15429,39 @@ function getProductFamily(productId) {
     .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
 }
 
+// Screen-space point-in-polygon (ray casting). poly = [{x,y}] in screen px.
+function _pipScr(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (((yi > py) !== (yj > py)) &&
+        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+// Screen-space centroid of a polygon.
+function _centroidScr(poly) {
+  let x = 0, y = 0;
+  for (const p of poly) { x += p.x; y += p.y; }
+  return { x: x / poly.length, y: y / poly.length };
+}
+// True if the axis-aligned box (center cx,cy; half-extents hw,hh) lies fully
+// inside `room` (screen poly) and clear of every `holes` polygon. Samples the
+// 4 corners + edge midpoints + centre.
+function _boxFitsPoly(cx, cy, hw, hh, room, holes) {
+  const samples = [
+    [cx-hw,cy-hh],[cx+hw,cy-hh],[cx+hw,cy+hh],[cx-hw,cy+hh],
+    [cx,cy-hh],[cx,cy+hh],[cx-hw,cy],[cx+hw,cy],[cx,cy]
+  ];
+  for (const [x, y] of samples) {
+    if (!_pipScr(x, y, room)) return false;
+    for (const h of holes) if (_pipScr(x, y, h)) return false;
+  }
+  return true;
+}
+
 function drawStrips() {
+  const stripLabelJobs = [];
   for (const strip of S.strips) {
     if (!_roomIdOnActiveFloor(strip.roomId)) continue;
     const room = S.rooms.find(r => r.id === strip.roomId);
@@ -15553,91 +15585,31 @@ function drawStrips() {
       ctx.restore();
     }
 
-    // Product label
+    // Product label — collected here, drawn in a second pass AFTER the strip
+    // loop (outside the room clip) so the box is never cut off at a room edge or
+    // obstacle. Positioning / width-aware layout / callout live in _drawStripLabel.
     if (S.ui.showStripLabels) {
       const prod = _stripProduct(strip);
-      const name = prod?.name;
-      if (name) {
-        let cx = nx + nw / 2, cy = ny + nh / 2;
+      if (prod?.name) {
         const narrow = strip.direction === 'v' ? nw : nh;
         // Mindre label på skjerm (mindre påtrengende). I PDF (arbeidstegning i felt) skal labelen leses
         // UTEN å zoome: rombildet rendres i ~300 DPI (≈2126 px → 180 mm), så ~35 px ≈ 3 mm bokstavhøyde.
         const fontSize = S.ui?._pdfMode
           ? Math.max(30, Math.min(40, narrow * 0.55))
           : Math.max(8, Math.min(11, narrow * 0.4));
-        // Offset the label along the strip's length, away from the room centroid, so it never sits
-        // on the room name (drawn at the centroid). nx/ny/nw/nh are screen px → use screen centroid.
-        const _lblRoom = S.rooms.find(r => r.id === strip.roomId);
-        if (_lblRoom && _lblRoom.points && _lblRoom.points.length) {
-          const rcx = _lblRoom.points.reduce((a, p) => a + p.x, 0) / _lblRoom.points.length;
-          const rcy = _lblRoom.points.reduce((a, p) => a + p.y, 0) / _lblRoom.points.length;
-          const rcS = w2s(rcx, rcy);
-          if (strip.direction === 'v') {
-            cy += ((cy >= rcS.y) ? 1 : -1) * Math.max(0, Math.min(nh * 0.28, nh / 2 - fontSize));
-          } else {
-            cx += ((cx >= rcS.x) ? 1 : -1) * Math.max(0, Math.min(nw * 0.28, nw / 2 - fontSize));
-          }
-        }
-        const lineH = fontSize + 3;
         const lengthM = (strip.length_cm / 100).toFixed(1) + ' m';
         const wattPerM2 = prod.watt_per_m2 || prod.watt_per_m || 0;
-        const stripAreaM2 = (nettoCm / 100) * (strip.length_cm / 100);
-        const stripWatt = Math.round(wattPerM2 * stripAreaM2);
+        const stripWatt = Math.round(wattPerM2 * (nettoCm / 100) * (strip.length_cm / 100));
         const infoLine = lengthM + (stripWatt > 0 ? ' · ' + stripWatt + ' W' : '');
-
-        ctx.save();
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        if (strip.direction === 'v') {
-          ctx.translate(cx, cy);
-          ctx.rotate(-Math.PI / 2);
-        } else {
-          ctx.translate(cx, cy);
-        }
-
-        // Measure both lines for frame sizing
-        ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
-        const nameW = ctx.measureText(name).width;
-        ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
-        const lenW  = ctx.measureText(infoLine).width;
-        const padX = 8, padY = 5;
-        const frameW = Math.max(nameW, lenW) + padX * 2;
-        const frameH = lineH * 2 + padY * 2;
-        const fx = -frameW / 2, fy = -frameH / 2, r = 5;
-
-        // Rounded-rect frame
-        ctx.beginPath();
-        ctx.moveTo(fx + r, fy);
-        ctx.lineTo(fx + frameW - r, fy);
-        ctx.quadraticCurveTo(fx + frameW, fy, fx + frameW, fy + r);
-        ctx.lineTo(fx + frameW, fy + frameH - r);
-        ctx.quadraticCurveTo(fx + frameW, fy + frameH, fx + frameW - r, fy + frameH);
-        ctx.lineTo(fx + r, fy + frameH);
-        ctx.quadraticCurveTo(fx, fy + frameH, fx, fy + frameH - r);
-        ctx.lineTo(fx, fy + r);
-        ctx.quadraticCurveTo(fx, fy, fx + r, fy);
-        ctx.closePath();
-        ctx.fillStyle   = _lc('rgba(255,255,255,0.92)','rgba(12,18,28,0.78)');
-        ctx.strokeStyle = _lc('rgba(140,90,0,0.7)','rgba(255,210,80,0.65)');
-        ctx.lineWidth   = 1;
-        ctx.fill();
-        ctx.stroke();
-
-        // Line 1: product name
-        ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
-        ctx.fillStyle = _lc('rgba(20,30,50,0.95)','rgba(255,255,255,0.95)');
-        ctx.fillText(name, 0, -lineH / 2);
-
-        // Line 2: length + watt
-        ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
-        ctx.fillStyle = _lc('rgba(140,90,0,0.95)','rgba(255,210,80,0.92)');
-        ctx.fillText(infoLine, 0, lineH / 2);
-
-        ctx.restore();
+        stripLabelJobs.push({ strip, name: prod.name, infoLine, fontSize,
+          nx, ny, nw, nh, dir: strip.direction, roomId: strip.roomId });
       }
     }
     ctx.restore();
   }
+  // ── Label pass: draw all foil labels after the strips, outside the room clip
+  // (never cut off), clamped inside the room, width-aware, with callout fallback.
+  for (const job of stripLabelJobs) _drawStripLabel(job);
 
   // ── Preview strips for auto-fill comparison ──
   if (S.ui.autoFillPreviewDefs && S.ui.autoFillPreviewDefs.length) {
@@ -15686,6 +15658,164 @@ function drawStrips() {
       ctx.restore();
     }
   }
+}
+
+/**
+ * Draw a single foil label (name + length·W), guaranteeing it stays fully
+ * inside the room:
+ *  - two-line box when it fits the foil width;
+ *  - slimmer single-line box on narrower foils;
+ *  - callout (label parked in open room space + thin leader line) when the foil
+ *    is too narrow for even one readable line.
+ * Always clamped so the whole box lies inside the room polygon (and clear of
+ * obstacles). PDF inherits this since it renders from the same canvas.
+ */
+function _drawStripLabel(job) {
+  const { name, infoLine, fontSize, nx, ny, nw, nh, dir, roomId } = job;
+  const room = S.rooms.find(r => r.id === roomId);
+  const lineH = fontSize + 3;
+  const padX = 8, padY = 5;
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Measure both fonts (bold name, mono info line).
+  ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
+  const nameW = ctx.measureText(name).width;
+  const sepW  = ctx.measureText('  ·  ').width;
+  ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
+  const infoW = ctx.measureText(infoLine).width;
+
+  const twoW = Math.max(nameW, infoW) + padX * 2;
+  const twoH = lineH * 2 + padY * 2;
+  const oneW = nameW + sepW + infoW + padX * 2;
+  const oneH = lineH + padY * 2;
+
+  // Room screen polygon + obstacle holes, for containment clamping.
+  let roomScr = null, holes = [];
+  if (room && room.points && room.points.length >= 3) {
+    roomScr = room.points.map(p => w2s(p.x, p.y));
+    holes = (S.hindrings || [])
+      .filter(h => h.roomId === roomId && h.points && h.points.length >= 3)
+      .map(h => h.points.map(p => w2s(p.x, p.y)));
+  }
+
+  const foilPerp = dir === 'v' ? nw : nh;   // across-strip screen extent
+  const alongLen = dir === 'v' ? nh : nw;   // along-strip screen extent
+  const foilCx = nx + nw / 2, foilCy = ny + nh / 2;
+
+  // Choose layout by whether the perpendicular box height fits the foil width.
+  let mode;
+  if (twoH <= foilPerp)      mode = 'two';
+  else if (oneH <= foilPerp) mode = 'one';
+  else                       mode = 'callout';
+
+  // Paint the rounded frame + text at the current origin (0,0). `oneLine`
+  // packs name + info on a single mixed-font row.
+  const paintBox = (fw, fh, oneLine) => {
+    ctx.beginPath();
+    ctx.roundRect(-fw / 2, -fh / 2, fw, fh, 5);
+    ctx.fillStyle   = _lc('rgba(255,255,255,0.92)', 'rgba(12,18,28,0.78)');
+    ctx.strokeStyle = _lc('rgba(140,90,0,0.7)', 'rgba(255,210,80,0.65)');
+    ctx.lineWidth   = 1;
+    ctx.fill();
+    ctx.stroke();
+    if (oneLine) {
+      const total = nameW + sepW + infoW;
+      let x = -total / 2;
+      ctx.textAlign = 'left';
+      ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
+      ctx.fillStyle = _lc('rgba(20,30,50,0.95)', 'rgba(255,255,255,0.95)');
+      ctx.fillText(name, x, 0); x += nameW;
+      ctx.fillStyle = _lc('rgba(140,90,0,0.6)', 'rgba(255,210,80,0.55)');
+      ctx.fillText('  ·  ', x, 0); x += sepW;
+      ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
+      ctx.fillStyle = _lc('rgba(140,90,0,0.95)', 'rgba(255,210,80,0.92)');
+      ctx.fillText(infoLine, x, 0);
+      ctx.textAlign = 'center';
+    } else {
+      ctx.font = `bold ${fontSize}px 'Space Grotesk',sans-serif`;
+      ctx.fillStyle = _lc('rgba(20,30,50,0.95)', 'rgba(255,255,255,0.95)');
+      ctx.fillText(name, 0, -lineH / 2);
+      ctx.font = `${Math.round(fontSize * 0.88)}px 'IBM Plex Mono',monospace`;
+      ctx.fillStyle = _lc('rgba(140,90,0,0.95)', 'rgba(255,210,80,0.92)');
+      ctx.fillText(infoLine, 0, lineH / 2);
+    }
+  };
+
+  // Slide the centre toward the room centroid until the whole box fits inside.
+  const clampInside = (cx, cy, hw, hh) => {
+    if (!roomScr) return { cx, cy };
+    if (_boxFitsPoly(cx, cy, hw, hh, roomScr, holes)) return { cx, cy };
+    const cen = _centroidScr(roomScr);
+    for (let i = 0; i < 260; i++) {
+      const dx = cen.x - cx, dy = cen.y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      cx += dx / d * 2; cy += dy / d * 2;
+      if (_boxFitsPoly(cx, cy, hw, hh, roomScr, holes)) break;
+    }
+    return { cx, cy };
+  };
+
+  if (mode === 'callout') {
+    // Park a normal horizontal two-line box in open room space beside the foil,
+    // with a thin leader line back to the foil centre.
+    const fw = twoW, fh = twoH, hw = fw / 2, hh = fh / 2;
+    const cen = roomScr ? _centroidScr(roomScr) : { x: foilCx, y: foilCy };
+    let cx, cy;
+    if (dir === 'v') {
+      const side = (cen.x >= foilCx) ? 1 : -1;
+      cx = foilCx + side * (nw / 2 + hw + 8);
+      cy = Math.max(ny + hh, Math.min(ny + nh - hh, foilCy));
+    } else {
+      const side = (cen.y >= foilCy) ? 1 : -1;
+      cy = foilCy + side * (nh / 2 + hh + 8);
+      cx = Math.max(nx + hw, Math.min(nx + nw - hw, foilCx));
+    }
+    ({ cx, cy } = clampInside(cx, cy, hw, hh));
+    // Leader line: foil centre → box edge.
+    ctx.strokeStyle = _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(foilCx, foilCy);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+    ctx.save();
+    ctx.translate(cx, cy);
+    paintBox(fw, fh, false);
+    ctx.restore();
+    ctx.restore();
+    return;
+  }
+
+  // In-foil layout (two-line or single-line). Screen footprint depends on the
+  // strip orientation: vertical strips draw the box rotated -90°, so the box's
+  // "height" (fh) is what spans the foil width in both cases.
+  const fw = mode === 'two' ? twoW : oneW;
+  const fh = mode === 'two' ? twoH : oneH;
+  const hw = dir === 'v' ? fh / 2 : fw / 2;   // screen half-width
+  const hh = dir === 'v' ? fw / 2 : fh / 2;   // screen half-height
+
+  // Start at foil centre, nudged along its length away from the room centroid
+  // (keeps the label off the room name at the centroid), bounded to the strip.
+  let cx = foilCx, cy = foilCy;
+  if (roomScr) {
+    const cen = _centroidScr(roomScr);
+    const maxNudge = Math.max(0, alongLen / 2 - fw / 2);
+    const nudge = Math.min(alongLen * 0.28, maxNudge);
+    if (dir === 'v') cy += ((foilCy >= cen.y) ? 1 : -1) * nudge;
+    else             cx += ((foilCx >= cen.x) ? 1 : -1) * nudge;
+  }
+  ({ cx, cy } = clampInside(cx, cy, hw, hh));
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (dir === 'v') ctx.rotate(-Math.PI / 2);
+  paintBox(fw, fh, mode === 'one');
+  ctx.restore();
+  ctx.restore();
 }
 
 // ─── CABLE RENDERING ──────────────────────────────────────────
