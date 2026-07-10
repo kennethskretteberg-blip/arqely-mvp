@@ -3488,7 +3488,7 @@ function _anyInteractionActive() {
     _plateDragging || _stairDragging ||
     _vdDragging || _vdPending ||
     _dimOffDragging || _annotDragging ||
-    _cardDragging || _cableLabelDragging || _stripLabelDragging || _cableGizmoDragging ||
+    _cardDragging || _cableLabelDragging || _stripLabelDragging || _labelHandleDrag || _cableGizmoDragging ||
     _thDragging || _mmDragging || _vfPickDrag || _bgDragging
   );
 }
@@ -15757,6 +15757,7 @@ function drawStrips() {
   // ── Label pass: draw all foil labels after the strips, outside the room clip
   // (never cut off), clamped inside the room, width-aware, with callout fallback.
   for (const job of stripLabelJobs) _drawStripLabel(job);
+  drawStripLabelHandles();
 
   // ── Preview strips for auto-fill comparison ──
   if (S.ui.autoFillPreviewDefs && S.ui.autoFillPreviewDefs.length) {
@@ -16046,6 +16047,40 @@ function _drawStripLabel(job) {
   ctx.restore();
 }
 
+// Draw rotate + stretch handles around the SELECTED strip's label (move = drag the
+// body). Uses the oriented geometry recorded by _drawStripLabel. Records screen
+// handle points for hit-testing. No handles when nothing/label is not shown.
+function drawStripLabelHandles() {
+  _stripLabelHandlePts = null;
+  const id = S.ui.selectedStripId;
+  if (id == null || !S.ui.showStripLabels) return;
+  const g = _stripLabelGeom[id];
+  if (!g) return;
+  const { cx, cy, ang, fw, fh } = g;
+  const cos = Math.cos(ang), sin = Math.sin(ang);
+  const L = (lx, ly) => ({ x: cx + lx * cos - ly * sin, y: cy + lx * sin + ly * cos });
+  const topMid = L(0, -fh / 2), rotPt = L(0, -fh / 2 - 20), strPt = L(fw / 2, fh / 2);
+  const accent = _lc('rgba(59,130,246,0.95)', 'rgba(96,165,250,0.95)');
+  const fillc  = _lc('#ffffff', '#0d0e10');
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = accent; ctx.lineWidth = 1.5;
+  const c1 = L(-fw/2,-fh/2), c2 = L(fw/2,-fh/2), c3 = L(fw/2,fh/2), c4 = L(-fw/2,fh/2);
+  ctx.beginPath(); ctx.moveTo(c1.x,c1.y); ctx.lineTo(c2.x,c2.y); ctx.lineTo(c3.x,c3.y); ctx.lineTo(c4.x,c4.y); ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(topMid.x, topMid.y); ctx.lineTo(rotPt.x, rotPt.y); ctx.stroke();
+  ctx.beginPath(); ctx.arc(rotPt.x, rotPt.y, 6, 0, Math.PI * 2); ctx.fillStyle = fillc; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.rect(strPt.x - 5, strPt.y - 5, 10, 10); ctx.fillStyle = fillc; ctx.fill(); ctx.stroke();
+  ctx.restore();
+  _stripLabelHandlePts = { id, rotate: rotPt, stretch: strPt, cx, cy };
+}
+function hitStripLabelHandle(sx, sy) {
+  const h = _stripLabelHandlePts;
+  if (!h) return null;
+  if (Math.hypot(sx - h.rotate.x, sy - h.rotate.y) <= 10) return { id: h.id, kind: 'rotate' };
+  if (Math.hypot(sx - h.stretch.x, sy - h.stretch.y) <= 10) return { id: h.id, kind: 'stretch' };
+  return null;
+}
+
 // ─── CABLE RENDERING ──────────────────────────────────────────
 let _hoveredCableId = null;
 let _cableLabelBounds = {}; // {cableId: {sx, sy, w, h}} — updated during render
@@ -16065,6 +16100,8 @@ function hitCableLabel(sx, sy) {
 // is stored on strip.labelPos (deleted by «Tilbakestill til auto»).
 let _stripLabelBounds = {}; // {stripId: {sx, sy, w, h}} — screen AABB, updated during render
 let _stripLabelGeom = {};   // {stripId: {cx, cy, ang, fw, fh}} — oriented box, for handles
+let _stripLabelHandlePts = null;  // {id, rotate:{x,y}, stretch:{x,y}, cx, cy} — selected label
+let _labelHandleDrag = null;      // {id, kind:'rotate'|'stretch', startDist?, startScale?}
 let _stripLabelDragging = false;
 let _stripLabelDragId = null;
 let _stripLabelDragOffset = {x: 0, y: 0};
@@ -29085,6 +29122,24 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Foil label handle (rotate / stretch) — only shown for the selected label ──
+    const lhHit = hitStripLabelHandle(sx0, sy0);
+    if (lhHit) {
+      const strip = S.strips.find(s => s.id === lhHit.id);
+      if (strip) {
+        pushUndo();
+        if (lhHit.kind === 'stretch') {
+          const g = _stripLabelGeom[lhHit.id];
+          const d0 = Math.hypot(sx0 - g.cx, sy0 - g.cy) || 1;
+          _labelHandleDrag = { id: lhHit.id, kind: 'stretch', startDist: d0, startScale: strip.labelScale || 1 };
+        } else {
+          _labelHandleDrag = { id: lhHit.id, kind: 'rotate' };
+        }
+        canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
+
     // ── Foil label drag (labelPos + undo deferred to first real move — a pure
     //     click selects without converting to a manual/flat label) ──
     const slHit = hitStripLabel(sx0, sy0);
@@ -29821,6 +29876,28 @@ canvas.addEventListener('mousemove', e=>{
       const sx = e.clientX - cRect.left, sy = e.clientY - cRect.top;
       const wp = s2w(sx, sy);
       cable.labelPos = { x: wp.x - _cableLabelDragOffset.x, y: wp.y - _cableLabelDragOffset.y };
+      render();
+    }
+    return;
+  }
+
+  // Foil label handle drag (rotate free + snap 0/90/180/270; stretch → scale)
+  if (_labelHandleDrag) {
+    const strip = S.strips.find(s => s.id === _labelHandleDrag.id);
+    const g = _stripLabelGeom[_labelHandleDrag.id];
+    if (strip && g) {
+      const cRect = canvas.getBoundingClientRect();
+      const sx = e.clientX - cRect.left, sy = e.clientY - cRect.top;
+      if (_labelHandleDrag.kind === 'rotate') {
+        let deg = (Math.atan2(sy - g.cy, sx - g.cx) + Math.PI / 2) * 180 / Math.PI;
+        deg = ((deg % 360) + 360) % 360;
+        if (!e.shiftKey) { for (const s of [0,90,180,270,360]) if (Math.abs(deg - s) <= 8) { deg = s % 360; break; } }
+        strip.labelRotation = deg;
+      } else {
+        const d = Math.hypot(sx - g.cx, sy - g.cy);
+        let sc = _labelHandleDrag.startScale * (d / _labelHandleDrag.startDist);
+        strip.labelScale = Math.max(0.5, Math.min(4, Math.round(sc * 100) / 100));
+      }
       render();
     }
     return;
@@ -30580,6 +30657,8 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor='pointer';          // clickable corner point
       } else if (nearMoveArrow(sx2, sy2)) {
         canvas.style.cursor=_wallMoveCursor();  // wall move arrow — direction matches wall orientation
+      } else if (hitStripLabelHandle(sx2, sy2)) {
+        canvas.style.cursor='crosshair';        // foil label rotate/stretch handle
       } else if (hitStripLabel(sx2, sy2) !== null) {
         canvas.style.cursor='grab';             // draggable foil label
       } else if (hitStrip(rawWp2.x, rawWp2.y)) {
@@ -30635,6 +30714,10 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_cableLabelDragging) {
     _cableLabelDragging=false; _cableLabelDragId=null; canvas.style.cursor='default'; return;
+  }
+  if (_labelHandleDrag) {
+    _labelHandleDrag = null; canvas.style.cursor='default';
+    _scheduleAutoSave && _scheduleAutoSave(); return;
   }
   if (_stripLabelDragging) {
     _stripLabelDragging=false; _stripLabelDragId=null; canvas.style.cursor='default';
