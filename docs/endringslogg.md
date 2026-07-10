@@ -101,6 +101,50 @@ Forbedret varmefolie-labelen (navn + lengde·W) på tegning + PDF. **Plan først
 
 ---
 
+## Tilbehør: manuelt tilbehør faller ikke ut av materiallisten — 2026-07-10
+
+- **`ec8ea07` — FlexFoil tang (og andre manuelle) kom ikke med i PDF-en.** Bug: manuelt tilbehør
+  (avhuket AV som standard) hadde antallsfelt = 0. Huket montøren PÅ tangen uten å skrive et tall,
+  ga `readRow` qty=0 → droppet (krever qty>0) → «FlexFoil tang» kom ikke med under «Tilbehør
+  varmefolie». Fiks: manuelt tilbehør starter antallsfeltet på **1** (ikke 0); `readRow` teller
+  avhuket manuelt tilbehør med tomt/0 antall som minst 1 (avrundet til `roundTo`) → faller aldri ut.
+  Auto-tilbehør uendret (0 = ikke med). Verifisert på ekte PDF.
+
+**Fil:** romtegner.html.
+
+---
+
+## Frihånds-varmematte — felttest R2–R6 (flukt-invariant + robusthet) — 2026-07-09
+
+Felttest-forbedringer på frihånds-matte-verktøyet (`S.matPaths`, `_matFree*`/`drawMatPaths`/
+`_drawMatPathCable`). Låste kabelregler (buesving = halvsirkel cc/2, ingen Y-splitt) intakt.
+
+- **`e4e976a` — R2 #1: kabel ≥5 cm fra vegg + hindring, ingen matte utenfor rommet.** `_matFreeCableMarginCm`
+  (5 cm innendørs / 0 snø), draw-time klamp (`clipScanlineToPolygon` + hindring-bbox) i `_matFreeCandidate`,
+  render-klamp av kabel-strenger.
+- **`8220726` — R2 #2: sammenhengende kabel med flukt-skjøt.** Én ubrutt kabel over alle bredder:
+  strengene på et GLOBALT rutenett (full lane-kant + cc/2, steg cc) → nabobredder linjerer; skann-retning
+  veksler pr bredde → siste streng møter første i neste rett over (flukt-`lineTo`, ikke U-sving).
+- **`9352b3d` — R2 #3: vis tegnet lengde ved siden av valgt matte** («Tegnet X m → EcoMat … (rull Y m)»).
+- **`e0147a8` — R3 #1: hold hele matta i rommet.** Start flyttet til NET/2 fra vegg + perpendikulær klamp
+  i `_matFreeCandidate` (move.len=0 hvis lanen ikke får plass i tverr-retning).
+- **`b0df3e6` — R3 #2+#3: flukt-retning (rett side) + ortogonal skjøt.** Skann bredden fra enden nærmest
+  forrige utgang (`prevExitW`); L-forbindelse følger kant (aldri diagonal luftlinje).
+- **`c994aa6` — R3 #1-rettelse: retningsavhengig start.** ½ cc mot kortside (bane-enden), 5 cm mot langside
+  (50 cm-kanten) via `_matFreeStartFor(room,prod,axis)`.
+- **`e0bea3a` — R4: kaldskjøt ved reell start + serpentin flukter mot neste.** Første breddes serpentin ordnes
+  fra bane.a (`entryRef`); strand-paritet orientert ut fra neste breddes tverr-posisjon (`rNext`).
+- **`4ee0823` — R5: fjern forbindelseskabel + valgbart start-hjørne.** Skjøt-connector → `moveTo` (hver
+  serpentin for seg); `S.varmefolie.startCorner` (bl/br/tl/tr) generalisert med velger i matte-panelet.
+- **`c53d909` — R6: varig flukt-invariant.** Fast regel i kabel-genereringen: hver bredde STARTER mot forrige
+  (`entryHi` fra `prevExitW`) og ENDER mot neste (`exitHi` fra `rNext`) → skjøtene møtes alltid flush på delt
+  kant, uansett retning/start/hjørne. Paritet-fiks kutter ±1×CC (Nuse=N−1) hvis utgangssiden blir feil.
+  Erstatter R4-logikken (som bare styrte exit → feil entry-side).
+
+**Fil:** romtegner.html.
+
+---
+
 ## EcoMat matte — Del 3: eksakt mattelengde (N−1 like + kortere siste) — 2026-07-08
 
 Auto-utlegget legger nå ut HELE rullelengden: **N−1 like bredder** (`Lc = ceil((total/N)/raster)·raster`) +
