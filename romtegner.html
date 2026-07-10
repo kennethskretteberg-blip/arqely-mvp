@@ -42335,6 +42335,84 @@ async function _applyQuickCustomer(projectId, customerId, customerName) {
   } catch(e) { console.warn('Customer update failed:', e.message); alert('Kunde-oppdatering feilet: ' + e.message); }
 }
 
+// ─── PROSJEKT-FREMDRIFT (beregnet, ren funksjon — STEG 2) ─────
+// Live saved-JSON view of the currently OPEN project, for _projectProgress and
+// later workflow UI. Mirrors the shape stored in romtegner_projects.data.
+function _openProjectData() {
+  return {
+    project:  S.project,
+    rooms:    S.rooms,
+    strips:   S.strips,
+    cables:   S.cables,
+    mats:     S.mats,
+    matPaths: S.matPaths,
+    plates:   S.plates,
+    aluboard: S.aluboard,
+    stairs:   S.stairs,
+  };
+}
+
+/**
+ * Compute a workflow checklist for one project from its saved-JSON shape.
+ * PURE — no DB, no globals mutated. Reads only `pdata` (+ optional docStatus).
+ *
+ * @param {object} pdata  { project, rooms, strips, cables, mats, matPaths,
+ *                          plates, aluboard, stairs } — _openProjectData() for the
+ *                          open project, or a loaded row's `data` for others.
+ * @param {object} [docStatus]  { roomsTotal, roomsDocumented, signed } pre-fetched
+ *                          from warranty_certificates (async/external). Omitted →
+ *                          Dokumentasjon = 'na' (ukjent), never a false 'todo'.
+ * @returns {{steps:Array<{key,label,status}>, percent:number, nextStep:object|null}}
+ */
+function _projectProgress(pdata, docStatus) {
+  const p        = (pdata && pdata.project) || {};
+  const rooms    = (pdata && pdata.rooms) || [];
+  const geoRooms = rooms.filter(r => r.points && r.points.length >= 3);
+  const hasEl = (a) => Array.isArray(a) && a.length > 0;
+  const anyProduct = pdata && (hasEl(pdata.strips) || hasEl(pdata.cables) ||
+    hasEl(pdata.mats) || hasEl(pdata.matPaths) || hasEl(pdata.plates) || hasEl(pdata.aluboard));
+
+  // 1 Kunde — firma (fritekst eller lenket kunderad) utfylt.
+  const kundeDone = !!((p.customer && String(p.customer).trim()) || p.customer_id);
+
+  // 2 Tegning — minst ett rom med reell geometri.
+  const tegningDone = geoRooms.length > 0;
+
+  // 3 Rom — alle geometri-rom har romtype (og dermed areal).
+  const romStatus = geoRooms.length === 0 ? 'na'
+    : (geoRooms.every(r => r.roomType) ? 'done' : 'todo');
+
+  // 4 Effekt & gulv — alle geometri-rom har flateeffekt (W/m²) + gulv/romtype.
+  const effektStatus = geoRooms.length === 0 ? 'na'
+    : (geoRooms.every(r => (r.targetWm2 > 0) && (r.floorType || r.roomType)) ? 'done' : 'todo');
+
+  // 5 Produkter — minst ett varmeelement lagt ut (folie/kabel/matte/plate).
+  const produkterStatus = geoRooms.length === 0 ? 'na' : (anyProduct ? 'done' : 'todo');
+
+  // 6 Dokumentasjon — fra forhåndshentet warranty-status. Ukjent → 'na'.
+  let dokStatus = 'na';
+  if (docStatus && docStatus.roomsTotal > 0) {
+    dokStatus = (docStatus.roomsDocumented >= docStatus.roomsTotal) ? 'done' : 'todo';
+  } else if (docStatus && docStatus.roomsTotal === 0) {
+    dokStatus = 'todo';   // has doc context but nothing documented yet
+  }
+
+  const steps = [
+    { key: 'kunde',    label: 'Kunde',          status: kundeDone   ? 'done' : 'todo' },
+    { key: 'tegning',  label: 'Tegning',        status: tegningDone ? 'done' : 'todo' },
+    { key: 'rom',      label: 'Rom',            status: romStatus },
+    { key: 'effekt',   label: 'Effekt & gulv',  status: effektStatus },
+    { key: 'produkter',label: 'Produkter',      status: produkterStatus },
+    { key: 'dok',      label: 'Dokumentasjon',  status: dokStatus },
+  ];
+
+  const counted = steps.filter(s => s.status !== 'na');
+  const done = counted.filter(s => s.status === 'done').length;
+  const percent = counted.length ? Math.round(done / counted.length * 100) : 0;
+  const nextStep = steps.find(s => s.status === 'todo') || null;
+  return { steps, percent, nextStep };
+}
+
 function _renderDashStats(projects) {
   const el = document.getElementById('dash-stats');
   if (!el) return;
