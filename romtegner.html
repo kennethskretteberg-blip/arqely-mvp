@@ -3455,7 +3455,7 @@ function _anyInteractionActive() {
     _plateDragging || _stairDragging ||
     _vdDragging || _vdPending ||
     _dimOffDragging || _annotDragging ||
-    _cardDragging || _cableLabelDragging || _cableGizmoDragging ||
+    _cardDragging || _cableLabelDragging || _stripLabelDragging || _cableGizmoDragging ||
     _thDragging || _mmDragging || _vfPickDrag || _bgDragging
   );
 }
@@ -15462,6 +15462,7 @@ function _boxFitsPoly(cx, cy, hw, hh, room, holes) {
 
 function drawStrips() {
   const stripLabelJobs = [];
+  _stripLabelBounds = {};
   for (const strip of S.strips) {
     if (!_roomIdOnActiveFloor(strip.roomId)) continue;
     const room = S.rooms.find(r => r.id === strip.roomId);
@@ -15704,8 +15705,7 @@ function _drawStripLabel(job) {
   const foilPerp = dir === 'v' ? nw : nh;   // across-strip screen extent
   const alongLen = dir === 'v' ? nh : nw;   // along-strip screen extent
   const foilCx = nx + nw / 2, foilCy = ny + nh / 2;
-
-  // Choose layout by whether the perpendicular box height fits the foil width.
+  const strip = job.strip;
   let mode;
   if (twoH <= foilPerp)      mode = 'two';
   else if (oneH <= foilPerp) mode = 'one';
@@ -15758,6 +15758,24 @@ function _drawStripLabel(job) {
     return { cx, cy };
   };
 
+  // Manual position (dragged): draw a horizontal two-line box at strip.labelPos
+  // with a leader line to the foil. Overrides auto layout/clamp — user's choice.
+  // «Tilbakestill til auto» deletes labelPos to return to the auto placement below.
+  if (strip && strip.labelPos) {
+    const fw = twoW, fh = twoH;
+    const p = w2s(strip.labelPos.x, strip.labelPos.y);
+    const cx = p.x, cy = p.y;
+    _stripLabelBounds[strip.id] = { sx: cx - fw / 2, sy: cy - fh / 2, w: fw, h: fh };
+    if (Math.abs(cx - foilCx) > fw / 2 || Math.abs(cy - foilCy) > fh / 2) {
+      ctx.strokeStyle = _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
+      ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(foilCx, foilCy); ctx.lineTo(cx, cy); ctx.stroke();
+    }
+    ctx.save(); ctx.translate(cx, cy); paintBox(fw, fh, false); ctx.restore();
+    ctx.restore();
+    return;
+  }
+
   if (mode === 'callout') {
     // Park a normal horizontal two-line box in open room space beside the foil,
     // with a thin leader line back to the foil centre.
@@ -15774,6 +15792,7 @@ function _drawStripLabel(job) {
       cx = Math.max(nx + hw, Math.min(nx + nw - hw, foilCx));
     }
     ({ cx, cy } = clampInside(cx, cy, hw, hh));
+    if (strip) _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
     // Leader line: foil centre → box edge.
     ctx.strokeStyle = _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
     ctx.lineWidth = 1;
@@ -15809,6 +15828,7 @@ function _drawStripLabel(job) {
     else             cx += ((foilCx >= cen.x) ? 1 : -1) * nudge;
   }
   ({ cx, cy } = clampInside(cx, cy, hw, hh));
+  if (strip) _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
 
   ctx.save();
   ctx.translate(cx, cy);
@@ -15827,6 +15847,21 @@ let _cableLabelDragOffset = {x: 0, y: 0};
 
 function hitCableLabel(sx, sy) {
   for (const [id, b] of Object.entries(_cableLabelBounds)) {
+    if (sx >= b.sx && sx <= b.sx + b.w && sy >= b.sy && sy <= b.sy + b.h) return parseInt(id);
+  }
+  return null;
+}
+
+// Foil (strip) labels are draggable, mirroring cable labels. Screen bounds are
+// recorded in drawStrips → _drawStripLabel each render; a manual world position
+// is stored on strip.labelPos (deleted by «Tilbakestill til auto»).
+let _stripLabelBounds = {}; // {stripId: {sx, sy, w, h}} — updated during render
+let _stripLabelDragging = false;
+let _stripLabelDragId = null;
+let _stripLabelDragOffset = {x: 0, y: 0};
+
+function hitStripLabel(sx, sy) {
+  for (const [id, b] of Object.entries(_stripLabelBounds)) {
     if (sx >= b.sx && sx <= b.sx + b.w && sy >= b.sy && sy <= b.sy + b.h) return parseInt(id);
   }
   return null;
@@ -21074,11 +21109,27 @@ function stripCtxMenu(e, id) {
   if (!S.ui.selectedStripIds.has(id)) selStrip(id);
   const selIds = [...S.ui.selectedStripIds];
   const multiSel = selIds.length > 1;
+  const anyManualLabel = selIds.some(sid => S.strips.find(s => s.id === sid)?.labelPos);
   document.getElementById('ctx-menu').innerHTML = `
     ${_angreItem()}
     ${multiSel ? `<div class="ctx-item" onclick="promptCreateGroup();hideCtx()"><svg class="ic ic-package" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg> Lag gruppe (${selIds.length} striper)</div><div class="ctx-sep"></div>` : ''}
+    ${anyManualLabel ? `<div class="ctx-item" onclick="resetStripLabel();hideCtx()">↩ Tilbakestill label til auto</div>` : ''}
     <div class="ctx-item danger" onclick="${multiSel ? 'deleteMultiStrips()' : 'deleteStrip('+id+')'};hideCtx()">✕ Slett ${multiSel ? selIds.length+' striper' : 'stripe'}</div>`;
   showCtxAt(e.clientX, e.clientY);
+}
+
+// Clear any manual (dragged) label position on the selected strips → back to
+// automatic placement (Del 1+2). Undoable + autosaved.
+function resetStripLabel() {
+  const selIds = [...S.ui.selectedStripIds];
+  if (!selIds.length) return;
+  pushUndo();
+  let changed = false;
+  for (const sid of selIds) {
+    const s = S.strips.find(st => st.id === sid);
+    if (s && s.labelPos) { delete s.labelPos; changed = true; }
+  }
+  if (changed) { render(); _scheduleAutoSave && _scheduleAutoSave(); }
 }
 
 // ─── VF PERIMETER PICKER (canvas) ────────────────────────────
@@ -28820,6 +28871,26 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
+    // ── Foil label drag ──
+    const slHit = hitStripLabel(sx0, sy0);
+    if (slHit !== null) {
+      const strip = S.strips.find(s => s.id === slHit);
+      if (strip) {
+        pushUndo();
+        _stripLabelDragging = true; _stripLabelDragId = slHit;
+        const rawWp = s2w(sx0, sy0);
+        if (!strip.labelPos) {
+          // Initialize from the current on-screen label centre → no jump on grab.
+          const b = _stripLabelBounds[slHit];
+          if (b) { const c = s2w(b.sx + b.w / 2, b.sy + b.h / 2); strip.labelPos = { x: c.x, y: c.y }; }
+          else strip.labelPos = { x: rawWp.x, y: rawWp.y };
+        }
+        _stripLabelDragOffset = { x: rawWp.x - strip.labelPos.x, y: rawWp.y - strip.labelPos.y };
+        canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
+
     // ── Room info card hit (close or drag) ──
     const cardHit = hitRoomCard(sx0, sy0);
     if (cardHit) {
@@ -29542,6 +29613,19 @@ canvas.addEventListener('mousemove', e=>{
       const sx = e.clientX - cRect.left, sy = e.clientY - cRect.top;
       const wp = s2w(sx, sy);
       cable.labelPos = { x: wp.x - _cableLabelDragOffset.x, y: wp.y - _cableLabelDragOffset.y };
+      render();
+    }
+    return;
+  }
+
+  // Foil label drag
+  if (_stripLabelDragging && _stripLabelDragId !== null) {
+    const strip = S.strips.find(s => s.id === _stripLabelDragId);
+    if (strip) {
+      const cRect = canvas.getBoundingClientRect();
+      const sx = e.clientX - cRect.left, sy = e.clientY - cRect.top;
+      const wp = s2w(sx, sy);
+      strip.labelPos = { x: wp.x - _stripLabelDragOffset.x, y: wp.y - _stripLabelDragOffset.y };
       render();
     }
     return;
@@ -30275,6 +30359,8 @@ canvas.addEventListener('mousemove', e=>{
         canvas.style.cursor='pointer';          // clickable corner point
       } else if (nearMoveArrow(sx2, sy2)) {
         canvas.style.cursor=_wallMoveCursor();  // wall move arrow — direction matches wall orientation
+      } else if (hitStripLabel(sx2, sy2) !== null) {
+        canvas.style.cursor='grab';             // draggable foil label
       } else if (hitStrip(rawWp2.x, rawWp2.y)) {
         canvas.style.cursor='pointer';          // selectable strip body
       } else if (hitCable(rawWp2.x, rawWp2.y)) {
@@ -30328,6 +30414,10 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_cableLabelDragging) {
     _cableLabelDragging=false; _cableLabelDragId=null; canvas.style.cursor='default'; return;
+  }
+  if (_stripLabelDragging) {
+    _stripLabelDragging=false; _stripLabelDragId=null; canvas.style.cursor='default';
+    _scheduleAutoSave && _scheduleAutoSave(); return;
   }
   if (_cardDragging) {
     _cardDragging=false; _cardRoomId=null; canvas.style.cursor='default'; return;
