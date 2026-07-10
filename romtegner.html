@@ -15603,6 +15603,7 @@ function _boxFitsPoly(cx, cy, hw, hh, room, holes) {
 function drawStrips() {
   const stripLabelJobs = [];
   _stripLabelBounds = {};
+  _stripLabelGeom = {};
   for (const strip of S.strips) {
     if (!_roomIdOnActiveFloor(strip.roomId)) continue;
     const room = S.rooms.find(r => r.id === strip.roomId);
@@ -15855,7 +15856,11 @@ function _resolveFillColor(strip) {
  * obstacles). PDF inherits this since it renders from the same canvas.
  */
 function _drawStripLabel(job) {
-  const { name, infoLine, fontSize, nx, ny, nw, nh, dir, roomId } = job;
+  const { name, infoLine, nx, ny, nw, nh, dir, roomId } = job;
+  const strip = job.strip;
+  // Manual scale (drag-stretch) multiplies the base font; auto labels use scale 1.
+  const scl = (strip && strip.labelScale > 0) ? strip.labelScale : 1;
+  const fontSize = job.fontSize * scl;
   const room = S.rooms.find(r => r.id === roomId);
   const lineH = fontSize + 3;
   const padX = 8, padY = 5;
@@ -15888,7 +15893,6 @@ function _drawStripLabel(job) {
   const foilPerp = dir === 'v' ? nw : nh;   // across-strip screen extent
   const alongLen = dir === 'v' ? nh : nw;   // along-strip screen extent
   const foilCx = nx + nw / 2, foilCy = ny + nh / 2;
-  const strip = job.strip;
   const col = _resolveLabelColors(strip);   // custom label colours, or null = theme look
   let mode;
   if (twoH <= foilPerp)      mode = 'two';
@@ -15947,25 +15951,29 @@ function _drawStripLabel(job) {
     return { cx, cy };
   };
 
-  // Manual position (dragged): draw a horizontal two-line box at strip.labelPos
-  // with a leader line to the foil. Overrides auto layout/clamp — user's choice.
-  // «Tilbakestill til auto» deletes labelPos to return to the auto placement below.
-  if (strip && strip.labelPos) {
-    // Dragged label keeps the foil's length-orientation by default (vertical foil →
-    // rotated label), so a click/move never flips it flat. The two-line box is drawn
-    // rotated for standing foil; its screen AABB (for hit/leader) swaps accordingly.
-    const rot = (dir === 'v');
+  // Manual override (flytt/roter/strekk): any of labelPos / labelRotation / labelScale
+  // set → draw a two-line box at the chosen position, angle and scale. Default angle
+  // follows the foil's length-direction, so a plain drag never flips the label flat.
+  // «Tilbakestill til auto» clears all three to return to the auto placement below.
+  const hasManual = strip && (strip.labelPos || strip.labelRotation != null || strip.labelScale != null);
+  if (hasManual) {
+    const ang = (strip.labelRotation != null)
+      ? strip.labelRotation * Math.PI / 180
+      : (dir === 'v' ? -Math.PI / 2 : 0);
     const fw = twoW, fh = twoH;
-    const p = w2s(strip.labelPos.x, strip.labelPos.y);
-    const cx = p.x, cy = p.y;
-    const hw = rot ? fh / 2 : fw / 2, hh = rot ? fw / 2 : fh / 2;
+    const center = strip.labelPos ? w2s(strip.labelPos.x, strip.labelPos.y) : { x: foilCx, y: foilCy };
+    const cx = center.x, cy = center.y;
+    // Axis-aligned screen bounds of the rotated box (for hit-testing + leader).
+    const ca = Math.abs(Math.cos(ang)), sa = Math.abs(Math.sin(ang));
+    const hw = (ca * fw + sa * fh) / 2, hh = (sa * fw + ca * fh) / 2;
     _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    _stripLabelGeom[strip.id] = { cx, cy, ang, fw, fh };
     if (Math.abs(cx - foilCx) > hw || Math.abs(cy - foilCy) > hh) {
       ctx.strokeStyle = col ? col.border : _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
       ctx.lineWidth = 1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(foilCx, foilCy); ctx.lineTo(cx, cy); ctx.stroke();
     }
-    ctx.save(); ctx.translate(cx, cy); if (rot) ctx.rotate(-Math.PI / 2); paintBox(fw, fh, false); ctx.restore();
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang); paintBox(fw, fh, false); ctx.restore();
     ctx.restore();
     return;
   }
@@ -15986,7 +15994,10 @@ function _drawStripLabel(job) {
       cx = Math.max(nx + hw, Math.min(nx + nw - hw, foilCx));
     }
     ({ cx, cy } = clampInside(cx, cy, hw, hh));
-    if (strip) _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    if (strip) {
+      _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+      _stripLabelGeom[strip.id] = { cx, cy, ang: 0, fw, fh };
+    }
     // Leader line: foil centre → box edge.
     ctx.strokeStyle = col ? col.border : _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
     ctx.lineWidth = 1;
@@ -16022,7 +16033,10 @@ function _drawStripLabel(job) {
     else             cx += ((foilCx >= cen.x) ? 1 : -1) * nudge;
   }
   ({ cx, cy } = clampInside(cx, cy, hw, hh));
-  if (strip) _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+  if (strip) {
+    _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    _stripLabelGeom[strip.id] = { cx, cy, ang: dir === 'v' ? -Math.PI / 2 : 0, fw, fh };
+  }
 
   ctx.save();
   ctx.translate(cx, cy);
@@ -16049,7 +16063,8 @@ function hitCableLabel(sx, sy) {
 // Foil (strip) labels are draggable, mirroring cable labels. Screen bounds are
 // recorded in drawStrips → _drawStripLabel each render; a manual world position
 // is stored on strip.labelPos (deleted by «Tilbakestill til auto»).
-let _stripLabelBounds = {}; // {stripId: {sx, sy, w, h}} — updated during render
+let _stripLabelBounds = {}; // {stripId: {sx, sy, w, h}} — screen AABB, updated during render
+let _stripLabelGeom = {};   // {stripId: {cx, cy, ang, fw, fh}} — oriented box, for handles
 let _stripLabelDragging = false;
 let _stripLabelDragId = null;
 let _stripLabelDragOffset = {x: 0, y: 0};
@@ -21305,7 +21320,7 @@ function stripCtxMenu(e, id) {
   if (!S.ui.selectedStripIds.has(id)) selStrip(id);
   const selIds = [...S.ui.selectedStripIds];
   const multiSel = selIds.length > 1;
-  const anyManualLabel = selIds.some(sid => S.strips.find(s => s.id === sid)?.labelPos);
+  const anyManualLabel = selIds.some(sid => { const s = S.strips.find(st => st.id === sid); return s && (s.labelPos || s.labelRotation != null || s.labelScale != null); });
   document.getElementById('ctx-menu').innerHTML = `
     ${_angreItem()}
     ${multiSel ? `<div class="ctx-item" onclick="promptCreateGroup();hideCtx()"><svg class="ic ic-package" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg> Lag gruppe (${selIds.length} striper)</div><div class="ctx-sep"></div>` : ''}
@@ -21323,7 +21338,10 @@ function resetStripLabel() {
   let changed = false;
   for (const sid of selIds) {
     const s = S.strips.find(st => st.id === sid);
-    if (s && s.labelPos) { delete s.labelPos; changed = true; }
+    if (!s) continue;
+    if (s.labelPos != null)      { delete s.labelPos;      changed = true; }
+    if (s.labelRotation != null) { delete s.labelRotation; changed = true; }
+    if (s.labelScale != null)    { delete s.labelScale;    changed = true; }
   }
   if (changed) { render(); _scheduleAutoSave && _scheduleAutoSave(); }
 }
