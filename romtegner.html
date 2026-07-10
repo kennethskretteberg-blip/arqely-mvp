@@ -551,6 +551,12 @@ body.present-mode #render-stats{display:none !important}
 #label-color-panel .lcp-sw:hover{outline:2px solid var(--accent);outline-offset:1px}
 #label-color-panel .lcp-sw.on{border-color:var(--text)}
 #label-color-panel .lcp-auto{background:var(--surface2);color:var(--dim);border:1px dashed var(--border)}
+#label-color-panel .lcp-scopes{display:flex;gap:6px;flex-wrap:wrap}
+#label-color-panel .lcp-scope{font-size:11px;padding:5px 9px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer}
+#label-color-panel .lcp-scope:hover{border-color:var(--accent)}
+#label-color-panel .lcp-scope.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+#label-color-panel .lcp-projrow{display:flex;align-items:center;gap:8px;margin-top:5px}
+#label-color-panel .lcp-projlbl{font-size:11px;color:var(--dim);width:38px;flex:0 0 auto}
 .gap-title{padding:7px 12px 4px;font-size:11px;color:var(--dim);letter-spacing:.05em}
 .gap-presets{display:flex;flex-wrap:wrap;gap:4px;padding:4px 10px 6px}
 .gap-preset-btn{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:4px 9px;font-size:12px;color:var(--muted);cursor:pointer;transition:all .12s}
@@ -14710,18 +14716,47 @@ function _lcpSwatches(current, onclickFn) {
   }).join('');
   return html;
 }
+// Colour-propagation scope (STEG «forplant til like artikler»). Applies to the
+// next colour click — label and fill can therefore each get their own scope.
+let _colorScope = 'room';   // 'room' | 'floor' | 'project'
+function _stripFloorId(strip) {
+  const r = S.rooms.find(rr => rr.id === strip.roomId);
+  return r ? r.floorId : null;
+}
+// Strips sharing this strip's article (productId) within the chosen scope.
+function _stripsInScope(strip, scope) {
+  const same = S.strips.filter(s => s.productId === strip.productId);
+  if (scope === 'project') return same;
+  if (scope === 'floor') { const fid = _stripFloorId(strip); return same.filter(s => _stripFloorId(s) === fid); }
+  return same.filter(s => s.roomId === strip.roomId);   // default: this room
+}
+function _setColorScope(sc) { _colorScope = sc; _lcpRefresh(); }
+
+// Common value of a field across the selected strips (null unless all share it).
+function _lcpCommon(strips, field) {
+  if (!strips.length) return null;
+  const v = strips[0][field] || null;
+  return strips.some(s => (s[field] || null) !== v) ? null : v;
+}
+
 function _labelColorPanelHtml() {
   const ids = _selectedStripIdList();
   const strips = ids.map(id => S.strips.find(s => s.id === id)).filter(Boolean);
-  // Common per-strip colour (only highlighted when all selected share it).
-  let selColor = strips.length ? (strips[0].labelColor || null) : null;
-  if (strips.some(s => (s.labelColor || null) !== selColor)) selColor = null;
-  const projColor = (S.varmefolie && S.varmefolie.labelColor) || null;
+  const selLabel = _lcpCommon(strips, 'labelColor');
+  const selFill  = _lcpCommon(strips, 'fillColor');
+  const projLabel = (S.varmefolie && S.varmefolie.labelColor) || null;
+  const projFill  = (S.varmefolie && S.varmefolie.fillColor) || null;
+  const scopeBtn = (sc, lbl) => `<button class="lcp-scope${_colorScope===sc?' on':''}" onclick="_setColorScope('${sc}')">${lbl}</button>`;
   return `
     <div class="lcp-title">Label-farge (${ids.length} valgt)</div>
-    <div class="lcp-swatches">${_lcpSwatches(selColor, 'setStripLabelColor')}</div>
+    <div class="lcp-swatches">${_lcpSwatches(selLabel, 'setStripLabelColor')}</div>
+    <div class="lcp-title sub">Folie-farge (${ids.length} valgt)</div>
+    <div class="lcp-swatches">${_lcpSwatches(selFill, 'setFillColor')}</div>
+    <div class="lcp-title sub">Forplant til like artikler</div>
+    <div class="lcp-scopes">${scopeBtn('room','Dette rommet')}${scopeBtn('floor','Denne etasjen')}${scopeBtn('project','Hele prosjektet')}</div>
     <div class="lcp-title sub">Standard for prosjektet</div>
-    <div class="lcp-swatches">${_lcpSwatches(projColor, 'setProjectLabelColor')}</div>`;
+    <div class="lcp-projrow"><span class="lcp-projlbl">Label</span><div class="lcp-swatches">${_lcpSwatches(projLabel, 'setProjectLabelColor')}</div></div>
+    <div class="lcp-projrow"><span class="lcp-projlbl">Folie</span><div class="lcp-swatches">${_lcpSwatches(projFill, 'setProjectFillColor')}</div></div>`;
 }
 function openLabelColorPanel(e) {
   e.stopPropagation();
@@ -14741,20 +14776,27 @@ function _lcpRefresh() {
   const p = document.getElementById('label-color-panel');
   if (p && p.style.display !== 'none') p.innerHTML = _labelColorPanelHtml();
 }
-function setStripLabelColor(hex) {
-  const ids = _selectedStripIdList();
-  if (!ids.length) return;
+// Apply a colour field to every like-article strip within the chosen scope. One
+// undo covers the whole batch; last explicit choice wins for any given strip.
+function _applyColorToScope(field, hex) {
+  const sel = _selectedStripIdList().map(id => S.strips.find(s => s.id === id)).filter(Boolean);
+  if (!sel.length) return;
+  const targets = new Set();
+  for (const s of sel) for (const t of _stripsInScope(s, _colorScope)) targets.add(t);
   pushUndo();
-  for (const id of ids) {
-    const s = S.strips.find(st => st.id === id);
-    if (!s) continue;
-    if (hex) s.labelColor = hex; else delete s.labelColor;
-  }
+  for (const t of targets) { if (hex) t[field] = hex; else delete t[field]; }
   render(); _scheduleAutoSave && _scheduleAutoSave(); _lcpRefresh();
 }
+function setStripLabelColor(hex) { _applyColorToScope('labelColor', hex); }
+function setFillColor(hex)       { _applyColorToScope('fillColor', hex); }
 function setProjectLabelColor(hex) {
   pushUndo();
   if (hex) S.varmefolie.labelColor = hex; else delete S.varmefolie.labelColor;
+  render(); _scheduleAutoSave && _scheduleAutoSave(); _lcpRefresh();
+}
+function setProjectFillColor(hex) {
+  pushUndo();
+  if (hex) S.varmefolie.fillColor = hex; else delete S.varmefolie.fillColor;
   render(); _scheduleAutoSave && _scheduleAutoSave(); _lcpRefresh();
 }
 // Close label-color panel when clicking outside it (and not on its ctxbar chip).
@@ -15605,10 +15647,15 @@ function drawStrips() {
     }
     // Brutto background
     ctx.fillStyle = _lc('rgba(255,160,0,0.09)','rgba(255,150,50,0.10)'); ctx.fillRect(bx, by, bw, bh);
-    // Netto active area
-    ctx.fillStyle = isSel ? _lc('rgba(255,180,0,0.30)','rgba(255,200,80,0.38)')
-                  : isHov ? _lc('rgba(190,255,50,0.38)','rgba(200,255,60,0.42)')
-                  :         _lc('rgba(255,180,0,0.18)','rgba(255,200,80,0.22)');
+    // Netto active area — custom foil fill colour overrides the default orange.
+    const _fill = _resolveFillColor(strip);
+    if (_fill) {
+      ctx.fillStyle = _hexA(_fill, isSel ? 0.5 : isHov ? 0.55 : 0.34);
+    } else {
+      ctx.fillStyle = isSel ? _lc('rgba(255,180,0,0.30)','rgba(255,200,80,0.38)')
+                    : isHov ? _lc('rgba(190,255,50,0.38)','rgba(200,255,60,0.42)')
+                    :         _lc('rgba(255,180,0,0.18)','rgba(255,200,80,0.22)');
+    }
     ctx.fillRect(nx, ny, nw, nh);
     // Netto outline
     ctx.strokeStyle = isSel ? _lc('rgba(140,90,0,1.0)','rgba(255,220,80,1.0)')
@@ -15791,6 +15838,10 @@ function _labelColorsFrom(bg) {
 function _resolveLabelColors(strip) {
   const bg = (strip && strip.labelColor) || (S.varmefolie && S.varmefolie.labelColor) || null;
   return bg ? _labelColorsFrom(bg) : null;
+}
+// Resolve a strip's foil FILL colour (hex) or null: own fill > project default.
+function _resolveFillColor(strip) {
+  return (strip && strip.fillColor) || (S.varmefolie && S.varmefolie.fillColor) || null;
 }
 
 /**
