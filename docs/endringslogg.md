@@ -4,6 +4,103 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## UX-arbeidsflyt — STEG 1–7 (fremdriftsmodell, dashbord + tegneskjerm) — 2026-07-10
+
+Stegvis serie som gjør navigasjonen arbeidsflyt-orientert i stedet for funksjons-orientert. Alt
+bakoverkompatibelt — dagens funksjons-nav (Inne/Ute/Trapp, Snap, Raster, Import) er urørt.
+Verifisert i preview/headless med syntetiske prosjekter (innloggede flyter gjenstår for felttest).
+
+- **`3fc6a80` — STEG 1: semantiske fargetokens.** Nye CSS-variabler i begge temaer: `--success`
+  (grønn), `--danger` (rød), `--info` (blå); `--warn` (oransje) beholdt. Semantikk overalt framover:
+  grønn=ferdig/ok, oransje=mangler/venter, rød=feil/avvik, blå=nøytral info. `_renderDashStats` +
+  målings-/advarselvisning (`.doc-val.good/.bad`, portal-`cell()`) bruker tokens. «Pågår» gul→oransje.
+- **`da7e0ca` — STEG 2: `_projectProgress` (ren funksjon, ryggraden).** 6-stegs sjekkliste (Kunde/
+  Tegning/Rom/Effekt & gulv/Produkter/Dokumentasjon) med `done/todo/na` utledet fra prosjektdata +
+  samlet prosent + neste steg. `_openProjectData()` gir lagret-JSON-view av åpent prosjekt. Endrer
+  ikke `p._status`-enumen. Dok mates via `docStatus` (async/ekstern).
+- **`9786d2b` — STEG 3: «Å gjøre nå» på dashbordet.** Handlingsliste øverst i prosjekt-fanen bygget
+  på `_projectProgress`. Datastrategi «sammendrag ved lagring»: `_buildSaveData` stempler
+  `project._prog`, `_fetchProjectList` plukker det ut → ingen ekstra geometri-fetch. Grupperte,
+  klikkbare kort (mangler kunde/tegning/romtype/effekt/prosjektering + «må dokumenteres» via batch
+  warranty-spørring); klikk filtrerer lista; tom → «Alt à jour».
+- **`3217c2e` — STEG 4: ett samlet søk.** Slo sammen de to feltene (prosjekt + kunde) til ett;
+  `_filterProjectsList` matcher fritt mot navn/adresse/ansvarlig/kunde/kontakt/ordrenr + lenket
+  kunderad (navn/telefon/e-post). Status-/type-select beholdt.
+- **`299e541` — STEG 5: adresse-autofyll + kunde-først.** `#dash-create-form` omordnet (Kunde →
+  Kontakt → Navn → Adresse → Type → Ansvarlig; fokus på Kunde). Adresse-felt fikk Kartverkets
+  gratis, nøkkelfrie API (`ws.geonorge.no/adresser/v1/sok`): `_addrSearch`→`_addrFetch`→dropdown,
+  `_addrPick` fyller «adressetekst, postnr poststed». Feil/offline → ren fritekst (fallback).
+- **`f51f213` — STEG 6: empty-state «Hvordan vil du begynne?» + PDF-drop + DWG.** `#canvas-empty-state`
+  vises når aktiv etasje er tom (`_editorIsEmpty()`/`_updateEmptyState()` fra `render()`). 4 kort:
+  Importer PDF + DWG/DXF (drop-soner → `_autoReadStart`; klikk → `_importPlanToDraw`), Tegn rom
+  (`abStartDraw('rect2')`), Hurtig prosjektering (`addPart('list')`). Gjenbruker eksisterende
+  import-/tegne-flyt. DWG-status (lumelo-backend): DXF nativt (ezdxf); native `.dwg` krever ODA
+  File Converter (ikke installert) → feiler server-side, `.dxf` virker — kortet er ekte «DWG/DXF».
+- **`0a182d8` + `10bc798` — STEG 7: arbeidsflyt-stripe i tegneskjermen.** Tynn `#workflow-stripe`
+  (rad mellom `#topbar` og `#content`), `_renderWorkflowStripe()` fra `render()` med signatur-vakt,
+  kun indoor-modul. Chips fra `_projectProgress` (STEG 1-farger) + accent «Send til montør». Klikk:
+  Kunde → lettvekts info-modal; Tegning → `fitAll`/import; Rom → `selRoom`; Effekt/Produkter →
+  `showUnifiedProductPanel`; Dok + Send → `showDocPanel`.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Folie-label — orientering + håndtak + folie-fyll + trofast PDF (Del A–E) — 2026-07-10
+
+Oppfølger til folie-label-jobben. **Plan først** (geometri/orientering). Skjerm = PDF (samme canvas
+via `_renderRoomToImage`). Verifisert headless/syntetisk; faktisk PDF-eksport gjenstår for felttest.
+
+- **`8878657` — Del A: klikk flipper ikke lenger stående label flatt.** Rotårsak: et klikk satte
+  `labelPos`, og den manuelle grenen tegnet alltid horisontal boks → stående folie flippet. Fiks:
+  manuell gren respekterer lengderetning (`dir==='v'` → rotér −90°); `labelPos`+undo utsatt til reell
+  drag (>4 px), så et klikk endrer ingenting.
+- **`dca6551` — Del B: folie-fyll-farge + forplantning til like artikler.** Nytt `strip.fillColor`
+  + prosjekt-standard `S.varmefolie.fillColor` (`drawStrips` netto-fyll via `_resolveFillColor`).
+  Farge-panelet fikk «Folie-farge»-spor + omfangsvelger (`_colorScope`: Dette rommet / Denne etasjen
+  / Hele prosjektet). Fargeendring forplanter til alle strips med samme `productId` innen omfang
+  (`_applyColorToScope`/`_stripsInScope`); B=140 aldri berørt når B=100 endres. Undo pr batch.
+- **`41f0908` + `62c0cc2` — Del C: manuelle håndtak (roter/strekk/flytt).** C1: `_drawStripLabel`
+  støtter vilkårlig `strip.labelRotation` (deg) + `strip.labelScale`; lagrer orientert boks-geometri.
+  C2: `drawStripLabelHandles()` tegner orientert boks + rotasjonssirkel + strekk-firkant for VALGT
+  label; `hitStripLabelHandle` sjekkes før label/strip (kun valgt → ingen kollisjon). Roter =
+  atan2+90° med snap 0/90/180/270 (Shift=fri); strekk = avstand-ratio → skala 0.5–4×.
+  «Tilbakestill til auto» nullstiller pos+rotasjon+skala.
+- **`67a2ec7` — Del D (punkt 5): trofast PDF — verdensbasert label-størrelse.** Fjernet den
+  hardkodede PDF-fonten (clamp 30–40px). Ny KONSTANT verdens-fonthøyde `LABEL_FONT_CM=5.0`,
+  `fontSize = LABEL_FONT_CM × (zoom×BASE_SCALE)` → uniform («like store») OG label:rom-forhold
+  IDENTISK skjerm↔PDF. Boks-metrikk (lineH, padding, radius, mono-font) gjort proporsjonal med
+  fonten. `labelScale` ganger fonten → strekk/rotasjon printer trofast. Verifisert: forhold identisk
+  ved skjerm-skala vs PDF-lik skala (før: ~3× avvik).
+- **`fa4c647` — Del E (punkt 6, valgfritt): auto-label overlapp-nudge.** Overlappende AUTO-bokser
+  dyttes fra hverandre langs lengderetningen (re-klemt i rom) via `_nudgeAutoLabel`/
+  `_placedAutoLabelBoxes`; manuelt plasserte labels røres aldri. «Hold roterte auto-bokser i rom»
+  var alt dekket av `clampInside`.
+
+**Fil:** romtegner.html.
+
+---
+
+## Folie-label — hold i rom + breddebevisst + drag + farge (Del 1–4) — 2026-07-10
+
+Forbedret varmefolie-labelen (navn + lengde·W) på tegning + PDF. **Plan først** der geometri berøres.
+
+- **`9089a49` — Del 1+2: hold hele labelen i rommet + breddebevisst layout.** Rotårsak: labelen ble
+  tegnet INNE i `ctx.clip('evenodd')` (rom minus hindringer) → boksen ble kappet ved romkant
+  («xFoil…»). Fiks: labels tegnes i eget pass ETTER strip-løkka, UTENFOR klippet; ny `_drawStripLabel`
+  klemmer hele boksen innenfor rom-polygonet (`_pipScr`/`_boxFitsPoly`/`_centroidScr`). Breddebevisst:
+  to-linjers → én-linjes → callout (leder-strek til folie) når folien er for smal.
+- **`e21a629` — Del 3: flyttbar label (drag) med varig effekt.** `strip.labelPos` + `hitStripLabel`
+  + drag-wiring (speiler kabel-labels). Manuell boks m/ leder-strek; «↩ Tilbakestill label til auto»
+  i høyreklikk. Persistens gratis (strip-spread ved lagring, `S.strips = data.strips` ved last).
+- **`9676fd5` — Del 4: farge pr label + prosjekt-standard.** `strip.labelColor` (bakgrunns-hex, tekst
+  auto-kontrast) + prosjekt-default `S.varmefolie.labelColor`. Kuratert 8-fargers palett, «🎨 Farge»-
+  chip → `#label-color-panel` (pr-label + prosjekt-standard, «A»=Auto).
+
+**Fil:** romtegner.html.
+
+---
+
 ## EcoMat matte — Del 3: eksakt mattelengde (N−1 like + kortere siste) — 2026-07-08
 
 Auto-utlegget legger nå ut HELE rullelengden: **N−1 like bredder** (`Lc = ceil((total/N)/raster)·raster`) +
