@@ -15900,16 +15900,21 @@ function _drawStripLabel(job) {
   // with a leader line to the foil. Overrides auto layout/clamp — user's choice.
   // «Tilbakestill til auto» deletes labelPos to return to the auto placement below.
   if (strip && strip.labelPos) {
+    // Dragged label keeps the foil's length-orientation by default (vertical foil →
+    // rotated label), so a click/move never flips it flat. The two-line box is drawn
+    // rotated for standing foil; its screen AABB (for hit/leader) swaps accordingly.
+    const rot = (dir === 'v');
     const fw = twoW, fh = twoH;
     const p = w2s(strip.labelPos.x, strip.labelPos.y);
     const cx = p.x, cy = p.y;
-    _stripLabelBounds[strip.id] = { sx: cx - fw / 2, sy: cy - fh / 2, w: fw, h: fh };
-    if (Math.abs(cx - foilCx) > fw / 2 || Math.abs(cy - foilCy) > fh / 2) {
+    const hw = rot ? fh / 2 : fw / 2, hh = rot ? fw / 2 : fh / 2;
+    _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    if (Math.abs(cx - foilCx) > hw || Math.abs(cy - foilCy) > hh) {
       ctx.strokeStyle = col ? col.border : _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
       ctx.lineWidth = 1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(foilCx, foilCy); ctx.lineTo(cx, cy); ctx.stroke();
     }
-    ctx.save(); ctx.translate(cx, cy); paintBox(fw, fh, false); ctx.restore();
+    ctx.save(); ctx.translate(cx, cy); if (rot) ctx.rotate(-Math.PI / 2); paintBox(fw, fh, false); ctx.restore();
     ctx.restore();
     return;
   }
@@ -15997,6 +16002,8 @@ let _stripLabelBounds = {}; // {stripId: {sx, sy, w, h}} — updated during rend
 let _stripLabelDragging = false;
 let _stripLabelDragId = null;
 let _stripLabelDragOffset = {x: 0, y: 0};
+let _stripLabelDragStart = {sx: 0, sy: 0};  // press point — labelPos/undo deferred until real drag
+let _stripLabelDragMoved = false;           // false = pure click (must not change the label)
 
 function hitStripLabel(sx, sy) {
   for (const [id, b] of Object.entries(_stripLabelBounds)) {
@@ -29009,21 +29016,15 @@ canvas.addEventListener('mousedown', e=>{
       return;
     }
 
-    // ── Foil label drag ──
+    // ── Foil label drag (labelPos + undo deferred to first real move — a pure
+    //     click selects without converting to a manual/flat label) ──
     const slHit = hitStripLabel(sx0, sy0);
     if (slHit !== null) {
       const strip = S.strips.find(s => s.id === slHit);
       if (strip) {
-        pushUndo();
         _stripLabelDragging = true; _stripLabelDragId = slHit;
-        const rawWp = s2w(sx0, sy0);
-        if (!strip.labelPos) {
-          // Initialize from the current on-screen label centre → no jump on grab.
-          const b = _stripLabelBounds[slHit];
-          if (b) { const c = s2w(b.sx + b.w / 2, b.sy + b.h / 2); strip.labelPos = { x: c.x, y: c.y }; }
-          else strip.labelPos = { x: rawWp.x, y: rawWp.y };
-        }
-        _stripLabelDragOffset = { x: rawWp.x - strip.labelPos.x, y: rawWp.y - strip.labelPos.y };
+        _stripLabelDragMoved = false;
+        _stripLabelDragStart = { sx: sx0, sy: sy0 };
         canvas.style.cursor = 'grabbing';
       }
       return;
@@ -29762,6 +29763,19 @@ canvas.addEventListener('mousemove', e=>{
     if (strip) {
       const cRect = canvas.getBoundingClientRect();
       const sx = e.clientX - cRect.left, sy = e.clientY - cRect.top;
+      if (!_stripLabelDragMoved) {
+        // Ignore sub-threshold jitter so a click doesn't become a manual label.
+        if (Math.hypot(sx - _stripLabelDragStart.sx, sy - _stripLabelDragStart.sy) < 4) return;
+        pushUndo();
+        if (!strip.labelPos) {
+          const b = _stripLabelBounds[_stripLabelDragId];
+          const c = b ? s2w(b.sx + b.w / 2, b.sy + b.h / 2) : s2w(_stripLabelDragStart.sx, _stripLabelDragStart.sy);
+          strip.labelPos = { x: c.x, y: c.y };
+        }
+        const w0 = s2w(_stripLabelDragStart.sx, _stripLabelDragStart.sy);
+        _stripLabelDragOffset = { x: w0.x - strip.labelPos.x, y: w0.y - strip.labelPos.y };
+        _stripLabelDragMoved = true;
+      }
       const wp = s2w(sx, sy);
       strip.labelPos = { x: wp.x - _stripLabelDragOffset.x, y: wp.y - _stripLabelDragOffset.y };
       render();
@@ -30555,7 +30569,8 @@ canvas.addEventListener('mouseup', e=>{
   }
   if (_stripLabelDragging) {
     _stripLabelDragging=false; _stripLabelDragId=null; canvas.style.cursor='default';
-    _scheduleAutoSave && _scheduleAutoSave(); return;
+    if (_stripLabelDragMoved) { _stripLabelDragMoved=false; _scheduleAutoSave && _scheduleAutoSave(); }
+    return;
   }
   if (_cardDragging) {
     _cardDragging=false; _cardRoomId=null; canvas.style.cursor='default'; return;
