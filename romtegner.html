@@ -148,6 +148,19 @@ input,textarea{font-family:var(--font-ui);color:var(--text)}
 .dash-stat{flex:1;min-width:130px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;text-align:center}
 .dash-stat-num{font-size:24px;font-weight:700;color:var(--text)}
 .dash-stat-label{font-size:11px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.04em}
+/* Å gjøre nå (STEG 3) */
+.dash-todo-wrap{margin:14px 0 4px}
+.dash-todo-hd{font-size:15px;font-weight:600;color:var(--text);margin-bottom:2px;display:flex;align-items:center;gap:8px}
+.dash-todo-sub{font-size:12px;color:var(--dim);margin-bottom:10px}
+.dash-todo-cards{display:flex;gap:10px;flex-wrap:wrap}
+.dash-todo-card{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--warn);border-radius:10px;padding:10px 14px;cursor:pointer;transition:border-color .12s,background .12s;min-width:180px}
+.dash-todo-card:hover{background:var(--surface2);border-left-color:var(--accent)}
+.dash-todo-card.dok{border-left-color:var(--info)}
+.dash-todo-card .tc-n{font-size:22px;font-weight:700;color:var(--warn);line-height:1;font-family:var(--font-mono)}
+.dash-todo-card.dok .tc-n{color:var(--info)}
+.dash-todo-card .tc-t{font-size:12.5px;color:var(--text);line-height:1.25}
+.dash-todo-allclear{display:flex;align-items:center;gap:8px;background:color-mix(in srgb,var(--success) 8%,transparent);border:1px solid color-mix(in srgb,var(--success) 35%,transparent);color:var(--success);border-radius:10px;padding:10px 14px;font-size:13px;font-weight:500}
+.dash-todo-clear{margin-left:auto;font-size:12px;color:var(--accent);cursor:pointer;background:none;border:none;padding:4px 8px}
 /* ── Status badge ── */
 .pl-status{display:inline-block;font-size:11px;font-weight:600;padding:2px 10px;border-radius:12px;white-space:nowrap}
 /* ── Type cell ── */
@@ -1091,6 +1104,9 @@ body.present-mode #render-stats{display:none !important}
 
     <!-- ═══ TAB: PROSJEKTER ═══ -->
     <div id="dash-tab-content-projects">
+
+    <!-- Å gjøre nå (STEG 3: handlingsliste bygget på _projectProgress) -->
+    <div id="dash-todo"></div>
 
     <!-- Opprett prosjekt (collapsed) -->
     <div class="dash-section">
@@ -33459,9 +33475,19 @@ function editProjName() {
 let _projectFileHandle = null; // FileSystemFileHandle — reused for overwrite
 
 function _buildSaveData() {
+  // STEG 3: stamp a compact workflow-progress summary into the saved project
+  // metadata so the dashboard «Å gjøre nå» can group projects without loading each
+  // one's full geometry. Rides in data->project → fetched by the lean list query.
+  const _prog = (() => {
+    try {
+      const r = _projectProgress(_openProjectData());
+      return { pct: r.percent, next: r.nextStep ? r.nextStep.key : null,
+               missing: r.steps.filter(s => s.status === 'todo').map(s => s.key) };
+    } catch (e) { return null; }
+  })();
   return {
     _version : 2,
-    project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now()},
+    project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now(), _prog},
     floors   : S.floors.map(f=>({...f})),
     rooms    : S.rooms.map(r=>({
       ...r,
@@ -41330,6 +41356,7 @@ async function _fetchProjectList() {
         _type: proj.type || 'indoor',
         _status: p.status || proj.status || 'in_progress',
         _responsible: proj.responsible || '',
+        _prog: proj._prog || null,   // STEG 3: stamped workflow-progress summary
         _deletedAt: p.deleted_at || null,
         // "Oppdatert"-datoen vises/sorteres på savedAt (stemplet ved ekte
         // prosjekt-lagring), IKKE updated_at. Slik flytter ikke en
@@ -42178,8 +42205,9 @@ async function _renderProjectList() {
   }
   let projects = _cachedProjects;
 
-  // Render stats from full list (before filtering)
+  // Render stats + «Å gjøre nå» from full list (before filtering)
   _renderDashStats(projects);
+  _renderDashTodo(projects);
 
   // Søk/kunde/status/type-filter + sortering via delt hjelper (samme som kundekortet).
   const statusFilter = document.getElementById('dash-filter-status')?.value || '';
@@ -42190,6 +42218,13 @@ async function _renderProjectList() {
     status: statusFilter,
     type: document.getElementById('dash-filter-type')?.value || ''
   });
+
+  // «Å gjøre nå»-kortfilter: vis kun prosjektene i valgt gruppe.
+  if (_dashTodoFilter) {
+    projects = projects.filter(p => _dashTodoFilter === 'dok'
+      ? _dashDocGapIds.has(p.id)
+      : (p._prog && p._prog.next === _dashTodoFilter));
+  }
 
   if (!projects.length) {
     tbody.innerHTML = '';
@@ -42426,6 +42461,116 @@ function _renderDashStats(projects) {
     <div class="dash-stat"><div class="dash-stat-num" style="color:var(--info)">${counts.ready_quote}</div><div class="dash-stat-label">Tilbudsklar</div></div>
     <div class="dash-stat"><div class="dash-stat-num" style="color:var(--success)">${counts.completed}</div><div class="dash-stat-label">Ferdig</div></div>
   `;
+}
+
+// ─── «Å GJØRE NÅ» (STEG 3) ────────────────────────────────────
+// Actionable task cards on the dashboard, grouped from the stamped _prog summary
+// (next todo step per project) + a best-effort batched documentation-gap query.
+let _dashTodoFilter = null;          // active card filter (step key or 'dok')
+let _dashDocGapIds = new Set();      // project ids missing documentation (async)
+
+function _dashGreetName() {
+  const u = (typeof _currentUser !== 'undefined') ? _currentUser : null;
+  const raw = u?.user_metadata?.full_name || u?.user_metadata?.name || u?.email || '';
+  const first = String(raw).split(/[ @.]/)[0];
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : '';
+}
+
+const _TODO_LABELS = {
+  kunde:     n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler kunde`,
+  tegning:   n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler tegning`,
+  rom:       n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler romtype`,
+  effekt:    n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler effekt & gulv`,
+  produkter: n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler prosjektering`,
+};
+const _TODO_ORDER = ['kunde','tegning','rom','effekt','produkter'];
+
+function _renderDashTodo(projects) {
+  const el = document.getElementById('dash-todo');
+  if (!el) return;
+  const active = (projects || []).filter(p => !p._deletedAt);
+
+  // Group by the project's next todo step (from stamped _prog).
+  const buckets = {};
+  for (const p of active) {
+    const next = p._prog && p._prog.next;
+    if (next && _TODO_LABELS[next]) (buckets[next] = buckets[next] || []).push(p);
+  }
+  // Documentation gaps (populated async by _fetchDashDocGaps).
+  const docGap = active.filter(p => _dashDocGapIds.has(p.id));
+
+  const cards = [];
+  for (const key of _TODO_ORDER) {
+    const arr = buckets[key];
+    if (arr && arr.length) {
+      cards.push(`<div class="dash-todo-card" onclick="_dashTodoClick('${key}')" title="Vis disse prosjektene">
+        <span class="tc-n">${arr.length}</span><span class="tc-t">${_TODO_LABELS[key](arr.length)}</span></div>`);
+    }
+  }
+  if (docGap.length) {
+    cards.push(`<div class="dash-todo-card dok" onclick="_dashTodoClick('dok')" title="Vis disse prosjektene">
+      <span class="tc-n">${docGap.length}</span><span class="tc-t">${docGap.length===1?'prosjekt':'prosjekter'} må dokumenteres</span></div>`);
+  }
+
+  const greet = _dashGreetName();
+  const hd = greet ? `God morgen, ${_esc(greet)}` : 'Å gjøre nå';
+  let body;
+  if (cards.length) {
+    const clearBtn = _dashTodoFilter ? `<button class="dash-todo-clear" onclick="_dashTodoClear()">✕ Vis alle</button>` : '';
+    body = `<div class="dash-todo-cards">${cards.join('')}</div>`;
+    el.innerHTML = `<div class="dash-todo-wrap">
+      <div class="dash-todo-hd">${_esc(hd)}${clearBtn}</div>
+      <div class="dash-todo-sub">Prosjekter som venter på et neste steg — klikk for å filtrere lista.</div>
+      ${body}</div>`;
+  } else {
+    // Only claim "à jour" once we actually have progress data to judge by.
+    const anyProg = active.some(p => p._prog);
+    el.innerHTML = `<div class="dash-todo-wrap">
+      <div class="dash-todo-hd">${_esc(hd)}</div>
+      ${anyProg ? `<div class="dash-todo-allclear">✓ Alt à jour — ingen prosjekter venter på deg.</div>` : ''}</div>`;
+  }
+
+  // Kick off best-effort doc-gap fetch (async); re-renders when it resolves.
+  _fetchDashDocGaps(active);
+}
+
+function _dashTodoClick(key) {
+  _dashTodoFilter = key;
+  _renderProjectList();
+  const t = document.getElementById('pl-tbody');
+  if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function _dashTodoClear() {
+  _dashTodoFilter = null;
+  _renderProjectList();
+}
+
+// Best-effort: among product-complete projects (stamped pct===100), find those
+// without a signed warranty certificate. One batched query; fully defensive so a
+// missing table / older schema simply yields no doc card.
+let _dashDocGapFetching = false, _dashDocGapKey = '';
+async function _fetchDashDocGaps(active) {
+  if (!_db || _dashDocGapFetching) return;
+  const candidates = active.filter(p => p._prog && p._prog.pct === 100).map(p => p.id);
+  const key = candidates.slice().sort().join(',');
+  if (key === _dashDocGapKey) return;         // nothing changed → don't refetch
+  _dashDocGapKey = key;
+  if (!candidates.length) { if (_dashDocGapIds.size) { _dashDocGapIds = new Set(); _renderDashTodo(_cachedProjects || []); } return; }
+  _dashDocGapFetching = true;
+  try {
+    const { data, error } = await _db.from('warranty_certificates')
+      .select('project_id,status').in('project_id', candidates);
+    if (error) throw error;
+    const signedByProject = new Set((data || []).filter(c => c.status === 'signed').map(c => c.project_id));
+    const gaps = new Set(candidates.filter(id => !signedByProject.has(id)));
+    const changed = gaps.size !== _dashDocGapIds.size || [...gaps].some(id => !_dashDocGapIds.has(id));
+    _dashDocGapIds = gaps;
+    if (changed) _renderDashTodo(_cachedProjects || []);
+  } catch (e) {
+    // Table missing / schema mismatch / offline → no doc card, no noise.
+  } finally {
+    _dashDocGapFetching = false;
+  }
 }
 
 function _invalidateProjectCache() {
