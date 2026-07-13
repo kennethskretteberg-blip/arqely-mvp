@@ -33,6 +33,19 @@ app med ekte events/målinger (der mulig), ikke bare kodelesing.
   produkt-kjede → folie uendret (52), kabel/matte nå også 52. Gjelder alle sider; tallverdier urørt.
   Verifisert: to rom side-ved-side, begge 52 cm.
 
+**1:1-verifisering i innlogget app (ekte events/toggles, fler-stegs — 2026-07-13):**
+- **Folie-label-gizmo (`1e2d4ad`):** reelt rom + FlexFoil-strip, valgt så gizmoen vises; drev ekte
+  `mousedown`→N×`mousemove`→`mouseup` på canvas. Body-drag: grep-punktet låst under cursoren i alle
+  4 steg (grep-offset holdt 0,0 → ingen hopp). Roter: senter-drift 0 gjennom 4 vinkler (30/75/120/
+  200°), `labelRotation` følger draget. Strekk: `labelScale` proporsjonal (1.5×→2.2×→3.0×), senter-
+  drift 0 (skalerer fra senter). «Tilbakestill til auto» nullstiller pos/rotasjon/skala → auto −90°.
+  Kjernefiksen bekreftet: roter/strekk startet fra AUTO-label (uten labelPos) og driftet 0 (var −175).
+- **Kabel-målsett (`5207140`):** to identiske 300×200-rom med ekte toggle-funksjoner
+  (`_toggleRoomDimSnap` + `_toggleStripDimSnap`/`_toggleCableDimSnap`); begge rom-mål på 52 cm, blå
+  streker like langt fra begge rom i skjermbildet. Strip+kabel-rom stabler til 72 cm (egen 20 cm-
+  klaring pr. kjede). Avgrensning: testet den flaggdrevne rom-mål-offsetten, ikke med ekte kabel-
+  geometri (oransje produkt-kjeder er uendret 25 cm).
+
 **Fil:** romtegner.html + `docs/endringslogg.md`.
 
 ---
