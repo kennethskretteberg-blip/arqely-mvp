@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Å gjøre nå»-rydding + varmekabel-label (innhold + størrelse) — 2026-07-13
+
+- **`e4a5e11` — fjern «romtype» og «effekt & gulv» som «venter»-kriterier.** De to stegene ble lest
+  feilaktig som feilmeldinger i «Å gjøre nå». Fjernet helt fra fremdriftsberegningen (ikke bare kort-
+  etikettene): `_projectProgress.steps` er nå kunde → tegning → produkter → dok, prosent regnes over de
+  fire, og `nextStep` faller til `produkter` etter `tegning`. `_TODO_LABELS` + `_TODO_ORDER` renset for
+  `rom`/`effekt`. Et prosjekt med tegning men uten varmeelement havner nå riktig under «mangler
+  prosjektering» (forsvinner ikke). Arbeidsflyt-stripen (STEG 7) mister også Rom/Effekt-chips → Kunde ›
+  Tegning › Produkter › Dokumentasjon › Send til montør (default per prompt). Gamle prosjekter med
+  utdatert stemplet `_prog.next='rom'/'effekt'` vises ikke som kort (defensiv `_TODO_LABELS[next]`-guard)
+  og re-bucketes ved neste lagring. Verifisert live: tegnet rom uten romtype/produkt → next='produkter';
+  ingen JS-feil; dashboard uten «mangler romtype/effekt»-kort.
+- **`7c17d9d` — varmekabel-label: linje 2 = flate/BTA/CC + størrelse lik folie.** Gjelder alle kabeltyper,
+  begge label-veier (`drawCables` + `_drawCableLabelOnly`). (1) Linje 2 viser nå «W/m² flate · W/m² BTA ·
+  CC … cm» i stedet for «lengde · total W · CC» — verdiene hentes fra allerede beregnede felt i
+  `_computeRoomStats` (flate = `cableLenM>0 ? cableWm2 : wm2Heated`, BTA = `wm2Total`); lengde/total-W kun
+  fjernet fra label, ikke fra materialliste/spesifikasjon. Linje 1 (produktnavn) beholdt. (2) Fast 13px-
+  font byttet til folies verdensbaserte `LABEL_FONT_CM*(zoom*BASE_SCALE)` med 6px skjerm-gulv + proporsjonal
+  boks-metrikk → kabel-label nå like diskré/stor som folie-label. Verifisert live (auto-lagring stubbet for
+  å unngå junk-prosjekter): rendret label = «InFloor 17T 170W 10m» / «139 W/m² flate · 196 W/m² BTA · CC
+  12.2 cm»; per-linje-høyde identisk med folie (18.2px @ zoom 1.4); ingen regresjon i folie-/matte-label.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## Fire fikser — matte-stopp · folie-label-gizmo · Toppgulv-stepper · kabel-målsett — 2026-07-13
 
 Kø av prompt-fil-oppgaver, hver med «finn rot-årsak først». Rotårsakene ble verifisert i innlogget
