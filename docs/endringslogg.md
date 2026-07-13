@@ -4,6 +4,34 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Folie-label v2 — låst valg + egne markører (flytt/skaler/roter) — 2026-07-13
+
+Erstatter den forrige gizmo-tilnærmingen med en klarere, label-sentrert modell. Kun varmefolie;
+kabel-/matte-label med samme prinsipp holdes til en senere del.
+
+- **`f508aae` — låst label-valg + egne markører.** Rotårsak (verifisert): labelen manglet et eget
+  «valgt»-state — klikk startet bare et utsatt dra uten seleksjon/håndtak, og håndtakene lånte
+  `selectedStripId`, som gjorde strip-body klikkbar/syklende → forvirrende «lag-bytting».
+  - **Del 1 (lås):** ny UI-state `S.ui.selectedLabelStripId`. Klikk på label låser den (KUN labelen
+    markeres, `selectedStripId` urørt); gjentatte klikk holder den låst og lag-syklingen kjøres aldri
+    (returnerer i label-grenen). Klikk tydelig UTENFOR labelen, Escape, eller klikk på et annet objekt
+    → forlater det låste valget og går videre til normal seleksjon/sykling.
+    `drawStripLabelHandles`/håndtak-hit nøkler nå på `selectedLabelStripId`.
+  - **Del 2 (markører + cursors):** boks-hover → `cursor:move`; SKALER = lite KRYSS (X) i hjørnet,
+    hover → `crosshair` (var firkant/`nwse-resize`); ROTER = liten rundpil over boksen, hover →
+    `grab`.
+  - **Del 3 (lagring/tilbakestill):** `resetStripLabel` virker på den låste labelen; Escape/utenfor-
+    klikk nullstiller låsen. `labelPos`/`rotation`/`scale` er alt verden-basert + lagret + PDF-arvet;
+    grabOffset (ingen hopp) beholdt.
+  - Verifisert live (ekte events): klikk låser (`selStrip=null`), gjentatt klikk holder, utenfor/
+    Escape/strip-klikk forlater; cursors move/crosshair/grab; body-drag offset 0 (ingen hopp), roter
+    senter-drift 0 (89°), skaler senter-drift 0 (2×); reset nullstiller. Lag-sykling for strip/rom
+    intakt (label ikke i kandidatstacken); kabel-/matte-label uendret.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## «Å gjøre nå»-rydding + varmekabel-label (innhold + størrelse) — 2026-07-13
 
 - **`e4a5e11` — fjern «romtype» og «effekt & gulv» som «venter»-kriterier.** De to stegene ble lest
