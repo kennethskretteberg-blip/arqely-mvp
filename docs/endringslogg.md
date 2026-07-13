@@ -4,6 +4,35 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Label v2 for kabel + matte (låst valg + flytt/skaler/roter) — 2026-07-13
+
+Utvider label-v2-modellen (fra folie, `f508aae`) til kabel- og matte-labels. Delt gizmo trukket ut i
+`_drawLabelGizmo` + `_hitLabelHandlePts` (orientert boks + rundpil-roter + X-skaler), brukt av alle tre.
+Felles prinsipp: LÅST label-valg (kun labelen markeres, ingen lag-sykling), egne markører/cursors
+(boks→move, X→crosshair, rundpil→grab), grabOffset (ingen hopp), verden-basert + PDF-arvet,
+«tilbakestill til auto». De tre låsene (`selectedLabelStripId`/`CableId`/`MatId`) er gjensidig utelukkende.
+
+- **`cb85211` — Kabel-label v2 (Del A).** Ny `S.ui.selectedLabelCableId`; ny `cable.labelRotation`/
+  `labelScale`; `drawCables` + `_drawCableLabelOnly` roterer/skalerer boksen og lagrer `_cableLabelGeom`
+  (orientert) + akse-justert AABB. Klikk låser (før syklingen → ingen lag-sykling); body-drag beholder
+  grabOffset; `drawCableLabelHandles`/`hitCableLabelHandle`/`resetCableLabel`. Seeder `labelPos` fra
+  FAKTISK tegnet senter → fjerner et ~70px hopp som fantes i den gamle kabel-drag-init-en.
+- **`e8cdd45` — Matte-label v2 (Del B).** Matte-labelen (matPath) hadde INGEN interaksjon før (fast
+  hjørne-tekst). Bygget hele v2 fra bunnen: `_drawMatPathObj`-labelen ble sentrert 2-linjers boks
+  (produktnavn + «Tegnet X m · m² · rull Y m») ved `mp.labelPos`, verden-basert font, med rotasjon
+  (`mp.labelRotation`) + skala (`mp.labelScale`); `_matLabelGeom`/`_matLabelBounds`, `hitMatLabel`/
+  `hitMatLabelHandle`/`drawMatLabelHandles`/`resetMatLabel`, drag + handle-drag wiret i
+  mousedown/mousemove/mouseup, `S.ui.selectedLabelMatId`. Bonus-fiks: `_resetProjectState` manglet
+  `nextMatPathId` i `S.counters` → frihånds-matter i NYE (u-lastede) prosjekt fikk `id=NaN` (brøt
+  seleksjon); lagt til.
+- Verifisert live (ekte events, dummy `_supabaseProjectId` → ingen junk-prosjekter): begge låser uten
+  hopp (0px), body-drag/roter/skaler drift 0 (89°, 2×); cursors move/crosshair/grab; reset + Escape;
+  folie/kabel/matte-lås gjensidig utelukkende; lag-sykling for strip/kabel/rom intakt; ingen JS-feil.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## Folie-label v2 — låst valg + egne markører (flytt/skaler/roter) — 2026-07-13
 
 Erstatter den forrige gizmo-tilnærmingen med en klarere, label-sentrert modell. Kun varmefolie;
