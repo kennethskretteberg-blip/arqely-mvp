@@ -4,6 +4,39 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Fire fikser — matte-stopp · folie-label-gizmo · Toppgulv-stepper · kabel-målsett — 2026-07-13
+
+Kø av prompt-fil-oppgaver, hver med «finn rot-årsak først». Rotårsakene ble verifisert i innlogget
+app med ekte events/målinger (der mulig), ikke bare kodelesing.
+
+- **`7a7874e` — frihånds-matte avslutter pålitelig på klikk på stopp-tegnet.** Rotårsak (verifisert):
+  IKKE hit-rekkefølge (stopp sjekkes alt før ghost-commit), men for trang treffsone — markør r=9px,
+  treffradius bare 12px → avslutt-klikk noen px utenfor falt gjennom til «legg neste bane». Reprodusert:
+  13/20px fra senter la bane; 0/8/11px avsluttet. Fiks: markør r 9→11, treffradius 12→20px; tilgivende
+  avslutning (klikk ved fri ende uten reell bane avslutter); `resizeCanvas()` ved `_matFreeStart` så
+  skjerm↔verden-treffet stemmer hele økta. Ingen regresjon i utlegging/EcoMat-auto.
+- **`1e2d4ad` — folie-label roter/skaler hopper ikke lenger.** Rotårsak (verifisert, avvek fra prompt-
+  hypotesen): body-draget hadde alt korrekt grep-offset; hoppet lå i roter/strekk-håndtakene som satte
+  `labelRotation`/`labelScale` men aldri `labelPos` → manuell render-gren ankret på foliesenter og labelen
+  hoppet −175px. Fiks: seed `labelPos` fra gjeldende `_stripLabelGeom`-senter ved håndtak-grep. Polering:
+  distinkte gizmo-cursors (roter=grab, strekk=nwse-resize, body=move). Verifisert: drift 0px (var −175),
+  body-drag/klikk ingen regresjon.
+- **`84fc50d` — Hurtig prosjektering: «Toppgulv» får ▲▼-stepper + pil opp/ned.** Toppgulv-feltet var et
+  rått `<select>` uten stepper (+ gjenbrukte `li-floor-${rid}` → kolliderte med Etasje). Nå via samme
+  `sel()`/`_listStepSelect`/`_listKey`-mønster som naborutene: egen nøkkel `ftype` (id `li-ftype-${rid}`,
+  rydder også duplikat-id-en), ▲▼-stepper, pil opp/ned (ned=neste, opp=forrige), Tab flytter uten å endre,
+  ender klamper likt. Verifisert live; ingen regresjon i de andre stepperne.
+- **`5207140` — kabel-rommets målsett like tett på rommet som folie-rommet.** Rotårsak (verifisert mot
+  sammenligningsbilde): rom-mål-linjene (blå, `_drawDimAnnotationsForRoom`) skyves ut for å klarere
+  produkt-kjeden, men bidraget var ulikt per modul — folie 52 cm, kabel/matte 32+65 = 97 cm (≈ dobbelt så
+  langt). Fiks (folie = fasit, én felles konstant): `DIM_BASE_CM=32 + DIM_CHAIN_CLEARANCE_CM=20` pr. aktiv
+  produkt-kjede → folie uendret (52), kabel/matte nå også 52. Gjelder alle sider; tallverdier urørt.
+  Verifisert: to rom side-ved-side, begge 52 cm.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## UX-arbeidsflyt STEG 6-justering — «Tegn opp rom»-kort → alle fire tegnemetoder — 2026-07-13
 
 Prompt-oppdatering til empty-state-kortet: den gamle teksten («Tegn rom» / «Klikk to hjørner på
