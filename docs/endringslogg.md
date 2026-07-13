@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## UX-arbeidsflyt STEG 6-justering — «Tegn opp rom»-kort → alle fire tegnemetoder — 2026-07-13
+
+Prompt-oppdatering til empty-state-kortet: den gamle teksten («Tegn rom» / «Klikk to hjørner på
+lerretet») beskrev bare én av fire tegnemetoder, og klikk tvang rektangel-modus.
+
+- **`65a85c9` — «Tegn opp rom»-kortet fører til lerret med alle fire metoder.** Tittel «Tegn rom»
+  → «Tegn opp rom», undertittel «Klikk to hjørner på lerretet» → «Rektangel, polygon, L-form eller
+  vegg-for-vegg». `_emptyDrawRoom()` tvinger ikke lenger rektangel (`abStartDraw('rect2')`), men
+  skjuler startvalget til et tomt lerret der alle fire tegnemetodene (Rektangel/Polygon/L-form/WBW)
+  ligger klare i verktøylinja — uten aktiv modus. Ny session-flagg `_emptyStateDismissed` skjuler
+  startvalget uten `drawMode` og hindrer at en re-render viser det igjen; nullstilles i
+  `_resetProjectState` så nytt/åpnet tomt prosjekt viser startvalget på nytt. Verifisert live: kort-
+  tekst oppdatert; klikk → overlay skjult, `drawMode=null`, alle fire verktøy tilgjengelige;
+  re-render viser ikke overlay igjen; gjenåpning av modul viser startvalget på nytt (ingen regresjon).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## UX-arbeidsflyt STEG 4-fiks — token-basert søk på tvers av felt — 2026-07-13
 
 Ende-til-ende-verifisering av hele STEG 1–7-serien i innlogget app (preview) avdekket én reell
