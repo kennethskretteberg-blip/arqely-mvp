@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## UX-arbeidsflyt STEG 4-fiks — token-basert søk på tvers av felt — 2026-07-13
+
+Ende-til-ende-verifisering av hele STEG 1–7-serien i innlogget app (preview) avdekket én reell
+defekt i STEG 4-søket; resten av serien fungerte som spesifisert.
+
+- **`74243ee` — STEG 4-fiks: token-basert kryssfelt-søk.** `_filterProjectsList` gjorde
+  `hay.includes(search)` — en sammenhengende delstreng-match — i stedet for det tokeniserte
+  kryssfelt-søket spec-en krever. Følgen var at flerords-søk der ordene traff *ulike* felt ga
+  0 treff (`leir askøy`, `park alt`). Fikset til å splitte søket på whitespace og kreve at HVERT
+  token finnes et sted i den samlede feltstrengen (`tokens.every(t => hay.includes(t))`).
+  Rekkefølge-uavhengig og på tvers av felt. Verifisert live mot ekte data: `leir askøy` /
+  `askøy leir` → *Leirvikåsen 11*; `park alt` → *Parkveien 3*; enkelt-token + sammenhengende søk
+  fortsatt OK.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## UX-arbeidsflyt — STEG 1–7 (fremdriftsmodell, dashbord + tegneskjerm) — 2026-07-10
 
 Stegvis serie som gjør navigasjonen arbeidsflyt-orientert i stedet for funksjons-orientert. Alt
