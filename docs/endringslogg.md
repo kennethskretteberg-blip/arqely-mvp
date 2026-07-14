@@ -4,6 +4,51 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## To-akse prosjektstatus (salg + leveranse) + P2/P3 — 2026-07-14
+
+Innfører to uavhengige statusakser som erstatter den blandede statusaksen i UI: **`sales_status`**
+(salgstrakt: under_arbeid → tilbud_sendt → vunnet/tapt) og **`delivery_status`** (leveranse, aktiv kun
+ved `vunnet`). Løser feilrettet dok-varsel (leverandør ble maset på om dokumentasjon), rydder hovedliste
++ Dokumentasjon-fanen, og skiller «regnet på» fra «faktisk fått». Rolle leses fra
+`organizations.org_type` (`installer`/`supplier`) — aldri antatt. Gammel `status`-kolonne røres ikke
+(bakoverkompat). Ingen RLS-endring. Migrasjon + smart backfill kjørt manuelt i Supabase.
+
+- **`1b81e2f` — Steg 1–6 + 5b.**
+  - **Steg 1 (DB):** `supabase-migration-project-status.sql` — nye kolonner `sales_status`
+    (NOT NULL default under_arbeid, CHECK), `delivery_status` (CHECK), `lost_reason`,
+    `status_changed_at` + delvis indeks `(org_id, sales_status) WHERE sales_status <> 'tapt'` +
+    backfill. `supabase-backfill-sales-status.sql` — smart mapping fra gammel status
+    (ready_quote→tilbud_sendt, completed→vunnet, archived→tapt).
+  - **Steg 2 (hovedliste):** nye `SALES_STATUSES`/`DELIVERY_STATUSES`/`LOST_REASONS`; 4-verdi salgs-chip;
+    «Aktive»-default skjuler tapt + ferdige leveranser; «Alle statuser» henter alt; statistikk-kort,
+    kundekort og batch-status mappet til akse A.
+  - **Steg 3 (dashboard-kort):** rollegated «Å gjøre nå»-kort — installatør «X må dokumenteres»
+    (`delivery_status='montert_venter_dok'`), leverandør «X klar for levering»
+    (`klar_for_levering`). Fjernet gammel warranty-cert-heuristikk (`_fetchDashDocGaps`/`_dashDocGapIds`).
+  - **Steg 4 (Dokumentasjon-fanen):** viser kun `sales_status='vunnet'`; fanen skjult for leverandør.
+  - **Steg 5 (auto-overganger):** priset PDF-eksport → `tilbud_sendt` (betinget, kun fra under_arbeid);
+    `vunnet` → aktiver akse B (klar_for_montering/klar_for_levering etter rolle); garanti signert →
+    `delivery_status='ferdig'`. Sentral skriver `_setProjectStatus(id, patch, cond?)` +
+    `_applySalesTransition`. Alt stempler `status_changed_at`.
+  - **Steg 5b (manuell leveranse):** knapper på vunne prosjekter i lista — Start montering / Ferdig
+    montert (installatør) og Marker levert / Marker ferdig (leverandør), så dok-varselet faktisk kan
+    trigges. `_deliveryNextAction`/`_deliveryCellHtml`/`_advanceDelivery`.
+  - **Steg 6 (tapt):** hurtigvalg-overlay for valgfri `lost_reason` (pris/tid/konkurrent/kunde_utsatt/
+    annet) når et prosjekt tapes; ryddes automatisk hvis prosjektet flyttes ut av tapt.
+- **`d4fe350` — P2 + P3.**
+  - **P2 (salgs-nudge):** nytt «Å gjøre nå»-kort «X tilbud har ventet >14 dager — følg opp?» basert på
+    `sales_status='tilbud_sendt'` + `status_changed_at` (ny `_statusChangedAt` i cachen); `_isStaleTilbud`
+    (14-dagers terskel); `'tilbud'`-filternøkkel i lista.
+  - **P3 (pipeline-statistikk):** «Vinnrate»-kort (`vunnet/(vunnet+tapt)`) + tapt-årsak-oppsummering som
+    tooltip på Tapt-kortet (utnytter `lost_reason`).
+- Verifisert for parse + logikk i preview (filter-matrise, rolle-gating, auto-overganger, stale-tilbud,
+  vinnrate-matte, årsaksbryting) — ingen JS-feil. Full innlogget ende-til-ende-test gjenstår hos Kenneth.
+
+**Fil:** romtegner.html + `supabase-migration-project-status.sql` + `supabase-backfill-sales-status.sql`
++ `docs/endringslogg.md`.
+
+---
+
 ## Label v2 for kabel + matte (låst valg + flytt/skaler/roter) — 2026-07-13
 
 Utvider label-v2-modellen (fra folie, `f508aae`) til kabel- og matte-labels. Delt gizmo trukket ut i
