@@ -42122,7 +42122,7 @@ async function _fetchProjectList() {
     // column/feature that may not exist on this DB (status, deleted_at, JSON-path
     // select) so the list still loads on older schemas/PostgREST versions.
     const candidates = [
-      'id, name, description, created_at, updated_at, status, deleted_at, sales_status, delivery_status, lost_reason, proj:data->project',
+      'id, name, description, created_at, updated_at, status, deleted_at, sales_status, delivery_status, lost_reason, status_changed_at, proj:data->project',
       'id, name, description, created_at, updated_at, status, deleted_at, proj:data->project',
       'id, name, description, created_at, updated_at, deleted_at, proj:data->project',
       'id, name, description, created_at, updated_at, status, proj:data->project',
@@ -42149,6 +42149,7 @@ async function _fetchProjectList() {
         _salesStatus: p.sales_status || 'under_arbeid',   // Akse A (salg)
         _deliveryStatus: p.delivery_status || null,        // Akse B (leveranse)
         _lostReason: p.lost_reason || null,
+        _statusChangedAt: p.status_changed_at || null,   // P2: tilbud-alder
         _responsible: proj.responsible || '',
         _projectNo: proj.projectNo || '',   // STEG 4: searchable order/project number
         _prog: proj._prog || null,   // STEG 3: stamped workflow-progress summary
@@ -43041,6 +43042,7 @@ async function _renderProjectList() {
     projects = projects.filter(p => {
       if (_dashTodoFilter === 'dok') return p._deliveryStatus === 'montert_venter_dok';
       if (_dashTodoFilter === 'levering') return p._deliveryStatus === 'klar_for_levering';
+      if (_dashTodoFilter === 'tilbud') return _isStaleTilbud(p);
       return p._prog && p._prog.next === _dashTodoFilter;
     });
   }
@@ -43354,12 +43356,20 @@ function _renderDashStats(projects) {
   const total = live.length;
   const counts = { under_arbeid:0, tilbud_sendt:0, vunnet:0, tapt:0 };
   live.forEach(p => { const s = p._salesStatus || 'under_arbeid'; if (counts[s] !== undefined) counts[s]++; });
+  // P3: vinnrate (vunnet av avgjorte) + tapt-årsak-oppsummering (tooltip på Tapt).
+  const decided = counts.vunnet + counts.tapt;
+  const winRate = decided ? Math.round(counts.vunnet / decided * 100) : null;
+  const reasonCounts = {};
+  live.forEach(p => { if (p._salesStatus === 'tapt' && p._lostReason) reasonCounts[p._lostReason] = (reasonCounts[p._lostReason]||0)+1; });
+  const reasonTip = Object.entries(reasonCounts).sort((a,b)=>b[1]-a[1])
+    .map(([id,n]) => { const r = LOST_REASONS.find(x=>x.id===id); return `${r?r.label:id}: ${n}`; }).join(' · ');
   el.innerHTML = `
     <div class="dash-stat"><div class="dash-stat-num">${total}</div><div class="dash-stat-label">Totalt</div></div>
     <div class="dash-stat"><div class="dash-stat-num" style="color:var(--muted)">${counts.under_arbeid}</div><div class="dash-stat-label">Under arbeid</div></div>
     <div class="dash-stat"><div class="dash-stat-num" style="color:var(--info)">${counts.tilbud_sendt}</div><div class="dash-stat-label">Tilbud sendt</div></div>
     <div class="dash-stat"><div class="dash-stat-num" style="color:var(--success)">${counts.vunnet}</div><div class="dash-stat-label">Vunnet</div></div>
-    <div class="dash-stat"><div class="dash-stat-num" style="color:var(--danger)">${counts.tapt}</div><div class="dash-stat-label">Tapt</div></div>
+    <div class="dash-stat"${reasonTip?` title="Tapt-årsaker — ${reasonTip}"`:''}><div class="dash-stat-num" style="color:var(--danger)">${counts.tapt}</div><div class="dash-stat-label">Tapt</div></div>
+    <div class="dash-stat" title="Vunnet av avgjorte (vunnet + tapt)"><div class="dash-stat-num" style="color:var(--info)">${winRate!=null?winRate+'%':'—'}</div><div class="dash-stat-label">Vinnrate</div></div>
   `;
 }
 
@@ -43382,6 +43392,14 @@ const _TODO_LABELS = {
   produkter: n => `${n} ${n===1?'prosjekt':'prosjekter'} mangler prosjektering`,
 };
 const _TODO_ORDER = ['kunde','tegning','produkter'];
+
+// P2: mild salgs-nudge — tilbud som har ventet på svar for lenge.
+const _TILBUD_NUDGE_DAYS = 14;
+function _isStaleTilbud(p) {
+  if (!p || p._salesStatus !== 'tilbud_sendt' || !p._statusChangedAt) return false;
+  const ageDays = (Date.now() - new Date(p._statusChangedAt).getTime()) / 86400000;
+  return ageDays > _TILBUD_NUDGE_DAYS;
+}
 
 function _renderDashTodo(projects) {
   const el = document.getElementById('dash-todo');
@@ -43420,6 +43438,13 @@ function _renderDashTodo(projects) {
       cards.push(`<div class="dash-todo-card" onclick="_dashTodoClick('levering')" title="Vis disse prosjektene">
         <span class="tc-n">${toDeliver.length}</span><span class="tc-t">${toDeliver.length===1?'vunnet prosjekt':'vunne prosjekter'} klar for levering</span></div>`);
     }
+  }
+
+  // P2: salgs-nudge (rolle-agnostisk) — tilbud som har ventet > 14 dager.
+  const staleTilbud = active.filter(_isStaleTilbud);
+  if (staleTilbud.length) {
+    cards.push(`<div class="dash-todo-card" onclick="_dashTodoClick('tilbud')" title="Vis disse tilbudene">
+      <span class="tc-n">${staleTilbud.length}</span><span class="tc-t">tilbud har ventet >${_TILBUD_NUDGE_DAYS} dager — følg opp?</span></div>`);
   }
 
   const greet = _dashGreetName();
