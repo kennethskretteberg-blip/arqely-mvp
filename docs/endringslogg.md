@@ -4,6 +4,41 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Dashboard delt på intensjon: Kalkulasjon vs Prosjektering (STEG 2–5) — 2026-07-16
+
+Bygger om dashboard-toppen fra én blandet modul-«kortrad» (varmetype + hurtigprosjektering om
+hverandre) til **to intensjons-kolonner**: brukerens første valg er nå dybde, ikke varmetype.
+**Kalkulasjon** (rask pris) venstre, **Prosjektering** (detaljert leggetegning) høyre; stables
+vertikalt på smal skjerm. Speiler statusflyten: kalkyle = salgsfase, prosjektering = leveransefase.
+Gjenbruker EKSISTERENDE inngangsfunksjoner — ingen nye flyter, ingen endring i tegne-/kalkyle-motorene.
+
+- **`902ae40` — STEG 2–5.**
+  - **Steg 2 (to kolonner):** `_renderDashModules()` bygger nå to kolonner i stedet for den flate
+    `MODULE_TYPES`-raden. **Kalkulasjon** (inndata-metode): Manuelt → `addPart('list')`, Fra tegning →
+    `_quickStartFromDrawing()` (åpner indoor-editor + dagens plan-import/auto-romdeteksjon),
+    Snøsmelting–effektbehov → `_openSnowCalc()`. **Prosjektering** (varmetype/tegneverktøy): Innendørs
+    gulvvarme, Snøsmelting trapper/grunn, Frostsikring rør + Tak og takrenner disabled («Kommer»).
+    Datadrevet via `_DASH_CALC_CARDS`/`_DASH_PROJ_CARDS`.
+  - **Steg 3 (fargekoding):** nye CSS-vars `--calc` (#0F6E56 teal, salg/kalkyle) / `--proj` (#534AB7
+    lilla, leveranse/prosjektering) + tint-varianter. Kolonnene og leveranse-pill'en (`_deliveryCellHtml`)
+    bærer modus-fargen. Salgstraktens semantiske chip-farger (vunnet=grønn osv.) er BEVISST urørt.
+  - **Steg 4 (broen):** `_prosjekteringBridgeHtml(p)` viser «Gjør om til prosjektering» kun når
+    `sales_status='vunnet'` OG `_type='list'` (vunnet Manuelt-kalkyle) — i stedet for de vanlige
+    leveranse-kontrollene. `_convertToProsjektering(id)` bytter `project.type` list→indoor, setter
+    `delivery_status='klar_for_montering'` og åpner tegneverktøyet på den eksisterende romlista.
+    Kun navigasjon — INGEN geometri-konvertering (spec §7). Broen forsvinner når type er byttet.
+    Viktig funn: `_applySalesTransition` auto-setter `delivery_status` ved `vunnet`, så «tomt
+    delivery_status» kan ikke flagge en kalkyle — `_type='list'` brukes i stedet.
+  - **Steg 5 (responsivt):** `@media(max-width:720px)` stabler kolonnene (Kalkulasjon øverst); to
+    kolonner side-ved-side på desktop.
+- Verifisert for parse + render + logikk i preview (to-kolonne-render, teal/lilla i lyst+mørkt tema,
+  responsiv stabling på 375px, bro-trigger-matrise) — ingen JS-feil. Innlogget ende-til-ende-test av
+  selve bro-klikket (mot ekte vunnet list-prosjekt) gjenstår hos Kenneth.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`. Spec: `spec-dashboard-intensjon-kalkulasjon-prosjektering.md`.
+
+---
+
 ## To-akse prosjektstatus (salg + leveranse) + P2/P3 — 2026-07-14
 
 Innfører to uavhengige statusakser som erstatter den blandede statusaksen i UI: **`sales_status`**
