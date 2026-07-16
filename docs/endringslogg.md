@@ -4,6 +4,89 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Startskjerm: context-aware import-flyt + merget dropzone + auto/manuell-steg — 2026-07-16
+
+UX-omlegging av tegneverktøyets startskjerm «Hvordan vil du begynne?». Fjerner dobbelt-spørring
+av «hvordan», slår filtype-kortene sammen til én slipp-sone, og gjør auto-vs-manuelt utvetydig
+etter raster-import. Kun flyt/UI — parser, auto-deteksjon og tegneverktøy er urørt.
+
+- **`583c4ee` — Startskjerm-flyt.**
+  - **Merget dropzone:** de fire ces-cards (Importer PDF, Importer DWG/DXF, Tegn opp rom, Hurtig
+    prosjektering) → tre valg: én stiplet slipp-sone («Slipp tegning her, eller klikk — PDF, bilde
+    eller DWG/DXF») + Tegn opp rom + Romliste. Klikk/slipp → felles dispatcher.
+  - **Dispatcher `_startImportFile`:** DWG/DXF (vektor) → `_autoReadStart` (auto, ingen spørsmål);
+    PDF/bilde (raster) → `_rasterMethodChoice` steg-2 «Fant en plantegning — hvordan lage rommene?»
+    med a) «La appen finne rommene» (anbefalt) → auto-deteksjon; b) «Jeg tegner selv» →
+    `_loadFileAsBackground` (uttrukket fra `handleBgFile`). Ordlyden gjør det utvetydig hvem som
+    lager geometrien.
+  - **Context-aware:** flagg `_startMethod`. «Fra tegning» på dashboardet → dropzone-fokusert modus
+    (kun slipp-sonen + «Eller start på andre måter»-lenke), ingen native fil-dialog. Generisk
+    inngang («Gulvvarme»/«+Opprett») → full startskjerm. Nullstilles i `_quickStartModule` +
+    `_resetProjectState`.
+  - **Toolbar-opprydding:** `_importPlanMenu` → `_emptyPickImport` (samme dispatcher); gammel
+    pre-import auto/manuell-meny fjernet — ikke tilbudt på to måter.
+  - Tastatur: `role=button` + tabindex + `_cesKey` (Enter/Space) + `:focus-visible`. Ingen
+    drop-shadows. `_importPlanToDraw` beholdt (shape-card + fallback).
+- Verifisert i preview (begge modi, steg-2, dispatch-matrise DWG→auto / raster→steg-2, dark/light)
+  — ingen JS-feil. Innlogget ende-til-ende (ekte import) gjenstår hos Kenneth.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Dashboard visuell polish: kompakt full-bredde flis-rutenett — 2026-07-16
+
+Ren visuell/layout-forbedring av to-kolonne-dashboardet (Kalkulasjon/Prosjektering). Ingen endring
+i logikk, ruter eller inngangsfunksjoner. Prinsipp: se mest mulig uten å scrolle.
+
+- **`559433c` — Kompakt flis-rutenett.**
+  - **Full bredde:** boksene spenner samme bredde som stat-kort-raden (fikset at `#dash-modules`
+    ikke strakk seg til full bredde → kompakt grid kollapset til innholdsbredde).
+  - **Kompakte fliser:** `repeat(auto-fit, minmax(104px,1fr))` → 3 i bredden på desktop, 2 på smal
+    skjerm. Kalkulasjon 1 rad, Prosjektering 2 rader (3+2). Flis = sentrert kolonnefarget ikon +
+    kort etikett (~62px), undertitler droppet.
+  - **Lett boks:** tynn 2px kolonnefarget toppkant + kompakt header (ikon-chip + tittel + kort
+    undertekst); tunge ytre paneler fjernet. `align-items:start` → ingen tomrom i Kalkulasjon.
+  - **Hover:** løft ~1,5px + kolonnefarget kant + svak tint (~100ms). `:focus-visible`. Ingen
+    drop-shadows. Stat-kort strammet (padding/font) + mindre `.dash`-gap → alt høyt oppe.
+  - Farge: teal #0F6E56 (kant #5DCAA5) / lilla #534AB7 (kant #AFA9EC). Fiks: «Fra tegning» brukte
+    `ico:'image'` (mangler i ikon-settet, tom chip) → `map`.
+- Verifisert desktop + mobil, lyst + mørkt tema. Ingen inngangsfunksjon endret (samme onclick).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Kalkyle-matrise med bulk-varmetype på import-gjennomgang (STEG 1–5) — 2026-07-16
+
+Utvider import-gjennomgangsskjermen (`#import-review-screen`) til en **varmetype-matrise** for
+kalkyle. Matrisen bor her fordi de auto-detekterte rommene har geometri (`poly`), så folie-pakking
+fungerer og de committes som ekte tegnede rom. «Fra tegning»-kortet router hit (target=draw).
+Selve tegne-/pakkemotorene er urørt — kun romliste-UI, bulk, preset-oppslag og grov auto-utfylling.
+
+- **`9cf06ab` — STEG 1–5 + DB.**
+  - **Steg 1 (matrise):** hver rad (`_reviewRenderList`) får 4-veis gjensidig utelukkende
+    Folie/Kabel/Matte/Ingen (`r.calcType`, `heat = calcType≠none`); fargekodet `.rv-tseg`.
+  - **Steg 2 (bulk):** «Alle rom · N»-rad + `_reviewBulkType`; 'preset' = sett hvert rom etter
+    romtype-regel. Enkeltoverstyring bruker samme mekanisme.
+  - **Steg 3 (romtype-preset):** ny kolonne `default_mod_type` på `room_type_defaults`
+    (`supabase-migration-roomtype-modtype.sql`, kjørt manuelt). `ROOM_TYPES[].defaultModType`
+    (bad/vaskerom=mat, ellers foil), `_roomTypeModType`, `_savePersonalModTypeOverride` +
+    admin-popup «⚙ Standarder». Forhåndsfyller varmetype per rom (scope global > org > user).
+  - **Steg 4 (grov autofyll ved commit):** `_calcRoughFill` i `_drawCreateRoomsFromReview` — folie
+    via `_autoFillBothDirections` (beste retning), kabel/matte via `_listAutoSuggest` (kun-label-
+    anslag). Alt flagget `_calcRough=true` for re-kjøring ved «gjør om til prosjektering».
+  - **Steg 5 (live-sum):** footer `#rv-sum` (`_reviewUpdateSum`) — rom med varme · sum m² · grov
+    effekt (W), avrundet, live. Responsiv (footer wrap + matrise stabler på smal skjerm).
+  - **Viktig funn:** `_applySalesTransition` auto-setter `delivery_status` ved `vunnet`, så
+    matrisen bygger på import-detekterte geometri-rom (ikke den manuelle list-modulen).
+- Verifisert render/bulk/preset/live-sum i preview. Motorkjøring (folie-pakking + kabel/matte)
+  krever login/produktkatalog — innlogget ende-til-ende gjenstår hos Kenneth.
+
+**Fil:** romtegner.html + `supabase-migration-roomtype-modtype.sql` + `docs/endringslogg.md`.
+
+---
+
 ## Dashboard delt på intensjon: Kalkulasjon vs Prosjektering (STEG 2–5) — 2026-07-16
 
 Bygger om dashboard-toppen fra én blandet modul-«kortrad» (varmetype + hurtigprosjektering om
