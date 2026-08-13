@@ -4841,6 +4841,39 @@ function _rectEdgeIsSoneBoundary(room, rect, side /* 'x0'|'x1'|'y0'|'y1' */) {
   return total > 0 && free / total >= 0.5;
 }
 
+// REGEL B — maximin bredde-kombinasjon: ved lik dekning, foretrekk kombinasjonen der den SMALESTE
+// brukte bredden er BREDEST (120+60 foran 140+40 — begge dekker 180cm, men 60>40). DP over «brukt
+// tverr-akse-plass» (1cm oppløsning): for hver oppnåelige totalsum, spor beste (høyeste) minste-
+// bredde brukt for å nå den. Blant summer innen tol fra beste oppnåelige dekning, velg den med
+// høyest minste-bredde — dekning er fortsatt primær, dette avgjør kun uavgjort. Returnerer en
+// bredde-REKKEFØLGE (cm) som pakkeløkka i _packZoneFullLength bruker som PREFERANSE per posisjon;
+// en reell forskyvning (notch) faller fortsatt tilbake til bredest-først-søk for den ene posisjonen.
+function _maximinWidthCombo(widthsCm, budgetCm, gapCm) {
+  const uniq = [...new Set(widthsCm)].sort((a, b) => b - a);
+  const B = Math.max(0, Math.floor(budgetCm));
+  if (!uniq.length || B <= 0) return [];
+  const tol = Math.max(10, B * 0.08);
+  const dp = new Array(B + 1).fill(null);
+  dp[0] = { minW: Infinity, combo: [] };
+  for (let s = 0; s <= B; s++) {
+    if (!dp[s]) continue;
+    for (const w of uniq) {
+      const ns = s + w + gapCm;
+      if (ns > B) continue;
+      const cand = Math.min(dp[s].minW, w);
+      if (!dp[ns] || dp[ns].minW < cand) dp[ns] = { minW: cand, combo: [...dp[s].combo, w] };
+    }
+  }
+  let bestS = 0;
+  for (let s = B; s >= 0; s--) { if (dp[s]) { bestS = s; break; } }
+  if (bestS === 0) return [];
+  let chosen = dp[bestS];
+  for (let s = Math.max(0, Math.floor(bestS - tol)); s <= bestS; s++) {
+    if (dp[s] && dp[s].minW > chosen.minW) chosen = dp[s];
+  }
+  return chosen.combo;
+}
+
 // Pakk én sone «som montøren»: bredeste produkt som gir FULL lengde forankret til vegg;
 // der en forskyvning gjør at ingen bredde blir full lengde, legges en SMAL strimmel som
 // absorberer forskyvningen (montørens 20 cm-triks) → resten blir rene full-lengde kolonner.
@@ -4848,11 +4881,18 @@ function _rectEdgeIsSoneBoundary(room, rect, side /* 'x0'|'x1'|'y0'|'y1' */) {
 // uansett riktig margin mot EKTE vegg/hindring internt) eller slakk — pakk UTOVER fra den kanten,
 // slik at det udekkede alltid havner mot den ekte veggen på MOTSATT side. Har sonen ingen eller
 // begge kanter mot naboer, beholdes dagens lav-koordinat-anker (uendret for enkle/klemte soner).
+// REGEL C: familiens ABSOLUTT smaleste bredde er en nødløsning montøren ikke bruker som førstevalg
+// (fortsatt tilgjengelig i manuell/bane-liste-modus) — ekskludert fra auto sitt full-lengde-søk og
+// fra REGEL B sin plan, og brukt i smal-absorberen kun når den gir vesentlig dekning (≥halve sin
+// egen bredde, minst 20cm) — ellers siste utvei, ellers står feltet udekket (mot vegg, jf. REGEL A).
+// Familier med ≤2 bredder beholder alle (ikke krymp auto til under ett reelt valg).
 function _packZoneFullLength(roomId, rect, direction, productId) {
   const family = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
   if (!family.length) return [];
   const ncOf = fp => (fp.netto_width_mm || fp.width_mm) / 10;
-  const narrow = family[family.length - 1];
+  const lastResort = family[family.length - 1];
+  const auto = family.length > 2 ? family.slice(0, -1) : family;
+  const narrow = auto[auto.length - 1];
   const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
 
   const room = S.rooms.find(r => r.id === roomId);
@@ -4880,7 +4920,7 @@ function _packZoneFullLength(roomId, rect, direction, productId) {
     }
     return best;
   };
-  // «Full lengde» = lengste oppnåelige i sonen (samplet med smaleste produkt).
+  // «Full lengde» = lengste oppnåelige i sonen (samplet med auto sin smaleste vurderte bredde).
   let targetLen = 0;
   for (let pos = basePos; stepSign > 0 ? pos <= limit : pos >= limit; pos += stepSign * 15) {
     const samplePos = anchorHi ? pos - ncOf(narrow) : pos;   // segAt/pos_cm er alltid strimmelens LAVE kant
@@ -4888,25 +4928,44 @@ function _packZoneFullLength(roomId, rect, direction, productId) {
   }
   if (targetLen < 5) return [];
   const tol = Math.max(10, targetLen * 0.08);
+
+  const plan = _maximinWidthCombo(auto.map(ncOf), Math.abs(limit - basePos), gap);
+  let planIdx = 0;
+
   const defs = [];
   let cursor = basePos, guard = 0;
   while (fits(cursor, ncOf(narrow)) && guard++ < 2000) {
     let placed = false;
-    for (const fp of family) {           // bredeste produkt som gir FULL lengde her
+    const plannedW = plan[planIdx];
+    const plannedFp = plannedW != null ? auto.find(fp => Math.abs(ncOf(fp) - plannedW) < 0.01) : null;
+    const tryOrder = plannedFp ? [plannedFp, ...auto.filter(fp => fp !== plannedFp)] : auto;
+    for (const fp of tryOrder) {   // planlagt bredde først (REGEL B), ellers bredest-først som før
       const w = ncOf(fp);
       if (!fits(cursor, w)) continue;
       const posLo = anchorHi ? cursor - w : cursor;
       const s = segAt(posLo, fp.id);
       if (s && s.len >= targetLen - tol) {
         defs.push({ productId: fp.id, direction, pos_cm: posLo, start_cm: s.start, length_cm: s.len });
-        cursor += stepSign * (w + gap); placed = true; break;
+        cursor += stepSign * (w + gap); placed = true; planIdx++; break;
       }
     }
     if (placed) continue;
+    // REGEL C: ingen auto-bredde nådde full lengde her → smal absorber, men bare hvis den gir
+    // vesentlig dekning (eller familien har ≤2 bredder, da er narrow allerede den ekte smaleste);
+    // ellers familiens ekte smaleste som siste utvei; ellers stå udekket (mot vegg, jf. REGEL A).
     const w = ncOf(narrow);
     const posLo = anchorHi ? cursor - w : cursor;
-    const s = segAt(posLo, narrow.id);  // forskyvning → smal absorberende strimmel
-    if (s) defs.push({ productId: narrow.id, direction, pos_cm: posLo, start_cm: s.start, length_cm: s.len });
+    const s = segAt(posLo, narrow.id);
+    if (s && (s.len >= Math.max(20, w * 0.5) || lastResort.id === narrow.id)) {
+      defs.push({ productId: narrow.id, direction, pos_cm: posLo, start_cm: s.start, length_cm: s.len });
+    } else if (lastResort.id !== narrow.id) {
+      const lw = ncOf(lastResort);
+      const lPosLo = anchorHi ? cursor - lw : cursor;
+      const ls = segAt(lPosLo, lastResort.id);
+      if (ls && ls.len >= Math.max(20, lw * 0.5)) {
+        defs.push({ productId: lastResort.id, direction, pos_cm: lPosLo, start_cm: ls.start, length_cm: ls.len });
+      }
+    }
     cursor += stepSign * (w + gap);
   }
   return defs;
