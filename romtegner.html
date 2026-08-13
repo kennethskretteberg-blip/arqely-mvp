@@ -4813,17 +4813,62 @@ function _packZoneUniform(roomId, rect, productId, direction) {
   return defs;
 }
 
+// REGEL A — klassifiser en av sonens 4 tverr-akse-kanter: åpner den mot FRI, fyllbar rom-plass
+// (samme fyllbarhets-test som _decomposeRoomToRects bruker for å bygge rutenettet → en NABOSONE),
+// eller mot en EKTE vegg/hindring/forbudt sone? Sampler flere punkt rett utenfor kanten, unna
+// hjørnene (som ellers kan gi falskt utslag mot en vinkelrett vegg).
+function _rectEdgeIsSoneBoundary(room, rect, side /* 'x0'|'x1'|'y0'|'y1' */) {
+  const pts = room.points;
+  if (!pts || pts.length < 3) return false;
+  const hind = (S.hindrings || []).filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  const fz = (S.zones || []).filter(z => z.roomId === room.id && z.type === 'forbidden' && z.points && z.points.length >= 3);
+  const EPS = 3; // cm, rett utenfor kanten
+  const [aLo, aHi] = (side === 'x0' || side === 'x1') ? [rect.y0, rect.y1] : [rect.x0, rect.x1];
+  const N = 6;
+  let free = 0, total = 0;
+  for (let i = 1; i < N; i++) {   // hold unna hjørnene (i=0/N)
+    const t = aLo + (aHi - aLo) * (i / N);
+    let px, py;
+    if (side === 'x0') { px = rect.x0 - EPS; py = t; }
+    else if (side === 'x1') { px = rect.x1 + EPS; py = t; }
+    else if (side === 'y0') { px = t; py = rect.y0 - EPS; }
+    else { px = t; py = rect.y1 + EPS; }
+    total++;
+    if (!ptInPoly(px, py, pts)) continue;
+    const blocked = hind.some(h => ptInPoly(px, py, h.points)) || fz.some(z => ptInPoly(px, py, z.points));
+    if (!blocked) free++;
+  }
+  return total > 0 && free / total >= 0.5;
+}
+
 // Pakk én sone «som montøren»: bredeste produkt som gir FULL lengde forankret til vegg;
 // der en forskyvning gjør at ingen bredde blir full lengde, legges en SMAL strimmel som
 // absorberer forskyvningen (montørens 20 cm-triks) → resten blir rene full-lengde kolonner.
+// REGEL A: en tverr-akse-kant mot en NABOSONE får verken veggmargin (computeClippedSegments gir
+// uansett riktig margin mot EKTE vegg/hindring internt) eller slakk — pakk UTOVER fra den kanten,
+// slik at det udekkede alltid havner mot den ekte veggen på MOTSATT side. Har sonen ingen eller
+// begge kanter mot naboer, beholdes dagens lav-koordinat-anker (uendret for enkle/klemte soner).
 function _packZoneFullLength(roomId, rect, direction, productId) {
   const family = getProductFamily(productId).slice().sort((a, b) => ((b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm)));
   if (!family.length) return [];
   const ncOf = fp => (fp.netto_width_mm || fp.width_mm) / 10;
   const narrow = family[family.length - 1];
   const margin = _effectiveMarginCm(productId), gap = _effectiveGapCm(productId);
-  const basePos = direction === 'v' ? rect.x0 : rect.y0;
-  const limit = (direction === 'v' ? rect.x1 : rect.y1) - margin;
+
+  const room = S.rooms.find(r => r.id === roomId);
+  const loSide = direction === 'v' ? 'x0' : 'y0', hiSide = direction === 'v' ? 'x1' : 'y1';
+  const loIsSone = !!room && _rectEdgeIsSoneBoundary(room, rect, loSide);
+  const hiIsSone = !!room && _rectEdgeIsSoneBoundary(room, rect, hiSide);
+  const anchorHi = hiIsSone && !loIsSone;   // pakk fra HØY koordinat og nedover mot lav (ekte vegg)
+  const loMargin = loIsSone ? 0 : margin, hiMargin = hiIsSone ? 0 : margin;
+
+  const rawLo = direction === 'v' ? rect.x0 : rect.y0;
+  const rawHi = direction === 'v' ? rect.x1 : rect.y1;
+  const basePos = anchorHi ? rawHi - hiMargin : rawLo + loMargin;
+  const limit = anchorHi ? rawLo + loMargin : rawHi - hiMargin;   // motsatt (ekte-vegg-)side
+  const stepSign = anchorHi ? -1 : 1;
+  const fits = (c, w) => stepSign > 0 ? (c + w <= limit + 0.01) : (c - w >= limit - 0.01);
+
   const aLo = direction === 'v' ? rect.y0 : rect.x0;
   const aHi = direction === 'v' ? rect.y1 : rect.x1;
   // Lengste segment (innenfor sonen) for en strimmel ved pos med gitt produkt.
@@ -4837,26 +4882,32 @@ function _packZoneFullLength(roomId, rect, direction, productId) {
   };
   // «Full lengde» = lengste oppnåelige i sonen (samplet med smaleste produkt).
   let targetLen = 0;
-  for (let pos = basePos + margin; pos <= limit; pos += 15) { const s = segAt(pos, narrow.id); if (s && s.len > targetLen) targetLen = s.len; }
+  for (let pos = basePos; stepSign > 0 ? pos <= limit : pos >= limit; pos += stepSign * 15) {
+    const samplePos = anchorHi ? pos - ncOf(narrow) : pos;   // segAt/pos_cm er alltid strimmelens LAVE kant
+    const s = segAt(samplePos, narrow.id); if (s && s.len > targetLen) targetLen = s.len;
+  }
   if (targetLen < 5) return [];
   const tol = Math.max(10, targetLen * 0.08);
   const defs = [];
-  let cursor = basePos + margin, guard = 0;
-  while (cursor + ncOf(narrow) <= limit + 0.01 && guard++ < 2000) {
+  let cursor = basePos, guard = 0;
+  while (fits(cursor, ncOf(narrow)) && guard++ < 2000) {
     let placed = false;
     for (const fp of family) {           // bredeste produkt som gir FULL lengde her
       const w = ncOf(fp);
-      if (cursor + w > limit + 0.01) continue;
-      const s = segAt(cursor, fp.id);
+      if (!fits(cursor, w)) continue;
+      const posLo = anchorHi ? cursor - w : cursor;
+      const s = segAt(posLo, fp.id);
       if (s && s.len >= targetLen - tol) {
-        defs.push({ productId: fp.id, direction, pos_cm: cursor, start_cm: s.start, length_cm: s.len });
-        cursor += w + gap; placed = true; break;
+        defs.push({ productId: fp.id, direction, pos_cm: posLo, start_cm: s.start, length_cm: s.len });
+        cursor += stepSign * (w + gap); placed = true; break;
       }
     }
     if (placed) continue;
-    const s = segAt(cursor, narrow.id);  // forskyvning → smal absorberende strimmel
-    if (s) defs.push({ productId: narrow.id, direction, pos_cm: cursor, start_cm: s.start, length_cm: s.len });
-    cursor += ncOf(narrow) + gap;
+    const w = ncOf(narrow);
+    const posLo = anchorHi ? cursor - w : cursor;
+    const s = segAt(posLo, narrow.id);  // forskyvning → smal absorberende strimmel
+    if (s) defs.push({ productId: narrow.id, direction, pos_cm: posLo, start_cm: s.start, length_cm: s.len });
+    cursor += stepSign * (w + gap);
   }
   return defs;
 }
