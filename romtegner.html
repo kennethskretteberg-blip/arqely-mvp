@@ -15672,15 +15672,23 @@ function manualDragEnd(e) {
   S.ui.dropPreviewStrip = null;
 }
 
+// Ghosten viser ALLTID nøyaktig posisjonen folien faktisk vil lande på (allerede snappet av
+// _stripDropCandidate) — ingen egen gul ghost-på-peker + separat grønn ghost-på-snap-posisjon
+// lenger, siden det er samme posisjon nå. Farge viser TILSTAND: grønn = snappet mot vegg/nabofolie,
+// gul = fri plassering (Alt-tasten eller utenfor snap-radius), rød = ugyldig (får ikke plass — vist
+// som en liten markør på pekerens sveip-koordinat siden det ikke finnes noe ekte segment der).
 function drawDropPreview() {
   const s = S.ui.dropPreviewStrip; if (!s) return;
   const nc = s.nc;
-  const segs = s.segments || (s.start_cm != null ? [{ start_cm: s.start_cm, length_cm: s.length_cm }] : []);
+  const segs = (s.segments && s.segments.length) ? s.segments
+    : (s.invalid && s.start_cm != null ? [{ start_cm: s.start_cm, length_cm: s.length_cm }] : []);
   if (!segs.length) return;
   ctx.save();
-  ctx.globalAlpha = 0.5;
-  ctx.fillStyle   = s.invalid ? 'rgba(255,60,60,0.35)' : 'rgba(255,200,80,0.35)';
-  ctx.strokeStyle = s.invalid ? 'rgba(255,80,80,1)'    : 'rgba(255,220,80,1)';
+  ctx.globalAlpha = s.snapped ? 0.65 : 0.5;
+  const color = s.invalid ? 'rgba(255,80,80,1)' : s.snapped ? 'rgba(34,197,94,0.95)' : 'rgba(255,220,80,1)';
+  const fillColor = s.invalid ? 'rgba(255,60,60,0.35)' : s.snapped ? 'rgba(34,197,94,0.25)' : 'rgba(255,200,80,0.35)';
+  ctx.fillStyle = fillColor;
+  ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.setLineDash([6, 3]);
   // One ghost rectangle per actual segment — shows the user exactly how the
@@ -15698,27 +15706,6 @@ function drawDropPreview() {
     ctx.strokeRect(bx, by, bw, bh);
   }
   ctx.setLineDash([]);
-  // Green ghost at snap position if the drop would currently collide
-  if (s.invalid && s.snapPos != null) {
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = 'rgba(34,197,94,0.2)';
-    ctx.strokeStyle = 'rgba(34,197,94,0.9)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    for (const seg of segs) {
-      let gx, gy, gw, gh;
-      if (s.direction === 'v') {
-        const g1 = w2s(s.snapPos, seg.start_cm), g2 = w2s(s.snapPos + nc, seg.start_cm + seg.length_cm);
-        gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
-      } else {
-        const g1 = w2s(seg.start_cm, s.snapPos), g2 = w2s(seg.start_cm + seg.length_cm, s.snapPos + nc);
-        gx=g1.x; gy=g1.y; gw=g2.x-g1.x; gh=g2.y-g1.y;
-      }
-      ctx.fillRect(gx, gy, gw, gh);
-      ctx.strokeRect(gx, gy, gw, gh);
-    }
-    ctx.setLineDash([]);
-  }
   ctx.restore();
 }
 
@@ -15825,69 +15812,161 @@ function _segAtSweep(segments, sweep) {
   return best;
 }
 
+// Siste peker-verdenposisjon under manuell drag — brukes til å oppdatere ghosten når retningen
+// byttes med 'r'-snarveien (dragover fyrer kun ved pekerbevegelse, ikke ved tastetrykk, så uten
+// dette står ghosten igjen i gammel retning til brukeren rører musa).
+let _lastDropWp = null;
+
+// Delt kandidatfunksjon for manuell folieplassering — kalt fra BÅDE dragover (ghost) og drop
+// (commit), slik at det er umulig for dem å sprike (samme mønster som _matFreeCandidate: «så
+// ghosten ikke endrer figur ved commit»). Beregner MAGNET-posisjonen FØRST (vegg eller nabofolie i
+// samme retning) og kjører foil-avoid PÅ DEN SNAPPEDE posisjonen — ikke omvendt, som var rotårsaken
+// til at draget «forsvant» stille. Etter snapping er perp-overlappet mot samme-retnings-naboer
+// null, så _withFoilAvoid (ment for auto-utlegg, urørt her) ikke lenger barberer bort hele kolonnen
+// ved et hårs bredde overlapp. Folie PÅ TVERS (motsatt retning) klippes fortsatt korrekt av
+// foil-avoid — den jobben er urørt og fortsatt nødvendig.
+// Magneten har to nivåer: kolliderer den frie (rå) posisjonen med en nabo — selve SYMPTOMET,
+// pekeren midt oppi en eksisterende folie — snappes det UANSETT avstand (obligatorisk, som gamle
+// _snapStripToNearest). Er fri posisjon allerede ledig, snappes det kun innenfor en skjerm-piksel-
+// radius (ren bekvemmelighet). altKey=true hopper over magneten helt (fri plassering der pekeren
+// faktisk peker, selv om det kolliderer — foil-avoid gir da invalid/toast som normalt).
+function _stripDropCandidate(wp, productId, altKey) {
+  const dir = S.varmefolie.direction;
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  const empty = { room: null, pos: 0, segments: [], direction: dir, nc: 0, snapped: null, invalid: true, reason: null };
+  if (!prod) return empty;
+  const room = S.rooms.find(r => _roomOnActiveFloor(r) && ptInPoly(wp.x, wp.y, r.points));
+  if (!room) return empty;
+
+  const nc = (prod.netto_width_mm || prod.width_mm) / 10;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minB = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
+  const maxB = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
+  const margin = _effectiveMarginCm(prod.id);
+  // Sonens along-akse-utstrekning — kun brukt til en konservativ kollisjons-forhåndssjekk av
+  // kandidater (før faktisk klipping mot hindringer), ikke til selve plasseringen.
+  const aLo = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
+  const aHi = dir === 'v' ? Math.max(...ys) : Math.max(...xs);
+
+  // Fri posisjon: rå peker minus halv bredde, klemt mot romboks ⊖ margin (dagens oppførsel).
+  const rawPointer = dir === 'v' ? wp.x : wp.y;
+  const freePos = Math.max(minB + margin, Math.min(rawPointer - nc / 2, maxB - nc - margin));
+
+  let pos = freePos, snapped = null;
+  if (!altKey) {
+    const corner = (S.varmefolie && S.varmefolie.startCorner) || 'bl';
+    // Tiebreak ved like nære kandidater: foretrekk den som bygger ut fra starthjørnet.
+    const preferLow = dir === 'v' ? corner.charAt(1) === 'l' : corner.charAt(0) === 't';
+    const collides = p => {
+      const tmp = { id: -999, roomId: room.id, direction: dir, pos_cm: p, productId, start_cm: aLo, length_cm: aHi - aLo };
+      return _stripOverlapsAny(tmp);
+    };
+    // Hvilke SAMME-retnings naboer kolliderer den frie (rå) posisjonen faktisk med? En folie på
+    // TVERS (motsatt retning) fanges ikke her med vilje — den løses av foil-avoid sin ordinære
+    // along-akse-klipping nedenfor, ikke av en sidelengs magnet-flytting.
+    const collidingNeighbors = _stripsForRoomDir(room.id, dir).filter(o => {
+      const onc = _stripNettoCm(o);
+      const gapReq = _effectiveGapCmPair(productId, o.productId);
+      const perpGap = freePos >= o.pos_cm ? freePos - (o.pos_cm + onc) : o.pos_cm - (freePos + nc);
+      return perpGap < gapReq - 0.01;
+    });
+
+    let candidates, unconditional;
+    if (collidingNeighbors.length === 1) {
+      // SYMPTOMET, enkel nabo: pekeren står midt oppi ÉN eksisterende folie. Begge sider av DEN
+      // naboen er trygge kandidater (ingen annen nabo å hoppe forbi) — snap UANSETT avstand (å
+      // løse en aktiv kollisjon er obligatorisk, som gamle _snapStripToNearest). Avstand + korn-
+      // hjørne-tiebreak i best-løkken nedenfor avgjør ved eksakt dødsenter-slipp, med naturlig
+      // fallback til den andre siden hvis den foretrukne siden er utenfor rom eller kolliderer.
+      const o = collidingNeighbors[0];
+      const onc = _stripNettoCm(o);
+      const gapReq = _effectiveGapCmPair(productId, o.productId);
+      candidates = [
+        { pos: o.pos_cm - nc - gapReq, type: 'strip' },
+        { pos: o.pos_cm + onc + gapReq, type: 'strip' },
+      ];
+      unconditional = true;
+    } else if (collidingNeighbors.length > 1) {
+      // Klemt mellom flere naboer (sandwich): kun INNOVER-vendte side av HVER kolliderende nabo —
+      // ikke ytterkanten, som ville hoppet forbi en annen nabo til en urelatert, fjern posisjon i
+      // stedet for å korrekt varsle «for trangt her» (se hovedtest for for-liten-lomme).
+      candidates = collidingNeighbors.map(o => {
+        const onc = _stripNettoCm(o);
+        const gapReq = _effectiveGapCmPair(productId, o.productId);
+        const towardLeft = (freePos + nc / 2) < (o.pos_cm + onc / 2);
+        return { pos: towardLeft ? o.pos_cm - nc - gapReq : o.pos_cm + onc + gapReq, type: 'strip' };
+      });
+      unconditional = true;
+    } else {
+      // Fri posisjon er allerede ledig (evt. kun en tverrgående kollisjon, håndtert nedenfor):
+      // ordinær bekvemmelighets-magnet mot vegg ELLER nabo, kun innenfor skjerm-piksel-radiusen.
+      const wallCands = [
+        { pos: minB + margin, type: 'wall' },
+        { pos: maxB - margin - nc, type: 'wall' },
+      ];
+      const neighborCands = _neighborSnapCandidates(room.id, dir, productId, nc, null)
+        .map(p => ({ pos: p, type: 'strip' }));
+      candidates = [...wallCands, ...neighborCands];
+      unconditional = false;
+    }
+    candidates = candidates.filter(c => c.pos >= minB - 0.01 && c.pos + nc <= maxB + 0.01);
+    const radiusCm = 14 / (S.view.zoom * BASE_SCALE);   // 14 skjerm-px, uavhengig av zoom
+
+    let best = null, bestDist = Infinity;
+    for (const c of candidates) {
+      const d = Math.abs(c.pos - freePos);
+      if (!unconditional && d > radiusCm + 0.01) continue;
+      if (collides(c.pos)) continue;
+      const isCloser = d < bestDist - 0.01;
+      const isTie = Math.abs(d - bestDist) <= 0.01;
+      if (best === null || isCloser || (isTie && (preferLow ? c.pos < best.pos : c.pos > best.pos))) {
+        best = c; bestDist = d;
+      }
+    }
+    if (best) { pos = best.pos; snapped = best.type; }
+  }
+
+  const segments0 = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
+  // Manual placement: keep ONLY the segment under the pointer (the piece the user points at),
+  // so dropping over a hindring previews/places only the over-piece.
+  const sweep = dir === 'v' ? wp.y : wp.x;
+  const seg = _segAtSweep(segments0, sweep);
+  const segments = seg ? [seg] : [];
+  const invalid = segments.length === 0;
+  const reason = invalid ? 'Folien får ikke plass her — velg en smalere bredde' : null;
+
+  return { room, pos, segments, direction: dir, nc, snapped, invalid, reason, sweep };
+}
+
+// Bygger S.ui.dropPreviewStrip-formen fra et kandidat-resultat — delt av dragover og
+// 'r'-retningsbytte, så begge alltid viser nøyaktig samme ghost for samme kandidat.
+function _dropPreviewFromCandidate(cand) {
+  if (!cand.room) return null;
+  let unionStart = 0, unionLen = 0;
+  if (cand.segments.length) {
+    unionStart = cand.segments[0].start_cm;
+    const unionEnd = cand.segments[cand.segments.length - 1].start_cm + cand.segments[cand.segments.length - 1].length_cm;
+    unionLen = Math.max(5, unionEnd - unionStart);
+  } else if (cand.invalid) {
+    // Ingen ekte segment å vise (får ikke plass) — en liten markør sentrert på pekerens
+    // sveip-koordinat, kun til visuell «her prøvde du»-indikasjon (rød ghost), ikke plassering.
+    unionStart = cand.sweep - 25; unionLen = 50;
+  }
+  return {
+    pos_cm: cand.pos, segments: cand.segments, direction: cand.direction, nc: cand.nc, roomId: cand.room.id,
+    invalid: cand.invalid, snapped: cand.snapped, reason: cand.reason,
+    start_cm: unionStart, length_cm: unionLen,
+  };
+}
+
 canvas.addEventListener('dragover', e => {
   if (!S.ui.dragWidth) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
   const wp = _getDropPosition(e);
-  const prod = HEATING_PRODUCTS.find(p => p.id === S.ui.dragWidth.productId);
-  if (!prod) return;
-  const nc = (prod.netto_width_mm || prod.width_mm) / 10;
-  const room = S.rooms.find(r => _roomOnActiveFloor(r) && ptInPoly(wp.x, wp.y, r.points));
-  if (!room) { S.ui.dropPreviewStrip = null; markDirty(); return; }
-  const dir = S.varmefolie.direction;
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const MARGIN = _effectiveMarginCm(prod.id);
-  let pos;
-  if (dir === 'v') {
-    pos = Math.max(Math.min(...xs) + MARGIN, Math.min(wp.x - nc/2, Math.max(...xs) - nc - MARGIN));
-  } else {
-    pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
-  }
-  // Compute actual segments the drop would create — preview matches the
-  // commit path (clipped around hindringer + zones + existing foils, snapped to cut-interval).
-  let segments = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
-  // Manual placement: keep ONLY the segment under the drop point (the piece the
-  // user points at), so dropping over a hindring previews only the over-piece.
-  { const sweep = dir === 'v' ? wp.y : wp.x; const _s = _segAtSweep(segments, sweep); segments = _s ? [_s] : []; }
-  // Perp-axis overlap against existing strips (preview turns red on real
-  // collision; same along-axis fix as _stripOverlapsAny so split-strips
-  // sharing pos_cm don't flag falsely).
-  const dragProdId = S.ui.dragWidth.productId;
-  let previewInvalid = false;
-  outer:
-  for (const o of _stripsForRoomDir(room.id, dir)) {
-    const onc = _stripNettoCm(o);
-    const gapReq = _effectiveGapCmPair(dragProdId, o.productId);
-    const perpGap = pos >= o.pos_cm ? pos - (o.pos_cm + onc) : o.pos_cm - (pos + nc);
-    if (perpGap >= gapReq - 0.01) continue;
-    const oStart = o.start_cm, oEnd = o.start_cm + o.length_cm;
-    for (const seg of segments) {
-      const sStart = seg.start_cm, sEnd = seg.start_cm + seg.length_cm;
-      if (Math.min(sEnd, oEnd) - Math.max(sStart, oStart) > 0.01) {
-        previewInvalid = true; break outer;
-      }
-    }
-  }
-  let snapPos = null;
-  if (previewInvalid) {
-    const tmpStrip = { id: -999, roomId: room.id, direction: dir, pos_cm: pos, productId: dragProdId,
-                       start_cm: segments[0]?.start_cm ?? 0, length_cm: segments[0]?.length_cm ?? 0 };
-    snapPos = _snapStripToNearest(tmpStrip);
-  }
-  // Union along-range across all segments — kept for drawStripGapLine() and
-  // any other consumer that expects a single start_cm/length_cm.
-  let unionStart = 0, unionLen = 0;
-  if (segments.length) {
-    unionStart = segments[0].start_cm;
-    const unionEnd = segments[segments.length - 1].start_cm + segments[segments.length - 1].length_cm;
-    unionLen = Math.max(5, unionEnd - unionStart);
-  }
-  S.ui.dropPreviewStrip = {
-    pos_cm: pos, segments, direction: dir, nc, roomId: room.id,
-    invalid: previewInvalid, snapPos,
-    start_cm: unionStart, length_cm: unionLen,
-  };
+  _lastDropWp = wp;
+  const cand = _stripDropCandidate(wp, S.ui.dragWidth.productId, e.altKey);
+  S.ui.dropPreviewStrip = _dropPreviewFromCandidate(cand);
   // The conditional rAF loop only repaints when something marks the frame dirty.
   // HTML5 dragover doesn't trip any interaction flag, so mark it here or the
   // ghost preview never gets drawn.
@@ -15903,52 +15982,23 @@ canvas.addEventListener('drop', e => {
   e.preventDefault();
   if (!S.ui.dragWidth) return;
   const wp = _getDropPosition(e);
-  const prod = HEATING_PRODUCTS.find(p => p.id === S.ui.dragWidth.productId);
-  if (!prod) return;
-  const room = S.rooms.find(r => _roomOnActiveFloor(r) && ptInPoly(wp.x, wp.y, r.points));
-  if (!room) { S.ui.dropPreviewStrip = null; return; }
-  const nc = (prod.netto_width_mm || prod.width_mm) / 10;
-  const dir = S.varmefolie.direction;
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const MARGIN = _effectiveMarginCm(prod.id);
-  let pos;
-  if (dir === 'v') {
-    pos = Math.max(Math.min(...xs) + MARGIN, Math.min(wp.x - nc/2, Math.max(...xs) - nc - MARGIN));
-  } else {
-    pos = Math.max(Math.min(...ys) + MARGIN, Math.min(wp.y - nc/2, Math.max(...ys) - nc - MARGIN));
+  const dragProdId = S.ui.dragWidth.productId;
+  const cand = _stripDropCandidate(wp, dragProdId, e.altKey);
+  if (!cand.room) { S.ui.dropPreviewStrip = null; S.ui.dragWidth = null; return; }
+  if (cand.invalid) {
+    if (typeof _showToast === 'function') _showToast(cand.reason || 'Folien får ikke plass her', 'warn');
+    S.ui.dropPreviewStrip = null; S.ui.dragWidth = null; render(); return;
   }
-  let segments = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
-  // Manual placement: place ONE strip in the segment under the drop point (not the
-  // whole column). Dropping over a hindring places only the over-piece; an existing
-  // piece under it is left untouched. Free stretch/move afterwards via the gizmo.
-  { const sweep = dir === 'v' ? wp.y : wp.x; const _s = _segAtSweep(segments, sweep); segments = _s ? [_s] : []; }
-  if (!segments.length) { S.ui.dropPreviewStrip = null; S.ui.dragWidth = null; render(); return; }
   pushUndo();
   let placed = false;
-  for (const seg of segments) {
+  for (const seg of cand.segments) {
     const newStrip = {
       id: S.counters.nextStripId++,
-      roomId: room.id, productId: prod.id, direction: dir,
-      pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm
+      roomId: cand.room.id, productId: dragProdId, direction: cand.direction,
+      pos_cm: cand.pos, start_cm: seg.start_cm, length_cm: seg.length_cm
     };
     S.strips.push(newStrip);
     _invalidateStripCache();
-    if (_stripOverlapsAny(newStrip)) {
-      // Magnetic snap: try snapping to nearest neighbor
-      const snappedPos = _snapStripToNearest(newStrip);
-      if (snappedPos !== null) {
-        newStrip.pos_cm = snappedPos;
-        // Re-compute clipped segments for new position (hindrings may differ);
-        // keep the piece under the drop point, consistent with single-segment drop.
-        const reSegs = computeClippedSegments(room.id, dir, snappedPos, prod.id);
-        const reSeg = _segAtSweep(reSegs, dir === 'v' ? wp.y : wp.x);
-        if (reSeg) { newStrip.start_cm = reSeg.start_cm; newStrip.length_cm = reSeg.length_cm; }
-      } else {
-        S.strips.pop(); _invalidateStripCache();
-        S.counters.nextStripId--;
-        continue;
-      }
-    }
     if (!placed) { selStrip(newStrip.id); placed = true; }
   }
   S.ui.dropPreviewStrip = null;
@@ -21092,6 +21142,21 @@ function _stripOverlapsAny(strip) {
   return false;
 }
 
+// Nabo-kandidat-posisjoner (inntil venstre/topp og høyre/bunn av HVER eksisterende folie i samme
+// retning, med korrekt leverandør-gap), UVALIDERT mot romgrenser/kollisjon — kalleren filtrerer og
+// validerer selv. Delt av _snapStripToNearest (flytter en EKSISTERENDE folie — ekskluderer seg
+// selv via excludeId) og _stripDropCandidate (manuell plassering — intet strip-objekt før commit,
+// excludeId=null).
+function _neighborSnapCandidates(roomId, direction, productId, nc, excludeId) {
+  const out = [];
+  for (const o of _stripsForRoomDir(roomId, direction)) {
+    if (excludeId != null && o.id === excludeId) continue;
+    const onc = _stripNettoCm(o);
+    const gapCm = _effectiveGapCmPair(productId, o.productId);
+    out.push(o.pos_cm - nc - gapCm, o.pos_cm + onc + gapCm);
+  }
+  return out;
+}
 // Magnetic snap: find nearest valid pos_cm adjacent to a neighbor strip
 function _snapStripToNearest(strip) {
   const nc = _stripNettoCm(strip);
@@ -21103,25 +21168,18 @@ function _snapStripToNearest(strip) {
   const minB = dir === 'v' ? bounds.minX : bounds.minY;
   const maxB = dir === 'v' ? bounds.maxX : bounds.maxY;
 
+  const candPositions = _neighborSnapCandidates(strip.roomId, dir, strip.productId, nc, strip.id);
   let bestPos = null, bestDist = Infinity;
-  for (const o of others) {
-    const onc = _stripNettoCm(o);
-    const gapCm = _effectiveGapCmPair(strip.productId, o.productId);
-    const candidates = [
-      o.pos_cm - nc - gapCm,   // snap to left/top of neighbor
-      o.pos_cm + onc + gapCm   // snap to right/bottom of neighbor
-    ];
-    for (const pos of candidates) {
-      // Room bounds check
-      if (pos < minB + 0.01 || pos + nc > maxB - 0.01) continue;
-      const dist = Math.abs(pos - strip.pos_cm);
-      if (dist >= bestDist) continue;
-      // Overlap check at candidate position
-      const tmp = { id: strip.id, roomId: strip.roomId, direction: dir, pos_cm: pos, productId: strip.productId };
-      if (!_stripOverlapsAny(tmp)) {
-        bestPos = pos;
-        bestDist = dist;
-      }
+  for (const pos of candPositions) {
+    // Room bounds check
+    if (pos < minB + 0.01 || pos + nc > maxB - 0.01) continue;
+    const dist = Math.abs(pos - strip.pos_cm);
+    if (dist >= bestDist) continue;
+    // Overlap check at candidate position
+    const tmp = { id: strip.id, roomId: strip.roomId, direction: dir, pos_cm: pos, productId: strip.productId };
+    if (!_stripOverlapsAny(tmp)) {
+      bestPos = pos;
+      bestDist = dist;
     }
   }
   return bestPos;
@@ -31882,7 +31940,16 @@ document.addEventListener('keydown', e=>{
   // R key: rotate selected strip 90° (without Ctrl — Ctrl+R is room rotate mode)
   if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.selectedStripId!==null) { _rotateSelectedStrip(); e.preventDefault(); return; }
   // R key during manual placement: toggle direction
-  if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.manualPlaceMode) { S.varmefolie.direction = S.varmefolie.direction === 'v' ? 'h' : 'v'; render(); e.preventDefault(); return; }
+  if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.manualPlaceMode) {
+    S.varmefolie.direction = S.varmefolie.direction === 'v' ? 'h' : 'v';
+    // dragover fyrer kun ved pekerbevegelse, ikke ved tastetrykk — oppdater ghosten mot siste
+    // kjente peker-posisjon her også, ellers står den igjen i gammel retning til musa røres.
+    if (S.ui.dragWidth && _lastDropWp) {
+      const cand = _stripDropCandidate(_lastDropWp, S.ui.dragWidth.productId, e.altKey);
+      S.ui.dropPreviewStrip = _dropPreviewFromCandidate(cand);
+    }
+    render(); e.preventDefault(); return;
+  }
   if (e.key==='Delete'&&S.ui.selectedStripId!==null) { deleteStrip(S.ui.selectedStripId); return; }
   if (e.key==='Delete'&&S.ui.selectedCableId!==null) { deleteCable(S.ui.selectedCableId); return; }
   if (e.key==='Delete'&&S.ui.selectedZoneId!==null) { deleteZone(S.ui.selectedZoneId); return; }
