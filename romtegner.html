@@ -18098,11 +18098,19 @@ function _drawStairPlan(stair) {
       runsBySurf[r.surfaceIdx].push(r);
     }
 
+    // Regel 9: inngangsside per flate følger motorens paritetskjede (stair.connections[].exitRight),
+    // ikke en lokal antakelse om at hver flate alltid starter fra venstre. Ved konstant (partall) N
+    // flipper den aldri i praksis (vanligste tilfelle), men et repos eller en flate med oddetall N
+    // kan flippe paritetskjeden — da må sikksakken speiles for å stemme med forrige flates utgang.
+    const entryRightBySurf = {};
+    for (const conn of (stair.connections || [])) entryRightBySurf[conn.toSurf] = conn.exitRight;
+
     for (const [si, surfRuns] of Object.entries(runsBySurf)) {
       const surf = surfs[+si];
       if (!surf) continue;
       const surfW = surf.w_cm || stair.width_cm || 120;
       const edgeMrg = stair.edgeMargin_cm || 5;
+      const entryRight = entryRightBySurf[+si] || false; // første flate: ingen inngang, starter venstre
       for (let ri = 0; ri < surfRuns.length; ri++) {
         const run = surfRuns[ri];
         ctx.strokeStyle = hasMultiCable ? (STAIR_CABLE_COLORS[run.cableIdx] || defaultColor) : defaultColor;
@@ -18112,12 +18120,12 @@ function _drawStairPlan(stair) {
         // Arc after this run
         if (ri < surfRuns.length - 1) {
           const R = Math.abs(surfRuns[ri + 1].pos_cm - run.pos_cm) / 2;
-          if (ri % 2 === 0) trimRight = R; else trimLeft = R;
+          if ((ri % 2 === 0) !== entryRight) trimRight = R; else trimLeft = R;
         }
         // Arc before this run (arriving from previous)
         if (ri > 0) {
           const R = Math.abs(run.pos_cm - surfRuns[ri - 1].pos_cm) / 2;
-          if ((ri - 1) % 2 === 0) trimRight = R; else trimLeft = R;
+          if (((ri - 1) % 2 === 0) !== entryRight) trimRight = R; else trimLeft = R;
         }
 
         for (const seg of run.segments) {
@@ -18131,7 +18139,7 @@ function _drawStairPlan(stair) {
         // U-turn arc to next run (curves outward, stays within edge margin)
         if (ri < surfRuns.length - 1) {
           const nextRun = surfRuns[ri + 1];
-          const atRight = (ri % 2 === 0);
+          const atRight = (ri % 2 === 0) !== entryRight;
           const xEdge = atRight ? surf.x_cm + surfW - edgeMrg : surf.x_cm + edgeMrg;
           const radius = Math.abs(nextRun.pos_cm - run.pos_cm) / 2;
           const midY = (run.pos_cm + nextRun.pos_cm) / 2;
@@ -18159,13 +18167,15 @@ function _drawStairPlan(stair) {
         if (!fromSurf || !toSurf) continue;
         const fromRuns = runsBySurf[conn.fromSurf] || [];
         if (fromRuns.length) {
-          const nFrom = fromRuns.length;
-          const exitRight = (nFrom % 2 === 1);
+          const exitRight = conn.exitRight; // fra motoren — ikke regnet på nytt lokalt (Regel 9)
           const exitX = exitRight
             ? fromSurf.x_cm + (fromSurf.w_cm || stair.width_cm || 120) - (stair.edgeMargin_cm || 5)
             : fromSurf.x_cm + (stair.edgeMargin_cm || 5);
+          const entryX = exitRight
+            ? toSurf.x_cm + (toSurf.w_cm || stair.width_cm || 120) - (stair.edgeMargin_cm || 5)
+            : toSurf.x_cm + (stair.edgeMargin_cm || 5);
           const a = w2s(ox + exitX, oy + fromSurf.y_cm + fromSurf.d_cm);
-          const b = w2s(ox + exitX, oy + toSurf.y_cm);
+          const b = w2s(ox + entryX, oy + toSurf.y_cm);
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
         }
       }
@@ -18466,11 +18476,17 @@ function _drawStairSide(stair) {
     for (const [si, surfRuns] of Object.entries(runsBySurf)) {
       const sc = surfSideCoords[+si];
       if (!sc) continue;
-      const margin = stair.edgeMargin_cm || 5;
+      // Regel 9: bruk streng-posisjonen fra motoren (run.pos_cm — allerede regnet med riktig
+      // dybdemargin: nese/opptrinn for trinn, repos' egen dybdemargin for repos) i stedet for
+      // sidemarginen (edgeMargin_cm), som ikke har noe med dybde å gjøre. Hver streng tegnes som
+      // en kort strek ved sin EGEN dybdeposisjon, så N strenger vises som N atskilte streker i
+      // stedet for én linje som strekker seg over hele trinnet (uansett N).
+      const tickHalf = Math.max(1.5, Math.min(sc.depth * 0.12, 5));
       for (const run of surfRuns) {
         ctx.strokeStyle = hasMultiCable ? (STAIR_CABLE_COLORS[run.cableIdx] || defaultColor) : defaultColor;
-        const px = w2s(ox + sc.xStart + margin, oy + sc.yTop);
-        const px2 = w2s(ox + sc.xStart + sc.depth - margin, oy + sc.yTop);
+        const posX = sc.xStart + run.pos_cm;
+        const px = w2s(ox + Math.max(sc.xStart, posX - tickHalf), oy + sc.yTop);
+        const px2 = w2s(ox + Math.min(sc.xStart + sc.depth, posX + tickHalf), oy + sc.yTop);
         ctx.beginPath();
         ctx.moveTo(px.x, px.y);
         ctx.lineTo(px2.x, px2.y);
@@ -37328,19 +37344,24 @@ function _renderStairToImage(stair) {
     c.lineWidth = 1.5; c.lineCap = 'round';
     const runsBySurf = {};
     for (const r of stair.runs) { if (!runsBySurf[r.surfaceIdx]) runsBySurf[r.surfaceIdx] = []; runsBySurf[r.surfaceIdx].push(r); }
+    // Regel 9: inngangsside følger motorens paritetskjede (stair.connections[].exitRight) — se
+    // samme logikk i _drawStairSide (plan-visning), holdt i sync her.
+    const entryRightBySurf = {};
+    for (const conn of (stair.connections || [])) entryRightBySurf[conn.toSurf] = conn.exitRight;
 
     for (const [si, surfRuns] of Object.entries(runsBySurf)) {
       const sf = surfs[+si];
       if (!sf) continue;
       const surfW = sf.w_cm || stair.width_cm || 120;
       const edgeMrg = stair.edgeMargin_cm || 5;
+      const entryRight = entryRightBySurf[+si] || false;
       for (let ri = 0; ri < surfRuns.length; ri++) {
         const run = surfRuns[ri];
         c.strokeStyle = hasMulti ? (COLORS[run.cableIdx] || '#e06030') : '#e06030';
         // Trim for arcs
         let trimL = 0, trimR = 0;
-        if (ri < surfRuns.length-1) { const R=Math.abs(surfRuns[ri+1].pos_cm-run.pos_cm)/2; if(ri%2===0) trimR=R; else trimL=R; }
-        if (ri > 0) { const R=Math.abs(run.pos_cm-surfRuns[ri-1].pos_cm)/2; if((ri-1)%2===0) trimR=R; else trimL=R; }
+        if (ri < surfRuns.length-1) { const R=Math.abs(surfRuns[ri+1].pos_cm-run.pos_cm)/2; if((ri%2===0)!==entryRight) trimR=R; else trimL=R; }
+        if (ri > 0) { const R=Math.abs(run.pos_cm-surfRuns[ri-1].pos_cm)/2; if(((ri-1)%2===0)!==entryRight) trimR=R; else trimL=R; }
         for (const seg of run.segments) {
           const a = { x: tx(sf.x_cm + seg.start_cm + trimL), y: ty(sf.y_cm + run.pos_cm) };
           const b = { x: tx(sf.x_cm + seg.end_cm - trimR), y: ty(sf.y_cm + run.pos_cm) };
@@ -37349,7 +37370,7 @@ function _renderStairToImage(stair) {
         // U-turn arc
         if (ri < surfRuns.length-1) {
           const nextRun = surfRuns[ri+1];
-          const atRight = (ri%2===0);
+          const atRight = (ri%2===0)!==entryRight;
           const xEdge = atRight ? sf.x_cm+surfW-edgeMrg : sf.x_cm+edgeMrg;
           const radius = Math.abs(nextRun.pos_cm - run.pos_cm)/2;
           const midY = (run.pos_cm + nextRun.pos_cm)/2;
@@ -37373,13 +37394,10 @@ function _renderStairToImage(stair) {
         if (!fromSurf || !toSurf) continue;
         const fRuns = runsBySurf[conn.fromSurf]||[];
         if (fRuns.length) {
-          const nF = fRuns.length;
-          const exitRight = (nF%2===1);
+          const exitRight = conn.exitRight; // fra motoren — ikke regnet på nytt lokalt (Regel 9)
           const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : fromSurf.x_cm+(stair.edgeMargin_cm||5);
           const a = { x:tx(exitX), y:ty(fromSurf.y_cm+fromSurf.d_cm) };
-          const tRuns = runsBySurf[conn.toSurf]||[];
-          const entryRight = exitRight;
-          const entryX = entryRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
+          const entryX = exitRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
           const b = { x:tx(entryX), y:ty(toSurf.y_cm) };
           c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
         }
