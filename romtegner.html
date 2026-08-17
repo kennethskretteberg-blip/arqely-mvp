@@ -18714,12 +18714,15 @@ function _setStairFrontBackOffset(val) {
 function _setStairStepCC(val) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
-  const cm = Math.max(3, Math.min(STAIR_MAX_CC_CM, parseFloat(val) || 8));
+  const cm = Math.max(3, Math.min(STAIR_MAX_CC_CM, parseFloat(val) || STAIR_DEFAULT_MAX_CC_CM));
   const rounded = Math.round(cm * 10) / 10;
   if (rounded === stair.stepCC_cm) return;
   pushUndo();
   stair.stepCC_cm = rounded;
   stair.cableSpacing_cm = rounded;
+  // Maks CC endret => ny geometri; forrige runsPerStep-cache er ikke lenger gyldig (Regel 7:
+  // strengantall følger utelukkende maks CC + dybde, ikke det forrige valgte forslaget).
+  stair.runsPerStep = null;
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -18728,7 +18731,7 @@ function _setStairStepCC(val) {
 function _setStairLandingCC(val) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
-  const cm = Math.max(3, Math.min(STAIR_MAX_CC_CM, parseFloat(val) || 8));
+  const cm = Math.max(3, Math.min(STAIR_MAX_CC_CM, parseFloat(val) || STAIR_DEFAULT_MAX_CC_CM));
   const rounded = Math.round(cm * 10) / 10;
   if (rounded === stair.landingCC_cm) return;
   pushUndo();
@@ -18861,6 +18864,20 @@ function _renderStairSettingsPanel(stairId) {
           <span style="font-size:10px;color:var(--dim)">cm</span>
         </span>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <span>Maks CC trinn</span>
+        <span style="display:flex;align-items:center;gap:3px">
+          <input type="number" min="3" max="${STAIR_MAX_CC_CM}" step="0.5" value="${stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairStepCC(this.value)" onclick="event.stopPropagation()">
+          <span style="font-size:10px;color:var(--dim)">cm</span>
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span>Maks CC repos</span>
+        <span style="display:flex;align-items:center;gap:3px">
+          <input type="number" min="3" max="${STAIR_MAX_CC_CM}" step="0.5" value="${stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairLandingCC(this.value)" onclick="event.stopPropagation()">
+          <span style="font-size:10px;color:var(--dim)">cm</span>
+        </span>
+      </div>
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
@@ -18902,10 +18919,29 @@ function getStairCableViolations(stairId) {
   if (!stair) return { hasAny: false };
   const v = {};
   const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
-  const cc = stair.cableSpacing_cm;
 
-  // CC > 10cm
-  if (cc > STAIR_MAX_CC_CM) v.maxSpacing = { actual: cc * 10, max: STAIR_MAX_CC_CM * 10 };
+  // Sjekk BYGGET cc fra faktiske løp (stair.runs), ikke innstillingen — de kan i teorien avvike
+  // (avrundingsdrift, se _stairRunCount-kommentaren i generateStairCable). Finn verste (største)
+  // faktiske CC blant alle flater, mot flatens egen maks (repos har egen landingCC_cm).
+  const maxStepCC = Math.min(stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM, STAIR_MAX_CC_CM);
+  const maxLandingCC = Math.min(stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM, STAIR_MAX_CC_CM);
+  const runsBySurfV = {};
+  for (const r of (stair.runs || [])) { (runsBySurfV[r.surfaceIdx] ||= []).push(r); }
+  let worstCC = 0, worstMaxCC = 0;
+  for (const si in runsBySurfV) {
+    const rs = runsBySurfV[si];
+    if (rs.length < 2) continue;
+    rs.sort((a, b) => a.pos_cm - b.pos_cm);
+    const surf = (stair.surfaces || [])[+si];
+    const isLandingSurf = surf && surf.type === 'landing';
+    const builtCC = Math.abs(rs[1].pos_cm - rs[0].pos_cm); // uniform spacing by construction
+    const allowedCC = isLandingSurf ? maxLandingCC : maxStepCC;
+    if (builtCC > allowedCC + 0.05 && builtCC > worstCC) { worstCC = builtCC; worstMaxCC = allowedCC; }
+  }
+  const cc = worstCC > 0 ? worstCC : (stair.cableSpacing_cm || 0); // fallback for supplier-sjekkene under
+
+  // CC > maks (bygget verdi, ikke innstillingen)
+  if (worstCC > 0) v.maxSpacing = { actual: worstCC * 10, max: worstMaxCC * 10 };
   // Supplier min
   if (prod?.min_spacing_mm && cc * 10 < prod.min_spacing_mm) v.minSpacing = { actual: cc * 10, min: prod.min_spacing_mm };
   // Supplier max
@@ -19989,8 +20025,8 @@ function _migrateStairToSegments(stair) {
   stair.stairType = stair.stairType || 'straight';
   stair.riserOffset_cm = stair.riserOffset_cm ?? 2;
   stair.noseOffset_cm = stair.noseOffset_cm ?? 2;
-  stair.stepCC_cm = stair.stepCC_cm ?? (stair.cableSpacing_cm || 8);
-  stair.landingCC_cm = stair.landingCC_cm ?? (stair.cableSpacing_cm || 8);
+  stair.stepCC_cm = stair.stepCC_cm ?? (stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM);
+  stair.landingCC_cm = stair.landingCC_cm ?? (stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM);
 }
 
 /** Generate surfaces from segment-based model. Falls back to legacy if no segments.
@@ -20062,8 +20098,22 @@ function _stairBounds(stair) {
 }
 
 // ── Stair cable layout ──
-const STAIR_MAX_CC_CM = 12;
+const STAIR_MAX_CC_CM = 12;          // hard sikkerhetsgrense — ingen innstilling kan overstige denne
+const STAIR_DEFAULT_MAX_CC_CM = 10;  // standard maks CC for nye trapper (spec-trapp-kabelutlegg.md, Regel 3)
 const STAIR_MIN_DENSITY_WM2 = 250;
+
+// Regel 3 (spec-trapp-kabelutlegg.md): "gjerdestolpe"-formelen. N = ceil(brukbar dybde / maks CC) + 1,
+// CC = brukbar dybde / (N - 1). Bruker ceil, ALDRI floor — floor kan gi faktisk CC over maks (Funn 1:
+// 27 cm / maks 10 cm ga floor(2.7)+1=3 strenger => CC 13,5 cm, mens ceil(2.7)+1=4 strenger => CC 9 cm).
+// Delt av generateStairCable (byggeren), _stairCableLength (estimatoren/forslagsmotoren) og
+// getStairCableViolations, slik at de tre aldri igjen kan komme til ulikt antall strenger for samme
+// geometri.
+function _stairRunCount(usableDepth, maxCC) {
+  if (usableDepth <= 0 || maxCC <= 0) return { N: 1, actualCC: 0 };
+  const N = Math.max(2, Math.ceil(usableDepth / maxCC - 1e-6) + 1);
+  const actualCC = N > 1 ? usableDepth / (N - 1) : 0;
+  return { N, actualCC };
+}
 
 function generateStairCable(stair) {
   // Cable runs SIDE-TO-SIDE across stair width (X-axis).
@@ -20100,8 +20150,8 @@ function generateStairCable(stair) {
     const surf = surfs[si];
     const ci = _cableIdxForSurface(si);
     const isLanding = (surf.type === 'landing');
-    const cc = Math.min(isLanding ? (stair.landingCC_cm || stair.cableSpacing_cm || 8)
-                                  : (stair.stepCC_cm || stair.cableSpacing_cm || 8), STAIR_MAX_CC_CM);
+    const maxCC = Math.min(isLanding ? (stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM)
+                                  : (stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM), STAIR_MAX_CC_CM);
 
     const depthStart = isLanding ? edgeMargin : noseOff;
     const depthEnd = isLanding ? surf.d_cm - edgeMargin : surf.d_cm - riserOff;
@@ -20114,13 +20164,13 @@ function generateStairCable(stair) {
     const runLength = xEnd - xStart;
     if (runLength <= 0) continue;
 
-    // Trinn: bruk eksplisitt runsPerStep fra valgt forslag (unngar avrundings-drift i
-    // N). Repos/landing utleder fra CC som for. Fallback + epsilon-guard mot at et
-    // opprundet CC feilaktig senker N.
-    const N = (!isLanding && stair.runsPerStep > 0)
-      ? Math.max(1, stair.runsPerStep)
-      : Math.max(1, Math.floor(usableDepth / cc + 1e-6) + 1);
-    const actualCC = N > 1 ? usableDepth / (N - 1) : 0;
+    // Trinn: bruk eksplisitt runsPerStep fra valgt forslag når den finnes (unngår avrundings-drift
+    // når en avrundet CC lagres tilbake som ny maks-CC). runsPerStep er alltid satt fra ren geometri
+    // — aldri fra kabelvalg, jf. Regel 7 — se _generateStairProposals. Repos/landing har ingen slik
+    // cache og regner alltid direkte fra _stairRunCount.
+    const { N, actualCC } = (!isLanding && stair.runsPerStep > 0)
+      ? { N: Math.max(1, stair.runsPerStep), actualCC: stair.runsPerStep > 1 ? usableDepth / (stair.runsPerStep - 1) : 0 }
+      : _stairRunCount(usableDepth, maxCC);
 
     for (let ri = 0; ri < N; ri++) {
       const pos = depthStart + ri * actualCC;
@@ -20175,14 +20225,14 @@ function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
     const runLength = surfW - 2 * edgeMargin;
     if (runLength <= 0) continue;
 
-    // Number of runs along depth, spaced by CC
-    let N;
+    // Number of runs along depth, spaced by CC (Regel 3: ceil-basert, aldri floor — se _stairRunCount)
+    let N, actualCC;
     if (!isLanding) {
       N = runsPerStep;
+      actualCC = N > 1 ? usableDepth / (N - 1) : 0;
     } else {
-      N = Math.max(1, Math.floor(usableDepth / cc) + 1);
+      ({ N, actualCC } = _stairRunCount(usableDepth, cc));
     }
-    const actualCC = N > 1 ? usableDepth / (N - 1) : 0;
 
     // Cable: N runs × width + (N-1) U-turns at edges
     totalLen += N * runLength;
@@ -20937,11 +20987,11 @@ function _createStairObj(params) {
     preferredVoltage: params.preferredVoltage || 230,
     // Cable parameters
     cableProductId: params.cableProductId || null,
-    cableSpacing_cm: Math.min(params.cableSpacing_cm || 8, STAIR_MAX_CC_CM),
+    cableSpacing_cm: Math.min(params.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM, STAIR_MAX_CC_CM),
     riserOffset_cm: params.riserOffset_cm ?? 2,
     noseOffset_cm: params.noseOffset_cm ?? 2,
-    stepCC_cm: params.stepCC_cm ?? (params.cableSpacing_cm || 8),
-    landingCC_cm: params.landingCC_cm ?? (params.cableSpacing_cm || 8),
+    stepCC_cm: params.stepCC_cm ?? (params.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
+    landingCC_cm: params.landingCC_cm ?? (params.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
     edgeMargin_cm: params.edgeMargin_cm || 5,
     // Multi-cable allocations
     cables: params.cables || [],
@@ -26806,8 +26856,8 @@ function _renderStairBuilderModal() {
 
       <!-- CC settings row -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px;margin-bottom:14px">
-        <label style="color:var(--muted)">CC trinn (cm)<br><input id="stair-step-cc" type="number" value="8" min="3" max="10" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-        <label style="color:var(--muted)">CC repos (cm)<br><input id="stair-landing-cc" type="number" value="8" min="3" max="10" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
+        <label style="color:var(--muted)">Maks CC trinn (cm)<br><input id="stair-step-cc" type="number" value="10" min="3" max="12" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
+        <label style="color:var(--muted)">Maks CC repos (cm)<br><input id="stair-landing-cc" type="number" value="10" min="3" max="12" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
       </div>
 
       <!-- Action buttons -->
@@ -26975,8 +27025,8 @@ function _confirmAddStair() {
     segments: JSON.parse(JSON.stringify(_stairBuilderSegs)),
     buildDirection: _stairBuilderDir,
     stairType: 'straight',
-    stepCC_cm: stepCCEl ? (+stepCCEl.value || 8) : 8,
-    landingCC_cm: landingCCEl ? (+landingCCEl.value || 8) : 8,
+    stepCC_cm: stepCCEl ? (+stepCCEl.value || STAIR_DEFAULT_MAX_CC_CM) : STAIR_DEFAULT_MAX_CC_CM,
+    landingCC_cm: landingCCEl ? (+landingCCEl.value || STAIR_DEFAULT_MAX_CC_CM) : STAIR_DEFAULT_MAX_CC_CM,
     cableProductId: prodEl ? (+prodEl.value || null) : null,
   };
 
