@@ -18858,6 +18858,11 @@ function _renderStairSettingsPanel(stairId) {
         cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Overganger</span><span>${cb.connectionLength_m} m</span></div>`;
       }
       cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;margin-bottom:1px"><span>Behov</span><span>${cb.totalNeeded_m} m</span></div>`;
+      if (cb.isTruncated) {
+        // To eksplisitte, navngitte sannheter (Regel 9/Funn 5) — «behov» og «dekket» skal aldri
+        // motsi hverandre ved gjetting; her står de rett under hverandre, tydelig merket.
+        cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px;color:#f59e0b"><span>Dekket (tegnet)</span><span>${cb.coveredLength_m} m</span></div>`;
+      }
       if (cb.productLength_m > 0) {
         cableBreakdownHtml += `<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span>Produkt</span><span>${cb.productLength_m} m</span></div>`;
         cableBreakdownHtml += `<div style="color:${fitCol};font-weight:600;font-size:10px">${fitIco} ${cb.fit.label}</div>`;
@@ -20294,48 +20299,37 @@ function _stairCableLength(stair, runsPerStep, stepCC, landingCC, edgeMargin) {
  * Returns array of { cableIdx, label, color, product, stepsLength_m, reposLength_m,
  *   totalNeeded_m, productLength_m, watts, fit: {status, label} }
  */
-function _stairCableLengthBreakdown(stair) {
-  if (!stair || !stair.surfaces || !stair.runs) return [];
-  const cables = stair.cables || [];
-  const nCables = Math.max(1, cables.length);
-  const surfs = stair.surfaces;
-  const edgeMargin = stair.edgeMargin_cm || 5;
-  const riserOff = stair.riserOffset_cm ?? 2;
-  const noseOff = stair.noseOffset_cm ?? 2;
-
-  // Group runs by cableIdx
+// Summerer per-kabel lengde (trinn/repos/overganger) fra et gitt løp/forbindelse-sett. Delt
+// hjelper slik at _stairCableLengthBreakdown kan bygge BÅDE behov (fra stair.fullRuns, upåvirket
+// av avkorting) og dekket (fra stair.runs, som _truncateStairCableToProduct kan ha avkortet) fra
+// samme regnestykke — de skal aldri kunne komme til ulikt tall for samme datasett (Funn 5).
+function _stairAccumulateCableData(surfs, edgeMargin, runsSrc, connsSrc, nCables) {
   const cableData = [];
-  for (let ci = 0; ci < nCables; ci++) {
-    cableData.push({ stepsLen: 0, reposLen: 0, connectionLen: 0 });
-  }
+  for (let ci = 0; ci < nCables; ci++) cableData.push({ stepsLen: 0, reposLen: 0, connectionLen: 0 });
+  if (!runsSrc) return cableData;
 
-  // Accumulate per-run cable lengths by surface type
-  for (const run of stair.runs) {
+  for (const run of runsSrc) {
     const ci = run.cableIdx || 0;
     if (ci >= cableData.length) continue;
     const surf = surfs[run.surfaceIdx];
     if (!surf) continue;
     const isLanding = surf.type === 'landing';
-
-    // Run length (single sweep across width)
-    const surfW = surf.w_cm || stair.width_cm || 120;
-    const runLen = surfW - 2 * edgeMargin;
+    // Faktisk segment-lengde, IKKE nominell full bredde — en avkortet (delvis) streng fra
+    // _truncateStairCableToProduct har et kortere segments[0] enn surfW-2*edgeMargin, og må telle
+    // som det den faktisk er, ellers overteller «dekket» present i forhold til det som er tegnet.
+    const seg = run.segments && run.segments[0];
+    const runLen = seg ? (seg.end_cm - seg.start_cm) : (surfW - 2 * edgeMargin);
     if (runLen <= 0) continue;
-
-    if (isLanding) {
-      cableData[ci].reposLen += runLen;
-    } else {
-      cableData[ci].stepsLen += runLen;
-    }
+    if (isLanding) cableData[ci].reposLen += runLen;
+    else cableData[ci].stepsLen += runLen;
   }
 
   // Add U-turn arcs: for each surface, consecutive runs on same surface have U-turns
   for (let si = 0; si < surfs.length; si++) {
     const surf = surfs[si];
     const isLanding = surf.type === 'landing';
-    const surfRuns = stair.runs.filter(r => r.surfaceIdx === si);
+    const surfRuns = runsSrc.filter(r => r.surfaceIdx === si);
     if (surfRuns.length < 2) continue;
-    // Sort by position
     surfRuns.sort((a, b) => a.pos_cm - b.pos_cm);
     for (let ri = 1; ri < surfRuns.length; ri++) {
       const gap = Math.abs(surfRuns[ri].pos_cm - surfRuns[ri - 1].pos_cm);
@@ -20347,23 +20341,38 @@ function _stairCableLengthBreakdown(stair) {
     }
   }
 
-  // Add step-over connections (attribute to steps portion)
-  if (stair.connections) {
-    for (const conn of stair.connections) {
+  if (connsSrc) {
+    for (const conn of connsSrc) {
       const ci = conn.cableIdx || 0;
       if (ci < cableData.length) cableData[ci].connectionLen += (conn.length_cm || 0);
     }
   }
+  return cableData;
+}
+
+function _stairCableLengthBreakdown(stair) {
+  if (!stair || !stair.surfaces || !stair.runs) return [];
+  const cables = stair.cables || [];
+  const nCables = Math.max(1, cables.length);
+  const surfs = stair.surfaces;
+  const edgeMargin = stair.edgeMargin_cm || 5;
+
+  // BEHOV: udelt løp-sett (før evt. avkorting mot for kort kabel). DEKKET: det faktiske,
+  // evt. avkortede settet — det som faktisk er tegnet. To eksplisitte sannheter, aldri gjettet.
+  const needData = _stairAccumulateCableData(surfs, edgeMargin, stair.fullRuns || stair.runs, stair.fullConnections || stair.connections, nCables);
+  const coveredData = _stairAccumulateCableData(surfs, edgeMargin, stair.runs, stair.connections, nCables);
 
   // Build result
   const result = [];
   for (let ci = 0; ci < nCables; ci++) {
-    const cd = cableData[ci];
+    const nd = needData[ci], cd = coveredData[ci];
     const cableObj = cables[ci];
     const prodId = cableObj ? cableObj.productId : stair.cableProductId;
     const prod = prodId ? HEATING_PRODUCTS.find(p => p.id === prodId) : null;
-    const totalNeeded_cm = cd.stepsLen + cd.reposLen + cd.connectionLen;
+    const totalNeeded_cm = nd.stepsLen + nd.reposLen + nd.connectionLen;
     const totalNeeded_m = Math.round(totalNeeded_cm / 100 * 10) / 10;
+    const totalCovered_cm = cd.stepsLen + cd.reposLen + cd.connectionLen;
+    const totalCovered_m = Math.round(totalCovered_cm / 100 * 10) / 10;
     const productLength_m = prod?.cable_length_m || 0;
     const diff_m = productLength_m - totalNeeded_m;
     const diffPct = productLength_m > 0 ? Math.abs(diff_m / productLength_m * 100) : 0;
@@ -20378,10 +20387,14 @@ function _stairCableLengthBreakdown(stair) {
       label: 'K' + (ci + 1),
       color: STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0],
       product: prod,
-      stepsLength_m: Math.round(cd.stepsLen / 100 * 10) / 10,
-      reposLength_m: Math.round(cd.reposLen / 100 * 10) / 10,
-      connectionLength_m: Math.round(cd.connectionLen / 100 * 10) / 10,
+      // BEHOV — udelt geometrisk krav (Regel 6)
+      stepsLength_m: Math.round(nd.stepsLen / 100 * 10) / 10,
+      reposLength_m: Math.round(nd.reposLen / 100 * 10) / 10,
+      connectionLength_m: Math.round(nd.connectionLen / 100 * 10) / 10,
       totalNeeded_m,
+      // DEKKET — faktisk tegnet lengde (kan være avkortet mot for kort kabel)
+      coveredLength_m: totalCovered_m,
+      isTruncated: totalCovered_m < totalNeeded_m - 0.05,
       productLength_m,
       watts,
       fit: { status: fitStatus, label: fitLabel },
@@ -20687,7 +20700,9 @@ function _generateStairProposals(stair) {
       // Per-step W/m²
       const wpm = cableSel.products[0]?.watt_per_m || (cableSel.products[0]?.watt ? cableSel.products[0].watt / (cableSel.products[0].length_m || 1) : 0);
       const stepCableLen_cm = runsPerStep * treadW + (runsPerStep > 1 ? (runsPerStep - 1) * Math.PI * actualCC / 2 : 0);
-      const stepArea_cm2 = treadW * treadD;
+      // Hele trinnarealet (ikke brukbart/marginredusert) — samme nevner som _stairPerStepWm2, så
+      // forslagskortet og innstillingspanelet aldri viser to ulike W/m²-tall for samme trapp.
+      const stepArea_cm2 = (firstTread.w_cm || stair.width_cm || 120) * firstTread.d_cm;
       const stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
 
       const candidate = {
@@ -21049,19 +21064,29 @@ function _regenerateStairCable(stair) {
   const layout = generateStairCable(stair);
   stair.runs = layout.runs;
   stair.connections = layout.connections;
-  stair.totalCableLength_cm = layout.totalCableLength_cm;
+  stair.totalCableLength_cm = layout.totalCableLength_cm;   // BEHOV — hele det geometriske kravet
   stair.cableLengths = layout.cableLengths || [];
+  // Udelt (pre-avkorting) løp/forbindelser — bevart slik at _stairCableLengthBreakdown kan vise
+  // BEHOV per kabel, ikke bare det som faktisk fikk plass etter _truncateStairCableToProduct.
+  // Objektene i stair.runs GJENBRUKES av begge (avkorting bygger nye/kopierte objekter i keptRuns,
+  // rører aldri disse), så dette er trygt uten en dyp kopi.
+  stair.fullRuns = layout.runs;
+  stair.fullConnections = layout.connections;
   // Update per-cable length_cm
   for (let i = 0; i < stair.cables.length; i++) {
     stair.cables[i].length_cm = (layout.cableLengths || [])[i] || 0;
   }
-  // Truncate cable visually if product is too short
+  // Truncate cable visually if product is too short. Setter stair.coveredCableLength_cm — DEKKET,
+  // det som faktisk er tegnet — som en egen, navngitt sannhet ved siden av totalCableLength_cm
+  // (BEHOV), slik at panel og ctx-bar aldri kan vise to tall som motsier hverandre (Regel 9/Funn 5).
   _truncateStairCableToProduct(stair);
 }
 
 /**
  * If the selected cable product(s) are shorter than required,
  * truncate stair.runs so the drawing shows where the cable actually ends.
+ * Setter stair.coveredCableLength_cm = DEKKET (faktisk tegnet lengde), atskilt fra
+ * stair.totalCableLength_cm = BEHOV (fullt geometrisk krav) — se _regenerateStairCable.
  */
 function _truncateStairCableToProduct(stair) {
   // Calculate total available cable from product(s)
@@ -21071,11 +21096,15 @@ function _truncateStairCableToProduct(stair) {
     const prod = c.productId ? HEATING_PRODUCTS.find(p => p.id === c.productId) : null;
     if (prod && prod.cable_length_m) totalAvail_cm += prod.cable_length_m * 100;
   }
-  if (totalAvail_cm <= 0 || totalAvail_cm >= stair.totalCableLength_cm) return; // enough cable or no product
+  if (totalAvail_cm <= 0 || totalAvail_cm >= stair.totalCableLength_cm) {
+    // Nok kabel (eller intet produkt valgt ennå) — hele behovet er dekket, ingen avkorting.
+    stair.coveredCableLength_cm = stair.totalCableLength_cm;
+    return;
+  }
 
   const surfs = stair.surfaces || [];
   const runs = stair.runs || [];
-  if (!runs.length) return;
+  if (!runs.length) { stair.coveredCableLength_cm = 0; return; }
 
   // Group runs by surface index, preserving order
   const surfOrder = [];
@@ -21147,6 +21176,9 @@ function _truncateStairCableToProduct(stair) {
 
   stair.runs = keptRuns;
   stair.connections = keptConns;
+  // DEKKET = det som faktisk ble brukt av tilgjengelig kabel. remaining_cm kan gå negativ (kabelen
+  // tok slutt midt i en sving/overgang) — da er alt tilgjengelig brukt opp, ikke mer.
+  stair.coveredCableLength_cm = Math.round((totalAvail_cm - Math.max(0, remaining_cm)) * 10) / 10;
 }
 
 // ── Strip room-bounds clamping ──
