@@ -19081,8 +19081,6 @@ function _renderStairSettingsPanel(stairId) {
   const surfs = stair.surfaces || [];
   const areaCm2 = surfs.reduce((s,f) => s + (f.w_cm||0) * (f.d_cm||0), 0);
   const areaM2 = areaCm2 / 10000;
-  const totalW = prod?.watt_per_m ? Math.round(fit.neededLength_m * prod.watt_per_m) : 0;
-  const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
   const stepWm2 = _stairPerStepWm2(stair);
   const firstTread = surfs.find(s => s.type === 'tread');
   const firstTreadIdx = firstTread ? surfs.indexOf(firstTread) : -1;
@@ -19110,6 +19108,12 @@ function _renderStairSettingsPanel(stairId) {
   // Per-cable breakdown
   const cableBreakdown = _stairCableLengthBreakdown(stair);
   const isMultiCable = cableBreakdown.length > 1;
+  // STEG 7 (Soner)/flerkabel: total effekt er summen av HVER kabels egen watt (egen lengde × eget
+  // produkts watt_per_m) — ikke ett produkts rate ganget med hele behovet, som var feil så snart
+  // kablene i settet ikke er identiske (alltid tilfelle i sone-modus, ofte i STEG 3-6s eksakte løsning).
+  const totalW = cableBreakdown.length ? cableBreakdown.reduce((s, cb) => s + (cb.watts || 0), 0)
+    : (prod?.watt_per_m ? Math.round(fit.neededLength_m * prod.watt_per_m) : 0);
+  const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
   let cableBreakdownHtml = '';
   if (cableBreakdown.length > 0) {
     for (const cb of cableBreakdown) {
@@ -19144,9 +19148,17 @@ function _renderStairSettingsPanel(stairId) {
     </div>`;
   }
 
+  // STEG 7 (Soner): trapp-byggerens segment-liste gjenbrukes til å redigere form OG sone-merking
+  // (Kenneth 19.08.2026 — ikke bygg ny UI). Feilbanner når soneløsningen ikke gikk opp (hull, eller
+  // en sone for stor for lengste tilgjengelige kabel) — forrige gyldige utlegg beholdes til fikset.
+  const zonesActive = !!(stair.segments || []).some(s => s.zone != null);
+  const zoneErrorHtml = stair.zoneError ? `<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:6px 8px;font-size:11px;color:#ef4444;margin-bottom:8px">⚠ ${esc(stair.zoneError)}</div>` : '';
+  const editShapeBtn = `<button onclick="showStairEditModal(${stair.id})" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:11px;margin-bottom:8px">✎ Rediger trinn/soner${zonesActive ? ' (soner på)' : ''}</button>`;
+
   return `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">
-    <div style="font-weight:600;font-size:13px;margin-bottom:8px">${isMultiCable ? 'Kabler' : 'Kabel'} — Resultat</div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>
+    <div style="font-weight:600;font-size:13px;margin-bottom:8px">${zonesActive ? 'Soner' : isMultiCable ? 'Kabler' : 'Kabel'} — Resultat</div>
+    ${zoneErrorHtml}${editShapeBtn}
+    ${!isMultiCable ? `<div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>` : ''}
     <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:6px">
       ${cableBreakdownHtml}
     </div>
@@ -20448,6 +20460,20 @@ function generateStairCable(stair) {
   const noseOff = stair.noseOffset_cm ?? 2;
   const landingMargin = stair.landingMargin_cm ?? 5; // repos' EGEN dybdemargin — ikke sidemarginen (Regel 2)
 
+  // STEG 7 (Soner): når brukeren har merket segmenter i den eksisterende segment-listen med en
+  // sone, gjelder EGEN sidemargin per sone (Regel 12 «innenfor DEN sonen») — se _stairZoneRanges.
+  // stair.cables[k] må da inneholde k'te sones fromSurf/toSurf/edgeMargin_cm (satt av
+  // _stairSolveZones, kalt fra _regenerateStairCable FØR denne funksjonen). stair.zoneError !=
+  // null betyr forrige soneløsning feilet (hull/for stor sone) — da faller vi tilbake til vanlig,
+  // udelt ruting med FORRIGE gyldige stair.cables i stedet for å tegne et mistilpasset utlegg.
+  const zoneRanges = !stair.zoneError ? _stairZoneRanges(stair) : null;
+  const zoneMarginForSurf = (si) => {
+    if (!zoneRanges) return edgeMargin;
+    const z = zoneRanges.findIndex(r => si >= r.fromSurf && si <= r.toSurf);
+    const cable = z >= 0 ? (stair.cables || [])[z] : null;
+    return (cable && cable.edgeMargin_cm != null) ? cable.edgeMargin_cm : edgeMargin;
+  };
+
   // Pass 1: bygg rutingen som ÉN ordnet sekvens av strekk (STEG 1, Regel 11) — hver streng og hvert
   // opptrinn i den rekkefølgen kabelen faktisk følger, uten noe kabel-eierskap ennå. `isGoingRight`
   // er retningen strengen faktisk legges i (samme paritet som sikksakk-tegningen), og avgjør senere
@@ -20467,9 +20493,10 @@ function generateStairCable(stair) {
     const usableDepth = depthEnd - depthStart;
     if (usableDepth < 0.5) continue;
 
+    const surfMargin = zoneMarginForSurf(si);
     const surfW = surf.w_cm || stair.width_cm || 120;
-    const xStart = edgeMargin;
-    const xEnd = surfW - edgeMargin;
+    const xStart = surfMargin;
+    const xEnd = surfW - surfMargin;
     const runLength = xEnd - xStart;
     if (runLength <= 0) continue;
 
@@ -20500,17 +20527,45 @@ function generateStairCable(stair) {
     prevExitRight = exitRight;
   }
 
-  // Pass 2 (STEG 1+2, Regel 11): fordel den ordnede sekvensen på kablene i stair.cables[] — på
-  // METER, ikke på flate-antall. Kapasiteten kommer fra det VALGTE produktets lengde per kabel
-  // (Infinity når intet produkt er valgt ennå, eller stair.cables mangler helt — ingen avkorting).
-  // Dette gjelder likt for én ELLER flere kabler: samme løp erstatter den tidligere separate
-  // _truncateStairCableToProduct-etterhåndspassen for enkeltkabel-avkorting (Regel 8) — én kabel
-  // som er for kort til behovet, splittes her akkurat som en flerkabel-skjøt ville gjort.
   const cables = stair.cables || [];
-  const capacities = cables.length
-    ? cables.map(c => { const p = c.productId ? HEATING_PRODUCTS.find(pp => pp.id === c.productId) : null; return p?.cable_length_m ? p.cable_length_m * 100 : Infinity; })
-    : [Infinity];
-  const alloc = _stairAllocateCables(pieces, capacities);
+  let alloc;
+  if (zoneRanges) {
+    // STEG 7 (Soner): hver sone er UAVHENGIG — ingen meter-fordeling eller skjøt går på tvers av
+    // en sonegrense (det ER hele poenget: brukeren ba eksplisitt om separate kabler per sone).
+    // Opptrinnet MELLOM to soner hører derfor ikke til noen av dem — det er der én kabel slutter
+    // og en annen, fysisk atskilt kabel begynner, ikke et sømløst skjøtepunkt (STEG 2 gjelder
+    // fortsatt INNENFOR en sone, ikke over sonegrensen). Kaller samme _stairAllocateCables som
+    // resten av motoren, bare én gang per sone med akkurat den sonens ene kabel.
+    const runs = [], connections = [];
+    const cableLens = cables.map(() => 0);
+    let covered_cm = 0;
+    for (let zi = 0; zi < zoneRanges.length; zi++) {
+      const r = zoneRanges[zi];
+      const zonePieces = pieces.filter(p => p.kind === 'run'
+        ? (p.surfaceIdx >= r.fromSurf && p.surfaceIdx <= r.toSurf)
+        : (p.fromSurf >= r.fromSurf && p.toSurf <= r.toSurf));
+      const cable = cables[zi];
+      const prod = cable && cable.productId ? HEATING_PRODUCTS.find(pp => pp.id === cable.productId) : null;
+      const capacity = prod?.cable_length_m ? prod.cable_length_m * 100 : Infinity;
+      const zoneAlloc = _stairAllocateCables(zonePieces, [capacity]);
+      for (const run of zoneAlloc.runs) { run.segments.forEach(s => { s.cableIdx = zi; }); run.cableIdx = zi; runs.push(run); }
+      for (const conn of zoneAlloc.connections) { conn.segments.forEach(s => { s.cableIdx = zi; }); conn.cableIdx = zi; connections.push(conn); }
+      cableLens[zi] = zoneAlloc.cableLens[0] || 0;
+      covered_cm += zoneAlloc.covered_cm;
+    }
+    alloc = { runs, connections, cableLens, covered_cm };
+  } else {
+    // Pass 2 (STEG 1+2, Regel 11): fordel den ordnede sekvensen på kablene i stair.cables[] — på
+    // METER, ikke på flate-antall. Kapasiteten kommer fra det VALGTE produktets lengde per kabel
+    // (Infinity når intet produkt er valgt ennå, eller stair.cables mangler helt — ingen avkorting).
+    // Dette gjelder likt for én ELLER flere kabler: samme løp erstatter den tidligere separate
+    // _truncateStairCableToProduct-etterhåndspassen for enkeltkabel-avkorting (Regel 8) — én kabel
+    // som er for kort til behovet, splittes her akkurat som en flerkabel-skjøt ville gjort.
+    const capacities = cables.length
+      ? cables.map(c => { const p = c.productId ? HEATING_PRODUCTS.find(pp => pp.id === c.productId) : null; return p?.cable_length_m ? p.cable_length_m * 100 : Infinity; })
+      : [Infinity];
+    alloc = _stairAllocateCables(pieces, capacities);
+  }
 
   return {
     runs: alloc.runs,
@@ -20728,8 +20783,10 @@ function _stairCableLengthBreakdown(stair) {
 
     result.push({
       cableIdx: ci,
-      label: 'K' + (ci + 1),
-      color: STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0],
+      // STEG 7 (Soner): cableObj.zone er satt av _stairSolveZones — vis «Sone N» i stedet for
+      // den generiske «K1/K2» når kabelen faktisk representerer en brukerdefinert sone.
+      label: cableObj?.zone != null ? ('Sone ' + cableObj.zone) : ('K' + (ci + 1)),
+      color: cableObj?.color || STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0],
       product: prod,
       stepsLength_m: Math.round(ad.stepsLen / 100 * 10) / 10,
       reposLength_m: Math.round(ad.reposLen / 100 * 10) / 10,
@@ -20746,7 +20803,69 @@ function _stairCableLengthBreakdown(stair) {
   return result;
 }
 
-const STAIR_CABLE_COLORS = ['#e06030', '#3080e0', '#30b050'];
+const STAIR_CABLE_COLORS = ['#e06030', '#3080e0', '#30b050', '#c040d0', '#e0b030', '#30c0c0'];
+
+// STEG 7 (Soner, spec-trapp-kabelutlegg.md «Soner», Kenneth 19.08.2026: gjenbruk EKSISTERENDE
+// segment-liste i trapp-byggeren — ikke bygg noe nytt utvalgsverktøy). Brukeren merker rader i den
+// listen (stair.segments[i].zone) med et sonenummer; en sone er derfor alltid ett eller flere HELE
+// segmenter (flate-granularitet nås ved å dele opp segmentet i byggeren, ikke via en egen UI).
+// Grupperer stair.surfaces (via deres segIdx, satt av _generateStairSurfaces) i sammenhengende
+// soner. Returnerer null når soner ikke er i bruk (ingen segmenter har zone satt) — automatisk
+// oppdeling er standard, soner er en overstyring brukeren slår på selv.
+function _stairZoneRanges(stair) {
+  const segs = stair.segments || [];
+  if (!segs.some(s => s.zone != null)) return null;
+  const surfs = stair.surfaces || [];
+  if (!surfs.length) return null;
+  const ranges = [];
+  let curZone, curFrom = -1;
+  for (let si = 0; si < surfs.length; si++) {
+    const seg = segs[surfs[si].segIdx];
+    const z = seg && seg.zone != null ? seg.zone : null; // null = hull (uzonet segment)
+    if (si === 0 || z !== curZone) {
+      if (curFrom >= 0) ranges.push({ zone: curZone, fromSurf: curFrom, toSurf: si - 1 });
+      curZone = z; curFrom = si;
+    }
+  }
+  ranges.push({ zone: curZone, fromSurf: curFrom, toSurf: surfs.length - 1 });
+  return ranges;
+}
+
+// Løser kabel + margin for HVER sone uavhengig (Regel 11-13 gjelder likt, bare skalert ned til
+// sonens egne flater — gjenbruker _stairSolveExactCableSet med maxCables:1, jf. spec: «Hver sone
+// dimensjoneres etter de samme reglene ... kabelen i full lengde»). Bygger stair.cables[] med ÉN
+// oppføring per sone, i sonerekkefølge, hver med sin egen fromSurf/toSurf/edgeMargin_cm — dette
+// ER hele grensesnittet generateStairCable trenger for å tegne sonene (se zoneRanges der).
+// Returnerer { ok:true, cables:[...] } eller { ok:false, reason, zoneResults:[...] } — sistnevnte
+// lar panelet vise HVILKEN sone som feilet, ikke bare at «noe» feilet (spec: «si fra hvis brukeren
+// lager et hull», og «sone for stor for lengste tilgjengelige kabel: si fra»).
+function _stairSolveZones(stair) {
+  const ranges = _stairZoneRanges(stair);
+  if (!ranges) return { ok: false, reason: 'Ingen soner satt.' };
+  if (ranges.some(r => r.zone == null)) {
+    return { ok: false, reason: 'Hull i soneinndelingen: ett eller flere segmenter mangler sone. Alle segmenter må ha en sone når soner er i bruk.' };
+  }
+
+  const cables = [];
+  const zoneResults = [];
+  for (let zi = 0; zi < ranges.length; zi++) {
+    const r = ranges[zi];
+    const subStair = { ...stair, edgeMargin_cm: stair.edgeMargin_cm || 5, surfaces: stair.surfaces.slice(r.fromSurf, r.toSurf + 1) };
+    const solved = _stairSolveExactCableSet(subStair, { maxCables: 1 });
+    zoneResults.push({ zone: r.zone, fromSurf: r.fromSurf, toSurf: r.toSurf, solved });
+    if (!solved.ok) continue;
+    cables.push({
+      index: zi, zone: r.zone, fromSurf: r.fromSurf, toSurf: r.toSurf,
+      productId: solved.products[0].id, edgeMargin_cm: solved.edgeMargin_cm,
+      color: STAIR_CABLE_COLORS[zi % STAIR_CABLE_COLORS.length],
+    });
+  }
+  const failed = zoneResults.filter(z => !z.solved.ok);
+  if (failed.length) {
+    return { ok: false, reason: `Sone ${failed.map(f => f.zone).join(', ')}: ${failed[0].solved.reason}`, zoneResults };
+  }
+  return { ok: true, cables, zoneResults };
+}
 
 // STEG 3+4(korrigert av Kenneth 19.08.2026)+5+6 (Regel 11-13, spec-trapp-kabelutlegg.md): finn et
 // kabelsett OG en sidemargin som til sammen dekker ruta EKSAKT — ALDRI ved å tette CC. Kenneth
@@ -21272,9 +21391,28 @@ function _createStairObj(params) {
 
 function _regenerateStairCable(stair) {
   stair.surfaces = _generateStairSurfaces(stair);
+  // STEG 7 (Soner): løs kabel+margin PER sone FØR selve rutingen bygges — generateStairCable leser
+  // stair.cables[zi].fromSurf/toSurf/edgeMargin_cm direkte (satt her), én oppføring per sone. Feiler
+  // løsningen (hull i soneinndelingen, eller en sone for stor for lengste tilgjengelige kabel), vis
+  // feilen (Regel 11/Soner: «si fra») og behold FORRIGE gyldige stair.cables i stedet for å tegne et
+  // ugyldig/mistilpasset utlegg — stair.zoneError styrer om generateStairCable faktisk bruker sonene.
+  const zoneRanges = _stairZoneRanges(stair);
+  if (zoneRanges) {
+    const solved = _stairSolveZones(stair);
+    if (solved.ok) { stair.cables = solved.cables; stair.zoneError = null; }
+    else { stair.zoneError = solved.reason; }
+    stair.zoneResults = solved.zoneResults || null;
+  } else {
+    stair.zoneError = null;
+    stair.zoneResults = null;
+    // Soner nettopp slått av (alle segmenter satt tilbake til «Auto») — rydd bort de gamle sone-
+    // kablene i stedet for å la dem henge igjen som et vilkårlig flerkabel-oppsett. Spec (Soner):
+    // «Slå soner av igjen: automatisk oppdeling tar over, UTEN RESTER fra sone-modus.»
+    if ((stair.cables || []).some(c => c.zone != null)) stair.cables = [];
+  }
   // Ensure cables[] has backward-compat fallback
   if (!stair.cables || !stair.cables.length) {
-    stair.cables = [{ index: 0, productId: stair.cableProductId, surfaceRange: [0, Math.max(0, (stair.surfaces||[]).length - 1)], color: STAIR_CABLE_COLORS[0] }];
+    stair.cables = [{ index: 0, productId: stair.cableProductId, color: STAIR_CABLE_COLORS[0] }];
   }
   const layout = generateStairCable(stair);
   stair.runs = layout.runs;
@@ -26913,7 +27051,9 @@ let _stairBuilderDir = 'bottom'; // 'bottom' = start from bottom, build up
 let _stairBuilderNewIdx = null; // index of the just-added segment, for the "new" highlight (STEG 4)
 let _stairBuilderJustAdded = false; // one-shot: scroll/focus the new segment only right after adding it,
                                      // not on every re-render (e.g. toggling build direction)
+let _stairBuilderEditingId = null; // STEG 7: null = bygger ny trapp, ellers id-en til trappa som redigeres
 const STAIR_BUILDER_DEFAULT_STEP_COUNT = 1;
+const STAIR_MAX_ZONES = 4; // matcher STAIR_CABLE_COLORS-paletten
 
 function showAddStairModal() { showStairBuilderModal(); } // alias for backward compat
 
@@ -26923,6 +27063,22 @@ function showStairBuilderModal() {
   ];
   _stairBuilderDir = 'bottom';
   _stairBuilderNewIdx = null;
+  _stairBuilderEditingId = null;
+  _renderStairBuilderModal();
+}
+
+// STEG 7 (Soner): gjenåpner SAMME bygger-modal for en ALLEREDE plassert trapp, forhåndsutfylt fra
+// dens egne segmenter — Kenneths instruks var å gjenbruke den eksisterende segment-listen, ikke
+// bygge et nytt verktøy. _confirmAddStair oppdaterer trappa i stedet for å opprette en ny når
+// _stairBuilderEditingId er satt.
+function showStairEditModal(stairId) {
+  const stair = S.stairs.find(s => s.id === stairId);
+  if (!stair) return;
+  if (!stair.segments || !stair.segments.length) _migrateStairToSegments(stair);
+  _stairBuilderSegs = JSON.parse(JSON.stringify(stair.segments));
+  _stairBuilderDir = stair.buildDirection || 'bottom';
+  _stairBuilderNewIdx = null;
+  _stairBuilderEditingId = stairId;
   _renderStairBuilderModal();
 }
 
@@ -26955,11 +27111,18 @@ function _renderStairBuilderModal() {
     const isNew = realIdx === _stairBuilderNewIdx;
     const cardBorder = isNew ? '1px solid #4ea8ff' : '1px solid var(--brd)';
     const cardShadow = isNew ? ';box-shadow:0 0 0 1px #4ea8ff' : '';
+    // STEG 7 (Soner, Kenneth 19.08.2026: gjenbruk denne listen, ikke bygg ny UI): «Sone»-velger
+    // per rad. En sone er alltid ett eller flere HELE segmenter — vil brukeren dele et sone-skille
+    // midt i et flertrinns-segment, må segmentet først deles i byggeren (samme ＋/✕-knapper som
+    // allerede finnes), ikke via en egen finkornet utvalgs-UI.
+    let zoneOpts = `<option value=""${seg.zone == null ? ' selected' : ''}>Auto</option>`;
+    for (let zn = 1; zn <= STAIR_MAX_ZONES; zn++) zoneOpts += `<option value="${zn}"${seg.zone === zn ? ' selected' : ''}>Sone ${zn}</option>`;
+    const zoneSelectHtml = `<select onchange="_stairBuilderSetZone(${realIdx},this.value)" style="padding:3px 4px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:11px" title="Sone (overstyrer automatisk kabeldeling)">${zoneOpts}</select>`;
     if (seg.type === 'steps') {
       segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px;margin-bottom:6px${cardShadow}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span style="font-weight:600;font-size:13px;color:var(--text)"><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Trinn${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span>
-          ${isOnly ? '' : `<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>`}
+          <span style="display:flex;align-items:center;gap:6px">${zoneSelectHtml}${isOnly ? '' : `<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>`}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
           <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" oninput="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
@@ -26972,7 +27135,7 @@ function _renderStairBuilderModal() {
       segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px;margin-bottom:6px${cardShadow}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span style="font-weight:600;font-size:13px;color:var(--text)">⬜ Repos${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span>
-          <button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>
+          <span style="display:flex;align-items:center;gap:6px">${zoneSelectHtml}<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button></span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
           <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" oninput="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
@@ -26990,11 +27153,11 @@ function _renderStairBuilderModal() {
 
   const html = `<div class="modal-backdrop" id="stair-modal-bg" onclick="if(event.target===this)this.remove()" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45)">
     <div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(500px,92vw);max-height:88vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
-      <h3 style="margin:0 0 14px;font-size:16px;color:var(--text)">🪜 Bygg trapp</h3>
+      <h3 style="margin:0 0 14px;font-size:16px;color:var(--text)">🪜 ${_stairBuilderEditingId != null ? 'Rediger trinn/soner' : 'Bygg trapp'}</h3>
 
       <!-- Name + direction row -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px;margin-bottom:12px">
-        <label style="color:var(--muted)">Navn<br><input id="stair-name" value="Trapp" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
+      <div style="display:grid;grid-template-columns:${_stairBuilderEditingId != null ? '1fr' : '1fr 1fr'};gap:8px 12px;font-size:13px;margin-bottom:12px">
+        ${_stairBuilderEditingId != null ? '' : `<label style="color:var(--muted)">Navn<br><input id="stair-name" value="Trapp" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>`}
         <label style="color:var(--muted)">Byggeretning<br><select id="stair-build-dir" onchange="_stairBuilderDir=this.value;_renderStairBuilderModal()" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px">
           <option value="bottom"${_stairBuilderDir==='bottom'?' selected':''}>Nedenfra og opp</option>
           <option value="top"${_stairBuilderDir==='top'?' selected':''}>Ovenfra og ned</option>
@@ -27025,6 +27188,7 @@ function _renderStairBuilderModal() {
         ${stats.landings > 0 ? `<span>⬜ ${stats.landings} repos</span>` : ''}
       </div>
 
+      ${_stairBuilderEditingId != null ? `<div style="font-size:11px;color:var(--dim);margin-bottom:12px">Kabelvalg, CC og margin endres i innstillingspanelet — denne dialogen endrer kun form og soner.</div>` : `
       <!-- Cable product -->
       <div style="margin-bottom:12px;font-size:13px">
         <label style="color:var(--muted)">Kabelprodukt<br><select id="stair-product" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px">${prodOpts}</select></label>
@@ -27034,12 +27198,12 @@ function _renderStairBuilderModal() {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;font-size:13px;margin-bottom:14px">
         <label style="color:var(--muted)">Maks CC trinn (cm)<br><input id="stair-step-cc" type="number" value="10" min="3" max="12" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
         <label style="color:var(--muted)">Maks CC repos (cm)<br><input id="stair-landing-cc" type="number" value="10" min="3" max="12" step="0.5" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:13px"></label>
-      </div>
+      </div>`}
 
       <!-- Action buttons -->
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button onclick="document.getElementById('stair-modal-bg').remove()" style="padding:8px 16px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:13px">Avbryt</button>
-        <button onclick="_confirmAddStair()" style="padding:8px 16px;border-radius:6px;border:none;background:#4ea8ff;color:#fff;cursor:pointer;font-size:13px;font-weight:600" ${segs.length===0?'disabled':''}>Plasser trapp</button>
+        <button onclick="_confirmAddStair()" style="padding:8px 16px;border-radius:6px;border:none;background:#4ea8ff;color:#fff;cursor:pointer;font-size:13px;font-weight:600" ${segs.length===0?'disabled':''}>${_stairBuilderEditingId != null ? 'Lagre endringer' : 'Plasser trapp'}</button>
       </div>
     </div>
   </div>`;
@@ -27083,6 +27247,14 @@ function _stairBuilderUpd(segIdx, key, val) {
       statsEl.innerHTML = `<span><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> ${stats.totalSteps} trinn</span><span><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> ${stats.totalHeight} cm høyde</span><span><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> ${stats.totalDepth} cm dybde</span>${stats.landings > 0 ? '<span>⬜ ' + stats.landings + ' repos</span>' : ''}`;
     }
   }
+}
+
+// STEG 7 (Soner): sonevelgeren trenger ingen preview/stats-oppdatering (påvirker ikke
+// trinnantall/høyde/dybde) — kun re-render selve listen, så andre rader sin «Auto»-liste ikke
+// trenger å endre seg (ingen avhengighet mellom rader å vise).
+function _stairBuilderSetZone(segIdx, val) {
+  if (!_stairBuilderSegs[segIdx]) return;
+  _stairBuilderSegs[segIdx].zone = val === '' ? null : parseInt(val, 10);
 }
 
 function _stairBuilderAddSeg(type) {
@@ -27191,6 +27363,10 @@ function _stairBuilderPreviewSVG() {
 }
 
 function _confirmAddStair() {
+  // STEG 7 (Soner): samme modal brukes til å REDIGERE en allerede plassert trapps segmenter/soner
+  // (showStairEditModal) — da oppdateres den eksisterende trappa i stedet for å opprette en ny.
+  if (_stairBuilderEditingId != null) { _confirmEditStairSegments(); return; }
+
   const nameEl = document.getElementById('stair-name');
   const prodEl = document.getElementById('stair-product');
   const stepCCEl = document.getElementById('stair-step-cc');
@@ -27222,6 +27398,24 @@ function _confirmAddStair() {
   const cy = S.view.panY;
   S.ui.stairPlaceParams = params;
   _placeStairAt(cx, cy);
+}
+
+// STEG 7 (Soner): lagre endringer fra showStairEditModal. Oppdaterer KUN geometrien
+// (segments/buildDirection, som soner henger på) — rører ikke kabelvalg/CC/margin, som allerede
+// har egne kontroller i innstillingspanelet og ikke skal nullstilles av å redigere formen.
+function _confirmEditStairSegments() {
+  const stair = S.stairs.find(s => s.id === _stairBuilderEditingId);
+  const bg = document.getElementById('stair-modal-bg');
+  if (bg) bg.remove();
+  _stairBuilderEditingId = null;
+  if (!stair) return;
+  pushUndo();
+  stair.segments = JSON.parse(JSON.stringify(_stairBuilderSegs));
+  stair.buildDirection = _stairBuilderDir;
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  renderSidebar(); updateCtxBar(); render();
+  _updateStairSettingsPanel();
 }
 
 function _placeStairAt(wx, wy) {
