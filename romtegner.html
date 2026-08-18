@@ -37294,12 +37294,22 @@ async function exportPDF(opts) {
     if (_pageStarted) _addPage(); else _pageStarted = true;
     doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(20, 40, 80);
     doc.text('Trapp: ' + (stair.name || 'Trapp'), M, y); y += 8;
-    // Stair image
+    // STEG 6 (Kenneth 19.08.2026): stairImg ble tidligere tvunget inn i en FAST 5:3-boks
+    // (imgW×imgW*0.6) uansett kildebildets faktiske form — for en portrett-formet (høy, smal) trapp
+    // vranger dette bildet vertikalt/horisontalt i tillegg til at kilden selv var lavoppløst. PNG,
+    // ekte format og evt. bånd (_renderStairPrintImages) stables nå under hverandre, hver med SIN
+    // EGEN oppløsning og aspekt bevart (bredde=pw, høyde utledet — aldri strukket).
     try {
-      const stairImg = _renderStairToImage(stair);
-      const imgW = pw, imgH = pw * 0.6;
-      doc.addImage(stairImg, 'JPEG', M, y, imgW, imgH);
-      y += imgH + 6;
+      const stairImages = _renderStairPrintImages(stair);
+      const maxImgH = H - 2 * M;
+      for (const img of stairImages) {
+        let drawW = pw, drawH = pw / img.aspect;
+        if (drawH > maxImgH) { const s = maxImgH / drawH; drawH = maxImgH; drawW = pw * s; }
+        _checkPage(drawH + 6);
+        doc.addImage(img.dataUrl, 'PNG', M + (pw - drawW) / 2, y, drawW, drawH);
+        y += drawH + 4;
+      }
+      y += 2;
     } catch(e) { y += 4; }
     // STEG 1 (Kenneth 19.08.2026, Regel 17): sammendragslinjen «Trinn: X | Bredde: Y | CC trinn: Z
     // | N løp per trinn» talte kun FØRSTE trinn-serie — en trapp kan ha trinn → repos → trinn med
@@ -38063,36 +38073,86 @@ function _renderRoomToImageOffscreen(room) {
   return offCanvas.toDataURL('image/png');
 }
 
-function _renderStairToImage(stair) {
-  const offW = 800, offH = 500;
-  const offCanvas = document.createElement('canvas');
-  offCanvas.width = offW; offCanvas.height = offH;
-  const c = offCanvas.getContext('2d');
-  c.fillStyle = '#ffffff';
-  c.fillRect(0, 0, offW, offH);
-
+// STEG 6 (Kenneth 19.08.2026, oppløsning på lange trapper): kjernen som faktisk tegner en trapp
+// (eller et BÅND av den — se _renderStairPrintImages under) til et frittstående canvas. Skilt ut
+// fra _renderStairToImage/_renderStairPrintImages slik at begge deler nøyaktig samme tegnekode —
+// kun oppløsning og hvilket surfaceIdx-intervall som tegnes varierer mellom kallerne.
+//
+// ROTÅRSAK (funnet ved arbeid med denne funksjonen): et fast 800×500-lerret ga ~0,29 px/cm på en
+// 150×1468cm-trapp (mot ~4,8 px/cm for et kvadratisk motiv — 17× bedre), fordi skalaen ble låst av
+// den KORTE siden i et lerret formet som gjennomsnittstrappen, ikke motivets eget format. Lerretet
+// følger nå motivets sanne form, dimensjonert mot en ønsket trykt oppløsning i stedet.
+function _stairDrawToCanvas(stair, opts) {
+  opts = opts || {};
   const surfs = stair.surfaces;
-  if (!surfs || !surfs.length) return offCanvas.toDataURL('image/jpeg', 0.85);
+  const offCanvas = document.createElement('canvas');
+  if (!surfs || !surfs.length) {
+    offCanvas.width = 160; offCanvas.height = 100;
+    const c0 = offCanvas.getContext('2d');
+    c0.fillStyle = '#ffffff'; c0.fillRect(0, 0, 160, 100);
+    return offCanvas;
+  }
 
-  // Calculate bounds
+  // Båndstøtte (STEG 6, "del lange trapper i bånd"): render bare surfaceIdx [rFrom,rTo] — resten
+  // av tegnekoden er UENDRET og indekserer fortsatt i det fulle `surfs`-arrayet, så run.surfaceIdx/
+  // conn.fromSurf/toSurf slår opp riktig flate uansett hvilket bånd som tegnes.
+  const range = opts.surfaceRange || [0, surfs.length - 1];
+  const rFrom = range[0], rTo = range[1];
+
+  // Calculate bounds — kun for flatene i dette båndet.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const sf of surfs) {
+  for (let i = rFrom; i <= rTo; i++) {
+    const sf = surfs[i];
     minX = Math.min(minX, sf.x_cm);
     minY = Math.min(minY, sf.y_cm);
     maxX = Math.max(maxX, sf.x_cm + sf.w_cm);
     maxY = Math.max(maxY, sf.y_cm + sf.d_cm);
   }
   const sW = maxX - minX, sH = maxY - minY;
-  const pad = 40;
-  const scale = Math.min((offW - 2*pad) / sW, (offH - 2*pad) / sH);
-  const ox = pad + ((offW - 2*pad) - sW*scale) / 2;
-  const oy = pad + ((offH - 2*pad) - sH*scale) / 2;
+
+  // Lerretet dimensjoneres mot en ønsket TRYKT oppløsning (150 dpi), IKKE et fast pikselmål — et
+  // kvadratisk motiv og en lang, smal trapp får dermed hver sin riktige piksel-tetthet i stedet for
+  // at begge deles på samme faste lerret. Tak på totalt antall piksler (empirisk avveid mot
+  // filstørrelse, se commit-tallene) holder en VANLIG trapp sin PDF like liten som før.
+  //
+  // VIKTIG: målet er den TRYKTE bredden bildet FAKTISK ender opp med i PDF-en, ikke alltid full
+  // sidebredde. PDF-plasseringen (se _renderStairPrintImages-kalleren) skalerer til sidebredde
+  // (~180mm) OG faller tilbake til å begrense av sidehøyden (~267mm) for et høyt/smalt motiv — uten
+  // dette ville en smal trapp fått unødig høy oppløsning basert på en bredde den aldri faktisk
+  // skrives ut i (nettopp derfor ble en «normal» smal trapp foreløpig like stor som Kenneths lange
+  // — feilen ble funnet og rettet under verifisering av denne STEGen, se commit-tallene).
+  // opts.rotated forteller hvilken verdens-akse (bredde ELLER dybde) som ender opp som den TRYKTE
+  // bredden etter at _stairRotateCanvas90 har snudd bildet — selve pikseltettheten (px/cm) er lik
+  // uansett rotasjon, kun hvilken led som telles som "bredde" ved dimensjonering av print-boksen.
+  const PRINT_W_IN = 7.09, PRINT_MAX_H_IN = 10.51, TARGET_DPI = 150, MAX_PIXELS = 1400000, padCm = 4;
+  const printW_cm = (opts.rotated ? sH : sW) + padCm * 2;
+  const printH_cm = (opts.rotated ? sW : sH) + padCm * 2;
+  const printAspect = printW_cm / printH_cm;
+  const printW_in = Math.min(PRINT_W_IN, PRINT_MAX_H_IN * printAspect);
+  const totalW_cm = sW + padCm * 2, totalH_cm = sH + padCm * 2;
+  let pxPerCm = (printW_in * TARGET_DPI) / printW_cm;
+  let offW = Math.round(totalW_cm * pxPerCm), offH = Math.round(totalH_cm * pxPerCm);
+  if (offW * offH > MAX_PIXELS) {
+    const s = Math.sqrt(MAX_PIXELS / (offW * offH));
+    pxPerCm *= s; offW = Math.round(totalW_cm * pxPerCm); offH = Math.round(totalH_cm * pxPerCm);
+  }
+  offW = Math.max(offW, 160); offH = Math.max(offH, 100);
+
+  offCanvas.width = offW; offCanvas.height = offH;
+  const c = offCanvas.getContext('2d');
+  c.fillStyle = '#ffffff';
+  c.fillRect(0, 0, offW, offH);
+
+  const scale = pxPerCm;
+  const ox = padCm * scale, oy = padCm * scale;
   const tx = wx => ox + (wx - minX) * scale;
   const ty = wy => oy + (wy - minY) * scale;
 
-  // Draw surfaces
+  // Draw surfaces (kun båndets eget intervall)
   let _lNum = 0;
-  for (const sf of surfs) {
+  for (let i = 0; i < rFrom; i++) if (surfs[i].type === 'landing') _lNum++; // repos-nummer fortsetter riktig over en båndgrense
+  for (let i = rFrom; i <= rTo; i++) {
+    const sf = surfs[i];
     if (sf.type === 'landing') _lNum++;
     const x1 = tx(sf.x_cm), y1 = ty(sf.y_cm);
     const w = sf.w_cm * scale, h = sf.d_cm * scale;
@@ -38101,7 +38161,7 @@ function _renderStairToImage(stair) {
     c.strokeStyle = '#888'; c.lineWidth = 1;
     c.strokeRect(x1, y1, w, h);
     // Label
-    c.fillStyle = '#666'; c.font = '11px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#666'; c.font = Math.max(11, Math.round(scale * 3)) + 'px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
     const lbl = sf.type === 'landing' ? 'Repos ' + _lNum : '' + ((sf.stepIdx != null ? sf.stepIdx : sf.index) + 1);
     c.fillText(lbl, x1 + w/2, y1 + h/2);
   }
@@ -38110,7 +38170,7 @@ function _renderStairToImage(stair) {
   if (stair.runs && stair.runs.length > 0) {
     const hasMulti = (stair.cables || []).length > 1;
     const COLORS = ['#e06030', '#3080e0', '#30b050'];
-    c.lineWidth = 1.5; c.lineCap = 'round';
+    c.lineWidth = Math.max(1.5, scale * 0.3); c.lineCap = 'round';
     const runsBySurf = {};
     for (const r of stair.runs) { if (!runsBySurf[r.surfaceIdx]) runsBySurf[r.surfaceIdx] = []; runsBySurf[r.surfaceIdx].push(r); }
     // Regel 9: inngangsside følger motorens paritetskjede (stair.connections[].exitRight) — se
@@ -38119,6 +38179,7 @@ function _renderStairToImage(stair) {
     for (const conn of (stair.connections || [])) entryRightBySurf[conn.toSurf] = conn.exitRight;
 
     for (const [si, surfRuns] of Object.entries(runsBySurf)) {
+      if (+si < rFrom || +si > rTo) continue; // STEG 6: kun dette båndets flater
       const sf = surfs[+si];
       if (!sf) continue;
       const surfW = sf.w_cm || stair.width_cm || 120;
@@ -38144,7 +38205,7 @@ function _renderStairToImage(stair) {
           for (let sgi = 0; sgi < segs.length - 1; sgi++) {
             const jp = { x: tx(sf.x_cm + segs[sgi].end_cm), y: ty(sf.y_cm + run.pos_cm) };
             c.save(); c.fillStyle = '#111';
-            c.beginPath(); c.arc(jp.x, jp.y, 2.5, 0, Math.PI * 2); c.fill();
+            c.beginPath(); c.arc(jp.x, jp.y, Math.max(2.5, scale * 0.5), 0, Math.PI * 2); c.fill();
             c.strokeStyle = '#fff'; c.lineWidth = 0.8; c.stroke();
             c.restore();
           }
@@ -38172,21 +38233,21 @@ function _renderStairToImage(stair) {
         }
       }
     }
-    // Connections
+    // Connections — kun tegnet når BÅDE fra- og til-flaten er i dette båndet (en forbindelse som
+    // krysser en båndgrense tegnes ikke i noen av dem — samme prinsipp som et papirark som "fortsetter
+    // på neste ark": et lite, forventet brudd i tegningen der arket faktisk deles).
     if (stair.connections) {
       c.setLineDash([4,4]);
       for (const conn of stair.connections) {
+        if (conn.fromSurf < rFrom || conn.fromSurf > rTo || conn.toSurf < rFrom || conn.toSurf > rTo) continue;
         const fromSurf = surfs[conn.fromSurf], toSurf = surfs[conn.toSurf];
         if (!fromSurf || !toSurf) continue;
-        const fRuns = runsBySurf[conn.fromSurf]||[];
+        const runsBySurfConn = runsBySurf;
+        const fRuns = runsBySurfConn[conn.fromSurf]||[];
         if (fRuns.length) {
           const exitRight = conn.exitRight; // fra motoren — ikke regnet på nytt lokalt (Regel 9)
           const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : fromSurf.x_cm+(stair.edgeMargin_cm||5);
           const entryX = exitRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
-          // STEG 4 (Regel 14, funnet under arbeid med målsetting i denne funksjonen): denne PDF-
-          // kopien hadde fortsatt den GAMLE bunn-start-antakelsen (ay/by hardkodet) fra før STEG 2
-          // (valgfri snuing) — _drawStairPlan ble gjort retning-aware i aa20a3c, men denne
-          // nær-duplikat-koden ble ikke oppdatert samtidig. Samme fiks her.
           const ax = exitX, bx = entryX;
           const ay = stair.cableStartFromTop ? fromSurf.y_cm : fromSurf.y_cm + fromSurf.d_cm;
           const by = stair.cableStartFromTop ? toSurf.y_cm + toSurf.d_cm : toSurf.y_cm;
@@ -38218,15 +38279,16 @@ function _renderStairToImage(stair) {
     const edgeM = stair.edgeMargin_cm || 5;
     const riserOff = stair.riserOffset_cm ?? 2;
     c.strokeStyle = '#2090e0'; c.fillStyle = '#2090e0';
-    c.font = '9px sans-serif'; c.lineWidth = 0.8; c.setLineDash([]);
+    c.font = Math.max(9, Math.round(scale * 2.4)) + 'px sans-serif'; c.lineWidth = 0.8; c.setLineDash([]);
 
     const runsBySurfDim = {};
     for (const r of stair.runs) { (runsBySurfDim[r.surfaceIdx] = runsBySurfDim[r.surfaceIdx] || []).push(r); }
 
     // Regel 17/STEG 4 (kollisjon): en tikk-strek + tall trenger minst ~7px klaring i høyden for å
-    // være lesbar i trykk — på en lang, lavt skalert trapp (STEG 6s kjerneproblem) er det ofte ikke
-    // plass til CC-mål mellom hver streng. Dropp CC-etikettene (behold ende-målene) når det er trangt
-    // i stedet for å tegne tall oppå hverandre.
+    // være lesbar i trykk — på en lang, lavt skalert trapp er det ofte ikke plass til CC-mål mellom
+    // hver streng. Dropp CC-etikettene (behold ende-målene) når det er trangt i stedet for å tegne
+    // tall oppå hverandre. STEG 6s egen oppløsning/banding gjør dette sjeldnere nødvendig enn før,
+    // men grensetilfeller (svært mange løp per trinn) kan fortsatt kollidere.
     const MIN_LABEL_PX = 7;
 
     const tick = (ax, ay, bx, by, label, horiz) => {
@@ -38249,11 +38311,11 @@ function _renderStairToImage(stair) {
     const cablesImg = stair.cables || [];
     const nCablesImg = Math.max(1, cablesImg.length);
     for (let ci = 0; ci < nCablesImg; ci++) {
-      const cableRuns = stair.runs.filter(r => (r.cableIdx || 0) === ci);
+      const cableRuns = stair.runs.filter(r => (r.cableIdx || 0) === ci && r.surfaceIdx >= rFrom && r.surfaceIdx <= rTo);
       const firstTreadRun = cableRuns.find(r => surfs[r.surfaceIdx]?.type === 'tread');
       if (firstTreadRun) dimSurfacesImg.add(firstTreadRun.surfaceIdx);
     }
-    for (let si = 0; si < surfs.length; si++) {
+    for (let si = rFrom; si <= rTo; si++) {
       if (surfs[si].type === 'landing' && stair.runs.some(r => r.surfaceIdx === si)) dimSurfacesImg.add(si);
     }
 
@@ -38265,7 +38327,7 @@ function _renderStairToImage(stair) {
       const isLanding = surf.type === 'landing';
       const surfW = surf.w_cm || stair.width_cm || 120;
 
-      // Bredde-mål (sidemargin) kun på første dimensjonerte flate, over selve tegningen.
+      // Bredde-mål (sidemargin) kun på første dimensjonerte flate i BÅNDET, over selve tegningen.
       if (si === firstDimSurf) {
         const dimYw = surf.y_cm - 2 / scale; // 2px opp, uttrykt i world-cm for tx/ty
         const edgeTxt = _stairDimRound(edgeM) + '';
@@ -38287,7 +38349,89 @@ function _renderStairToImage(stair) {
     }
   }
 
-  return offCanvas.toDataURL('image/jpeg', 0.85);
+  return offCanvas;
+}
+
+// Enkelt forhåndsvisningsbilde (eksport-forhåndsvisning i appen, _expPreviewStair) — hele trappa,
+// urotert, ikke delt i bånd (ingen sideinndeling å ta hensyn til der, kun ett <img>).
+function _renderStairToImage(stair) {
+  return _stairDrawToCanvas(stair).toDataURL('image/png');
+}
+
+// STEG 6: roterer et ferdig tegnet lerret 90° (enkel bitmap-rotasjon av det FERDIGE bildet — rører
+// ikke selve tegnekoordinatene i _stairDrawToCanvas, som ville krevd å bytte om x/y i HVERT eneste
+// tx()/ty()-kall i funksjonen over og vært en betydelig større, mer risikabel omskriving for samme
+// resultat).
+function _stairRotateCanvas90(src) {
+  const rot = document.createElement('canvas');
+  rot.width = src.height; rot.height = src.width;
+  const rc = rot.getContext('2d');
+  rc.fillStyle = '#ffffff'; rc.fillRect(0, 0, rot.width, rot.height);
+  rc.translate(rot.width / 2, rot.height / 2);
+  rc.rotate(-Math.PI / 2);
+  rc.drawImage(src, -src.width / 2, -src.height / 2);
+  return rot;
+}
+
+// STEG 6: deler `surfs` i `nBands` sammenhengende intervaller med om lag lik VERDENS-dybde (cm) —
+// bruddpunktene legges ved flategrensen nærmest hver 1/nBands-del av total dybde, aldri midt i en
+// flate.
+function _stairSurfaceBands(surfs, nBands) {
+  if (nBands <= 1 || surfs.length <= 1) return [[0, surfs.length - 1]];
+  let minY = Infinity, maxY = -Infinity;
+  for (const sf of surfs) { minY = Math.min(minY, sf.y_cm); maxY = Math.max(maxY, sf.y_cm + sf.d_cm); }
+  const totalD = maxY - minY;
+  const bands = [];
+  let from = 0;
+  for (let b = 1; b < nBands; b++) {
+    const targetY = minY + totalD * b / nBands;
+    let bestIdx = from + 1, bestDiff = Infinity;
+    for (let i = from + 1; i < surfs.length; i++) {
+      const diff = Math.abs(surfs[i].y_cm - targetY);
+      if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+    }
+    if (bestIdx <= from) bestIdx = from + 1;
+    bands.push([from, bestIdx - 1]);
+    from = bestIdx;
+  }
+  bands.push([from, surfs.length - 1]);
+  return bands;
+}
+
+// STEG 6 (Kenneth 19.08.2026): print-optimalisert variant for selve PDF-utskriften. Løsningsrekke-
+// følge, som bedt om: (1) PNG — allerede i _stairDrawToCanvas via toDataURL('image/png'); (2) lerret
+// følger motivets format — også allerede der; (3) roter til liggende når trappa er mye lengre enn
+// bred; (4) del i bånd når det fortsatt er ekstremt. Returnerer 1-3 bilder ({dataUrl,aspect}) som
+// PDF-koden stabler under hverandre — hvert bånd får sitt eget format og god oppløsning, i stedet
+// for at HELE trappa tvinges inn i én uleselig strime.
+function _renderStairPrintImages(stair) {
+  const surfs = stair.surfaces;
+  if (!surfs || !surfs.length) {
+    const c = _stairDrawToCanvas(stair);
+    return [{ dataUrl: c.toDataURL('image/png'), aspect: c.width / c.height }];
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const sf of surfs) {
+    minX = Math.min(minX, sf.x_cm); minY = Math.min(minY, sf.y_cm);
+    maxX = Math.max(maxX, sf.x_cm + sf.w_cm); maxY = Math.max(maxY, sf.y_cm + sf.d_cm);
+  }
+  const sW = maxX - minX, sH = maxY - minY;
+  const ratio = sH / Math.max(sW, 1);
+  const nBands = ratio > 8 ? 3 : ratio > 4 ? 2 : 1;
+  const bands = _stairSurfaceBands(surfs, nBands);
+
+  return bands.map(range => {
+    // Rotasjonsvalget avgjøres FØR tegning (av båndets egne, RÅ verdens-mål), ikke etter — slik at
+    // _stairDrawToCanvas kan dimensjonere oppløsningen mot riktig TRYKT bredde med én gang (se
+    // opts.rotated der). Samme terskel (1.3) brukt konsekvent begge steder.
+    let bandMinY = Infinity, bandMaxY = -Infinity;
+    for (let i = range[0]; i <= range[1]; i++) { bandMinY = Math.min(bandMinY, surfs[i].y_cm); bandMaxY = Math.max(bandMaxY, surfs[i].y_cm + surfs[i].d_cm); }
+    const bandSH = bandMaxY - bandMinY;
+    const rotated = bandSH > sW * 1.3;
+    let canvas = _stairDrawToCanvas(stair, { surfaceRange: range, rotated });
+    if (rotated) canvas = _stairRotateCanvas90(canvas);
+    return { dataUrl: canvas.toDataURL('image/png'), aspect: canvas.width / canvas.height };
+  });
 }
 
 // ─── MODAL KEYBOARD SHORTCUTS ─────────────────────────────────
