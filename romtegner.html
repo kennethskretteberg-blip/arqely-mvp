@@ -26542,7 +26542,7 @@ function _loadFileAsBackground(file) {
 }
 
 function _loadBgPdf(file, fileName) {
-  const doRender = () => _renderPdfPage(file, fileName);
+  const doRender = () => _pdfBgLoad(file, fileName);
   if (window.pdfjsLib) { doRender(); return; }
   const s = document.createElement('script');
   s.src = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
@@ -26555,36 +26555,191 @@ function _loadBgPdf(file, fileName) {
   document.head.appendChild(s);
 }
 
-async function _renderPdfPage(file, fileName) {
+// STEG 1-2 (Kenneth 19.08.2026, PDF-bakgrunn: velg side, fordel på etasjer): åpner PDF-en ÉN gang
+// og grener på sidetall. Enkeltside-PDF: HELT uendret oppførsel — side 1 rett til aktiv etasje,
+// ingen modal (dagens sti, urørt bortsett fra at pageNumber=1 nå følger med for STEG 5/fallgruven).
+// Flerside-PDF: viser sidevelgeren (_pdfShowPagePicker) i stedet for stille å bruke side 1.
+async function _pdfBgLoad(file, fileName) {
   try {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
-    const page = await pdf.getPage(1);
-    const RENDER_SCALE = 2.0;
-    const vp = page.getViewport({scale: RENDER_SCALE});
-    const oc = document.createElement('canvas');
-    oc.width = vp.width; oc.height = vp.height;
-    await page.render({canvasContext: oc.getContext('2d'), viewport: vp}).promise;
-    const dataUrl = oc.toDataURL('image/jpeg', 0.85);
-    // PDF physical page size: viewport units at scale 1 are POINTS (1pt = 1/72"). Capture the
-    // real page size in cm so «Fast målestokk» (1:50 …) can scale exactly, no DPI guess.
-    const ptW = vp.width / RENDER_SCALE, ptH = vp.height / RENDER_SCALE;
-    const meta = { paperWidthCm: ptW / 72 * 2.54, paperHeightCm: ptH / 72 * 2.54 };
-    const img = new Image();
-    img.onload = () => _installBgImage(img, dataUrl, fileName, meta);
-    img.src = dataUrl;
+    if (pdf.numPages <= 1) {
+      const floorId = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
+      await _pdfRenderPageToBg(pdf, 1, fileName, floorId, { showCalibration: true });
+      return;
+    }
+    await _pdfShowPagePicker(pdf, file, fileName);
   } catch(err) { alert('Kunne ikke lese PDF: ' + err.message); }
+}
+
+// Render én side i full oppløsning (STEG 6-arven: RENDER_SCALE=2.0/JPEG 0.85, UENDRET for
+// enkeltside-importen — se STEG 4, «ikke endre det for enkeltside-importen uten å si fra») og
+// installerer den som bakgrunn for `floorId`. `opts.showCalibration=false` (flersideimport, STEG 2)
+// hopper over kalibrerings-overlayet/to-punkts-autostart — å kjede N overlay-popup-er ville vært
+// forvirrende; brukeren kalibrerer hver side for seg via den samme «ukalibrert»-indikatoren som
+// allerede finnes per bakgrunn.
+async function _pdfRenderPageToBg(pdf, pageNum, fileName, floorId, opts) {
+  const page = await pdf.getPage(pageNum);
+  const RENDER_SCALE = 2.0;
+  const vp = page.getViewport({scale: RENDER_SCALE});
+  const oc = document.createElement('canvas');
+  oc.width = vp.width; oc.height = vp.height;
+  await page.render({canvasContext: oc.getContext('2d'), viewport: vp}).promise;
+  const dataUrl = oc.toDataURL('image/jpeg', 0.85);
+  // STEG 3: papirstørrelse regnes PER SIDE (page.getViewport tar allerede hensyn til sidens egen
+  // /Rotate — en liggende og en stående side i samme PDF får hver sin riktige bredde/høyde).
+  const ptW = vp.width / RENDER_SCALE, ptH = vp.height / RENDER_SCALE;
+  const meta = { paperWidthCm: ptW / 72 * 2.54, paperHeightCm: ptH / 72 * 2.54, pageNumber: pageNum };
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => { _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts || {}); resolve(); };
+    img.onerror = () => reject(new Error('Kunne ikke laste rendret side ' + pageNum));
+    img.src = dataUrl;
+  });
+}
+
+// STEG 4: billig miniatyr for sidevelgeren — IKKE RENDER_SCALE=2.0 for alle sider (en 20-siders
+// tegnings-PDF ville spist minnet). Skalert ned til maxPx på lengste side, JPEG 0.7.
+async function _pdfRenderThumbnail(pdf, pageNum, maxPx) {
+  const page = await pdf.getPage(pageNum);
+  const vp1 = page.getViewport({scale: 1});
+  const scale = maxPx / Math.max(vp1.width, vp1.height);
+  const vp = page.getViewport({scale});
+  const oc = document.createElement('canvas');
+  oc.width = Math.max(1, Math.round(vp.width));
+  oc.height = Math.max(1, Math.round(vp.height));
+  await page.render({canvasContext: oc.getContext('2d'), viewport: vp}).promise;
+  return {
+    dataUrl: oc.toDataURL('image/jpeg', 0.7),
+    paperWidthCm: vp1.width / 72 * 2.54,
+    paperHeightCm: vp1.height / 72 * 2.54,
+  };
+}
+
+// STEG 1: papirformat-navn («A1 liggende, 84,1 × 59,4 cm») — «papirformatet er ofte det som
+// skiller en plantegning fra et snitt». Faller tilbake til bare målene når ingen ISO-størrelse
+// matcher innenfor toleranse (skannede/beskårne PDF-er treffer ikke alltid eksakt).
+const _PDF_PAPER_SIZES_CM = [['A0',84.1,118.9],['A1',59.4,84.1],['A2',42.0,59.4],['A3',29.7,42.0],['A4',21.0,29.7]];
+function _pdfPaperLabel(wCm, hCm) {
+  const short = Math.min(wCm, hCm), long = Math.max(wCm, hCm);
+  const landscape = wCm > hCm;
+  for (const [name, sN, lN] of _PDF_PAPER_SIZES_CM) {
+    if (Math.abs(short - sN) < 1.5 && Math.abs(long - lN) < 1.5) {
+      return `${name} ${landscape ? 'liggende' : 'stående'}, ${wCm.toFixed(1)} × ${hCm.toFixed(1)} cm`;
+    }
+  }
+  return `${wCm.toFixed(1)} × ${hCm.toFixed(1)} cm`;
+}
+
+// STEG 1: sidevelger for flerside-PDF. Leser bokmerker/outline for sidetitler når PDF-en har dem
+// («har den ikke det, ikke dikt opp navn» — tittel utelates helt hvis ingen finnes).
+async function _pdfShowPagePicker(pdf, file, fileName) {
+  let outline = null;
+  try { outline = await pdf.getOutline(); } catch (e) { outline = null; }
+  const pageTitles = {};
+  if (outline && outline.length) {
+    for (const item of outline) {
+      try {
+        const dest = typeof item.dest === 'string' ? await pdf.getDestination(item.dest) : item.dest;
+        if (dest && dest[0] != null) {
+          const idx = await pdf.getPageIndex(dest[0]);
+          if (pageTitles[idx + 1] == null) pageTitles[idx + 1] = item.title;
+        }
+      } catch (e) { /* skip malformed outline entries */ }
+    }
+  }
+  const THUMB_MAX_PX = 140;
+  const pages = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const thumb = await _pdfRenderThumbnail(pdf, i, THUMB_MAX_PX);
+    pages.push({ num: i, ...thumb, title: pageTitles[i] || null });
+  }
+  _pdfPagePickerShowModal(pdf, file, fileName, pages);
+}
+
+function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
+  const floors = S.floors || [];
+  const floorOpts = floors.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
+  const rows = pages.map(p => {
+    const label = _pdfPaperLabel(p.paperWidthCm, p.paperHeightCm);
+    const titleHtml = p.title ? `<div style="font-size:11px;color:var(--dim)">${esc(p.title)}</div>` : '';
+    return `<div style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px">
+      <img src="${p.dataUrl}" style="width:70px;height:auto;max-height:90px;object-fit:contain;border:1px solid var(--border);border-radius:4px;flex-shrink:0;background:#fff">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;color:var(--text)">Side ${p.num}</div>
+        <div style="font-size:12px;color:var(--muted)">${label}</div>
+        ${titleHtml}
+      </div>
+      <select class="_pdf-page-target" data-page="${p.num}" style="padding:5px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px">
+        <option value="">Ikke importer</option>
+        <option value="__global__">Global</option>
+        ${floorOpts}
+      </select>
+    </div>`;
+  }).join('');
+
+  const old = document.getElementById('_pdf-page-picker-ov');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = '_pdf-page-picker-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;width:480px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:16px;font-weight:700;color:var(--text)">Velg side(r) fra PDF</div>
+        <button onclick="_pdfPagePickerClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+      </div>
+      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Velg hvilken etasje hver side skal bli bakgrunn for.</div>
+      <div>${rows}</div>
+      <div style="display:flex;justify-content:flex-end;gap:10px">
+        <button onclick="_pdfPagePickerClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
+        <button id="_pdf-page-picker-go" style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Importer</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  document.getElementById('_pdf-page-picker-go').onclick = () => _pdfPagePickerRun(pdf, fileName, ov);
+}
+
+function _pdfPagePickerClose() { const ov = document.getElementById('_pdf-page-picker-ov'); if (ov) ov.remove(); }
+
+// STEG 2: importerer alle tildelte sider i ÉN operasjon. Kalibrering skjer aldri automatisk her
+// (se _pdfRenderPageToBg sin showCalibration:false) — bortsett fra det ene unntaket der brukeren
+// kom via «klikk et kjent mål»-hurtigimporten (_bgAutoStartTwoPoint) OG bare tildelte ÉN side; da
+// videreføres den flyten uendret, siden den forutsetter nøyaktig én bakgrunn å kalibrere mot.
+async function _pdfPagePickerRun(pdf, fileName, ov) {
+  const selects = [...ov.querySelectorAll('._pdf-page-target')];
+  const assignments = selects.map(s => ({ page: +s.dataset.page, target: s.value })).filter(a => a.target !== '');
+  ov.remove();
+  if (!assignments.length) { _bgAutoStartTwoPoint = false; return; }
+  const singleTwoPoint = assignments.length === 1 && _bgAutoStartTwoPoint;
+  if (!singleTwoPoint) _bgAutoStartTwoPoint = false;
+  let lastFloorId = null;
+  for (const a of assignments) {
+    const floorId = a.target === '__global__' ? '__global__' : parseInt(a.target, 10);
+    await _pdfRenderPageToBg(pdf, a.page, fileName, floorId, { showCalibration: singleTwoPoint });
+    lastFloorId = floorId;
+  }
+  if (!singleTwoPoint && lastFloorId != null) {
+    setActiveBgFloor(lastFloorId === '__global__' ? null : lastFloorId);
+    updateCtxBar(); renderSidebar(); render();
+  }
+  if (typeof _showToast === 'function') _showToast(`${assignments.length} side${assignments.length>1?'r':''} importert`, 'ok');
 }
 
 function _installBgImage(img, dataUrl, fileName, meta) {
   const bg = activeBg();
   // "Bytt bilde" fra handlingsmenyen: behold scale/x/y/rotasjon, bare nytt bilde.
   const keepTransform = _bgReplaceKeepTransform; _bgReplaceKeepTransform = false;
-  const sameFile = (keepTransform && bg.img) || (fileName && bg.fileName && bg.fileName === fileName && bg.img);
+  // STEG 0 (fallgruve, Kenneth 19.08.2026): «samme fil» avgjøres på FILNAVN ALENE — importer side 2
+  // og side 3 fra samme PDF, og den andre importen arver kalibreringen fra en helt annen side (feil
+  // selv når sidene tilfeldigvis er like store). Identiteten må være fil + sidenummer.
+  const newPageNumber = (meta && meta.pageNumber != null) ? meta.pageNumber : null;
+  const sameFile = (keepTransform && bg.img) || (fileName && bg.fileName && bg.fileName === fileName && bg.img && (bg.pageNumber ?? null) === newPageNumber);
 
   bg.img      = img;
   bg.dataUrl  = dataUrl;
   bg.fileName = fileName || null;
+  bg.pageNumber = newPageNumber;   // STEG 5: hvilken side av fileName denne bakgrunnen kom fra (null = ikke PDF/ukjent)
   // Physical paper size (PDF only) for exact «Fast målestokk». Raster images clear it on new file.
   if (meta && meta.paperWidthCm > 0) { bg.paperWidthCm = meta.paperWidthCm; bg.paperHeightCm = meta.paperHeightCm; }
   else if (!sameFile) { delete bg.paperWidthCm; delete bg.paperHeightCm; }
@@ -26625,6 +26780,64 @@ function _installBgImage(img, dataUrl, fileName, meta) {
     if (_bgAutoStartTwoPoint) { _bgAutoStartTwoPoint = false; if (typeof startBgCalibrate === 'function') startBgCalibrate(); }
     else { const ov = document.getElementById('bg-calib-overlay'); if (ov) ov.style.display = 'flex'; }
   }
+}
+
+// STEG 2 (Kenneth 19.08.2026, PDF-bakgrunn flere sider): samme jobb som _installBgImage, men mot
+// en EKSPLISITT etasje (`floorId`) i stedet for alltid «aktiv etasje» — nødvendig for å tildele
+// flere sider til flere etasjer i én operasjon uten å måtte bytte aktiv etasje mellom hver side.
+// «bruk _addBgToFloor når en etasje allerede har en bakgrunn, i stedet for å overskrive den»: har
+// `floorId` allerede et bilde, legges denne siden til som en NY lags-oppføring (samme mønster som
+// _addBgToFloor selv bruker), ellers fylles den eksisterende (tomme) slotten.
+function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
+  opts = opts || {};
+  if (!S.bgLayers) S.bgLayers = {};
+  if (!S.bgLayers[floorId]) S.bgLayers[floorId] = [];
+  const existing = S.bgs[floorId];
+  let bg;
+  if (existing && existing.img) {
+    bg = _newBgObj();
+    S.bgLayers[floorId].push(bg);
+  } else {
+    bg = existing || _newBgObj();
+    if (!S.bgLayers[floorId].includes(bg)) S.bgLayers[floorId].push(bg);
+  }
+  S.bgs[floorId] = bg;
+
+  bg.img = img;
+  bg.dataUrl = dataUrl;
+  bg.fileName = fileName || null;
+  bg.pageNumber = (meta && meta.pageNumber != null) ? meta.pageNumber : null;   // STEG 5
+  if (meta && meta.paperWidthCm > 0) { bg.paperWidthCm = meta.paperWidthCm; bg.paperHeightCm = meta.paperHeightCm; }
+  else { delete bg.paperWidthCm; delete bg.paperHeightCm; }
+
+  const sc = S.view.zoom * BASE_SCALE;
+  const fitW = canvas.width * 0.85 / sc;
+  const fitH = canvas.height * 0.85 / sc;
+  const ratio = Math.min(fitW / img.naturalWidth, fitH / img.naturalHeight);
+  bg._autoW = img.naturalWidth * ratio;
+  bg._autoH = img.naturalHeight * ratio;
+  bg.widthCm = bg._autoW;
+  bg.heightCm = bg._autoH;
+  bg.originX = S.view.panX - bg.widthCm / 2;
+  bg.originY = S.view.panY - bg.heightCm / 2;
+  bg.opacity = 1.0;
+  bg._needsCalibration = true;
+  bg.visible = true;
+  bg.calibrating = false;
+  bg.calPts = [];
+
+  // STEG 2: kalibrering er ALDRI automatisk for en flerside-batch (se _pdfPagePickerRun) — «hver
+  // side kalibreres for seg», ikke i en kjede av popup-er rett etter hverandre. Enkeltside-
+  // importen (opts.showCalibration=true) beholder den ORIGINALE oppførselen uendret.
+  if (opts.showCalibration) {
+    if (S.ui.activeFloorId !== floorId) setActiveBgFloor(floorId === '__global__' ? null : floorId);
+    showBgPanel();
+    updateCtxBar();
+    render();
+    if (_bgAutoStartTwoPoint) { _bgAutoStartTwoPoint = false; if (typeof startBgCalibrate === 'function') startBgCalibrate(); }
+    else { const ov = document.getElementById('bg-calib-overlay'); if (ov) ov.style.display = 'flex'; }
+  }
+  return bg;
 }
 
 function setBgOpacity(val) {
@@ -27080,8 +27293,10 @@ function _floorBgItemsHtml(floorId) {
   let html = '';
   for (let i = 0; i < layers.length; i++) {
     const bg = layers[i];
-    const fn = bg.fileName || 'Plantegning';
-    const sn = fn.length > 22 ? fn.substring(0, 20) + '…' : fn;
+    // STEG 5 (Kenneth 19.08.2026): «plan.pdf, side 2» — så Kenneth ser med en gang om etasjen har
+    // fått riktig tegning, FØR hele prosjekteringen er gjort på feil plan.
+    const fn = (bg.fileName || 'Plantegning') + (bg.pageNumber != null ? ', side ' + bg.pageNumber : '');
+    const sn = fn.length > 26 ? fn.substring(0, 24) + '…' : fn;
     const isSel = bg === S.ui.selectedBg;
     const hi = isSel || bg === S.bgs[floorId];
     const lockIco = bg.locked
@@ -33926,7 +34141,10 @@ function _bgCtxGroupHtml() {
   if (!bg || !bg.img || bg._needsCalibration) return '';
   const vis = bg.visible !== false ? 'checked' : '';
   const opVal = Math.round((bg.opacity ?? 1) * 100);
-  return `<span class="ctxbar-lbl" style="border:none;padding:0 6px 0 0"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg> Bakgrunn</span>
+  // STEG 5 (Kenneth 19.08.2026): «plan.pdf, side 2» som tooltip — så det er synlig med en gang
+  // hvilken fil/side denne etasjens bakgrunn faktisk kom fra.
+  const srcTitle = bg.fileName ? esc(bg.fileName + (bg.pageNumber != null ? ', side ' + bg.pageNumber : '')) : 'Bakgrunn';
+  return `<span class="ctxbar-lbl" style="border:none;padding:0 6px 0 0" title="${srcTitle}"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg> Bakgrunn</span>
     <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul bakgrunn"><input type="checkbox" ${vis} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
     <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
     <button class="snap-chip" onclick="selectBgLayer(_activeBgLayer())" title="Velg plantegning for flytting/skalering/rotasjon">${IC('move',14)} Velg</button>
@@ -36158,6 +36376,11 @@ function _buildSaveData() {
         .filter(([,bg]) => bg.dataUrl)
         .map(([k, bg]) => [k, {
           dataUrl: bg.dataUrl, fileName: bg.fileName,
+          pageNumber: bg.pageNumber ?? null,   // STEG 5: hvilken PDF-side denne kom fra
+          // STEG 3: papirstørrelsen «Fast målestokk» hviler på — manglet i lagringen fra før
+          // (samme gap gjaldt enkeltside-PDF-import allerede), tatt med her siden feltet uansett
+          // trengte lagring for flerside-fallgruven.
+          paperWidthCm: bg.paperWidthCm ?? null, paperHeightCm: bg.paperHeightCm ?? null,
           originX: bg.originX, originY: bg.originY,
           widthCm: bg.widthCm, heightCm: bg.heightCm,
           opacity: bg.opacity, visible: bg.visible,
