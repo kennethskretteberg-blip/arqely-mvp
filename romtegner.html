@@ -6890,6 +6890,74 @@ function _matRunsWithinRoom(mat, room, marginCm) {
   return true;
 }
 
+// STEG 4 (vakt, Regel D+E, Kenneth 19.08.2026). Regel D: summen av ALLE tegnede breddelengder skal
+// stemme med den valgte rullens lengde, innenfor ett kuttintervall — kapasiteten motoren regnet med
+// og lengden den faktisk tegner skal aldri kunne bli to ulike tall. Regel E (kun automatisk utlegg,
+// prod.mat_equal_widths uten fallback til gammel modell): alle bredder skal ha nøyaktig samme
+// lengde, og last_run_length_cm skal være usatt — en kort siste bredde her er selve regelbruddet
+// Regel E finnes for å hindre.
+//
+// anyRunClipped (Regel A/B, tidligere prompt): når romformen (innhukk/skrå vegg) faktisk har klippet
+// en eller flere bredder, gjelder VERKEN D eller E lenger som en STRENG likhet — kapasiteten
+// (capacityCm) er en SUM av hver rads eget sanne maksimum, mens en uniform per-rad-lengde (Lc)
+// forbruker et FAST budsjett per rad. Er én rads sanne maksimum under Lc pga. innhukket, taper
+// akkurat DEN raden budsjett som ikke hentes igjen andre steder — selv om kapasitetens SUM var nok.
+// Dette er allerede dekket, forventet og separat validert av _matRunsWithinRoom (ingen kabel
+// utenfor rommet); Regel D/E sin jobb er å fange ekte regresjoner i den UFORSTYRRA (rektangulære)
+// baneregningen, ikke å kreve at et innhukket rom skal forbruke hele rullen eksakt.
+function _matRunsMatchRule(mat, prod, cutCm, anyRunClipped) {
+  // Regel D/E gjelder KUN prod.mat_equal_widths-familien (EcoMat) — det er den eneste
+  // produktmodellen som noensinne har lovet «hele rullen brukes eksakt». Generiske matter
+  // (mat_equal_widths=false) kapper allerede bevisst antall baner til
+  // floor(totalLengthCm/runLengthCm) og lar RESTEN av rullen stå ubrukt — en helt normal,
+  // forhåndseksisterende og ØNSKET oppførsel, ikke noe Regel D skal flagge som et regelbrudd.
+  if (!prod || !prod.mat_equal_widths) return { ok: true };
+  const n = mat.num_runs || 1;
+  const lens = [];
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const l = _matRunLenCm(mat, i); lens.push(l); sum += l; }
+  if (anyRunClipped) return { ok: true };
+  const totalLenCm = (_matTotalLengthMm(prod) || 0) / 10;
+  const tol = Math.max(cutCm || 0, 0.5);
+  if (totalLenCm > 0 && Math.abs(sum - totalLenCm) > tol + 0.01) {
+    return { ok: false, rule: 'D', reason: `summen av bredder (${sum.toFixed(1)} cm) stemmer ikke med valgt rull (${totalLenCm.toFixed(1)} cm)` };
+  }
+  if (!mat._equalWidthFallback) {
+    const allEqual = lens.every(l => Math.abs(l - lens[0]) < 0.05);
+    if (!allEqual || mat.last_run_length_cm != null) {
+      return { ok: false, rule: 'E', reason: 'automatisk utlegg skal ha like bredder — ingen kort siste' };
+    }
+  }
+  return { ok: true };
+}
+
+// LÅST REGEL E (Kenneth 19.08.2026, ved AUTOMATISK utlegg): alle bredder på matta skal ha SAMME
+// lengde L — ingen kort siste bredde. Finner et gyldig (N, L)-par der HELE rullen forbrukes EKSAKT
+// (N × L === totalLengthCm, kabelen kan ikke kappes), L er et helt antall kuttintervaller,
+// L ≤ brukbar langspenn (marginen mot langveggene er justeringsvariabelen — presist samme prinsipp
+// som Regel 12 for trappekabel i spec-trapp-kabelutlegg.md: brukerens min_wall_margin_mm er et
+// gulv, ikke et mål), og N ≤ maks antall breddeplasser på tvers. Blant gyldige par: størst dekket
+// areal (matteboredden er lik for alle par, så N×L er nok som mål); likt areal → flest bredder
+// (jevnere varme, Kenneths egen begrunnelse). Returnerer null når INGEN gyldig par finnes for
+// akkurat denne varianten — kalleren prøver da nabovarianter (STEG 3) før den faller tilbake.
+function _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) {
+  if (!(totalLengthCm > 0) || !(cutCm > 0) || maxRuns < 1) return null;
+  const totalUnits = Math.round(totalLengthCm / cutCm);
+  if (Math.abs(totalUnits * cutCm - totalLengthCm) > 0.05) return null; // rullen selv går ikke opp i hele kuttenheter
+  let best = null;
+  for (let N = 1; N <= maxRuns; N++) {
+    if (totalUnits % N !== 0) continue;
+    const L = (totalUnits / N) * cutCm;
+    if (L > alongSpanCm + 0.01) continue;
+    if (L < minLenCm - 0.01) continue;
+    const coverage = N * L;
+    if (!best || coverage > best.coverage + 0.01 || (Math.abs(coverage - best.coverage) <= 0.01 && N > best.N)) {
+      best = { N, L, coverage };
+    }
+  }
+  return best;
+}
+
 // opts.exact: place exactly the given product (skip best-fit variant swap).
 // opts.keepPanel: don't hide the product panel after placing (for live variant preview).
 function autoFillMatSerpentine(productId, opts) {
@@ -7034,22 +7102,39 @@ function autoFillMatSerpentine(productId, opts) {
   // velge en rull lengre enn rommet har plass til). Finnes ingen variant ≤ kapasitet, bruk minste
   // tilgjengelige (best mulig delvis dekning) og varsle — aldri legg ut en rull rommet ikke tar imot.
   let _matCapacityShortfall = false;
+  let _matEqualNL = null;   // {N,L} når Regel E (jevne bredder) går opp eksakt for VALGT variant
+  let _matEqualWidthFallback = false;   // Regel E ble forsøkt men ingen kapasitets-egnet variant gikk opp
   if (!opts.exact && candidates.length >= 1) {
     if (prod.mat_equal_widths) {
-      // EcoMat «bruk HELE matta delt i N like bredder»: STØRSTE variant hvis TOTALE lengde er ≤
-      // kapasitet (ikke bare per-bredde ≤ det uniforme langspennet, som ignorerte romformen — det
-      // var nøyaktig 26m-bugen). Deretter: per-bredde-lengden snappes NED til kuttraster som før.
-      const N = maxRuns;
-      let pick = null;
+      // REGEL E (Kenneth 19.08.2026, automatisk utlegg): blant de kapasitets-egnede variantene
+      // (Regel B, størst først), foretrekk den STØRSTE som i tillegg går opp i like bredder
+      // (_matEqualWidthNL). STEG 3: «prøv NABOVARIANTENE» — de nærmeste, ikke ubegrenset nedover.
+      // Et par hopp (24→22→20) er et forsøk på å redde EKSAKT samme dekning; å fortsette helt ned
+      // til en mye mindre variant bare fordi DEN tilfeldigvis går opp i hele kuttenheter ville gitt
+      // et mye dårligere resultat enn fallback-modellen på den opprinnelige, kapasitets-beste
+      // varianten — coverage taper for jevnhet langt utover det Kenneth ba om.
+      const MAX_EQUAL_WIDTH_NEIGHBORS = 3;
+      let pick = null, pickNL = null, bestCapacityPick = null, neighborTries = 0;
       for (let i = candidates.length - 1; i >= 0; i--) {       // largest first
         const totalLenCm = candidates[i].lenMm / 10;
         if (totalLenCm > capacityCm + 0.01) continue;          // REGEL B: aldri over kapasiteten
-        const perW = totalLenCm / N;
-        const snapped = cutCm > 0 ? Math.floor(perW / cutCm) * cutCm : perW;
-        if (snapped >= minLenCm - 0.01) { pick = candidates[i]; break; }
+        if (!bestCapacityPick) bestCapacityPick = candidates[i];   // Regel B sitt opprinnelige valg — fallback-mål
+        if (neighborTries < MAX_EQUAL_WIDTH_NEIGHBORS) {
+          neighborTries++;
+          const nl = _matEqualWidthNL(totalLenCm, cutCm, maxRuns, alongSpan, minLenCm);
+          if (nl) { pick = candidates[i]; pickNL = nl; break; }
+        }
+      }
+      if (!pick && bestCapacityPick) {
+        // Ingen av de nærmeste kapasitets-egnede variantene gikk opp i like bredder — fall tilbake
+        // til Regel B sitt OPPRINNELIGE (størst ≤ kapasitet) valg, med «N-1 like + kortere siste»
+        // lenger ned (matLastRunLen), i stedet for å bytte til en mye mindre variant.
+        _matEqualWidthFallback = true;
+        pick = bestCapacityPick;
       }
       if (!pick) { pick = candidates[0]; _matCapacityShortfall = true; }   // ingen ≤ kapasitet → minste, varsle
       prod = pick.p; productId = pick.p.id;
+      _matEqualNL = pickNL;
     } else if (candidates.length > 1) {
       let pick = null;
       for (let i = candidates.length - 1; i >= 0; i--) {       // largest first
@@ -7067,19 +7152,36 @@ function autoFillMatSerpentine(productId, opts) {
   const totalLengthCm = totalLenMm ? totalLenMm / 10 : null;
   const isFixedLength = totalLengthCm !== null;
 
-  // EcoMat: legg ut HELE rullelengden — verken mer eller mindre. N−1 LIKE bredder (rundet OPP til raster)
-  // + 1 KORTERE siste (= resten) → summen = nøyaktig mattelengden. Den korte siste er en egen run-lengde
-  // (last_run_length_cm), forankret i skjøt-enden så første streng flukter.
+  // opts.exact: variantsøket over ble hoppet over (brukerens eksplisitte produktvalg, uendret) —
+  // men Regel E gjelder like fullt FOR DEN VALGTE varianten alene, uten nabosøk (det ville motsagt
+  // «ikke bytt variant»).
+  if (opts.exact && prod.mat_equal_widths && isFixedLength && _matEqualNL == null) {
+    _matEqualNL = _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpan, minLenCm);
+    _matEqualWidthFallback = !_matEqualNL;
+  }
+
+  // EcoMat: legg ut HELE rullelengden — verken mer eller mindre.
+  // REGEL E (Kenneth 19.08.2026, LÅST — automatisk utlegg): finnes et gyldig (N,L)-par
+  // (_matEqualNL, over) brukes det EKSAKT — alle bredder får samme lengde L, ingen kort siste.
+  // Ellers (ingen kapasitets-egnet variant gikk opp i like bredder): fall tilbake til FØR-Regel-E-
+  // modellen — N−1 LIKE bredder (rundet OPP til raster) + 1 KORTERE siste (= resten), forankret i
+  // skjøt-enden (last_run_length_cm) — samme fallback panelet varsler om via _matEqualWidthFallback.
   let matLastRunLen = null;
+  let actualRunsOverride = null;
   if (prod.mat_equal_widths && isFixedLength) {
-    const N = maxRuns;
-    let Lc = cutCm > 0 ? Math.ceil((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);   // like bredder, rundet OPP
-    if (Lc > alongSpan) Lc = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;       // maks romlengde
-    if (Lc < minLenCm) Lc = Math.min(minLenCm, alongSpan);
-    let lastLen = totalLengthCm - (N - 1) * Lc;                                                    // resten
-    while (lastLen <= 0 && Lc - cutCm >= minLenCm - 0.01) { Lc -= cutCm; lastLen = totalLengthCm - (N - 1) * Lc; }
-    runLengthCm = Lc;
-    matLastRunLen = (lastLen > 0.5 && lastLen < Lc - 0.5) ? Math.round(lastLen * 10) / 10 : null;  // kun hvis genuint kortere
+    if (_matEqualNL) {
+      runLengthCm = _matEqualNL.L;
+      actualRunsOverride = _matEqualNL.N;
+    } else {
+      const N = maxRuns;
+      let Lc = cutCm > 0 ? Math.ceil((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);   // like bredder, rundet OPP
+      if (Lc > alongSpan) Lc = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;       // maks romlengde
+      if (Lc < minLenCm) Lc = Math.min(minLenCm, alongSpan);
+      let lastLen = totalLengthCm - (N - 1) * Lc;                                                    // resten
+      while (lastLen <= 0 && Lc - cutCm >= minLenCm - 0.01) { Lc -= cutCm; lastLen = totalLengthCm - (N - 1) * Lc; }
+      runLengthCm = Lc;
+      matLastRunLen = (lastLen > 0.5 && lastLen < Lc - 0.5) ? Math.round(lastLen * 10) / 10 : null;  // kun hvis genuint kortere
+    }
   }
 
   // Cap each run to the mat's physical length. Without this a "0.5×2m"
@@ -7095,7 +7197,9 @@ function autoFillMatSerpentine(productId, opts) {
   // For fixed-length products, runs are capped at totalLengthCm/runLengthCm
   // so the order doesn't exceed what the user actually has.
   let actualRuns = maxRuns;
-  if (isFixedLength && !(prod.mat_equal_widths && matLastRunLen != null)) {
+  if (actualRunsOverride != null) {
+    actualRuns = actualRunsOverride;   // REGEL E: N er allerede eksakt kjent fra søket — ikke utled på nytt
+  } else if (isFixedLength && !(prod.mat_equal_widths && matLastRunLen != null)) {
     // equal_widths med kortere siste bruker ALLTID N (siste er kortere, ikke droppet).
     const neededRuns = Math.floor(totalLengthCm / runLengthCm);
     actualRuns = Math.min(maxRuns, neededRuns);
@@ -7211,7 +7315,12 @@ function autoFillMatSerpentine(productId, opts) {
     rotation_deg: dir === 'h' ? 90 : 0,
     _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
     _fromWall: fromWall,                                            // true → alt kaldt felt på én side; false → deles likt
-    _capacityCm: Math.round(capacityCm * 10) / 10                   // STEG 2: rommets sanne kapasitet — vist mot valgt rull-lengde i panelet
+    _capacityCm: Math.round(capacityCm * 10) / 10,                  // STEG 2: rommets sanne kapasitet — vist mot valgt rull-lengde i panelet
+    // REGEL E pkt. 4 (Kenneth 19.08.2026): den FAKTISKE veggmarginen langs matta etter at slakken
+    // (brukbar langspenn − L) er delt likt på de to langveggene — vist i panelet så brukeren ser at
+    // og hvor mye margen ble økt utover sin egen min_wall_margin_mm.
+    _effMarginAlongCm: prod.mat_equal_widths ? Math.round((marginCm + Math.max(0, alongSpan - runLengthCm) / 2) * 10) / 10 : null,
+    _equalWidthFallback: !!_matEqualWidthFallback,                  // Regel E gikk ikke opp — «N-1 like + kortere siste» ble brukt i stedet
   };
 
   // STEG 4: siste vaktpost før noe faktisk legges til state. PASS 2 over skal allerede garantere
@@ -7222,6 +7331,12 @@ function autoFillMatSerpentine(productId, opts) {
     _showToast('Auto-utlegg avbrutt: ville lagt kabel utenfor rommet', 'error');
     return;
   }
+  const _ruleCheck = _matRunsMatchRule(mat, prod, cutCm, anyRunClipped);
+  if (!_ruleCheck.ok) {
+    console.error('autoFillMatSerpentine: Regel ' + _ruleCheck.rule + ' brutt — avbrutt: ' + _ruleCheck.reason, mat);
+    _showToast('Auto-utlegg avbrutt: ' + _ruleCheck.reason, 'error');
+    return;
+  }
 
   pushUndo();
   S.mats.push(mat);
@@ -7229,6 +7344,11 @@ function autoFillMatSerpentine(productId, opts) {
   // som beste delvis dekning, men brukeren skal vite at rullen faktisk er lengre enn rommet tar imot.
   if (_matCapacityShortfall) {
     _showToast(`Ingen ${prod.product_family || prod.name} passer innenfor rommets kapasitet (${(capacityCm/100).toFixed(1)} m) — bruker minste tilgjengelige (${((_matTotalLengthMm(prod)||0)/1000).toFixed(1)} m)`, 'warn');
+  } else if (_matEqualWidthFallback) {
+    // REGEL E (STEG 3, «ikke lever en ujevn løsning i stillhet»): ingen kapasitets-egnet variant gikk
+    // opp i like bredder for dette rommet — brukeren skal vite at den korte siste bredden er en
+    // bevisst fallback, ikke en overraskelse.
+    _showToast('Rullen går ikke opp i like bredder i dette rommet — siste bredde er kortere enn resten', 'warn');
   }
 
   _invalidateMatCache();
@@ -28809,6 +28929,8 @@ function updateObjInfo() {
         ${mat._capacityCm!=null && mp?.mat_length_mm ? `<div class="soi-row"><span class="soi-k">Romkapasitet</span><span class="soi-v">${(mat._capacityCm/100).toFixed(1)} m</span></div>
         <div class="soi-row"><span class="soi-k">Valgt rull</span><span class="soi-v" style="${(mp.mat_length_mm/10) > mat._capacityCm + 0.5 ? 'color:var(--warn)' : ''}">${(mp.mat_length_mm/1000).toFixed(1)} m</span></div>` : ''}
         ${koldSideCm!=null?`<div class="soi-row"><span class="soi-k">Kaldt felt/side</span><span class="soi-v">${Math.round(koldSideCm)} cm</span></div>`:''}
+        ${mat._effMarginAlongCm!=null?`<div class="soi-row"><span class="soi-k">Avstand langvegg</span><span class="soi-v">${mat._effMarginAlongCm.toFixed(1)} cm</span></div>`:''}
+        ${mat._equalWidthFallback?`<div class="soi-row" style="color:var(--warn);font-size:11px">Rullen gikk ikke opp i like bredder — siste bredde er kortere</div>`:''}
         ${_ccMm ? `<div class="soi-row"><span class="soi-k">CC</span><span class="soi-v">${ccCm.toFixed(1)} cm</span></div>` : ''}
         ${kabelM>0?`<div class="soi-row"><span class="soi-k">Kabellengde</span><span class="soi-v">\u2248 ${kabelM.toFixed(1)} m</span></div>`:''}
         ${_cutMm ? `<div class="soi-row"><span class="soi-k">Klipp</span><span class="soi-v">hver ${_cutMm} mm</span></div>` : ''}
