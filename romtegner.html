@@ -16377,6 +16377,12 @@ function _nudgeAutoLabel(cx, cy, hw, hh, dir, clampInside) {
 function _drawStripLabel(job) {
   const { name, infoLine, nx, ny, nw, nh, dir, roomId } = job;
   const strip = job.strip;
+  // Generalisert for gjenbruk (matte-label m.fl.): hvor v2-geometrien lagres kan overstyres, så
+  // ulike objekttyper (folie, rektangulær matte, …) ikke kolliderer i samme id-rom. Default
+  // uendret for eksisterende folie-kall. `strip` selv trenger bare .id/.labelPos/.labelScale/
+  // .labelRotation/.labelColor/.fillColor — enhver «labelable» kan sendes inn som job.strip.
+  const boundsStore = job.boundsStore || _stripLabelBounds;
+  const geomStore = job.geomStore || _stripLabelGeom;
   // Manual scale (drag-stretch) multiplies the base font; auto labels use scale 1.
   const scl = (strip && strip.labelScale > 0) ? strip.labelScale : 1;
   const fontSize = job.fontSize * scl;
@@ -16488,8 +16494,8 @@ function _drawStripLabel(job) {
     // Axis-aligned screen bounds of the rotated box (for hit-testing + leader).
     const ca = Math.abs(Math.cos(ang)), sa = Math.abs(Math.sin(ang));
     const hw = (ca * fw + sa * fh) / 2, hh = (sa * fw + ca * fh) / 2;
-    _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
-    _stripLabelGeom[strip.id] = { cx, cy, ang, fw, fh };
+    boundsStore[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    geomStore[strip.id] = { cx, cy, ang, fw, fh };
     if (Math.abs(cx - foilCx) > hw || Math.abs(cy - foilCy) > hh) {
       ctx.strokeStyle = col ? col.border : _lc('rgba(140,90,0,0.55)', 'rgba(255,210,80,0.5)');
       ctx.lineWidth = 1; ctx.setLineDash([]);
@@ -16518,8 +16524,8 @@ function _drawStripLabel(job) {
     ({ cx, cy } = clampInside(cx, cy, hw, hh));
     ({ cx, cy } = _nudgeAutoLabel(cx, cy, hw, hh, dir, clampInside));
     if (strip) {
-      _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
-      _stripLabelGeom[strip.id] = { cx, cy, ang: 0, fw, fh };
+      boundsStore[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+      geomStore[strip.id] = { cx, cy, ang: 0, fw, fh };
       _placedAutoLabelBoxes.push({ cx, cy, hw, hh });
     }
     // Leader line: foil centre → box edge.
@@ -16559,8 +16565,8 @@ function _drawStripLabel(job) {
   ({ cx, cy } = clampInside(cx, cy, hw, hh));
   ({ cx, cy } = _nudgeAutoLabel(cx, cy, hw, hh, dir, clampInside));
   if (strip) {
-    _stripLabelBounds[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
-    _stripLabelGeom[strip.id] = { cx, cy, ang: dir === 'v' ? -Math.PI / 2 : 0, fw, fh };
+    boundsStore[strip.id] = { sx: cx - hw, sy: cy - hh, w: 2 * hw, h: 2 * hh };
+    geomStore[strip.id] = { cx, cy, ang: dir === 'v' ? -Math.PI / 2 : 0, fw, fh };
     _placedAutoLabelBoxes.push({ cx, cy, hw, hh });
   }
 
@@ -17289,7 +17295,12 @@ function _matTotalWidthCm(mat) {
   return n * mat.width_cm + Math.max(0, n - 1) * gapCm;
 }
 
+// ─── RECTANGULAR MAT LABEL v2 — samme mønster som matPath (_matLabelBounds/_matLabelGeom), men
+// egne lagre siden S.mats og S.matPaths har separate id-tellere (kan ikke dele id-rom trygt).
+let _matRectLabelBounds = {}; // {matId: {sx, sy, w, h}} — screen AABB
+let _matRectLabelGeom = {};   // {matId: {cx, cy, ang, fw, fh}} — oriented box, for v2 handles
 function drawMats() {
+  _matRectLabelBounds = {}; _matRectLabelGeom = {};   // rebuild per render (v2), som drawStrips/drawCables
   for (const mat of S.mats) {
     if (mat.labelOnly) continue;   // «kun label»-matte (Hurtig prosjektering) har ingen geometri
     if (!_roomIdOnActiveFloor(mat.roomId)) continue;
@@ -17460,37 +17471,42 @@ function drawMats() {
       }
     }
 
-    // Label \u2014 written along the length axis so it stays readable in either rotation.
-    // Teknisk mono, et hakk st\u00f8rre for lesbarhet for mont\u00f8r; produktnavn forkortes
-    // til \u00e5 passe innenfor mattens lengde (tekst tegnes langs lengde-aksen).
-    if (S.view.zoom > 0.38 && !dimOther) {
+    ctx.restore();
+
+    // Label \u2014 delt renderer med folie/kabel (_drawStripLabel): verdensbasert skalering (skalerer
+    // med zoom, riktig i PDF), klamping innenfor rommet, one-line/callout-fallback p\u00e5 smale matter.
+    // Tegnes i mattas EGEN, uavhengige v2-transform (labelPos/labelScale/labelRotation) \u2014 ikke
+    // n\u00f8stet i shape-rotasjonen over, siden labelen skal kunne flyttes/roteres fritt av brukeren.
+    // Egne bounds/geom-lagre (_matRectLabelBounds/_matRectLabelGeom) unng\u00e5r id-kollisjon med
+    // S.matPaths, som har sin egen, separate id-teller (se STEG 0-notat).
+    if (!dimOther) {
+      const label = prod ? prod.name : 'Matte';
       const nR = numRuns > 1 ? ` \u00d7${numRuns}` : '';
       const totalUsedM = (numRuns * mat.width_cm * mat.length_cm / 10000).toFixed(1);
       const dims = `${Math.round(mat.width_cm)}\u00d7${Math.round(mat.length_cm)}cm${nR} (${totalUsedM}m\u00b2)`;
-      ctx.fillStyle = _lc('rgba(30, 80, 160, 0.9)', 'rgba(140, 195, 255, 0.92)');
-      ctx.font = "600 13px 'IBM Plex Mono',monospace";
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // Offset toward one end (away from the centred room name). Mats are centred in the room, so
-      // shifting ~half-way to an end clears the room name at the centroid.
-      const offL = -hl * 0.5;
-      // Forkort produktnavn til tilgjengelig lengde (px) langs lengde-aksen.
-      const availPx = mat.length_cm * sc - 10;
-      let label = prod ? prod.name : 'Matte';
-      if (ctx.measureText(label).width > availPx) {
-        while (label.length > 1 && ctx.measureText(label + '\u2026').width > availPx) label = label.slice(0, -1);
-        label += '\u2026';
-      }
-      // In mat-local coords, length runs along the Y axis. Rotate the text -90\u00b0
-      // so it reads along that long axis instead of crossing the narrow width.
-      ctx.save();
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText(label, offL, -8);
-      ctx.fillText(dims, offL, 8);
-      ctx.restore();
-    }
 
-    ctx.restore();
+      // Skjerm-AABB + retning for klamping/one-line/callout-logikken, regnet fra mattas faktiske
+      // (evt. roterte) verdenshj\u00f8rner.
+      const hw0 = totalW / 2, hl0 = mat.length_cm / 2;
+      const cosR = Math.cos(rad), sinR = Math.sin(rad);
+      const localC = [[-hw0,-hl0],[hw0,-hl0],[hw0,hl0],[-hw0,hl0]];
+      const scrC = localC.map(([lx,ly]) => w2s(cx + lx*cosR - ly*sinR, cy + lx*sinR + ly*cosR));
+      const sxs = scrC.map(p=>p.x), sys = scrC.map(p=>p.y);
+      const _mnx = Math.min(...sxs), _mny = Math.min(...sys);
+      const _mnw = Math.max(...sxs) - _mnx, _mnh = Math.max(...sys) - _mny;
+      const _mdir = _mnh > _mnw ? 'v' : 'h';
+
+      const _msc = S.view.zoom * BASE_SCALE;
+      let fontSize = LABEL_FONT_CM * _msc;
+      if (!S.ui?._pdfMode) fontSize = Math.max(6, fontSize);
+
+      _drawStripLabel({
+        strip: mat, name: label, infoLine: dims,
+        nx: _mnx, ny: _mny, nw: _mnw, nh: _mnh, dir: _mdir,
+        roomId: mat.roomId, fontSize,
+        boundsStore: _matRectLabelBounds, geomStore: _matRectLabelGeom,
+      });
+    }
   }
 
   // Ghost preview during placement mode
