@@ -3669,7 +3669,7 @@ function _anyInteractionActive() {
     _plateDragging || _stairDragging ||
     _vdDragging || _vdPending ||
     _dimOffDragging || _annotDragging ||
-    _cardDragging || _cableLabelDragging || _cableLabelHandleDrag || _matLabelDragging || _matLabelHandleDrag || _stripLabelDragging || _labelHandleDrag || _cableGizmoDragging ||
+    _cardDragging || _cableLabelDragging || _cableLabelHandleDrag || _matLabelDragging || _matLabelHandleDrag || _matRectLabelDragging || _matRectLabelHandleDrag || _stripLabelDragging || _labelHandleDrag || _cableGizmoDragging ||
     _thDragging || _mmDragging || _vfPickDrag || _bgDragging
   );
 }
@@ -17281,6 +17281,57 @@ function _matTotalWidthCm(mat) {
 // egne lagre siden S.mats og S.matPaths har separate id-tellere (kan ikke dele id-rom trygt).
 let _matRectLabelBounds = {}; // {matId: {sx, sy, w, h}} — screen AABB
 let _matRectLabelGeom = {};   // {matId: {cx, cy, ang, fw, fh}} — oriented box, for v2 handles
+let _matRectLabelHandlePts = null;
+let _matRectLabelDragging = false;
+let _matRectLabelDragId = null;
+let _matRectLabelDragOffset = {x: 0, y: 0};
+let _matRectLabelHandleDrag = null;   // {id, kind:'rotate'|'stretch', startDist, startScale}
+function hitMatRectLabel(sx, sy) {
+  for (const [id, b] of Object.entries(_matRectLabelBounds)) {
+    if (sx >= b.sx && sx <= b.sx + b.w && sy >= b.sy && sy <= b.sy + b.h) return parseInt(id);
+  }
+  return null;
+}
+function drawMatRectLabelHandles() {
+  _matRectLabelHandlePts = null;
+  const id = S.ui.selectedLabelMatRectId;
+  if (id == null) return;
+  const g = _matRectLabelGeom[id];
+  if (!g) return;
+  _matRectLabelHandlePts = { id, ..._drawLabelGizmo(g) };
+}
+function hitMatRectLabelHandle(sx, sy) { return _hitLabelHandlePts(_matRectLabelHandlePts, sx, sy); }
+// v2: tilbakestill den låste RETKANGULÆRE matte-labelen til auto (pos + rotasjon + skala) —
+// samme som resetMatLabel gjør for frihånds-matte, men egen id (selectedLabelMatRectId).
+function resetMatRectLabel() {
+  const id = S.ui.selectedLabelMatRectId;
+  if (id == null) return;
+  const mat = (S.mats || []).find(x => x.id === id);
+  if (!mat) return;
+  pushUndo();
+  let changed = false;
+  if (mat.labelPos != null)      { delete mat.labelPos;      changed = true; }
+  if (mat.labelRotation != null) { delete mat.labelRotation; changed = true; }
+  if (mat.labelScale != null)    { delete mat.labelScale;    changed = true; }
+  if (changed) { render(); _scheduleAutoSave && _scheduleAutoSave(); }
+}
+// Høyreklikk på en rektangulær matte-label: eneste inngang til «Tilbakestill til auto» (rektangulær
+// matte har ingen egen kontekstmeny fra før — dette er en ren tillegg, rører ingen andre objekters
+// høyreklikk-meny).
+function matRectLabelCtxMenu(e, id) {
+  e.preventDefault();
+  const mat = (S.mats || []).find(m => m.id === id);
+  if (!mat) return;
+  if (S.ui.selectedLabelMatRectId !== id) {
+    S.ui.selectedLabelMatRectId = id; S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null;
+    _resetCycle(); render();
+  }
+  const hasManual = mat.labelPos || mat.labelRotation != null || mat.labelScale != null;
+  document.getElementById('ctx-menu').innerHTML = `
+    ${_angreItem()}
+    ${hasManual ? `<div class="ctx-item" onclick="resetMatRectLabel();hideCtx()">↩ Tilbakestill label til auto</div>` : ''}`;
+  showCtxAt(e.clientX, e.clientY);
+}
 function drawMats() {
   _matRectLabelBounds = {}; _matRectLabelGeom = {};   // rebuild per render (v2), som drawStrips/drawCables
   for (const mat of S.mats) {
@@ -17554,6 +17605,7 @@ function drawMats() {
     }
     ctx.restore();
   }
+  drawMatRectLabelHandles();   // v2: håndtak for låst rektangulær matte-label
 }
 
 // ── Mat gizmo rendering ──
@@ -29933,7 +29985,7 @@ canvas.addEventListener('mousedown', e=>{
     if (clHit !== null) {
       const cable = S.cables.find(c => c.id === clHit);
       if (cable) {
-        if (S.ui.selectedLabelCableId !== clHit) { S.ui.selectedLabelCableId = clHit; S.ui.selectedLabelStripId = null; S.ui.selectedLabelMatId = null; _resetCycle(); render(); }
+        if (S.ui.selectedLabelCableId !== clHit) { S.ui.selectedLabelCableId = clHit; S.ui.selectedLabelStripId = null; S.ui.selectedLabelMatId = null; S.ui.selectedLabelMatRectId = null; _resetCycle(); render(); }
         _cableLabelDragging = true; _cableLabelDragId = clHit;
         const rawWp = s2w(sx0, sy0);
         // v2: seed labelPos fra den FAKTISK tegnede senter-posisjonen (_cableLabelGeom),
@@ -29944,6 +29996,43 @@ canvas.addEventListener('mousedown', e=>{
           else    { cable.labelPos = { x: rawWp.x, y: rawWp.y }; }
         }
         _cableLabelDragOffset = { x: rawWp.x - cable.labelPos.x, y: rawWp.y - cable.labelPos.y };
+        canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
+
+    // ── Rektangulær matte-label handle (rotate / stretch) — kun for den LÅSTE labelen ──
+    const mrlhHit = hitMatRectLabelHandle(sx0, sy0);
+    if (mrlhHit) {
+      const mrm = (S.mats || []).find(m => m.id === mrlhHit.id);
+      if (mrm) {
+        pushUndo();
+        if (!mrm.labelPos) { const g0 = _matRectLabelGeom[mrlhHit.id]; if (g0) { const wc = s2w(g0.cx, g0.cy); mrm.labelPos = { x: wc.x, y: wc.y }; } }
+        if (mrlhHit.kind === 'stretch') {
+          const g = _matRectLabelGeom[mrlhHit.id];
+          const d0 = Math.hypot(sx0 - g.cx, sy0 - g.cy) || 1;
+          _matRectLabelHandleDrag = { id: mrlhHit.id, kind: 'stretch', startDist: d0, startScale: mrm.labelScale || 1 };
+        } else {
+          _matRectLabelHandleDrag = { id: mrlhHit.id, kind: 'rotate' };
+        }
+        canvas.style.cursor = 'grabbing';
+      }
+      return;
+    }
+    // ── Rektangulær matte-label drag ── (v2: klikk LÅSER labelen; ingen lag-sykling)
+    const mrlHit = hitMatRectLabel(sx0, sy0);
+    if (mrlHit !== null) {
+      const mrm = (S.mats || []).find(m => m.id === mrlHit);
+      if (mrm) {
+        if (S.ui.selectedLabelMatRectId !== mrlHit) { S.ui.selectedLabelMatRectId = mrlHit; S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; _resetCycle(); render(); }
+        _matRectLabelDragging = true; _matRectLabelDragId = mrlHit;
+        const rawWp = s2w(sx0, sy0);
+        if (!mrm.labelPos) {
+          const g0 = _matRectLabelGeom[mrlHit];
+          if (g0) { const wc = s2w(g0.cx, g0.cy); mrm.labelPos = { x: wc.x, y: wc.y }; }
+          else    { mrm.labelPos = { x: rawWp.x, y: rawWp.y }; }
+        }
+        _matRectLabelDragOffset = { x: rawWp.x - mrm.labelPos.x, y: rawWp.y - mrm.labelPos.y };
         canvas.style.cursor = 'grabbing';
       }
       return;
@@ -29972,7 +30061,7 @@ canvas.addEventListener('mousedown', e=>{
     if (mlHit !== null) {
       const mp = (S.matPaths || []).find(m => m.id === mlHit);
       if (mp) {
-        if (S.ui.selectedLabelMatId !== mlHit) { S.ui.selectedLabelMatId = mlHit; S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; _resetCycle(); render(); }
+        if (S.ui.selectedLabelMatId !== mlHit) { S.ui.selectedLabelMatId = mlHit; S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatRectId = null; _resetCycle(); render(); }
         _matLabelDragging = true; _matLabelDragId = mlHit;
         const rawWp = s2w(sx0, sy0);
         if (!mp.labelPos) {
@@ -30019,7 +30108,7 @@ canvas.addEventListener('mousedown', e=>{
     if (slHit !== null) {
       const strip = S.strips.find(s => s.id === slHit);
       if (strip) {
-        if (S.ui.selectedLabelStripId !== slHit) { S.ui.selectedLabelStripId = slHit; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; _resetCycle(); render(); }
+        if (S.ui.selectedLabelStripId !== slHit) { S.ui.selectedLabelStripId = slHit; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; S.ui.selectedLabelMatRectId = null; _resetCycle(); render(); }
         _stripLabelDragging = true; _stripLabelDragId = slHit;
         _stripLabelDragMoved = false;
         _stripLabelDragStart = { sx: sx0, sy: sy0 };
@@ -30029,8 +30118,8 @@ canvas.addEventListener('mousedown', e=>{
     }
     // Klikk tydelig UTENFOR enhver folie-/kabel-/matte-label → forlat de låste
     // label-valgene, og fortsett til normal seleksjon/sykling for objektene bak.
-    if (S.ui.selectedLabelStripId != null || S.ui.selectedLabelCableId != null || S.ui.selectedLabelMatId != null) {
-      S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; render();
+    if (S.ui.selectedLabelStripId != null || S.ui.selectedLabelCableId != null || S.ui.selectedLabelMatId != null || S.ui.selectedLabelMatRectId != null) {
+      S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; S.ui.selectedLabelMatRectId = null; render();
     }
 
     // ── Room info card hit (close or drag) ──
@@ -30758,6 +30847,38 @@ canvas.addEventListener('mousemove', e=>{
       const { x: sx, y: sy } = _evToCanvas(e);
       const wp = s2w(sx, sy);
       cable.labelPos = { x: wp.x - _cableLabelDragOffset.x, y: wp.y - _cableLabelDragOffset.y };
+      render();
+    }
+    return;
+  }
+
+  // Rektangulær matte-label drag (body) — v2
+  if (_matRectLabelDragging && _matRectLabelDragId !== null) {
+    const mrm = (S.mats || []).find(m => m.id === _matRectLabelDragId);
+    if (mrm) {
+      const _evcMrl = _evToCanvas(e);
+      const wp = s2w(_evcMrl.x, _evcMrl.y);
+      mrm.labelPos = { x: wp.x - _matRectLabelDragOffset.x, y: wp.y - _matRectLabelDragOffset.y };
+      render();
+    }
+    return;
+  }
+  // Rektangulær matte-label handle drag (rotate/stretch) — v2
+  if (_matRectLabelHandleDrag) {
+    const mrm = (S.mats || []).find(m => m.id === _matRectLabelHandleDrag.id);
+    const g = _matRectLabelGeom[_matRectLabelHandleDrag.id];
+    if (mrm && g) {
+      const { x: sx, y: sy } = _evToCanvas(e);
+      if (_matRectLabelHandleDrag.kind === 'rotate') {
+        let deg = (Math.atan2(sy - g.cy, sx - g.cx) + Math.PI / 2) * 180 / Math.PI;
+        deg = ((deg % 360) + 360) % 360;
+        if (!e.shiftKey) { for (const s of [0,90,180,270,360]) if (Math.abs(deg - s) <= 8) { deg = s % 360; break; } }
+        mrm.labelRotation = deg;
+      } else {
+        const d = Math.hypot(sx - g.cx, sy - g.cy);
+        let sc = _matRectLabelHandleDrag.startScale * (d / _matRectLabelHandleDrag.startDist);
+        mrm.labelScale = Math.max(0.5, Math.min(4, Math.round(sc * 100) / 100));
+      }
       render();
     }
     return;
@@ -31663,6 +31784,14 @@ canvas.addEventListener('mouseup', e=>{
     _cableLabelHandleDrag = null; canvas.style.cursor='default';
     _scheduleAutoSave && _scheduleAutoSave(); return;
   }
+  if (_matRectLabelDragging) {
+    _matRectLabelDragging=false; _matRectLabelDragId=null; canvas.style.cursor='default';
+    _scheduleAutoSave && _scheduleAutoSave(); return;
+  }
+  if (_matRectLabelHandleDrag) {
+    _matRectLabelHandleDrag = null; canvas.style.cursor='default';
+    _scheduleAutoSave && _scheduleAutoSave(); return;
+  }
   if (_matLabelDragging) {
     _matLabelDragging=false; _matLabelDragId=null; canvas.style.cursor='default';
     _scheduleAutoSave && _scheduleAutoSave(); return;
@@ -31868,6 +31997,10 @@ canvas.addEventListener('contextmenu', e=>{
       <div class="ctx-item${(S.ui.transformMode||'move')==='rotate'?' sel':''}" onclick="setTransformMode('rotate');hideCtx()">↻ Roter-modus</div>`;
     showCtxAt(e.clientX, e.clientY); return;
   }
+  // Rektangulær matte-label: eneste vei til «Tilbakestill til auto» siden matter ikke har noen
+  // annen kontekstmeny fra før — rent tillegg, påvirker ingen andre objekters høyreklikk.
+  const mrlCtxHit = hitMatRectLabel(sx, sy);
+  if (mrlCtxHit !== null) { matRectLabelCtxMenu(e, mrlCtxHit); return; }
   const vh=hitVertex(sx, sy);
   if (vh) { showVertexCtxMenu(e, vh.roomId, vh.vertexIdx); return; }
   const wp=getWorldPos(e);              // snapped — used only as insertion point for corner
@@ -32011,7 +32144,7 @@ document.addEventListener('keydown', e=>{
 
   if (e.key==='Escape') {
     _resetCycle();
-    if (S.ui.selectedLabelStripId != null || S.ui.selectedLabelCableId != null || S.ui.selectedLabelMatId != null) { S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; render(); return; }
+    if (S.ui.selectedLabelStripId != null || S.ui.selectedLabelCableId != null || S.ui.selectedLabelMatId != null || S.ui.selectedLabelMatRectId != null) { S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; S.ui.selectedLabelMatRectId = null; render(); return; }
     if (S.ui.selectedBg) { deselectBg(); return; }
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
     if (S.ui.stairPlaceMode) { S.ui.stairPlaceMode=false; S.ui.stairPlaceParams=null; canvas.style.cursor='default'; return; }
@@ -45317,7 +45450,7 @@ function _resetProjectState() {
     selectedHindringId:null, selectedHindringWallIdx:null,
     selectedVertexIdx:null, selectedDimId:null, selectedAnnot:null,
     selectedCableId:null, selectedMatId:null, selectedPlateId:null, selectedStairId:null,
-    selectedZoneId:null, activePartId:null, selectedLabelStripId:null, selectedLabelCableId:null, selectedLabelMatId:null,
+    selectedZoneId:null, activePartId:null, selectedLabelStripId:null, selectedLabelCableId:null, selectedLabelMatId:null, selectedLabelMatRectId:null,
     drawMode:null, movingWall:false, semiAutoMode:false,
     manualPlaceMode:false, dragWidth:null, dropPreviewStrip:null
   });
