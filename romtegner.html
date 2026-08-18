@@ -19103,6 +19103,31 @@ function _setStairCableStartFromTop(fromTop) {
   _updateStairSettingsPanel(); updateCtxBar(); render();
 }
 
+// STEG 5 (Regel 18, Kenneth 19.08.2026): ønsket antall kabler for å fordele lasten jevnt på en
+// trefasekurs. Tomt/0 = motoren søker fritt (1-3, som før) — se _stairSolveExactCableSet.
+function _setStairDesiredCableCount(val) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair) return;
+  const n = parseInt(val, 10);
+  const next = (n > 0) ? Math.min(n, 12) : null;
+  if (stair.desiredCableCount === next) return;
+  pushUndo();
+  stair.desiredCableCount = next;
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  _updateStairSettingsPanel(); updateCtxBar(); render();
+}
+
+function _setStairEqualCableLengths(checked) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair || !!stair.equalCableLengths === !!checked) return;
+  pushUndo();
+  stair.equalCableLengths = !!checked;
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  _updateStairSettingsPanel(); updateCtxBar(); render();
+}
+
 function _setStairFrontBackOffset(val) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
@@ -19336,6 +19361,20 @@ function _renderStairSettingsPanel(stairId) {
           <span style="font-size:10px;color:var(--dim)">cm</span>
         </span>
       </div>
+    </div>
+    <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <span title="Store trapper deles ofte i flere like kabler for jevn last på en trefasekurs (Regel 18)">Antall kabler</span>
+        <span style="display:flex;align-items:center;gap:3px">
+          <input type="number" min="0" max="12" step="1" value="${stair.desiredCableCount || ''}" placeholder="auto" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairDesiredCableCount(this.value)" onclick="event.stopPropagation()">
+        </span>
+      </div>
+      ${stair.desiredCableCount ? `<div style="display:flex;align-items:center;justify-content:space-between">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer" onclick="event.stopPropagation()">
+          <input type="checkbox" ${stair.equalCableLengths !== false ? 'checked' : ''} onchange="_setStairEqualCableLengths(this.checked)">
+          <span>Like lengder</span>
+        </label>
+      </div>` : ''}
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
@@ -21128,6 +21167,13 @@ function _stairSolveZones(stair) {
 // sett velges (Kenneths egen instruks), ikke tvinges inn med en for smal margin.
 function _stairSolveExactCableSet(stair, opts) {
   opts = opts || {};
+  // STEG 5 (Regel 18, Kenneth 19.08.2026): store trapper deles ofte i flere LIKE kabler for å
+  // fordele lasten jevnt på en trefasekurs. Brukerens ønskede antall + "like lengder"-avhuking er
+  // et EKSTRA krav oppå de vanlige reglene (margin som justeringsvariabel, eksakt kjede) — ikke en
+  // egen løsningsvei. Gjelder kun den udelte, hel-trapp-løsningen: soner tvinger allerede
+  // maxCables:1 via opts (STEG 7 — hver sone er ÉN kabel per design), og skal ikke overstyres av
+  // et stair-bredt kabelantall-ønske.
+  const wantEqualCount = !opts.maxCables && stair.desiredCableCount > 0 ? stair.desiredCableCount : null;
   const floorMargin = stair.edgeMargin_cm || 5;
   const prefFamily = stair.preferredFamily || 'InSnow 30T';
   const prefVoltage = stair.preferredVoltage || 230;
@@ -21156,7 +21202,9 @@ function _stairSolveExactCableSet(stair, opts) {
   const maxSaneMargin = Math.min(minSurfW / 2 - 1, floorMargin + 15);
 
   const lens = [...new Set(cableProds.map(p => p.cable_length_m))].sort((a, b) => a - b);
-  const maxCables = Math.min(opts.maxCables || 3, lens.length > 0 ? 3 : 0);
+  // STEG 5 (Regel 18): et eksplisitt ønsket antall er et BRUKERKRAV, ikke noe søkerommet skal
+  // begrenses til 3 for — den vanlige 3-kabel-taket gjelder kun det FRIE søket (ingen antall bedt om).
+  const maxCables = wantEqualCount ? wantEqualCount : Math.min(opts.maxCables || 3, lens.length > 0 ? 3 : 0);
   const candidates = [];
 
   function tryCombo(combo) {
@@ -21172,14 +21220,31 @@ function _stairSolveExactCableSet(stair, opts) {
     const margin = Math.max(floorMargin, Math.round(exactMargin * 10) / 10);
     candidates.push({ lens: combo, sum_cm, margin, exactMargin });
   }
-  // Multisett av lengder (ikke permutasjoner — rekkefølgen betyr ikke noe for summen).
-  for (let n = 1; n <= maxCables; n++) {
+  if (wantEqualCount && stair.equalCableLengths !== false) {
+    // STEG 5 (Regel 18): N LIKE kabler — samme katalog-lengde gjentatt N ganger, ikke et fritt
+    // multisett. Prøver hver tilgjengelige lengde som "den ene" lengden alle N kablene får.
+    for (const L of lens) tryCombo(Array(wantEqualCount).fill(L));
+  } else if (wantEqualCount) {
+    // Ønsket antall, men IKKE nødvendigvis like lengder — fritt multisett, men FAST på nøyaktig N
+    // kabler (ikke 1..N slik det frie søket ellers ville prøvd).
     (function rec(start, chosen) {
-      if (chosen.length === n) { tryCombo(chosen.map(i => lens[i])); return; }
+      if (chosen.length === wantEqualCount) { tryCombo(chosen.map(i => lens[i])); return; }
       for (let i = start; i < lens.length; i++) rec(i, [...chosen, i]);
     })(0, []);
+  } else {
+    // Multisett av lengder (ikke permutasjoner — rekkefølgen betyr ikke noe for summen).
+    for (let n = 1; n <= maxCables; n++) {
+      (function rec(start, chosen) {
+        if (chosen.length === n) { tryCombo(chosen.map(i => lens[i])); return; }
+        for (let i = start; i < lens.length; i++) rec(i, [...chosen, i]);
+      })(0, []);
+    }
   }
   if (!candidates.length) {
+    if (wantEqualCount) {
+      const wantLbl = stair.equalCableLengths !== false ? `${wantEqualCount} like kabler` : `${wantEqualCount} kabler`;
+      return { ok: false, reason: `Fant ingen kombinasjon som gir ${wantLbl} av ${prefFamily} ${prefVoltage}V innenfor maks CC og effektgrense, uten å gå under minimumsmarginen (${floorMargin} cm). Prøv et annet antall, slå av «like lengder», eller en annen familie/spenning.` };
+    }
     return { ok: false, reason: `Ingen kombinasjon av ${prefFamily} ${prefVoltage}V dekker behovet (${(neededAtFloor_cm / 100).toFixed(1)} m) uten å gå under minimumsmarginen (${floorMargin} cm). Prøv en annen familie/spenning, eller flere kabler.` };
   }
   // Foretrekk MINST mulig marginøkning (Regel 12 — brukeren skal ikke overraskes av en stor,
@@ -21260,6 +21325,10 @@ function _generateStairProposals(stair) {
   const marginVariants = [{nose: baseNoseOff, riser: baseRiserOff}];
   if (baseNoseOff !== 3 || baseRiserOff !== 3) marginVariants.push({nose: 3, riser: 3});
 
+  // STEG 5 (Regel 18): «går det ikke opp, skal appen si fra» — behold ÅRSAKEN fra
+  // _stairSolveExactCableSet (f.eks. «fant ingen kombinasjon som gir 3 like kabler...») i stedet
+  // for å la den forsvinne i `continue` og ende med en generisk «ingen forslag»-melding.
+  let firstFailReason = null;
   for (const mv of marginVariants) {
     const treadD = firstTread.d_cm - mv.riser - mv.nose;
     if (treadD <= 0) continue;
@@ -21289,7 +21358,7 @@ function _generateStairProposals(stair) {
       stepWm2 = actualCC > 0 ? Math.round(wpm / (actualCC / 100)) : 0;
     }
     stair.noseOffset_cm = origNose; stair.riserOffset_cm = origRiser; stair.runsPerStep = origRunsPerStep;
-    if (!solved.ok) continue;
+    if (!solved.ok) { if (!firstFailReason) firstFailReason = solved.reason; continue; }
 
     const totalWatt = solved.products.reduce((s, p) => s + (p.watt || 0), 0);
     const candidate = {
@@ -21317,7 +21386,14 @@ function _generateStairProposals(stair) {
     candidates.push(candidate);
   }
 
-  if (!candidates.length) return [];
+  if (!candidates.length) {
+    // STEG 5 (Regel 18): failReason henges på det tomme resultatet (arrayet er fortsatt en array —
+    // ingen kallere som sjekker .length bryr seg om den ekstra egenskapen) slik at showStairProposals
+    // kan vise Kenneths faktiske forklaring i stedet for en generisk «matcher ikke»-melding.
+    const empty = [];
+    if (firstFailReason) empty.failReason = firstFailReason;
+    return empty;
+  }
   candidates.sort((a, b) => b.score - a.score);
   const result = candidates.slice(0, 2);
   result[0].recommended = true;
@@ -21572,10 +21648,12 @@ function showStairProposals(stairId) {
   if (!proposals.length) {
     // Show inline toast instead of blocking alert
     const toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);background:var(--warn,#e06030);color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.3)';
-    toast.textContent = 'Ingen kabelforslag tilgjengelig. Kabelprodukter matcher ikke trappens dimensjoner.';
+    toast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);background:var(--warn,#e06030);color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.3);max-width:480px;text-align:center';
+    // STEG 5 (Regel 18): vis den FAKTISKE årsaken (f.eks. «fant ingen kombinasjon som gir 3 like
+    // kabler...») når den finnes, i stedet for alltid samme generiske melding.
+    toast.textContent = proposals.failReason || 'Ingen kabelforslag tilgjengelig. Kabelprodukter matcher ikke trappens dimensjoner.';
     document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 4000);
+    setTimeout(() => toast.remove(), 5000);
     return;
   }
   _renderStairProposalPanel(stair, proposals);
@@ -21636,6 +21714,11 @@ function _createStairObj(params) {
     // kun styrer rekkefølgen brukeren BYGGER segmentene i i trappebyggeren). Standard er bunn
     // (false) — eksisterende trapper skal aldri snu seg ved åpning/lasting.
     cableStartFromTop: params.cableStartFromTop ?? false,
+    // STEG 5 (Regel 18, Kenneth 19.08.2026): valgfritt ønsket antall kabler (null = motoren søker
+    // fritt 1-3 slik den alltid har gjort) + om de skal ha SAMME katalog-lengde. Standard PÅ for
+    // "like lengder" — det er selve poenget med å be om et bestemt antall (jevn last på trefase).
+    desiredCableCount: params.desiredCableCount ?? null,
+    equalCableLengths: params.equalCableLengths ?? true,
     stepCC_cm: params.stepCC_cm ?? (params.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
     landingCC_cm: params.landingCC_cm ?? (params.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
     edgeMargin_cm: params.edgeMargin_cm || 5,
