@@ -6551,6 +6551,11 @@ function _matColor(mat) {
 function _matLaidLengthCm(mat) {
   if (!mat) return 0;
   const n = mat.num_runs || 1;
+  if (mat.runLengths) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += _matRunLenCm(mat, i);
+    return sum;
+  }
   const last = (mat.last_run_length_cm != null) ? mat.last_run_length_cm : mat.length_cm;
   return (n - 1) * mat.length_cm + last;
 }
@@ -6796,6 +6801,71 @@ function _packSnowMats(roomId, productId) {
   return { placedIds: mats.map(m => m.id), summary, N, k, remainderName };
 }
 
+// Klipp ÉN matte-bredde mot rommets POLYGON (ikke bare det omsluttende rektangelet) + hindringer/
+// forbudte soner, langs `direction`-aksen ved tverr-posisjon [pos_cm, pos_cm+nettoCm]. Speiler
+// computeClippedSegments (:28540) sin oppbygning, men den er kabel-produkt-koblet (leser
+// netto_width_mm fra HEATING_PRODUCTS) og derfor ikke direkte kallbar for matte — denne kaller de
+// SAMME delte primitivene (clipStripToRoom/clipStripAroundHindrings/_clipStripAroundZones/
+// _mergeShortGaps) med matte sin egen bredde/margin/kuttraster i stedet. LÅST REGEL (Kenneth
+// 14.08.2026): varmekabel skal ALDRI tegnes/beregnes utenfor rommets yttervegger.
+function _matClippedSegments(roomId, direction, pos_cm, nettoCm, marginCm, cutCm) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return [];
+  const MIN_LEN = 5;
+  let segments = clipStripToRoom(pos_cm, nettoCm, direction, room.points, marginCm);
+  const roomHindrings = S.hindrings.filter(h => h.roomId === roomId);
+  if (roomHindrings.length > 0) {
+    segments = clipStripAroundHindrings(segments, pos_cm, nettoCm, direction, roomHindrings, marginCm);
+  }
+  const forbiddenZones = S.zones.filter(z => z.roomId === roomId && z.type === 'forbidden');
+  if (forbiddenZones.length > 0) {
+    segments = _clipStripAroundZones(segments, pos_cm, nettoCm, direction, forbiddenZones, marginCm);
+  }
+  segments = _mergeShortGaps(segments, 3);
+  return segments
+    .map(([lo, hi]) => {
+      let len = hi - lo;
+      if (cutCm > 0) len = Math.floor(len / cutCm) * cutCm;
+      return { start_cm: lo, length_cm: len };
+    })
+    .filter(seg => seg.length_cm >= MIN_LEN);
+}
+
+// Faktisk lengde (cm) for streng nr. `i` (0-indeksert) på en matte. Leser mat.runLengths[] når
+// satt (romform-klippet av autoFillMatSerpentine, STEG 1) — ellers dagens modell uendret: uniform
+// mat.length_cm, evt. kortere siste via last_run_length_cm («eksakt mattelengde»-regelen fra
+// 08.07). ÉN kilde brukt av tegning (skjerm), _matLaidLengthCm og materiallista, så de aldri kan
+// komme til ulikt tall.
+function _matRunLenCm(mat, i) {
+  if (mat && mat.runLengths && mat.runLengths[i] != null) return mat.runLengths[i];
+  const n = (mat && mat.num_runs) || 1;
+  if (mat && i === n - 1 && mat.last_run_length_cm != null) return mat.last_run_length_cm;
+  return mat ? mat.length_cm : 0;
+}
+
+// STEG 4 (vakt mot regelbrudd, LÅST REGEL Kenneth 14.08.2026): verifiser at HVER streng på en
+// matte faktisk ligger innenfor rommets polygon minus veggmargin. Sikkerhetslinje mot FREMTIDIGE
+// regresjoner i klippe-logikken (STEG 1-3), ikke bare denne ene bugen. Generell nok til å kunne
+// gjenbrukes for snø-matter/frihånds-matter senere (leser kun mat.x_cm/y_cm/width_cm/gap_cm/
+// rotation_deg/num_runs + _matRunLenCm — ingen antakelse om HVORDAN mattas felt ble beregnet).
+function _matRunsWithinRoom(mat, room, marginCm) {
+  if (!mat || !room || !room.points || room.points.length < 3) return true;
+  const n = mat.num_runs || 1;
+  const dir = mat.rotation_deg === 90 ? 'h' : 'v';
+  const alongStart = dir === 'h' ? mat.x_cm : mat.y_cm;
+  const perpBase = dir === 'h' ? mat.y_cm : mat.x_cm;
+  const gapCm = mat.gap_cm || 0;
+  for (let r = 0; r < n; r++) {
+    const len = _matRunLenCm(mat, r);
+    if (len <= 0) continue;
+    const perpPos = perpBase + r * (mat.width_cm + gapCm);
+    const segs = _matClippedSegments(room.id, dir, perpPos, mat.width_cm, marginCm, 0);
+    const fits = segs.some(s => s.start_cm <= alongStart + 0.5 && s.start_cm + s.length_cm >= alongStart + len - 0.5);
+    if (!fits) return false;
+  }
+  return true;
+}
+
 // opts.exact: place exactly the given product (skip best-fit variant swap).
 // opts.keepPanel: don't hide the product panel after placing (for live variant preview).
 function autoFillMatSerpentine(productId, opts) {
@@ -6904,7 +6974,32 @@ function autoFillMatSerpentine(productId, opts) {
     if (p.product_family && prod.product_family) return p.product_family === prod.product_family;
     return familyKey && (p.name || '').replace(sizeSuffixRe, '').trim() === familyKey;
   };
-  const idealLenCm = maxRuns * runLengthCm;
+  // STEG 3 (LÅST REGEL, Kenneth 14.08.2026): kapasiteten som styrer variantvalget skal reflektere
+  // hva ROMFORMEN faktisk gir plass til, ikke det omsluttende rektangelet — ellers velger motoren
+  // en for stor rull når romformen klipper noen bredder kortere (samme følgefeil som selve
+  // hovedbugen, bare videreført inn i variantvalget). Foreløpig anslag her: bruker gapCm (IKKE
+  // ennå jevnt fordelt evenGapCm) og alongMin som forankring, siden endelig tverr-akse-oppsett og
+  // mattas faktiske posisjon (matX/matY/effectiveGapCm) først er kjent etter at en variant er
+  // valgt. Presise per-bredde-lengder regnes på nytt (og lagres i mat.runLengths[]) etter det —
+  // se STEG 1 lenger ned. Forskjellen mellom de to rundene er typisk under ett kuttintervall og
+  // endrer i praksis aldri hvilken romsone en gitt bredde havner i.
+  let idealLenCm = 0;
+  for (let r = 0; r < maxRuns; r++) {
+    const perpPos = acrossMin + r * (matWidthCm + gapCm);
+    // cutCm=0 her: _matClippedSegments skal IKKE snappe internt — det ville dobbelt-avrundet
+    // sammen med Math.floor(len/cutCm) rett under (fant ~16 cm falsk «klipping» på HVER bredde,
+    // også de som aldri traff romformen, ved testing mot repro-rommet).
+    const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+    const seg = segs.find(s => s.start_cm <= alongMin + 0.5 && s.start_cm + s.length_cm >= alongMin - 0.5);
+    let len = 0;
+    if (seg) {
+      const reachable = (seg.start_cm + seg.length_cm) - alongMin;
+      len = Math.max(0, Math.min(runLengthCm, reachable));
+      len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+    }
+    if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → teller ikke
+    idealLenCm += len;
+  }
   const candidates = HEATING_PRODUCTS
     .filter(p => p.active !== false
       && p.mat_width_mm === prod.mat_width_mm
@@ -6981,8 +7076,6 @@ function autoFillMatSerpentine(productId, opts) {
   }
   if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
 
-  pushUndo();
-
   // Distribute leftover across-axis space as even gaps between mats
   // (mats can lie flush against each other, but spreading them evenly
   // gives better heat coverage and looks cleaner). The user's gapCm
@@ -7012,6 +7105,40 @@ function autoFillMatSerpentine(productId, opts) {
     matY = alongCenter - runLengthCm / 2;
   }
 
+  // STEG 1 (LÅST REGEL, Kenneth 14.08.2026): klipp HVER bredde mot rommets POLYGON på mattas
+  // FAKTISKE, endelige posisjon (matX/matY/effectiveGapCm er nå kjent) — ikke bare det
+  // omsluttende rektangelet across/along-spennene over er basert på. En bredde som treffer et
+  // innhukk/skrå vegg avsluttes FØR veggen i stedet for å stikke forbi den. mat.runLengths[]
+  // settes KUN når klippingen faktisk gir en kortere lengde enn nominell runLengthCm for minst
+  // én bredde — rene rektangler (alle bredder uklippet) forblir uendret (feltet forblir usatt,
+  // samme oppførsel som før denne endringen — den viktigste regresjonstesten).
+  const alongStart = dir === 'h' ? matX : matY;
+  const perpBase = dir === 'h' ? matY : matX;
+  const nominalMatStub = { num_runs: actualRuns, length_cm: runLengthCm, last_run_length_cm: matLastRunLen };
+  let anyRunClipped = false;
+  const clippedRunLens = [];
+  for (let r = 0; r < actualRuns; r++) {
+    const perpPos = perpBase + r * (matWidthCm + effectiveGapCm);
+    const nominalLen = _matRunLenCm(nominalMatStub, r);
+    // cutCm=0: se samme note som i idealLenCm-løkken over — snapping skjer ÉN gang, i
+    // Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
+    const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+    // Kun et segment som faktisk INNEHOLDER skjøt-forankringen (alongStart) er brukbart — å
+    // hoppe til et lengre, men frakoblet segment ville brutt regelen «ingen kabel i et segment
+    // som ikke henger sammen med resten».
+    const seg = segs.find(s => s.start_cm <= alongStart + 0.5 && s.start_cm + s.length_cm >= alongStart - 0.5);
+    let len = 0;
+    if (seg) {
+      const reachable = (seg.start_cm + seg.length_cm) - alongStart;
+      len = Math.max(0, Math.min(nominalLen, reachable));
+      len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+    }
+    if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → legg den ikke ut
+    if (len < nominalLen - 0.05) anyRunClipped = true;
+    clippedRunLens.push(len);
+  }
+  const runLengthsOut = anyRunClipped ? clippedRunLens : null;
+
   const mat = {
     id: S.counters.nextMatId++,
     roomId: room.id,
@@ -7022,11 +7149,23 @@ function autoFillMatSerpentine(productId, opts) {
     length_cm: runLengthCm,
     num_runs: actualRuns,
     last_run_length_cm: matLastRunLen,   // kortere siste bredde (null = alle like) — for eksakt mattelengde
+    runLengths: runLengthsOut,           // per-bredde-klippet mot romformen (null = alle uklippet)
     gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0,
     _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
     _fromWall: fromWall                                             // true → alt kaldt felt på én side; false → deles likt
   };
+
+  // STEG 4: siste vaktpost før noe faktisk legges til state. PASS 2 over skal allerede garantere
+  // dette, men hvis noe likevel bryter (fremtidig regresjon), ikke commit et utlegg som legger
+  // kabel utenfor rommet — logg og varsle i stedet for å stille legge det ut.
+  if (!_matRunsWithinRoom(mat, room, marginCm)) {
+    console.error('autoFillMatSerpentine: klippet utlegg brøt likevel romgrensa — avbrutt', mat);
+    _showToast('Auto-utlegg avbrutt: ville lagt kabel utenfor rommet', 'error');
+    return;
+  }
+
+  pushUndo();
   S.mats.push(mat);
 
   _invalidateMatCache();
@@ -17393,16 +17532,21 @@ function drawMats() {
         : _lc('rgba(40, 100, 200, 0.55)', 'rgba(80, 160, 240, 0.5)');
     }
 
-    // Draw each run as a separate rectangle. Siste bredde kan være KORTERE (last_run_length_cm),
-    // forankret i skjøt-enden (up-bane → bunn, down-bane → topp).
-    const _upLast = (numRuns - 1) % 2 === 0;
+    // Draw each run as a separate rectangle. En bredde kan være KORTERE enn nominell lengde —
+    // enten siste bredde (last_run_length_cm, «eksakt mattelengde») eller EN HVILKEN SOM HELST
+    // bredde klippet mot romformen (mat.runLengths[], LÅST REGEL: kabel skal aldri stikke utenfor
+    // rommet). Begge forankres i skjøt-enden (up-bane → bunn, down-bane → topp) — samme regel,
+    // generalisert til å gjelde alle bredder, ikke bare den siste.
     for (let r = 0; r < numRuns; r++) {
       const runCenterX = -htw + hw + r * (mat.width_cm + gapCm) * sc;
+      const rLenCm = _matRunLenCm(mat, r);
+      if (rLenCm <= 0) continue;   // STEG 2: klippet vekk helt (for kort etter kuttraster-snap)
       let ry0 = -hl, rh = hl * 2;
-      if (r === numRuns - 1 && mat.last_run_length_cm) {
-        const lastPx = mat.last_run_length_cm * sc;
-        ry0 = _upLast ? (hl - lastPx) : -hl;
-        rh = lastPx;
+      if (rLenCm < mat.length_cm - 0.05) {
+        const upR = (r % 2 === 0);
+        const rPxLen = rLenCm * sc;
+        ry0 = upR ? (hl - rPxLen) : -hl;
+        rh = rPxLen;
       }
       ctx.fillStyle = fillColor;
       ctx.fillRect(runCenterX - hw, ry0, hw * 2, rh);
@@ -17418,10 +17562,6 @@ function drawMats() {
       const minLenMgn = 2.0;
       const usableLen = mat.length_cm - 2 * minLenMgn;
       const nCableRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
-      // Kortere siste bredde → færre strenger i den banen (forankret i skjøt-enden via k-rekkefølgen).
-      const nCableRunsLast = mat.last_run_length_cm
-        ? Math.max(1, Math.min(nCableRuns, Math.floor((mat.last_run_length_cm - 2 * minLenMgn) / ccCm) + 1))
-        : nCableRuns;
       const totalSpan = (nCableRuns - 1) * ccCm;
       const edgeMgn = (mat.length_cm - totalSpan) / 2;
       const ccPx = ccCm * sc;
@@ -17442,14 +17582,27 @@ function drawMats() {
       const yOf = k => -hl + (edgeMgn + k * ccCm) * sc;
       ctx.beginPath();
       let pen = null, startPt = null, startDirX = 1;
+      // k-posisjonen VANDRER kontinuerlig over HELE kabelen (ikke uavhengig utledet per bane fra
+      // en fast «start på 0 eller 35»-antakelse) — se note nedenfor for hvorfor dette måtte endres
+      // fra den opprinnelige (kun siste bane kunne være kortere) modellen.
+      let curK = nCableRuns - 1, curDir = -1;                          // matcher opprinnelig bane 0: up=true, jj=0 → k=nCableRuns-1
       for (let vi = 0; vi < numRuns; vi++) {
         const r = vi;                                                  // VENSTRE→HØYRE (kabel starter på venstre matte)
+        const rLenVi = _matRunLenCm(mat, vi);
+        // Klippet vekk helt (STEG 2): kabelen kan ikke hoppe over en manglende bane uten Y-splitt
+        // (LÅST REGEL) — stopp den sammenhengende serpentinen her i stedet for å gjette en bro.
+        if (rLenVi <= 0) break;
         const cxr = -htw + hw + r * (mat.width_cm + gapCm) * sc;
         const loX = cxr - hw + insetPx, hiX = cxr + hw - insetPx;      // strengens tverr-endepunkter
-        const up = (vi % 2 === 0);                                     // vekslende skann-retning per bane
-        const runsThisBane = (vi === numRuns - 1) ? nCableRunsLast : nCableRuns;
+        // Kortere bredde (siste ELLER romform-klippet) → færre strenger i den banen (forankret i
+        // skjøt-enden — curK fortsetter alltid derfra den forrige banen faktisk sluttet, IKKE fra
+        // en antatt fast ende (0/nCableRuns-1). Det ANTAGELSEN var selve bugen: en klippet bane
+        // slutter på en k midt i rekka, og neste banes «flukt»-skjøt hoppet likevel til den faste
+        // enden — en lang, feilaktig strek tvers over flere bredder, potensielt utenfor rommet.
+        const runsThisBane = (rLenVi >= mat.length_cm - 0.05) ? nCableRuns
+          : Math.max(1, Math.min(nCableRuns, Math.floor((rLenVi - 2 * minLenMgn) / ccCm) + 1));
         for (let jj = 0; jj < runsThisBane; jj++) {
-          const k = up ? (nCableRuns - 1 - jj) : jj;
+          const k = curK;
           const y = yOf(k);
           const startHi = (jj % 2 === 1);                              // første streng starter VENSTRE → første sving på HØYRE
           const ax = startHi ? hiX : loX;                             // strengens start-x
@@ -17458,7 +17611,7 @@ function drawMats() {
             ctx.moveTo(ax, y);
             startPt = { x: ax, y: y }; startDirX = Math.sign(bx - ax) || 1;   // Del 2: kaldskjøt-start + retning
           } else if (jj === 0) {
-            ctx.lineTo(ax, y);                                        // flukt-skjøt mellom baner (rett over)
+            ctx.lineTo(ax, y);                                        // flukt-skjøt mellom baner (rett over — SAMME y, siden curK ikke ble nullstilt)
           } else {
             // Halvsirkel radius cc/2 mellom to strenger (cc fra hverandre langs lengden), buler ut
             // mot veggen på lo-siden (venstre) eller hi-siden (høyre) → lander på 2,5 cm-margen.
@@ -17472,7 +17625,15 @@ function drawMats() {
           }
           ctx.lineTo(bx, y);
           pen = { x: bx, y: y };
+          if (jj < runsThisBane - 1) {
+            curK += curDir;
+            // Defensivt: en full-lengde bane som følger flere klippede baner kan i teorien
+            // begynne vandringen fra en k som ikke er ved enden — klem inn i gyldig område i
+            // stedet for å tegne utenfor strengrekka.
+            curK = Math.max(0, Math.min(nCableRuns - 1, curK));
+          }
         }
+        curDir = -curDir;                                              // vekslende retning for NESTE bane
       }
       ctx.stroke();
 
