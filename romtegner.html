@@ -35325,18 +35325,244 @@ function _listSaveNameDialog(){
 // ─── PDF-IMPORT MOT DEN DELTE MOTOREN (lumelo-backend) ───────────────────────
 // Last en vektor-PDF → motoren tolker rom → opprett listMode-rom (navn + areal)
 // i hurtigprosjektering. Areal = shoelace(polygon i meter) × 10000 = cm².
-// Motor-URL: window-override → lagret valg (localStorage) → localhost (dev).
-// Lar deg bruke arqely.com fra en PC og peke på en HTTPS-motor (tunnel/Fly.io)
-// uten ny deploy — adressen settes i feil-dialogen under (eller _pdfSetEngineUrl).
+//
+// Motor-tilkobling (adresseoppløsning, helsesjekk, kaldstart-toleranse). Dette laget rører
+// KUN hvordan klienten FINNER og SNAKKER MED motoren — API-kontrakt, lag-velger og
+// geometri-tolking under er urørt.
+//
+// Rekkefølge (STEG 1): window-override (alltid) → lagret adresse (KUN hvis den svarer på
+// /health) → localhost:8000 (KUN på localhost/127.0.0.1, KUN hvis den svarer) → Fly-motoren
+// (standard overalt, uansett hostname). En død lagret adresse (f.eks. en lukket tunnel)
+// blokkerer ikke lenger — den blir bare hoppet over.
+const LUMELO_FLY_URL = 'https://lumelo-backend.fly.dev';
+const LUMELO_LOCAL_URL = 'http://localhost:8000';
+let _engineResolved = null;   // siste { url, source, reachable, tried, skippedStored, ts }
+const ENGINE_RESOLVE_CACHE_MS = 15000;   // unngår å pinge på nytt for hvert fetch-kall i én import-økt
+
+function _engineHost(u){ try{ return new URL(u).host; }catch(e){ return u; } }
+
+async function _engineHealthCheck(url, timeoutMs){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), timeoutMs||2500);
+  try {
+    const r = await fetch(url.replace(/\/+$/,'')+'/health', {signal: ctrl.signal});
+    return !!(r && r.ok);
+  } catch(err){
+    return false;
+  } finally { clearTimeout(t); }
+}
+
+// STEG 1+2: løs adresse, helsesjekket i riktig rekkefølge. `force` hopper over cachen (brukes
+// etter nullstilling/manuelt valg). Kaster aldri — returnerer alltid EN adresse å prøve, selv
+// om ingen svarte (Fly er alltid siste, «beste gjetning»; kaldstart-toleransen i fetch-laget
+// under tar seg av at Fly kan trenge et par sekunder på å våkne).
+async function _resolveEngineUrl(force){
+  if(window.LUMELO_ENGINE_URL) return { url: window.LUMELO_ENGINE_URL, source:'override', reachable:null, tried:[], ts:Date.now() };
+  if(!force && _engineResolved && (Date.now()-_engineResolved.ts) < ENGINE_RESOLVE_CACHE_MS) return _engineResolved;
+
+  const stored = (localStorage.getItem('lumelo_engine_url')||'').trim().replace(/\/+$/,'');
+  const isLocalHost = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname);
+  const tried = [];
+
+  if(stored){
+    const ok = await _engineHealthCheck(stored, 2500);
+    tried.push({url:stored, source:'stored', ok});
+    if(ok){ const res={url:stored, source:'stored', reachable:true, tried, ts:Date.now()}; _engineResolved=res; return res; }
+  }
+  if(isLocalHost){
+    const ok = await _engineHealthCheck(LUMELO_LOCAL_URL, 2500);
+    tried.push({url:LUMELO_LOCAL_URL, source:'localhost', ok});
+    if(ok){ const res={url:LUMELO_LOCAL_URL, source:'localhost', reachable:true, tried, ts:Date.now()}; _engineResolved=res; return res; }
+  }
+  const flyOk = await _engineHealthCheck(LUMELO_FLY_URL, 2500);
+  tried.push({url:LUMELO_FLY_URL, source:'fly', ok:flyOk});
+  const res = {
+    url: LUMELO_FLY_URL, source:'fly', reachable: flyOk, tried, ts: Date.now(),
+    skippedStored: (stored && !tried.some(t=>t.source==='stored'&&t.ok)) ? stored : null
+  };
+  _engineResolved = res;
+  return res;
+}
+
+// Kalles fra import-triggerne (knapp/slipp-sone) FØR filen er valgt, rent for å varme opp
+// cachen — treffer da helsesjekken parallelt med at brukeren velger fil i stedet for å vente
+// til filen faktisk skal sendes. Bevisst «fire and forget»: feiler den, oppdager den faktiske
+// import-fetchen det uansett (samme _resolveEngineUrl, nå cachet).
+function _engineWarmResolve(){ _resolveEngineUrl().catch(()=>{}); }
+
+function _engineResetStoredUrl(){
+  localStorage.removeItem('lumelo_engine_url');
+  _engineResolved = null;
+}
+
+// Synkron beste-gjetning for kode som (ennå) ikke kan awaite — brukes kun som visningsverdi
+// (statuslinje) før første _resolveEngineUrl har rukket å fullføre.
 function _engineUrl(){
   if(window.LUMELO_ENGINE_URL) return window.LUMELO_ENGINE_URL;
+  if(_engineResolved && _engineResolved.url) return _engineResolved.url;
   const stored=(localStorage.getItem('lumelo_engine_url')||'').trim();
   if(stored) return stored;
-  // Produksjon (arqely.com) → Fly-motoren; lokalt → localhost. Endre Fly-URL her
-  // hvis du valgte et annet app-navn enn 'lumelo-backend'.
-  return /(^|\.)arqely\.com$/i.test(location.hostname) ? 'https://lumelo-backend.fly.dev' : 'http://localhost:8000';
+  return /^(localhost|127\.0\.0\.1)$/i.test(location.hostname) ? LUMELO_LOCAL_URL : LUMELO_FLY_URL;
 }
-function _pdfSetEngineUrl(u){ if(u){ localStorage.setItem('lumelo_engine_url', String(u).trim().replace(/\/+$/,'')); } }
+function _pdfSetEngineUrl(u){
+  if(!u) return;
+  localStorage.setItem('lumelo_engine_url', String(u).trim().replace(/\/+$/,''));
+  _engineResolved = null;   // neste _resolveEngineUrl prøver den nye adressen på nytt (helsesjekket)
+}
+
+// STEG 3: tåler kaldstart. Feiler selve import-forespørselen (nettverksfeil ELLER 5xx): ping
+// /health til den svarer (tak 20s) og prøv SAMME forespørsel på nytt ÉN gang — aldri mer.
+// FormData/File i `opts.body` er trygt å gjenbruke på tvers av to fetch-kall (ikke en strøm).
+async function _engineFetchWithRetry(url, opts, onStatus){
+  let r;
+  try {
+    r = await fetch(url, opts);
+    if(r.ok || r.status < 500) return r;
+    throw new Error('HTTP '+r.status);
+  } catch(firstErr){
+    if(onStatus) onStatus('coldstart');
+    const base = url.replace(/\/import\/.*/, '');
+    const woke = await _engineWaitForHealth(base, 20000);
+    if(!woke){ if(onStatus) onStatus('failed'); throw firstErr; }
+    if(onStatus) onStatus('retrying');
+    return fetch(url, opts);
+  }
+}
+async function _engineWaitForHealth(baseUrl, maxWaitMs){
+  const start = Date.now();
+  while(Date.now()-start < maxWaitMs){
+    if(await _engineHealthCheck(baseUrl, 2500)) return true;
+    await new Promise(res=>setTimeout(res, 1000));
+  }
+  return false;
+}
+function _engineShowColdStartToast(status){
+  if(typeof _showToast!=='function') return;
+  if(status==='coldstart') _showToast('Starter motoren …','info');
+  else if(status==='retrying') _showToast('Motoren er oppe — prøver igjen …','info');
+}
+
+// Klassifiserer en feilet forespørsel til {kind, status, url, maybeCors} for feil-dialogen.
+// fetch() kaster samme generiske feil for ekte nettverksbrudd OG for en CORS-blokkering — de kan
+// ikke skilles pålitelig fra selve unntaket. Flagger «kan være CORS» når origin ikke er en av
+// dem motoren normalt godkjenner (localhost/arqely.com) — se app/core/config.py i lumelo-backend.
+function _engineClassifyError(err, url, status){
+  const kind = (err && err.name==='AbortError') ? 'timeout' : (status!=null ? 'http' : 'network');
+  const isTrustedOrigin = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname) || /(^|\.)arqely\.com$/i.test(location.hostname);
+  return { kind, status, url, message: err && err.message, maybeCors: kind==='network' && !isTrustedOrigin };
+}
+
+// Delt av auto-lesing og verktøylinje-import — begge poster filen til /import/{kind}/layers for
+// å hente lag-listen FØR bruker velger vegger. Kaster et klassifisert feilobjekt (ikke en rå
+// Error) slik at kallerne kan vise samme tilkoblings-dialog (STEG 4).
+async function _engineFetchLayers(file){
+  const res = await _resolveEngineUrl();
+  const url = res.url + '/import/' + _importKind(file) + '/layers';
+  const fd = new FormData(); fd.append('file', file);
+  let r;
+  try {
+    r = await _engineFetchWithRetry(url, {method:'POST', body:fd}, _engineShowColdStartToast);
+  } catch(err){ throw _engineClassifyError(err, url); }
+  if(r.status===415){ const e=new Error('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.'); e.kind='dwg415'; throw e; }
+  if(!r.ok){ throw _engineClassifyError(new Error('HTTP '+r.status), url, r.status); }
+  return (await r.json()).layers || {};
+}
+
+// Viser tilkoblings-feil-dialogen og kaller `retryFn()` igjen hvis brukeren velger en ny/
+// nullstilt adresse. Erstatter de to tidligere prompt()-stedene (STEG 4).
+function _engineHandleImportError(err, retryFn){
+  if(err && err.kind==='dwg415'){ if(typeof _showToast==='function') _showToast(err.message,'warn'); return; }
+  const info = (err && err.kind) ? err : _engineClassifyError(err, _engineUrl());
+  _engineErrorDialog(info, choice => { if(choice!=null) retryFn(); });
+}
+
+// Delt av alle «faktisk importer rommene»-kallstedene (auto-lesing, hurtigprosjektering,
+// verktøylinje-import). params: {layers, obstacle_layers, meters_per_point, min_area_pt}.
+// Kaster en vanlig Error med et lesbart budskap (som originalen) — disse tre stedene har ALDRI
+// vist tilkoblings-dialogen, kun en toast/inline-melding, og beholder den oppførselen uendret;
+// de får bare STEG 1-3 (adresseoppløsning + kaldstart-toleranse) transparent under panseret.
+async function _engineFetchImport(file, params){
+  const res = await _resolveEngineUrl();
+  const qs = new URLSearchParams();
+  (params.layers||[]).forEach(l=>qs.append('layers', l));
+  (params.obstacle_layers||[]).forEach(l=>qs.append('obstacle_layers', l));
+  if(params.min_area_pt!=null) qs.append('min_area_pt', String(params.min_area_pt));
+  qs.append('meters_per_point', String(params.meters_per_point));
+  const url = res.url + '/import/' + _importKind(file) + '?' + qs.toString();
+  const fd = new FormData(); fd.append('file', file);
+  let r;
+  try {
+    r = await _engineFetchWithRetry(url, {method:'POST', body:fd}, _engineShowColdStartToast);
+  } catch(err){
+    const c = _engineClassifyError(err, url);
+    const corsNote = c.maybeCors ? ' (kan skyldes CORS — se motorens cors_origins)' : '';
+    throw new Error('Fikk ikke kontakt med tolkemotoren på '+_engineHost(url)+corsNote);
+  }
+  if(r.status===415){ const e=new Error('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.'); e.kind='dwg415'; throw e; }
+  if(!r.ok){ let d='HTTP '+r.status; try{ const b=await r.json(); if(b.detail) d=b.detail; }catch(e){} throw new Error(d); }
+  return await r.json();
+}
+
+// STEG 4: statuslinje («Motor: lumelo-backend.fly.dev ✓») + nullstillingslenke, satt inn i
+// import-panelene. Viser siste KJENTE oppløsning — ingen ny pinging her, kun visning.
+function _engineStatusLineHTML(){
+  const res = _engineResolved;
+  if(!res) return '<div id="_engine-status-line" style="font-size:11px;color:var(--dim);margin-top:2px">Motor: sjekker …</div>';
+  const host = _engineHost(res.url);
+  const mark = res.reachable === false ? '✗' : '✓';
+  const skipped = res.skippedStored ? ' <span style="color:var(--dim)">(hoppet over lagret adresse — den svarte ikke)</span>' : '';
+  const hasStored = (localStorage.getItem('lumelo_engine_url')||'').trim();
+  const resetLink = hasStored ? ' · <a href="#" onclick="_engineResetStoredUrl();_engineRefreshStatusLines();return false" style="color:var(--accent)">Nullstill lagret adresse</a>' : '';
+  return `<div id="_engine-status-line" style="font-size:11px;color:var(--dim);margin-top:2px">Motor: ${_pdfEsc(host)} ${mark}${skipped}${resetLink}</div>`;
+}
+async function _engineRefreshStatusLines(){
+  await _resolveEngineUrl(true);
+  document.querySelectorAll('#_engine-status-line').forEach(el => { el.outerHTML = _engineStatusLineHTML(); });
+}
+
+// Erstatter de to gamle prompt()-dialogene. Viser adressen som ble prøvd, hva som gikk galt
+// (nettverk/HTTP/tidsavbrudd, med CORS nevnt eget når det er sannsynlig), og lar brukeren
+// velge Fly-motoren, nullstille, eller lime inn en egen adresse — i stedet for ett tekstfelt
+// uten kontekst.
+function _engineErrorDialog(info, onDone){
+  const old = document.getElementById('_engine-err-ov'); if(old) old.remove();
+  const kindLabel = info.kind==='timeout' ? 'Tidsavbrudd — motoren svarte ikke i tide'
+    : info.kind==='http' ? ('HTTP-feil' + (info.status ? ' ' + info.status : ''))
+    : 'Nettverksfeil — fikk ikke kontakt';
+  const corsNote = info.maybeCors
+    ? `<div style="font-size:11px;color:var(--dim);margin-top:8px">Kan være en CORS-blokkering (siden kjører fra <code>${_pdfEsc(location.hostname)}</code>, som motoren kanskje ikke har godkjent) — da er det motorens <code>cors_origins</code> som må utvides, ikke adressen som er feil.</div>`
+    : '';
+  const ov = document.createElement('div');
+  ov.id = '_engine-err-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3200;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:420px;max-width:94vw;padding:24px">
+    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">Fikk ikke kontakt med tolkemotoren</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Prøvde: <code>${_pdfEsc(info.url||'')}</code></div>
+    <div style="font-size:12px;color:var(--dim)">${_pdfEsc(kindLabel)}</div>
+    ${corsNote}
+    <div style="margin-top:14px">
+      <label style="font-size:11px;color:var(--dim)">Egen adresse (f.eks. https://xxx.trycloudflare.com)</label>
+      <input id="_engine-err-url" type="text" placeholder="${_pdfEsc(LUMELO_FLY_URL)}" style="width:100%;margin-top:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;box-sizing:border-box">
+    </div>
+    <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:16px">
+      <button id="_engine-err-cancel" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Avbryt</button>
+      <button id="_engine-err-reset" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Nullstill</button>
+      <button id="_engine-err-fly" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Bruk Fly-motoren</button>
+      <button id="_engine-err-use" style="padding:8px 16px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:700;color:#0d0e10;cursor:pointer">Bruk denne adressen</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const done = choice => { ov.remove(); if(onDone) onDone(choice); };
+  ov.onclick = e => { if(e.target===ov) done(null); };
+  document.getElementById('_engine-err-cancel').onclick = () => done(null);
+  document.getElementById('_engine-err-reset').onclick = () => { _engineResetStoredUrl(); done('__reset__'); };
+  document.getElementById('_engine-err-fly').onclick = () => { _pdfSetEngineUrl(LUMELO_FLY_URL); done(LUMELO_FLY_URL); };
+  document.getElementById('_engine-err-use').onclick = () => {
+    const v = document.getElementById('_engine-err-url').value.trim();
+    if(!v) return;
+    _pdfSetEngineUrl(v); done(v);
+  };
+}
 
 function _pdfEsc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -35354,6 +35580,7 @@ let _autoReadPdf = null;   // {file} som venter på at brukeren kalibrerer bakgr
 
 function _importPlanToDraw(){
   if(typeof closeModal==='function') closeModal();
+  _engineWarmResolve();   // STEG 2: start helsesjekken nå, parallelt med at brukeren velger fil
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
     : ((S.floors[0] && S.floors[0].id) ?? null);
   let inp=document.getElementById('_pdf-autoread-inp');
@@ -35428,6 +35655,7 @@ function _emptyDrop(e){
 }
 // Slipp-sonen (klikk): fil-velger for ALLE støttede typer → felles dispatcher.
 function _emptyPickImport(){
+  _engineWarmResolve();   // STEG 2: start helsesjekken nå, parallelt med at brukeren velger fil
   let inp = document.getElementById('_ces-import-inp');
   if (!inp) {
     inp = document.createElement('input'); inp.type = 'file';
@@ -35446,6 +35674,7 @@ function _emptyQuickList(){ _startMethod = null; if (typeof addPart === 'functio
 // Endrer IKKE parser/deteksjon — bare hvilken eksisterende flyt som kalles.
 function _startImportFile(file){
   if (!file) return;
+  _engineWarmResolve();   // STEG 2: dekker slippsonen (filen er allerede valgt der, ingen tidligere «panel»-hendelse)
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
     : ((S.floors[0] && S.floors[0].id) ?? null);
   if (_importKind(file) === 'dwg') { _autoReadStart(file); return; }   // vektor → auto, ingen spørsmål
@@ -35606,15 +35835,10 @@ async function _autoReadRunEngine(file){
   // Hent lag → la bruker velge vegg-lag, så møbler/inventar IKKE blir egne rom.
   let layers={};
   try {
-    const fd=new FormData(); fd.append('file', file);
-    const r=await fetch(_engineUrl()+'/import/pdf/layers', {method:'POST', body:fd});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    layers=(await r.json()).layers || {};
+    layers = await _engineFetchLayers(file);
   } catch(err){
-    const cur=_engineUrl();
-    const next=prompt('Fikk ikke kontakt med tolkemotoren på:\n'+cur+'\n\nLim inn motorens adresse (https://…), eller avbryt.', cur);
-    if(next && next.trim() && next.trim().replace(/\/+$/,'')!==cur){ _pdfSetEngineUrl(next); return _autoReadRunEngine(file); }
-    if(typeof _showToast==='function') _showToast('Import feilet: '+err.message); return;
+    _engineHandleImportError(err, () => _autoReadRunEngine(file));
+    return;
   }
   _autoReadLayerDialog(file, mpp, layers);
 }
@@ -35634,6 +35858,7 @@ function _autoReadLayerDialog(file, mpp, layers){
     <div style="font-size:17px;font-weight:700;color:var(--text);margin-bottom:4px">Hva er vegger?</div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:14px">Huk av lagene som er yttervegger/delevegger. La møbler og inventar stå avhuket — de vises kun i bakgrunnen, så du tegner hindringer over dem selv.</div>
     <div style="max-height:240px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:16px">${rows}</div>
+    ${_engineStatusLineHTML()}
     <div style="display:flex;justify-content:flex-end;gap:10px">
       <button onclick="document.getElementById('_ar-layer-ov').remove()" style="padding:9px 16px;background:var(--surface2,#1d1f26);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
       <button id="_ar-go" style="padding:9px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:700;color:#0d0e10;cursor:pointer">Les av rom</button>
@@ -35651,14 +35876,7 @@ async function _autoReadDoImport(file, mpp, layers){
   if(typeof _showToast==='function') _showToast('Leser av rom …','info');
   let result;
   try {
-    const fd=new FormData(); fd.append('file', file);
-    const qs=new URLSearchParams();
-    (layers||[]).forEach(l=>qs.append('layers', l));
-    qs.append('meters_per_point', String(mpp));
-    qs.append('min_area_pt','400');
-    const r=await fetch(_engineUrl()+'/import/pdf?'+qs.toString(), {method:'POST', body:fd});
-    if(!r.ok){ let d='HTTP '+r.status; try{const b=await r.json(); if(b.detail) d=b.detail;}catch(e){} throw new Error(d); }
-    result=await r.json();
+    result = await _engineFetchImport(file, { layers, meters_per_point: mpp, min_area_pt: 400 });
   } catch(err){ if(typeof _showToast==='function') _showToast('Import feilet: '+err.message); return; }
   const rooms=(result.model && result.model.storeys && result.model.storeys[0] && result.model.storeys[0].rooms) || [];
   if(!rooms.length){ if(typeof _showToast==='function') _showToast('Fant ingen rom med valgte lag. Prøv andre lag, eller «Tegn selv over bakgrunn».'); if(typeof render==='function') render(); return; }
@@ -35677,6 +35895,7 @@ function _importPlanMenu(){ _emptyPickImport(); }
 function _importKind(file){ return /\.(dxf|dwg)$/i.test((file && file.name) || '') ? 'dwg' : 'pdf'; }
 
 function _pdfImportStart(target){
+  _engineWarmResolve();   // STEG 2: start helsesjekken nå, parallelt med at brukeren velger fil
   _pdfImportTarget = (target === 'draw') ? 'draw' : 'list';
   let inp = document.getElementById('_pdf-import-inp');
   if(!inp){
@@ -35690,17 +35909,11 @@ function _pdfImportStart(target){
 }
 
 async function _pdfImportPickLayers(file){
-  let layers = {};
+  let layers;
   try {
-    const fd = new FormData(); fd.append('file', file);
-    const r = await fetch(_engineUrl() + '/import/' + _importKind(file) + '/layers', { method:'POST', body:fd });
-    if(r.status===415){ if(typeof _showToast==='function') _showToast('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.','warn'); return; }
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    layers = (await r.json()).layers || {};
+    layers = await _engineFetchLayers(file);
   } catch(err){
-    const cur = _engineUrl();
-    const next = prompt('Fikk ikke kontakt med tolkemotoren på:\n' + cur + '\n\nLim inn motorens adresse (f.eks. https://xxx.trycloudflare.com), eller avbryt.\nLokalt på Mac: kjør «uv run uvicorn app.main:app --port 8000».', cur);
-    if(next && next.trim() && next.trim().replace(/\/+$/,'') !== cur){ _pdfSetEngineUrl(next); return _pdfImportPickLayers(file); }
+    _engineHandleImportError(err, () => _pdfImportPickLayers(file));
     return;
   }
   _pdfImportShowModal(file, layers);
@@ -35744,6 +35957,7 @@ function _pdfImportShowModal(file, layers){
         <button onclick="_pdfImportClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
       </div>
       <div style="font-size:12px;color:var(--muted)">${_pdfEsc(file.name)}</div>
+      ${_engineStatusLineHTML()}
       <div>
         <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:2px">Lag — marker vegger og faste hindringer</div>
         <div style="font-size:11px;color:var(--dim);margin-bottom:6px">«Vegg» = rom leses av. «Hindring» = faste ting (kjøkken, skap) blir hindringer (brutto/netto). La flyttbare møbler stå umerket.</div>
@@ -35811,17 +36025,13 @@ async function _listImportRunEngine(file, layers, obstacleLayers){
   if(typeof _showToast==='function') _showToast('Leser av rom …','info');
   let result;
   try {
-    const fd=new FormData(); fd.append('file', file);
-    const qs=new URLSearchParams();
-    (layers||[]).forEach(l=>qs.append('layers', l));
-    (obstacleLayers||[]).forEach(l=>qs.append('obstacle_layers', l));
-    qs.append('min_area_pt','3000');
-    qs.append('meters_per_point', String(mpp));
-    const r=await fetch(_engineUrl()+'/import/'+_importKind(file)+'?'+qs.toString(), {method:'POST', body:fd});
-    if(r.status===415){ if(typeof _showToast==='function') _showToast('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.','warn'); if(typeof _showListModule==='function') _showListModule(); return; }
-    if(!r.ok){ let d='HTTP '+r.status; try{const b=await r.json(); if(b.detail) d=b.detail;}catch(e){} throw new Error(d); }
-    result=await r.json();
-  } catch(err){ if(typeof _showToast==='function') _showToast('Import feilet: '+err.message); if(typeof _showListModule==='function') _showListModule(); return; }
+    result = await _engineFetchImport(file, { layers, obstacle_layers: obstacleLayers, meters_per_point: mpp, min_area_pt: 3000 });
+  } catch(err){
+    const warn = err && err.kind==='dwg415';
+    if(typeof _showToast==='function') _showToast(warn ? err.message : ('Import feilet: '+err.message), warn?'warn':undefined);
+    if(typeof _showListModule==='function') _showListModule();
+    return;
+  }
   const rooms=(result.model && result.model.storeys && result.model.storeys[0] && result.model.storeys[0].rooms) || [];
   if(!rooms.length){ if(typeof _showToast==='function') _showToast('Fant ingen rom — prøv andre lag.'); if(typeof _showListModule==='function') _showListModule(); return; }
   _pdfImportTarget='list';
@@ -35835,18 +36045,10 @@ async function _pdfImportRun(file, layers, ratio, obstacleLayers){
   const mpp = ratio * 0.0254 / 72;
   let result;
   try {
-    const fd = new FormData(); fd.append('file', file);
-    const qs = new URLSearchParams();
-    layers.forEach(l => qs.append('layers', l));
-    (obstacleLayers||[]).forEach(l => qs.append('obstacle_layers', l));
-    qs.append('min_area_pt', '3000');
-    qs.append('meters_per_point', String(mpp));
-    const r = await fetch(_engineUrl() + '/import/' + _importKind(file) + '?' + qs.toString(), { method:'POST', body:fd });
-    if(r.status===415){ if(msg){ msg.style.color='#e5484d'; msg.textContent='Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.'; } if(go){ go.disabled=false; go.textContent='Importer rom'; } return; }
-    if(!r.ok){ let d = 'HTTP ' + r.status; try { const b = await r.json(); if(b.detail) d = b.detail; } catch(e){} throw new Error(d); }
-    result = await r.json();
+    result = await _engineFetchImport(file, { layers, obstacle_layers: obstacleLayers, meters_per_point: mpp, min_area_pt: 3000 });
   } catch(err){
-    if(msg){ msg.style.color = '#e5484d'; msg.textContent = 'Import feilet: ' + err.message; }
+    const warn = err && err.kind==='dwg415';
+    if(msg){ msg.style.color = '#e5484d'; msg.textContent = warn ? err.message : ('Import feilet: ' + err.message); }
     if(go){ go.disabled = false; go.textContent = 'Importer rom'; }
     return;
   }
