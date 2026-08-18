@@ -19044,9 +19044,14 @@ function _resetStairToProposal() {
   // motoren til gårsdagens tetthet (STEG 0-funn, Regel 7). Strengantallet gjenopprettes i stedet
   // direkte via runsPerStep (samme felt _applyStairProposal bruker), som geometrien faktisk leser.
   stair.runsPerStep = p.runsPerStep || null;
-  stair.noseOffset_cm = 2;
-  stair.riserOffset_cm = 2;  // kept in sync (avstand foran/bak)
-  stair.edgeMargin_cm = 5;
+  // Gjenopprett dybdemarginene forslaget FAKTISK brukte (kan være 2 eller 3 cm, jf. margin-
+  // variantene i _generateStairProposals) — ikke en hardkodet standardverdi.
+  stair.noseOffset_cm = p.noseOffset_cm ?? 2;
+  stair.riserOffset_cm = p.riserOffset_cm ?? 2;
+  // STEG 5/6 (Regel 12): sidemarginen forslaget faktisk løste — IKKE en hardkodet 5. En hardkodet
+  // verdi her ville brutt Regel 13s eksakte kjede igjen (kabelsettet ble valgt for å treffe DENNE
+  // marginen nøyaktig, ikke 5).
+  if (p.edgeMargin_cm != null) stair.edgeMargin_cm = p.edgeMargin_cm;
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -19162,7 +19167,7 @@ function _renderStairSettingsPanel(stairId) {
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span>Avstand sider</span>
         <span style="display:flex;align-items:center;gap:3px">
-          <input type="number" min="1" max="20" step="0.5" value="${stair.edgeMargin_cm || 5}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairEdgeMargin(this.value)" onclick="event.stopPropagation()">
+          <input type="number" min="1" max="20" step="0.5" value="${Math.round((stair.edgeMargin_cm || 5) * 100) / 100}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairEdgeMargin(this.value)" onclick="event.stopPropagation()">
           <span style="font-size:10px;color:var(--dim)">cm</span>
         </span>
       </div>
@@ -20741,194 +20746,92 @@ function _stairCableLengthBreakdown(stair) {
   return result;
 }
 
-/**
- * Select the best cable product(s) for a given total cable length and target power density.
- * Returns { products: [{id, name, length_m, watt}], waste_pct, power_wm2, cableCount }
- * Supports multi-cable: if no single cable fits, tries 2-3 cable combinations.
- */
-function _selectStairCableProducts(totalLength_cm, targetWm2, heatedArea_m2, products, splitHint) {
-  const totalLength_m = totalLength_cm / 100;
-  if (!products || !products.length || totalLength_m <= 0) return null;
-
-  // Sort by cable length descending
-  const sorted = [...products].sort((a, b) => (b.cable_length_m || 0) - (a.cable_length_m || 0));
-  const maxCableLen = sorted[0]?.cable_length_m || 0;
-
-  // --- Try single cable first ---
-  let bestFit = null;
-  let bestScore = -Infinity;
-
-  for (const p of sorted) {
-    const cableLen = p.cable_length_m || 0;
-    if (cableLen <= 0) continue;
-    const cableWatt = (p.watt_per_m || 0) * cableLen;
-    if (cableLen >= totalLength_m * 0.95 && cableLen <= totalLength_m * 1.15) {
-      const waste = (cableLen - totalLength_m) / cableLen * 100;
-      const wm2 = heatedArea_m2 > 0 ? cableWatt / heatedArea_m2 : 0;
-      const score = 100 - Math.abs(waste) * 2 - Math.abs(wm2 - targetWm2) * 0.5;
-      if (score > bestScore) {
-        bestScore = score;
-        bestFit = {
-          products: [{ id: p.id, name: p.name, length_m: cableLen, watt: cableWatt }],
-          waste_pct: Math.max(0, Math.round(waste * 10) / 10),
-          power_wm2: Math.round(wm2),
-          totalWatt: cableWatt,
-          cableCount: 1,
-        };
-      }
-    }
-  }
-
-  // Fallback: smallest single cable >= required
-  if (!bestFit) {
-    for (let i = sorted.length - 1; i >= 0; i--) {
-      const p = sorted[i];
-      const cableLen = p.cable_length_m || 0;
-      if (cableLen >= totalLength_m) {
-        const waste = (cableLen - totalLength_m) / cableLen * 100;
-        const cableWatt = (p.watt_per_m || 0) * cableLen;
-        const wm2 = heatedArea_m2 > 0 ? cableWatt / heatedArea_m2 : 0;
-        bestFit = {
-          products: [{ id: p.id, name: p.name, length_m: cableLen, watt: cableWatt }],
-          waste_pct: Math.max(0, Math.round(waste * 10) / 10),
-          power_wm2: Math.round(wm2),
-          totalWatt: cableWatt,
-          cableCount: 1,
-        };
-        break;
-      }
-    }
-  }
-
-  // --- If single cable doesn't fit, try multi-cable (2-3 cables) ---
-  if (!bestFit && maxCableLen > 0 && totalLength_m > maxCableLen) {
-    bestFit = _selectMultiCable(totalLength_m, heatedArea_m2, sorted, splitHint);
-  }
-
-  return bestFit;
-}
-
-/**
- * Try to find a 2-3 cable combination that covers the total length.
- * splitHint: optional array of segment lengths (cm) for natural split points.
- */
-function _selectMultiCable(totalLength_m, heatedArea_m2, sortedProducts, splitHint) {
-  // Try 2 cables, then 3
-  for (const nCables of [2, 3]) {
-    const targetPerCable = totalLength_m / nCables;
-    // Find best product for each segment (allow ±15% tolerance per cable)
-    const bestProd = _findBestProductForLength(targetPerCable, sortedProducts);
-    if (!bestProd) continue;
-
-    const totalCableLen = bestProd.cable_length_m * nCables;
-    if (totalCableLen < totalLength_m * 0.95) continue;
-
-    const waste = Math.max(0, (totalCableLen - totalLength_m) / totalCableLen * 100);
-    const totalWatt = (bestProd.watt_per_m || 0) * totalCableLen;
-    const wm2 = heatedArea_m2 > 0 ? totalWatt / heatedArea_m2 : 0;
-    const prods = [];
-    for (let i = 0; i < nCables; i++) {
-      prods.push({ id: bestProd.id, name: bestProd.name, length_m: bestProd.cable_length_m, watt: (bestProd.watt_per_m || 0) * bestProd.cable_length_m });
-    }
-    return {
-      products: prods,
-      waste_pct: Math.round(waste * 10) / 10,
-      power_wm2: Math.round(wm2),
-      totalWatt: Math.round(totalWatt),
-      cableCount: nCables,
-    };
-  }
-
-  // Last resort: use longest cable, as many as needed
-  const longest = sortedProducts[0];
-  if (!longest) return null;
-  const nCables = Math.ceil(totalLength_m / longest.cable_length_m);
-  const totalCableLen = longest.cable_length_m * nCables;
-  const waste = Math.max(0, (totalCableLen - totalLength_m) / totalCableLen * 100);
-  const totalWatt = (longest.watt_per_m || 0) * totalCableLen;
-  const wm2 = heatedArea_m2 > 0 ? totalWatt / heatedArea_m2 : 0;
-  const prods = [];
-  for (let i = 0; i < nCables; i++) {
-    prods.push({ id: longest.id, name: longest.name, length_m: longest.cable_length_m, watt: (longest.watt_per_m || 0) * longest.cable_length_m });
-  }
-  return {
-    products: prods,
-    waste_pct: Math.round(waste * 10) / 10,
-    power_wm2: Math.round(wm2),
-    totalWatt: Math.round(totalWatt),
-    cableCount: nCables,
-  };
-}
-
-function _findBestProductForLength(targetLen_m, sortedProducts) {
-  let best = null, bestDiff = Infinity;
-  for (const p of sortedProducts) {
-    const len = p.cable_length_m || 0;
-    if (len <= 0) continue;
-    // Cable must be at least 85% of target and no more than 115%
-    if (len >= targetLen_m * 0.85 && len <= targetLen_m * 1.15) {
-      const diff = Math.abs(len - targetLen_m);
-      if (diff < bestDiff) { bestDiff = diff; best = p; }
-    }
-  }
-  // Fallback: smallest cable >= target
-  if (!best) {
-    for (let i = sortedProducts.length - 1; i >= 0; i--) {
-      if ((sortedProducts[i].cable_length_m || 0) >= targetLen_m) { best = sortedProducts[i]; break; }
-    }
-  }
-  return best;
-}
-
 const STAIR_CABLE_COLORS = ['#e06030', '#3080e0', '#30b050'];
 
-/**
- * Build split points for multi-cable allocation on a stair.
- * strategy: 'landing' (split at repos boundaries) or 'even' (split evenly)
- * Returns array of surfaceRanges: [{from, to}, ...]
- */
-function _stairCableSplitPoints(stair, nCables, strategy) {
-  const surfs = stair.surfaces || [];
-  if (nCables <= 1 || surfs.length < 2) return [{ from: 0, to: surfs.length - 1 }];
+// STEG 3+4(korrigert av Kenneth 19.08.2026)+5+6 (Regel 11-13, spec-trapp-kabelutlegg.md): finn et
+// kabelsett OG en sidemargin som til sammen dekker ruta EKSAKT — ALDRI ved å tette CC. Kenneth
+// avviste CC-innstramming eksplisitt: strengantallet er et heltall låst av ceil()-formelen (Regel
+// 3/7) og gir derfor bare grov, sprangvis kontroll — sidemarginen er derimot kontinuerlig og rører
+// KUN strenglengden (Regel 1), aldri strengantallet, og er dermed presis nok til å løse eksakt.
+//
+// Matematikken: siden strengantallet er uavhengig av sidemarginen (Regel 7), er totalbehovet en
+// LINEÆR funksjon av den: needed(m) = needed(m0) - 2*totalStrands*(m - m0). Å treffe en gitt
+// tilgjengelig kabellengde er derfor ren algebra, ikke søk:
+//   m = m0 + (needed(m0) - available) / (2*totalStrands)
+// Gyldig kun når m >= brukerens gulv (Regel 12 — marginen kan aldri gå UNDER brukerens verdi), så
+// bare kabelsett med available <= needed(gulv) er brukbare — for lengre sett må heller et kortere
+// sett velges (Kenneths egen instruks), ikke tvinges inn med en for smal margin.
+function _stairSolveExactCableSet(stair, opts) {
+  opts = opts || {};
+  const floorMargin = stair.edgeMargin_cm || 5;
+  const prefFamily = stair.preferredFamily || 'InSnow 30T';
+  const prefVoltage = stair.preferredVoltage || 230;
+  const cableProds = HEATING_PRODUCTS.filter(p => {
+    const cat = PRODUCT_CATEGORIES.find(c => c.id === p.category_id);
+    if (!cat || cat.module_type !== 'cable' || p.active === false || !(p.cable_length_m > 0)) return false;
+    const fam = p.product_family || p.name.split(' ').slice(0, 2).join(' ');
+    return fam === prefFamily && (p.voltage || 230) === prefVoltage;
+  });
+  if (!cableProds.length) return { ok: false, reason: `Ingen kabler funnet for ${prefFamily} ${prefVoltage}V.` };
 
-  if (strategy === 'landing') {
-    // Find landing indices as natural split points
-    const landingIdxs = [];
-    for (let i = 1; i < surfs.length - 1; i++) {
-      if (surfs[i].type === 'landing') landingIdxs.push(i);
-    }
-    if (landingIdxs.length >= nCables - 1) {
-      // Pick evenly spaced landings
-      const picks = [];
-      for (let k = 1; k < nCables; k++) {
-        const idealIdx = Math.round(k * landingIdxs.length / nCables) - 1;
-        picks.push(landingIdxs[Math.max(0, Math.min(idealIdx, landingIdxs.length - 1))]);
-      }
-      // Deduplicate and sort
-      const splits = [...new Set(picks)].sort((a, b) => a - b);
-      return _surfaceRangesFromSplits(surfs.length, splits);
-    }
-    // Not enough landings — fall through to even split
-  }
+  // Probe geometrien VED gulv-marginen: totalStrands (uavhengig av margin, Regel 7) og needed(gulv).
+  // cables:[{productId:null}] => ubegrenset kapasitet i _stairAllocateCables, altså hele, uklippet
+  // ruten (samme prinsipp som matte-auto sin idealLenCm-probe).
+  const probe = generateStairCable({ ...stair, edgeMargin_cm: floorMargin, cables: [{ productId: null }] });
+  const totalStrands = probe.runs.length;
+  const neededAtFloor_cm = probe.totalCableLength_cm;
+  if (totalStrands <= 0 || neededAtFloor_cm <= 0) return { ok: false, reason: 'Ingen geometri å beregne kabel for.' };
 
-  // Even split: divide surfaces into nCables equal groups
-  const perCable = Math.ceil(surfs.length / nCables);
-  const splits = [];
-  for (let k = 1; k < nCables; k++) {
-    splits.push(Math.min(k * perCable, surfs.length - 1));
-  }
-  return _surfaceRangesFromSplits(surfs.length, splits);
-}
+  // Fornuftig margintak: strenglengden (trinnbredde - 2*margin) må forbli klart positiv OG
+  // sidemarginen skal ikke bli urealistisk bred. To grenser, strengeste vinner: halve smaleste
+  // flates bredde (geometrisk umulig forbi det), og +15 cm fra brukerens gulv (praktisk grense —
+  // et forslag som krever mer enn det bør heller avvises til fordel for et annet kabelsett, jf.
+  // sorteringen under som uansett foretrekker minst mulig marginøkning).
+  const minSurfW = Math.min(...(stair.surfaces || []).map(s => s.w_cm || stair.width_cm || 120));
+  const maxSaneMargin = Math.min(minSurfW / 2 - 1, floorMargin + 15);
 
-function _surfaceRangesFromSplits(total, splitIdxs) {
-  const ranges = [];
-  let start = 0;
-  for (const sp of splitIdxs) {
-    ranges.push({ from: start, to: sp - 1 });
-    start = sp;
+  const lens = [...new Set(cableProds.map(p => p.cable_length_m))].sort((a, b) => a - b);
+  const maxCables = Math.min(opts.maxCables || 3, lens.length > 0 ? 3 : 0);
+  const candidates = [];
+
+  function tryCombo(combo) {
+    const sum_cm = combo.reduce((a, b) => a + b, 0) * 100;
+    if (sum_cm > neededAtFloor_cm + 0.01) return; // ville krevd margin UNDER brukerens gulv (Regel 12)
+    const margin = floorMargin + (neededAtFloor_cm - sum_cm) / (2 * totalStrands);
+    if (margin > maxSaneMargin + 0.01) return; // urealistisk bred margin — for stort avvik fra behovet
+    // Regel 13 (eksakt kjede): margin holdes i FULL presisjon her (ikke avrundet til 0,1 cm) — en
+    // avrunding ville lagt igjen en liten udekket hale (Σ kabellengde ≠ rutingens lengde). Avrunding
+    // skjer kun i visning (panel/PDF), aldri i selve geometrien som legges ut.
+    candidates.push({ lens: combo, sum_cm, margin });
   }
-  ranges.push({ from: start, to: total - 1 });
-  return ranges;
+  // Multisett av lengder (ikke permutasjoner — rekkefølgen betyr ikke noe for summen).
+  for (let n = 1; n <= maxCables; n++) {
+    (function rec(start, chosen) {
+      if (chosen.length === n) { tryCombo(chosen.map(i => lens[i])); return; }
+      for (let i = start; i < lens.length; i++) rec(i, [...chosen, i]);
+    })(0, []);
+  }
+  if (!candidates.length) {
+    return { ok: false, reason: `Ingen kombinasjon av ${prefFamily} ${prefVoltage}V dekker behovet (${(neededAtFloor_cm / 100).toFixed(1)} m) uten å gå under minimumsmarginen (${floorMargin} cm). Prøv en annen familie/spenning, eller flere kabler.` };
+  }
+  // Foretrekk MINST mulig marginøkning (Regel 12 — brukeren skal ikke overraskes av en stor,
+  // uventet margin), IKKE færrest kabler for enhver pris: et enkeltkabel-sett som krever en
+  // absurd bred margin for å forbruke et stort underskudd er verre enn et to-kabelsett som treffer
+  // nær brukerens egen margin. Færrest kabler er kun tiebreak når marginene er tilnærmet like.
+  candidates.sort((a, b) => {
+    const dA = a.margin - floorMargin, dB = b.margin - floorMargin;
+    if (Math.abs(dA - dB) > 0.5) return dA - dB;
+    return a.lens.length - b.lens.length;
+  });
+  const best = candidates[0];
+
+  const products = best.lens.map(L => {
+    const p = cableProds.find(pp => Math.abs(pp.cable_length_m - L) < 0.001);
+    return p ? { id: p.id, name: p.name, length_m: p.cable_length_m, watt: (p.watt_per_m || 0) * p.cable_length_m } : null;
+  });
+  if (products.some(p => !p)) return { ok: false, reason: 'Internt avvik: fant ikke produkt for valgt lengde.' };
+
+  return { ok: true, edgeMargin_cm: best.margin, products, totalAvailable_m: Math.round(best.sum_cm) / 100 };
 }
 
 /**
@@ -20945,8 +20848,9 @@ function _scoreStairProposal(p) {
   score -= 15 * Math.abs(p.power_wm2 - 300) / Math.max(STAIR_MIN_DENSITY_WM2, 1);
   // Single cable bonus
   if (p.cableCount === 1) score += 30;
-  // Low waste
-  score -= (p.waste_pct || 0) * 1.5;
+  // STEG 5/6 (Regel 12): jo mer sidemarginen måtte justeres for å treffe kabelsettet eksakt, jo
+  // mindre attraktivt — foretrekk forslag nær brukerens egen sidemargin.
+  if (p.marginAdjusted) score -= 10;
   // 3-4 runs per step is ideal
   if (p.runsPerStep >= 3 && p.runsPerStep <= 4) score += 50;
   if (p.runsPerStep > 4) score -= (p.runsPerStep - 4) * 40; // strongly penalize 5+ runs
@@ -20960,19 +20864,8 @@ function _scoreStairProposal(p) {
 function _generateStairProposals(stair) {
   if (!stair.surfaces || !stair.surfaces.length) return [];
 
-  // Get cable products
-  // Filter cable products by preferred family + voltage
   const prefFamily = stair.preferredFamily || 'InSnow 30T';
   const prefVoltage = stair.preferredVoltage || 230;
-  const cableProds = HEATING_PRODUCTS.filter(p => {
-    const cat = PRODUCT_CATEGORIES.find(c => c.id === p.category_id);
-    if (!cat || cat.module_type !== 'cable' || p.active === false || !(p.cable_length_m > 0)) return false;
-    const fam = p.product_family || p.name.split(' ').slice(0, 2).join(' ');
-    return fam === prefFamily && (p.voltage || 230) === prefVoltage;
-  });
-  if (!cableProds.length) return [];
-
-  const edgeMargin = stair.edgeMargin_cm || 5;
   const baseRiserOff = stair.riserOffset_cm ?? 2;
   const baseNoseOff = stair.noseOffset_cm ?? 2;
   const landingMargin = stair.landingMargin_cm ?? 5;
@@ -20981,36 +20874,22 @@ function _generateStairProposals(stair) {
   // hvilket runsPerStep som "vant", fordi katalogkabelens effekt/svinn dominerte scoren).
   const maxCC = Math.min(stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM, STAIR_MAX_CC_CM);
 
-  // Find first tread to determine usable width
   const firstTread = stair.surfaces.find(s => s.type === 'tread');
   if (!firstTread) return [];
-  const treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
-  if (treadW <= 0) return [];
-
-  // Check if stair has landing surfaces (for repos-split strategy)
-  const hasLandings = stair.surfaces.some(s => s.type === 'landing');
 
   const candidates = [];
 
   // Margin-varianter (nese/opptrinn) er en LEGITIM del av geometrien (Regel 2/3) — ulike dybde-
   // marginer gir bevisst ulikt strengantall, og presenteres derfor som alternative forslag A/B.
-  // Sidemargin og maks CC er derimot FASTE brukervalg her, ikke noe motoren søker over.
+  // Maks CC er derimot et FAST brukervalg her, ikke noe motoren søker over. Sidemarginen er IKKE
+  // fast lenger — den er selve justeringsvariabelen (Regel 11-13, STEG 3-6) som _stairSolveExactCableSet
+  // løser eksakt per margin-variant, under.
   const marginVariants = [{nose: baseNoseOff, riser: baseRiserOff}];
   if (baseNoseOff !== 3 || baseRiserOff !== 3) marginVariants.push({nose: 3, riser: 3});
 
   for (const mv of marginVariants) {
     const treadD = firstTread.d_cm - mv.riser - mv.nose;
     if (treadD <= 0) continue;
-
-    // Calculate heated area for this margin variant
-    let heatedArea_cm2 = 0;
-    for (const surf of stair.surfaces) {
-      const isLanding = surf.type === 'landing';
-      const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * edgeMargin;
-      const usableD = isLanding ? surf.d_cm - 2 * landingMargin : surf.d_cm - mv.riser - mv.nose;
-      if (usableW > 0 && usableD > 0) heatedArea_cm2 += usableW * usableD;
-    }
-    const heatedArea_m2 = heatedArea_cm2 / 10000;
     const isAdjustedMargin = mv.nose !== baseNoseOff || mv.riser !== baseRiserOff;
 
     // ÉN geometrisk riktig runsPerStep per margin-variant — aldri søkt fram for å passe en
@@ -21018,71 +20897,58 @@ function _generateStairProposals(stair) {
     const { N: runsPerStep, actualCC } = _stairRunCount(treadD, maxCC);
     const landingCC = Math.min(actualCC, STAIR_MAX_CC_CM);
 
-    // Calculate total cable length (temporarily override stair offsets for calculation)
-    const origNose = stair.noseOffset_cm; const origRiser = stair.riserOffset_cm;
-    stair.noseOffset_cm = mv.nose; stair.riserOffset_cm = mv.riser;
-    const totalLen_cm = _stairCableLength(stair, runsPerStep, actualCC, landingCC, edgeMargin);
-    stair.noseOffset_cm = origNose; stair.riserOffset_cm = origRiser;
-    const totalLen_m = totalLen_cm / 100;
-
-    // Kabelvalg kommer ETTERPÅ (Regel 8) — behovet (runsPerStep/totalLen) er allerede låst over.
-    const cableSel = _selectStairCableProducts(totalLen_cm, STAIR_MIN_DENSITY_WM2, heatedArea_m2, cableProds);
-    if (!cableSel) continue;
-
-    const isMultiCable = cableSel.products.length > 1;
-
-    // For multi-cable: generate A/B proposals with different split strategies
-    const strategies = (isMultiCable && hasLandings) ? ['landing', 'even'] : [isMultiCable ? 'even' : 'none'];
-
-    for (const strategy of strategies) {
-      // Per-step W/m²
-      const wpm = cableSel.products[0]?.watt_per_m || (cableSel.products[0]?.watt ? cableSel.products[0].watt / (cableSel.products[0].length_m || 1) : 0);
+    // Kabelsett + sidemargin løses EKSAKT sammen (Regel 11-13) — behovet fra runsPerStep/CC over
+    // er allerede låst (Regel 7); dybdemarginene (nose/riser) er faste for denne varianten, kun
+    // sidemarginen søkes for å treffe et faktisk katalogsett nøyaktig.
+    const origNose = stair.noseOffset_cm, origRiser = stair.riserOffset_cm, origRunsPerStep = stair.runsPerStep;
+    stair.noseOffset_cm = mv.nose; stair.riserOffset_cm = mv.riser; stair.runsPerStep = runsPerStep;
+    const solved = _stairSolveExactCableSet(stair);
+    let heatedArea_m2 = 0, totalLen_m = 0, stepWm2 = 0, treadW = 0;
+    if (solved.ok) {
+      const geo = generateStairCable({ ...stair, edgeMargin_cm: solved.edgeMargin_cm,
+        cables: solved.products.map((p, i) => ({ index: i, productId: p.id })) });
+      totalLen_m = geo.totalCableLength_cm / 100;
+      treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * solved.edgeMargin_cm;
+      for (const surf of stair.surfaces) {
+        const isLanding = surf.type === 'landing';
+        const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * solved.edgeMargin_cm;
+        const usableD = isLanding ? surf.d_cm - 2 * landingMargin : surf.d_cm - mv.riser - mv.nose;
+        if (usableW > 0 && usableD > 0) heatedArea_m2 += usableW * usableD / 10000;
+      }
+      const wpm = solved.products[0]?.watt ? solved.products[0].watt / (solved.products[0].length_m || 1) : 0;
       const stepCableLen_cm = runsPerStep * treadW; // Regel 10: U-svinger telles ikke
-      // Hele trinnarealet (ikke brukbart/marginredusert) — samme nevner som _stairPerStepWm2, så
-      // forslagskortet og innstillingspanelet aldri viser to ulike W/m²-tall for samme trapp.
+      // Hele trinnarealet (ikke brukbart/marginredusert) — samme nevner som _stairPerStepWm2.
       const stepArea_cm2 = (firstTread.w_cm || stair.width_cm || 120) * firstTread.d_cm;
-      const stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
-
-      const candidate = {
-        runsPerStep,
-        stepCC: Math.round(actualCC * 10) / 10,
-        landingCC: Math.round(landingCC * 10) / 10,
-        totalCableLength_m: Math.round(totalLen_m * 10) / 10,
-        cableCount: cableSel.products.length,
-        products: cableSel.products,
-        waste_pct: cableSel.waste_pct,
-        power_wm2: cableSel.power_wm2,
-        totalWatt: cableSel.totalWatt,
-        heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
-        stepWm2,
-        splitStrategy: strategy,
-        splitLabel: strategy === 'landing' ? 'Repos-split' : strategy === 'even' ? 'Jevn deling' : null,
-        noseOffset_cm: mv.nose,
-        riserOffset_cm: mv.riser,
-        adjustedMargin: isAdjustedMargin,
-      };
-      candidate.score = _scoreStairProposal(candidate);
-      // Bonus for landing split (natural split is cleaner)
-      if (strategy === 'landing') candidate.score += 10;
-      candidates.push(candidate);
+      stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
     }
+    stair.noseOffset_cm = origNose; stair.riserOffset_cm = origRiser; stair.runsPerStep = origRunsPerStep;
+    if (!solved.ok) continue;
+
+    const totalWatt = solved.products.reduce((s, p) => s + (p.watt || 0), 0);
+    const candidate = {
+      runsPerStep,
+      stepCC: Math.round(actualCC * 10) / 10,
+      landingCC: Math.round(landingCC * 10) / 10,
+      totalCableLength_m: Math.round(totalLen_m * 10) / 10,
+      cableCount: solved.products.length,
+      products: solved.products,
+      edgeMargin_cm: solved.edgeMargin_cm,               // STEG 5/6: løst sidemargin, kan avvike fra stair.edgeMargin_cm
+      marginAdjusted: Math.abs(solved.edgeMargin_cm - (stair.edgeMargin_cm || 5)) > 0.05,
+      power_wm2: heatedArea_m2 > 0 ? Math.round(totalWatt / heatedArea_m2) : 0,
+      totalWatt: Math.round(totalWatt),
+      heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
+      stepWm2,
+      noseOffset_cm: mv.nose,
+      riserOffset_cm: mv.riser,
+      adjustedMargin: isAdjustedMargin,
+    };
+    candidate.score = _scoreStairProposal(candidate);
+    candidates.push(candidate);
   }
 
   if (!candidates.length) return [];
-
-  // Sort by score descending
   candidates.sort((a, b) => b.score - a.score);
-
-  // A/B strategy: if multi-cable candidates exist, ensure both split strategies are shown
-  const multiLanding = candidates.find(c => c.splitStrategy === 'landing');
-  const multiEven = candidates.find(c => c.splitStrategy === 'even');
-  let result;
-  if (multiLanding && multiEven) {
-    // Show both split strategies as A/B, best first
-    result = multiLanding.score >= multiEven.score ? [multiLanding, multiEven] : [multiEven, multiLanding];
-  } else {
-    result = candidates.slice(0, 2);
-  }
+  const result = candidates.slice(0, 2);
   result[0].recommended = true;
   return result;
 }
@@ -21107,16 +20973,17 @@ function _applyStairProposal(stair, proposal) {
   // Apply margin overrides from proposal (e.g. adjusted from 2cm to 3cm for better CC)
   if (proposal.noseOffset_cm != null) stair.noseOffset_cm = proposal.noseOffset_cm;
   if (proposal.riserOffset_cm != null) stair.riserOffset_cm = proposal.riserOffset_cm;
+  // STEG 5/6 (Regel 12): sidemarginen kan være justert av _stairSolveExactCableSet for å treffe
+  // kabelsettet eksakt — eget felt, uavhengig av dybdemarginene over.
+  if (proposal.edgeMargin_cm != null) stair.edgeMargin_cm = proposal.edgeMargin_cm;
   if (proposal.products && proposal.products.length > 0) {
     stair.cableProductId = proposal.products[0].id;
-    // Build cables[] from proposal
-    const nCables = proposal.products.length;
-    const strategy = proposal.splitStrategy || 'landing';
-    const ranges = _stairCableSplitPoints(stair, nCables, strategy);
+    // Build cables[] from proposal. Oppdelingen mellom dem skjer nå PÅ METER inne i
+    // generateStairCable/_stairAllocateCables (STEG 1+2, Regel 11) — surfaceRange trengs ikke
+    // lenger og settes ikke (_stairCableSplitPoints er fjernet, den delte kun på flate-antall).
     stair.cables = proposal.products.map((p, i) => ({
       index: i,
       productId: p.id,
-      surfaceRange: [ranges[i]?.from || 0, ranges[i]?.to || ((stair.surfaces||[]).length - 1)],
       color: STAIR_CABLE_COLORS[i] || STAIR_CABLE_COLORS[0],
     }));
   }
@@ -21144,7 +21011,10 @@ function _stairPreviewProposal(stairId, idx) {
     stair._prePreviewState = JSON.parse(JSON.stringify({
       cables: stair.cables, stepCC_cm: stair.stepCC_cm, landingCC_cm: stair.landingCC_cm,
       cableSpacing_cm: stair.cableSpacing_cm, cableProductId: stair.cableProductId,
-      noseOffset_cm: stair.noseOffset_cm, riserOffset_cm: stair.riserOffset_cm
+      noseOffset_cm: stair.noseOffset_cm, riserOffset_cm: stair.riserOffset_cm,
+      // STEG 5/6 (Regel 12): _applyStairProposal kan nå justere sidemarginen — må lagres og
+      // gjenopprettes her også, ellers overlever den en avbrutt forhåndsvisning.
+      edgeMargin_cm: stair.edgeMargin_cm,
     }));
   }
   _applyStairProposal(stair, stair.proposals[idx]);
@@ -21177,7 +21047,8 @@ function _stairCancelPreview(stairId) {
   const ps = stair._prePreviewState;
   Object.assign(stair, { cables: ps.cables, stepCC_cm: ps.stepCC_cm, landingCC_cm: ps.landingCC_cm,
     cableSpacing_cm: ps.cableSpacing_cm, cableProductId: ps.cableProductId,
-    noseOffset_cm: ps.noseOffset_cm, riserOffset_cm: ps.riserOffset_cm });
+    noseOffset_cm: ps.noseOffset_cm, riserOffset_cm: ps.riserOffset_cm,
+    edgeMargin_cm: ps.edgeMargin_cm });
   delete stair._prePreviewState;
   delete stair._activeProposalIdx;
   _regenerateStairCable(stair);
@@ -21224,15 +21095,17 @@ function _renderStairProposalPanel(stair, proposals) {
     const diffLabel = diffM > 0 ? `${diffM} m til overs` : diffM < 0 ? `${Math.abs(diffM)} m for kort` : 'Eksakt';
     const diffColor = diffM < 0 ? '#ef4444' : diffM > 3 ? '#f59e0b' : '#22c55e';
 
-    // Split strategy label for multi-cable
-    const strategyBadge = p.splitLabel ? `<div style="display:inline-block;background:var(--surface);border:1px solid var(--brd);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px">${esc(p.splitLabel)}</div>` : '';
-    const marginBadge = p.adjustedMargin ? `<div style="display:inline-block;background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--accent);margin-bottom:4px">Margin ${p.noseOffset_cm} cm</div>` : '';
+    // Dybdemargin-variant (nese/opptrinn, Regel 2/3)
+    const marginBadge = p.adjustedMargin ? `<div style="display:inline-block;background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:var(--accent);margin-bottom:4px">Dybdemargin ${p.noseOffset_cm} cm</div>` : '';
+    // STEG 5/6 (Regel 12): sidemargin automatisk justert for å treffe kabelsettet eksakt — vis
+    // ALLTID tydelig når den avviker fra det brukeren satte, så brukeren aldri lurer på hvorfor.
+    const sideMarginBadge = p.marginAdjusted ? `<div style="display:inline-block;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;color:#f59e0b;margin-bottom:4px">Sidemargin auto-justert: ${p.edgeMargin_cm.toFixed(1)} cm (din: ${stair.edgeMargin_cm || 5} cm)</div>` : '';
 
     cardsHtml += `
       <div style="flex:1;background:var(--surface2);border:1px solid ${p.recommended ? '#4ea8ff' : 'var(--brd)'};border-radius:10px;padding:14px;min-width:200px;position:relative">
         ${p.recommended ? '<div style="position:absolute;top:-10px;left:12px;background:#4ea8ff;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">★ Anbefalt</div>' : ''}
         <div style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:6px">Forslag ${String.fromCharCode(65 + i)}</div>
-        ${strategyBadge}${marginBadge}
+        ${marginBadge}${sideMarginBadge}
         <div style="font-size:12px;color:var(--muted);display:grid;gap:4px">
           ${cableDetailsHtml}
           <div style="font-size:11px;color:var(--dim)">Beregnet behov: <b>${p.totalCableLength_m} m</b></div>
