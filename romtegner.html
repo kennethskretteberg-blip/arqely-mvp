@@ -18328,6 +18328,10 @@ function drawStairs() {
   }
 }
 
+// Regel 15: delt avrundingshelper for ALT mål vist på trappa — skjerm OG utskrift — så «6,1» aldri
+// blir «6,0653...» ett sted og riktig et annet. cm, maks én desimal.
+function _stairDimRound(v) { return Math.round(v * 10) / 10; }
+
 function _drawStairPlan(stair) {
   const isSel = S.ui.selectedStairId === stair.id;
   const isHov = !isSel && _hoveredStairId === stair.id;
@@ -18650,8 +18654,9 @@ function _drawStairPlan(stair) {
     // allerede via Math.round(...*10)/10, men `topOff`/`botOff` (riserOff/noseOff/edgeM rått fra
     // stair-feltene) og edgeM i bredde-målene ble skrevet ut med bare `+ ''`, uten avrunding i det
     // hele tatt. Én delt helper her, brukt på ALT som skrives ut, i stedet for å stole på at hver
-    // kilde tilfeldigvis allerede er ren.
-    const _dimR = (v) => Math.round(v * 10) / 10;
+    // kilde tilfeldigvis allerede er ren. STEG 4: samme helper (_stairDimRound) brukes nå også i
+    // PDF-utskriftens målsetting (_renderStairToImage), så skjerm og utskrift alltid stemmer overens.
+    const _dimR = _stairDimRound;
 
     // Helper: draw depth dims for a surface (along-depth: offsets + CC between runs)
     function _drawSurfDepthDims(surf, surfRuns, isLanding) {
@@ -38095,7 +38100,13 @@ function _renderStairToImage(stair) {
           const exitRight = conn.exitRight; // fra motoren — ikke regnet på nytt lokalt (Regel 9)
           const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : fromSurf.x_cm+(stair.edgeMargin_cm||5);
           const entryX = exitRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
-          const ax = exitX, ay = fromSurf.y_cm+fromSurf.d_cm, bx = entryX, by = toSurf.y_cm;
+          // STEG 4 (Regel 14, funnet under arbeid med målsetting i denne funksjonen): denne PDF-
+          // kopien hadde fortsatt den GAMLE bunn-start-antakelsen (ay/by hardkodet) fra før STEG 2
+          // (valgfri snuing) — _drawStairPlan ble gjort retning-aware i aa20a3c, men denne
+          // nær-duplikat-koden ble ikke oppdatert samtidig. Samme fiks her.
+          const ax = exitX, bx = entryX;
+          const ay = stair.cableStartFromTop ? fromSurf.y_cm : fromSurf.y_cm + fromSurf.d_cm;
+          const by = stair.cableStartFromTop ? toSurf.y_cm + toSurf.d_cm : toSurf.y_cm;
           // STEG 2 (Regel 11): del proporsjonalt hvis opptrinnet selv er splittet av en skjøt.
           const segs = conn.segments || [{ len_cm: conn.length_cm, cableIdx: conn.cableIdx }];
           let tAcc = 0;
@@ -38113,9 +38124,85 @@ function _renderStairToImage(stair) {
     }
   }
 
-  // STEG 1 (Kenneth 19.08.2026): «Trapp 150 × 1468» på selve tegningen ga ingen informasjon —
-  // navnet står allerede i sidetittelen («Trapp: {navn}») og målene finnes i per-sone-tabellen,
-  // så et rått navn+dimensjon-stempel oppå bildet var bare støy. Fjernet, ikke erstattet.
+  // STEG 4 (Regel 17, Kenneth 19.08.2026): «Målsettingen fra appen mangler på utskriften» —
+  // samme mål-linjer som _drawSurfDepthDims/_drawSurfWidthDims viser på skjermen når en trapp er
+  // valgt, tegnet HER slik at de er en del av selve bildet og dermed skalerer med tegningen (ikke
+  // med skjermen/PDF-siden) — tallene i seg selv (per sone) finnes allerede i tabellen fra STEG 2,
+  // dette er de tilhørende linjene/pilene brukeren kjenner fra appen. Samme flate-utvalg som
+  // skjermversjonen: én trinn-flate per kabel + alle repos med løp, for å unngå at ALLE trinn
+  // dimensjoneres (det ville vært ulesbart selv på en kort trapp).
+  if (stair.runs && stair.runs.length > 0) {
+    const edgeM = stair.edgeMargin_cm || 5;
+    const riserOff = stair.riserOffset_cm ?? 2;
+    c.strokeStyle = '#2090e0'; c.fillStyle = '#2090e0';
+    c.font = '9px sans-serif'; c.lineWidth = 0.8; c.setLineDash([]);
+
+    const runsBySurfDim = {};
+    for (const r of stair.runs) { (runsBySurfDim[r.surfaceIdx] = runsBySurfDim[r.surfaceIdx] || []).push(r); }
+
+    // Regel 17/STEG 4 (kollisjon): en tikk-strek + tall trenger minst ~7px klaring i høyden for å
+    // være lesbar i trykk — på en lang, lavt skalert trapp (STEG 6s kjerneproblem) er det ofte ikke
+    // plass til CC-mål mellom hver streng. Dropp CC-etikettene (behold ende-målene) når det er trangt
+    // i stedet for å tegne tall oppå hverandre.
+    const MIN_LABEL_PX = 7;
+
+    const tick = (ax, ay, bx, by, label, horiz) => {
+      const pa = { x: tx(ax), y: ty(ay) }, pb = { x: tx(bx), y: ty(by) };
+      c.beginPath(); c.moveTo(pa.x, pa.y); c.lineTo(pb.x, pb.y); c.stroke();
+      if (horiz) {
+        c.beginPath(); c.moveTo(pa.x, pa.y - 2); c.lineTo(pa.x, pa.y + 2); c.stroke();
+        c.beginPath(); c.moveTo(pb.x, pb.y - 2); c.lineTo(pb.x, pb.y + 2); c.stroke();
+        c.textAlign = 'center'; c.textBaseline = 'bottom';
+        if (Math.abs(pb.x - pa.x) >= MIN_LABEL_PX) c.fillText(label, (pa.x + pb.x) / 2, pa.y - 2);
+      } else {
+        c.beginPath(); c.moveTo(pa.x - 2, pa.y); c.lineTo(pa.x + 2, pa.y); c.stroke();
+        c.beginPath(); c.moveTo(pb.x - 2, pb.y); c.lineTo(pb.x + 2, pb.y); c.stroke();
+        c.textAlign = 'left'; c.textBaseline = 'middle';
+        if (Math.abs(pb.y - pa.y) >= MIN_LABEL_PX) c.fillText(label, pa.x + 3, (pa.y + pb.y) / 2);
+      }
+    };
+
+    const dimSurfacesImg = new Set();
+    const cablesImg = stair.cables || [];
+    const nCablesImg = Math.max(1, cablesImg.length);
+    for (let ci = 0; ci < nCablesImg; ci++) {
+      const cableRuns = stair.runs.filter(r => (r.cableIdx || 0) === ci);
+      const firstTreadRun = cableRuns.find(r => surfs[r.surfaceIdx]?.type === 'tread');
+      if (firstTreadRun) dimSurfacesImg.add(firstTreadRun.surfaceIdx);
+    }
+    for (let si = 0; si < surfs.length; si++) {
+      if (surfs[si].type === 'landing' && stair.runs.some(r => r.surfaceIdx === si)) dimSurfacesImg.add(si);
+    }
+
+    const firstDimSurf = [...dimSurfacesImg][0];
+    for (const si of dimSurfacesImg) {
+      const surf = surfs[si];
+      const surfRuns = (runsBySurfDim[si] || []).slice().sort((a, b) => a.pos_cm - b.pos_cm);
+      if (!surf || !surfRuns.length) continue;
+      const isLanding = surf.type === 'landing';
+      const surfW = surf.w_cm || stair.width_cm || 120;
+
+      // Bredde-mål (sidemargin) kun på første dimensjonerte flate, over selve tegningen.
+      if (si === firstDimSurf) {
+        const dimYw = surf.y_cm - 2 / scale; // 2px opp, uttrykt i world-cm for tx/ty
+        const edgeTxt = _stairDimRound(edgeM) + '';
+        tick(surf.x_cm, dimYw, surf.x_cm + edgeM, dimYw, edgeTxt, true);
+        tick(surf.x_cm + surfW - edgeM, dimYw, surf.x_cm + surfW, dimYw, edgeTxt, true);
+      }
+
+      // Dybde-mål (riser/nese-avstand + CC) til høyre for flaten.
+      const dimXd = surf.x_cm + surfW + 3 / scale;
+      const topOff = isLanding ? edgeM : riserOff;
+      tick(dimXd, surf.y_cm, dimXd, surf.y_cm + topOff, _stairDimRound(topOff) + '', false);
+      for (let ri = 0; ri < surfRuns.length - 1; ri++) {
+        const cc = _stairDimRound(surfRuns[ri + 1].pos_cm - surfRuns[ri].pos_cm);
+        tick(dimXd, surf.y_cm + surfRuns[ri].pos_cm, dimXd, surf.y_cm + surfRuns[ri + 1].pos_cm, cc + '', false);
+      }
+      const lastPos = surfRuns[surfRuns.length - 1].pos_cm;
+      const botDist = _stairDimRound(surf.d_cm - lastPos);
+      tick(dimXd, surf.y_cm + lastPos, dimXd, surf.y_cm + surf.d_cm, botDist + '', false);
+    }
+  }
 
   return offCanvas.toDataURL('image/jpeg', 0.85);
 }
