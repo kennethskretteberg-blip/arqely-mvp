@@ -20969,6 +20969,70 @@ function _stairCableLengthBreakdown(stair) {
   return result;
 }
 
+// STEG 2 (Regel 17, spec-trapp-kabelutlegg.md): per-sone-data for utskriften. Leser N/CC/streng-
+// lengde direkte fra RUTINGEN (stair.runs) — regner dem aldri på nytt (Regel 9). En «sone» her er
+// enten en brukerdefinert sone (cableObj.zone != null, 1:1 med _stairSolveZones) eller — når soner
+// ikke er i bruk — samme kabel-inndeling som _stairCableLengthBreakdown allerede gir (én eller
+// flere fysiske kabler fra meter-basert deling, Regel 11). Berørte trinn grupperes i sammenhengende
+// «trinn-serier» (samme bredde/N/CC/streng-lengde, ingen hull i trinn-rekkefølgen — en mellomliggende
+// repos bryter alltid gruppen, siden det er et annet fysisk løp) i stedet for å vise ett tall som
+// later som det gjelder hele sonen (Kenneths eksplisitte krav — samme feilklasse som den fjernede
+// sammendragslinjen fra STEG 1).
+function _stairSoneGeometryBlocks(stair) {
+  if (!stair || !stair.surfaces || !stair.runs) return [];
+  const surfs = stair.surfaces;
+  const cbk = _stairCableLengthBreakdown(stair);
+  if (!cbk.length) return [];
+  const cables = stair.cables || [];
+  const riserOff = Math.round((stair.riserOffset_cm ?? 2) * 10) / 10;
+  const noseOff = Math.round((stair.noseOffset_cm ?? 2) * 10) / 10;
+
+  const runsBySurf = {};
+  for (const r of stair.runs) { (runsBySurf[r.surfaceIdx] = runsBySurf[r.surfaceIdx] || []).push(r); }
+  for (const k in runsBySurf) runsBySurf[k].sort((a, b) => a.pos_cm - b.pos_cm);
+
+  return cbk.map((cb, ci) => {
+    const cableObj = cables[ci];
+    const edgeMargin_cm = Math.round((cableObj?.edgeMargin_cm ?? (stair.edgeMargin_cm || 5)) * 10) / 10;
+
+    // Hvilke TRINN (ikke repos) denne kabelen faktisk berører — leses fra segmentenes cableIdx, så
+    // det virker likt for brukerdefinerte soner OG udelt meter-basert deling uten noen egen gren.
+    const touched = [];
+    for (let si = 0; si < surfs.length; si++) {
+      if (surfs[si].type !== 'tread') continue;
+      const runs = runsBySurf[si] || [];
+      if (runs.some(r => (r.segments || []).some(s => (s.cableIdx || 0) === ci))) touched.push(si);
+    }
+
+    const groups = [];
+    for (const si of touched) {
+      const surf = surfs[si];
+      const runs = runsBySurf[si] || [];
+      const N = runs.length;
+      const actualCC = N > 1 ? Math.round(Math.abs(runs[1].pos_cm - runs[0].pos_cm) * 10) / 10 : null;
+      const strandLen_cm = runs.length ? Math.round(runs[0].segments.reduce((s, g) => s + (g.end_cm - g.start_cm), 0) * 10) / 10 : 0;
+      const stepLabel = (surf.stepIdx != null ? surf.stepIdx : surf.index) + 1;
+      const sig = surf.w_cm + '|' + N + '|' + actualCC + '|' + strandLen_cm;
+      const prev = groups[groups.length - 1];
+      if (prev && prev.sig === sig && si === prev.lastSurf + 1) {
+        prev.toLabel = stepLabel; prev.lastSurf = si; prev.count++;
+      } else {
+        groups.push({ sig, fromLabel: stepLabel, toLabel: stepLabel, lastSurf: si, count: 1,
+          w_cm: surf.w_cm, N, actualCC, strandLen_cm });
+      }
+    }
+
+    const wPerM = cb.product?.watt_per_m || 0;
+    for (const g of groups) {
+      g.laidPerStep_cm = Math.round(g.N * g.strandLen_cm * 10) / 10;
+      // Regel 16: W/m² = (kabelens W/m) / (CC i meter) — IKKE areal. Ingen CC (N=1) -> ingen tall.
+      g.wm2 = (wPerM > 0 && g.actualCC > 0) ? Math.round(wPerM / (g.actualCC / 100)) : null;
+    }
+
+    return { ...cb, edgeMargin_cm, riserOffset_cm: riserOff, noseOffset_cm: noseOff, groups, varies: groups.length > 1 };
+  });
+}
+
 const STAIR_CABLE_COLORS = ['#e06030', '#3080e0', '#30b050', '#c040d0', '#e0b030', '#30c0c0'];
 
 // STEG 7 (Soner, spec-trapp-kabelutlegg.md «Soner», Kenneth 19.08.2026: gjenbruk EKSISTERENDE
@@ -37149,69 +37213,72 @@ async function exportPDF(opts) {
     // ulik bredde, og linja ga da ett tall som utga seg for å gjelde hele trappa. Fjernet, ikke
     // erstattet med et «riktigere» enkelt-tall — per-sone-tabellen under viser dette per sone.
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
-    const _surfs = stair.surfaces || [];
 
-    // Per-cable breakdown
-    const _cbk = _stairCableLengthBreakdown(stair);
-    const _isMulti = _cbk.length > 1;
-    if (_cbk.length > 0) {
-      // Table header
-      _checkPage(6 + _cbk.length * 5);
-      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(80, 90, 110);
-      const _tc = [M, M + 50, M + 78, M + 100, M + 118, M + 138];
-      // STEG 1 (Kenneth 19.08.2026): «Produkt» sto som kolonneoverskrift TO GANGER — én gang for
-      // produktNAVNET, én gang for cb.productLength_m (katalog-lengden/rullen som faktisk ble
-      // kjøpt, f.eks. «25 m»). Entydig navn på den andre nå: «Kabellengde».
-      if (_isMulti) doc.text('Kabel', _tc[0], y);
-      doc.text('Produkt', _isMulti ? _tc[0] + 15 : _tc[0], y);
-      doc.text('Trinn', _tc[1], y); doc.text('Repos', _tc[2], y);
-      doc.text('Lagt', _tc[3], y); doc.text('Kabellengde', _tc[4], y); doc.text('Effekt', _tc[5], y);
-      y += 1; doc.setDrawColor(180, 190, 200); doc.line(_tc[0], y, _tc[5] + 20, y); y += 3;
-
-      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(40, 50, 70);
+    // STEG 2 (Regel 17): en blokk per sone i stedet for en tabellrad - se _stairSoneGeometryBlocks.
+    // "Trinn kan ha ulik bredde" (Kenneths eksplisitte advarsel): en sone med mer enn en trinn-serie
+    // (ulik bredde/N/CC) viser HVER serie for seg, aldri ett tall som later som det gjelder alt.
+    const _soneBlocks = _stairSoneGeometryBlocks(stair);
+    const _cm1 = (v) => v == null ? '—' : (Math.round(v * 10) / 10) + ' cm';
+    if (_soneBlocks.length > 0) {
       let _totalW = 0;
-      for (const cb of _cbk) {
-        _totalW += cb.watts;
-        // Color indicator for multi-cable
-        if (_isMulti) {
-          const rgb = cb.color.match(/[0-9a-f]{2}/gi);
+      for (const sb of _soneBlocks) {
+        _totalW += sb.watts;
+        const groupLines = sb.groups.length;
+        _checkPage(14 + groupLines * 8);
+
+        // Header: farge-swatch (multi) + sonenavn + produkt, effekt til hoyre
+        const _isMultiSone = _soneBlocks.length > 1;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(20, 60, 130);
+        if (_isMultiSone) {
+          const rgb = sb.color.match(/[0-9a-f]{2}/gi);
           if (rgb && rgb.length === 3) {
             doc.setFillColor(parseInt(rgb[0],16), parseInt(rgb[1],16), parseInt(rgb[2],16));
-            doc.rect(_tc[0], y - 2.5, 3, 3, 'F');
+            doc.rect(M, y - 3, 3, 3, 'F');
           }
-          doc.text(cb.label, _tc[0] + 4, y);
+          doc.text(sb.label, M + 5, y);
+        } else {
+          doc.text(sb.label, M, y);
         }
-        const pName = cb.product ? (cb.product.name || '').substring(0, 22) : '—';
-        doc.text(pName, _isMulti ? _tc[0] + 15 : _tc[0], y);
-        doc.text(cb.stepsLength_m + ' m', _tc[1], y);
-        doc.text(cb.reposLength_m > 0 ? cb.reposLength_m + ' m' : '—', _tc[2], y);
-        doc.text(cb.assignedLength_m + ' m', _tc[3], y);
-        doc.text(cb.productLength_m > 0 ? cb.productLength_m + ' m' : '—', _tc[4], y);
-        doc.text(cb.watts + ' W', _tc[5], y);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
+        doc.text(sb.watts + ' W', W - M, y, { align: 'right' });
+        y += 4.5;
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(60, 70, 90);
+        const pName = sb.product ? (sb.product.name || '—') : '—';
+        const elArt = sb.product?.el_no ? ('El.nr: ' + sb.product.el_no + (sb.product.article_no ? '  |  Art.nr: ' + sb.product.article_no : '')) : '';
+        doc.text(pName + (elArt ? '  ·  ' + elArt : ''), M, y);
+        y += 4.5;
+
+        // Sone-niva felt (like for hele sonen uansett trinn-serie): dybdemarginer + sidemargin.
+        doc.setFontSize(7.5); doc.setTextColor(80, 90, 110);
+        doc.text('Avstand opptrinn: ' + _cm1(sb.riserOffset_cm) + '   |   Avstand nese: ' + _cm1(sb.noseOffset_cm) + '   |   Avstand sider: ' + _cm1(sb.edgeMargin_cm), M, y);
         y += 4;
-        // El.nr
-        if (cb.product?.el_no) {
-          doc.setFontSize(7); doc.setTextColor(100, 110, 130);
-          doc.text('El.nr: ' + cb.product.el_no + (cb.product.article_no ? '  |  Art.nr: ' + cb.product.article_no : ''), _isMulti ? _tc[0] + 15 : _tc[0], y);
-          doc.setFontSize(8); doc.setTextColor(40, 50, 70);
+
+        // Trinn-serie-felt (N/CC/lengde/flateeffekt) - varierer disse innad i sonen, vis hver serie.
+        doc.setTextColor(40, 50, 70);
+        for (const g of sb.groups) {
+          const rangeLbl = sb.varies
+            ? (g.fromLabel === g.toLabel ? 'Trinn ' + g.fromLabel : 'Trinn ' + g.fromLabel + '–' + g.toLabel) + ' (bredde ' + Math.round(g.w_cm) + ' cm): '
+            : '';
+          doc.text(rangeLbl + g.N + ' strenger/trinn   |   CC ' + _cm1(g.actualCC) + '   |   ' + _cm1(g.strandLen_cm) + '/streng   |   ' + _cm1(g.laidPerStep_cm) + '/trinn   |   ' + (g.wm2 != null ? g.wm2 + ' W/m²' : '—'), M, y);
           y += 4;
         }
+
+        // Lengder for sonen
+        doc.setTextColor(60, 70, 90);
+        doc.text('Trinn: ' + sb.stepsLength_m + ' m   |   Repos: ' + (sb.reposLength_m > 0 ? sb.reposLength_m + ' m' : '—') + '   |   Lagt: ' + sb.assignedLength_m + ' m   |   Kabellengde: ' + (sb.productLength_m > 0 ? sb.productLength_m + ' m' : '—'), M, y);
+        y += 5.5;
+        doc.setDrawColor(215, 220, 230); doc.setLineWidth(0.2); doc.line(M, y - 2, W - M, y - 2);
       }
-      // Summary line \u2014 STEG 3 (Regel 11): samlet behov/samlet kabel/differanse, se _stairCableSetFit.
-      y += 1; doc.setDrawColor(180, 190, 200); doc.line(_tc[0], y, _tc[5] + 20, y); y += 3;
-      const _areaCm2 = _surfs.reduce((s,f) => s + (f.w_cm||0) * (f.d_cm||0), 0);
-      const _areaM2 = _areaCm2 / 10000;
-      const _densityPdf = _areaM2 > 0 ? Math.round(_totalW / _areaM2) : 0;
+
+      // Aggregert sum for hele trappa - STEG 3 (Regel 11): samlet behov/samlet kabel/differanse.
+      _checkPage(10);
       const _setFit = _stairCableSetFit(stair);
-      doc.setFont('helvetica', 'bold');
-      // STEG 1 (Regel 16, Kenneth 19.08.2026): \u00abOppvarmet areal\u00bb er uinteressant for trapper \u2014
-      // en trapp str\u00e5ler ut i luft p\u00e5 tre kanter mens fjerde langside g\u00e5r inn i neste opptrinn, s\u00e5
-      // et arealbasert tall er misvisende. Fjernet fra utskriften. Total INSTALLERT EFFEKT
-      // beholdes (trengs til sikringsdimensjonering).
-      doc.text('Totalt: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m   |   ' + _totalW + ' W   |   ' + _densityPdf + ' W/m\u00b2', _tc[0], y);
-      y += 4;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
+      doc.text('Totalt: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m   |   ' + _totalW + ' W', M, y);
+      y += 4.5;
       doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
-      doc.text('Samlet kabel: ' + _setFit.availableLength_m.toFixed(1) + ' m' + (_setFit.label ? '   |   ' + _setFit.label : ''), _tc[0], y);
+      doc.text('Samlet kabel: ' + _setFit.availableLength_m.toFixed(1) + ' m' + (_setFit.label ? '   |   ' + _setFit.label : ''), M, y);
       y += 6;
     } else {
       // Fallback for no breakdown data
