@@ -19171,20 +19171,22 @@ function _resetStairToProposal() {
   _updateStairSettingsPanel(); updateCtxBar(); render();
 }
 
+// STEG 3 (Regel 16, Kenneth 19.08.2026): flateeffekt regnes av CC, IKKE av areal — en trapp
+// stråler ut i luft på tre kanter, mens fjerde langside går inn i neste opptrinn, så arealbasert
+// W/m² er misvisende. Formel: W/m² = (kabelens W/m) / (CC i meter) — samme formel som
+// _stairSoneGeometryBlocks (PDF-utskriften), nå eneste kilde alle andre visninger leser fra.
 function _stairPerStepWm2(stair) {
   const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
   if (!prod) return 0;
   const wpm = prod.watt_per_m || 0;
+  if (wpm <= 0) return 0;
   const surfs = stair.surfaces || [];
   const firstTread = surfs.find(s => s.type === 'tread');
   if (!firstTread) return 0;
   const treadRuns = (stair.runs || []).filter(r => r.surfaceIdx === surfs.indexOf(firstTread));
-  const runsN = treadRuns.length;
-  if (runsN === 0) return 0;
-  const treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * (stair.edgeMargin_cm || 5);
-  const stepCableLen = runsN * treadW; // Regel 10: U-svinger telles ikke
-  const stepArea = (firstTread.w_cm || stair.width_cm || 120) * firstTread.d_cm;
-  return stepArea > 0 ? Math.round((stepCableLen / 100) * wpm / (stepArea / 10000)) : 0;
+  if (treadRuns.length < 2) return 0; // ingen CC uten minst to strenger
+  const actualCC_cm = Math.abs(treadRuns[1].pos_cm - treadRuns[0].pos_cm);
+  return actualCC_cm > 0 ? Math.round(wpm / (actualCC_cm / 100)) : 0;
 }
 
 function _renderStairSettingsPanel(stairId) {
@@ -19193,8 +19195,6 @@ function _renderStairSettingsPanel(stairId) {
   const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
   const fit = _stairCableSetFit(stair);
   const surfs = stair.surfaces || [];
-  const areaCm2 = surfs.reduce((s,f) => s + (f.w_cm||0) * (f.d_cm||0), 0);
-  const areaM2 = areaCm2 / 10000;
   const stepWm2 = _stairPerStepWm2(stair);
   const firstTread = surfs.find(s => s.type === 'tread');
   const firstTreadIdx = firstTread ? surfs.indexOf(firstTread) : -1;
@@ -19227,7 +19227,6 @@ function _renderStairSettingsPanel(stairId) {
   // kablene i settet ikke er identiske (alltid tilfelle i sone-modus, ofte i STEG 3-6s eksakte løsning).
   const totalW = cableBreakdown.length ? cableBreakdown.reduce((s, cb) => s + (cb.watts || 0), 0)
     : (prod?.watt_per_m ? Math.round(fit.neededLength_m * prod.watt_per_m) : 0);
-  const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
   let cableBreakdownHtml = '';
   if (cableBreakdown.length > 0) {
     for (const cb of cableBreakdown) {
@@ -19284,8 +19283,8 @@ function _renderStairSettingsPanel(stairId) {
       ${cableBreakdownHtml}
     </div>
     <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;margin-bottom:2px;font-weight:600"><span>Total effekt</span><span>${totalW} W · ${density} W/m²</span></div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Per trinn</span><span style="font-weight:600;color:${stepWm2 < 250 ? '#f59e0b' : stepWm2 > 500 ? '#ef4444' : 'var(--text)'}">${stepWm2} W/m²</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px;font-weight:600"><span>Total effekt</span><span>${totalW} W</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Flateeffekt</span><span style="font-weight:600;color:${stepWm2 < 250 ? '#f59e0b' : stepWm2 > 500 ? '#ef4444' : 'var(--text)'}">${stepWm2} W/m²</span></div>
       <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Løp per trinn</span><span>${treadRuns}</span></div>
       <div style="display:flex;justify-content:space-between"><span>CC i trinn</span><span>${actualStepCC.toFixed(1)} cm</span></div>
     </div>
@@ -19400,14 +19399,25 @@ function getStairCableViolations(stairId) {
   if (prod?.min_spacing_mm && cc * 10 < prod.min_spacing_mm) v.minSpacing = { actual: cc * 10, min: prod.min_spacing_mm };
   // Supplier max
   if (prod?.max_spacing_mm && cc * 10 > prod.max_spacing_mm) v.supplierMaxSpacing = { actual: cc * 10, max: prod.max_spacing_mm };
-  // Power density < 300 W/m²
+  // STEG 3 (Regel 16): flateeffekt regnes av CC (W/m ÷ CC i meter), ikke areal — se
+  // _stairSoneGeometryBlocks. Sjekker verste (BREDESTE, altså laveste flateeffekt) faktiske CC
+  // blant TRINN-flatene (repos har ingen tilsvarende "stråler ut i luft"-begrunnelse, jf. Regel 16,
+  // og holdes derfor utenfor — samme avgrensning som _stairSoneGeometryBlocks bruker).
   if (prod?.watt_per_m) {
-    const surfs = stair.surfaces || [];
-    const areaCm2 = surfs.reduce((s,f) => s + f.w_cm * f.d_cm, 0);
-    const areaM2 = areaCm2 / 10000;
-    const totalW = (stair.totalCableLength_cm / 100) * prod.watt_per_m;
-    const density = areaM2 > 0 ? totalW / areaM2 : 0;
-    if (density < STAIR_MIN_DENSITY_WM2) v.lowDensity = { actual: Math.round(density), min: STAIR_MIN_DENSITY_WM2 };
+    const surfsForDensity = stair.surfaces || [];
+    let widestTreadCC = 0;
+    for (const si in runsBySurfV) {
+      const surf = surfsForDensity[+si];
+      if (!surf || surf.type !== 'tread') continue;
+      const rs = runsBySurfV[si];
+      if (rs.length < 2) continue;
+      const builtCC = Math.abs(rs[1].pos_cm - rs[0].pos_cm);
+      if (builtCC > widestTreadCC) widestTreadCC = builtCC;
+    }
+    if (widestTreadCC > 0) {
+      const density = prod.watt_per_m / (widestTreadCC / 100);
+      if (density < STAIR_MIN_DENSITY_WM2) v.lowDensity = { actual: Math.round(density), min: STAIR_MIN_DENSITY_WM2 };
+    }
   }
   // Cable length mismatch — check per cable if multi-cable, otherwise total
   if (stair.cables && stair.cables.length > 1) {
@@ -21227,7 +21237,6 @@ function _generateStairProposals(stair) {
   const prefVoltage = stair.preferredVoltage || 230;
   const baseRiserOff = stair.riserOffset_cm ?? 2;
   const baseNoseOff = stair.noseOffset_cm ?? 2;
-  const landingMargin = stair.landingMargin_cm ?? 5;
   // Regel 7 — determinisme: maks CC er brukerens FASTE innstilling, ikke noe forslagsmotoren søker
   // over for å finne en katalogkabel som passer bedre (det var Funn 2 — sidemargin 5→2 kunne endre
   // hvilket runsPerStep som "vant", fordi katalogkabelens effekt/svinn dominerte scoren).
@@ -21262,23 +21271,17 @@ function _generateStairProposals(stair) {
     const origNose = stair.noseOffset_cm, origRiser = stair.riserOffset_cm, origRunsPerStep = stair.runsPerStep;
     stair.noseOffset_cm = mv.nose; stair.riserOffset_cm = mv.riser; stair.runsPerStep = runsPerStep;
     const solved = _stairSolveExactCableSet(stair);
-    let heatedArea_m2 = 0, totalLen_m = 0, stepWm2 = 0, treadW = 0;
+    let totalLen_m = 0, stepWm2 = 0;
     if (solved.ok) {
       const geo = generateStairCable({ ...stair, edgeMargin_cm: solved.edgeMargin_cm,
         cables: solved.products.map((p, i) => ({ index: i, productId: p.id })) });
       totalLen_m = geo.totalCableLength_cm / 100;
-      treadW = (firstTread.w_cm || stair.width_cm || 120) - 2 * solved.edgeMargin_cm;
-      for (const surf of stair.surfaces) {
-        const isLanding = surf.type === 'landing';
-        const usableW = (surf.w_cm || stair.width_cm || 120) - 2 * solved.edgeMargin_cm;
-        const usableD = isLanding ? surf.d_cm - 2 * landingMargin : surf.d_cm - mv.riser - mv.nose;
-        if (usableW > 0 && usableD > 0) heatedArea_m2 += usableW * usableD / 10000;
-      }
+      // STEG 3 (Regel 16): W/m² = (kabelens W/m) / (CC i meter) — IKKE areal. Ett CC-tall gjelder
+      // hele denne kandidaten (samme maks-CC-innstilling brukes for alle trinn i forslagsmotoren,
+      // se Regel 7-kommentaren over), så det trengs ingen per-trinn-serie-oppdeling her slik PDF-en
+      // (_stairSoneGeometryBlocks) må gjøre for en allerede bygget, potensielt sonedelt trapp.
       const wpm = solved.products[0]?.watt ? solved.products[0].watt / (solved.products[0].length_m || 1) : 0;
-      const stepCableLen_cm = runsPerStep * treadW; // Regel 10: U-svinger telles ikke
-      // Hele trinnarealet (ikke brukbart/marginredusert) — samme nevner som _stairPerStepWm2.
-      const stepArea_cm2 = (firstTread.w_cm || stair.width_cm || 120) * firstTread.d_cm;
-      stepWm2 = stepArea_cm2 > 0 ? Math.round((stepCableLen_cm / 100) * wpm / (stepArea_cm2 / 10000)) : 0;
+      stepWm2 = actualCC > 0 ? Math.round(wpm / (actualCC / 100)) : 0;
     }
     stair.noseOffset_cm = origNose; stair.riserOffset_cm = origRiser; stair.runsPerStep = origRunsPerStep;
     if (!solved.ok) continue;
@@ -21296,9 +21299,10 @@ function _generateStairProposals(stair) {
       // Regel 15: marginen er snappet til hele mm — residual_cm er det (vanligvis millimeterstore)
       // restavviket det gir, vist ærlig i stedet for skjult (se _stairSolveExactCableSet).
       marginResidual_cm: solved.residual_cm || 0,
-      power_wm2: heatedArea_m2 > 0 ? Math.round(totalWatt / heatedArea_m2) : 0,
+      // STEG 3 (Regel 16): power_wm2 og stepWm2 er nå samme CC-baserte tall — "totalt" vs "per
+      // trinn" var kun ulike så lenge begge var (feil) arealbaserte gjennomsnitt.
+      power_wm2: stepWm2,
       totalWatt: Math.round(totalWatt),
-      heatedArea_m2: Math.round(heatedArea_m2 * 100) / 100,
       stepWm2,
       noseOffset_cm: mv.nose,
       riserOffset_cm: mv.riser,
@@ -21482,9 +21486,12 @@ function _renderStairProposalPanel(stair, proposals) {
           <div>↔ CC trinn: <b>${p.stepCC} cm</b></div>
           <div>↔ CC repos: <b>${p.landingCC} cm</b></div>
           <div>〰 ${p.runsPerStep} løp per trinn</div>
-          <div><svg class="ic ic-zap" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg> ${p.totalWatt || 0} W · <b>${p.power_wm2} W/m²</b> totalt</div>
-          <div><svg class="ic ic-flame" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 2c.7 3 3.8 4.4 3.8 8a3.8 3.8 0 0 1-7.6 0c0-1.3.4-2.2.9-2.8.2.9.8 1.5 1.4 1.8C10.9 6.8 11.4 4.7 12 2z"/></svg> <b>${p.stepWm2 || '?'} W/m²</b> per trinn</div>
-          <div><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Oppvarmet areal: ${p.heatedArea_m2} m²</div>
+          <div><svg class="ic ic-zap" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg> ${p.totalWatt || 0} W</div>
+          <!-- STEG 3 (Regel 16, Kenneth 19.08.2026): flateeffekt fra CC, ikke areal — "totalt"/"per
+               trinn" var kun to tall så lenge begge var (feil) arealbaserte gjennomsnitt; med samme
+               CC for hele forslaget er det nå ett tall, og "Oppvarmet areal" er fjernet (uinteressant
+               for trapper, samme begrunnelse som PDF-utskriften i STEG 1). -->
+          <div><svg class="ic ic-flame" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 2c.7 3 3.8 4.4 3.8 8a3.8 3.8 0 0 1-7.6 0c0-1.3.4-2.2.9-2.8.2.9.8 1.5 1.4 1.8C10.9 6.8 11.4 4.7 12 2z"/></svg> <b>${p.stepWm2 || '?'} W/m²</b></div>
         </div>
         <button onclick="_stairPreviewProposal(${stair.id},${i})"
           id="stair-prop-btn-${i}"
@@ -33608,12 +33615,12 @@ function _ctxBarItems() {
       const cables = stair.cables || [];
       const hasMulti = cables.length > 1;
       const ccCmStair = stair.cableSpacing_cm.toFixed(1);
-      const surfs = stair.surfaces || [];
-      const areaCm2 = surfs.reduce((s,f) => s + f.w_cm * f.d_cm, 0);
-      const areaM2 = areaCm2 / 10000;
       const viol = getStairCableViolations(stair.id);
       const warnIco = viol.hasAny ? ' \u26A0\uFE0F' : '';
       const viewLabel = stair.viewMode === 'side' ? 'Side' : stair.viewMode === 'both' ? 'Begge' : 'Plan';
+      // STEG 3 (Regel 16, Kenneth 19.08.2026): flateeffekt fra CC (_stairPerStepWm2), ikke areal \u2014
+      // samme formel/kilde som innstillingspanelet og PDF-utskriften bruker n\u00e5 konsekvent.
+      const density = _stairPerStepWm2(stair);
       let cableInfo;
       if (hasMulti) {
         // Multi-cable: show per-cable info
@@ -33625,14 +33632,12 @@ function _ctxBarItems() {
           totalW += w;
           return `<span style="color:${STAIR_CABLE_COLORS[i]}">K${i+1}</span>: ${p ? esc(p.name) : '?'} \u00b7 ${lenM} m \u00b7 ${w} W`;
         });
-        const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
         const totalLen = (stair.totalCableLength_cm / 100).toFixed(1);
         cableInfo = parts.join(' | ') + ` | Total: ${totalLen} m \u00b7 ${totalW} W \u00b7 ${density} W/m\u00b2${warnIco}`;
       } else {
         const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
         const lenM = (stair.totalCableLength_cm / 100).toFixed(1);
         const totalW = prod?.watt_per_m ? Math.round((stair.totalCableLength_cm / 100) * prod.watt_per_m) : 0;
-        const density = areaM2 > 0 ? Math.round(totalW / areaM2) : 0;
         cableInfo = `${prod ? esc(prod.name) : 'Ingen kabel'} \u00b7 ${lenM} m \u00b7 ${totalW} W \u00b7 ${density} W/m\u00b2${warnIco}`;
       }
       return `<span class="ctxbar-lbl">\u{1FA9C} Trapp</span>
