@@ -6447,7 +6447,7 @@ function showMatPlacePanel(familyName, categoryId) {
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
           onclick="_startMatPlacementFromSelect(${firstP.id})">Plasser matte</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
-          onclick="autoFillMatSerpentine(${firstP.id})">Fyll rom</div>
+          onclick="_matFillRoomSmart(${firstP.id})">Fyll rom</div>
       </div>
       <div style="display:flex;gap:4px;margin-top:4px">
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
@@ -6471,7 +6471,7 @@ function showMatPlacePanel(familyName, categoryId) {
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
           onclick="_startMatPlacement(${p.id})">Plasser matte</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center;background:var(--accent);color:#fff"
-          onclick="autoFillMatSerpentine(${p.id})">Fyll rom</div>
+          onclick="_matFillRoomSmart(${p.id})">Fyll rom</div>
       </div>
       <div style="display:flex;gap:4px;margin-top:4px">
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
@@ -6956,6 +6956,351 @@ function _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) 
     }
   }
   return best;
+}
+
+// ── Flere matter i samme rom (LÅST REGEL F+G, Kenneth 19.08.2026) ──────────────────────────
+// Når rommet er større enn den største tilgjengelige matten, tilbys to forslag (like/ulike
+// størrelser) i stedet for å legge ut ÉN matte og la resten av rommet stå kaldt. Egen kodesti
+// (ikke en gren i autoFillMatSerpentine): geometri-oppsettet under er en liten, stabil DEL av det
+// autoFillMatSerpentine allerede gjør (bbox/margin/hindring/retning/maxRuns) — trygg å duplisere.
+// Selve enkelt-matte-funksjonen er allerede kompleks nok (Regel A-E, variantvalg, klipping) at et
+// tvunget felles kjerne-lag ville økt risikoen begge veier uten reell gevinst.
+
+// Samme bbox+margin+hindring-unngåelse+retningsvalg som autoFillMatSerpentine sin første halvdel,
+// faktorert ut hit så både enkelt- og flermatte-veien bruker nøyaktig samme brukbare rektangel.
+function _matRoomGeomForFill(room, prod) {
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
+  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs), rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  let uX0 = rMinX + marginCm, uX1 = rMaxX - marginCm, uY0 = rMinY + marginCm, uY1 = rMaxY - marginCm;
+  {
+    const hinds = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3)
+      .map(h => { const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
+        return { x0: Math.min(...hx) - marginCm, x1: Math.max(...hx) + marginCm,
+                 y0: Math.min(...hy) - marginCm, y1: Math.max(...hy) + marginCm }; });
+    let R = { x0: uX0, x1: uX1, y0: uY0, y1: uY1 };
+    for (let it = 0; it < hinds.length + 2; it++) {
+      const H = hinds.find(h => h.x0 < R.x1 - 0.1 && h.x1 > R.x0 + 0.1 && h.y0 < R.y1 - 0.1 && h.y1 > R.y0 + 0.1);
+      if (!H) break;
+      const cand = [
+        { x0: R.x0, x1: Math.min(R.x1, H.x0), y0: R.y0, y1: R.y1 },
+        { x0: Math.max(R.x0, H.x1), x1: R.x1, y0: R.y0, y1: R.y1 },
+        { x0: R.x0, x1: R.x1, y0: R.y0, y1: Math.min(R.y1, H.y0) },
+        { x0: R.x0, x1: R.x1, y0: Math.max(R.y0, H.y1), y1: R.y1 },
+      ].map(c => ({ ...c, area: Math.max(0, c.x1 - c.x0) * Math.max(0, c.y1 - c.y0) }))
+       .sort((a, b) => b.area - a.area);
+      if (cand[0].area <= 0) { R = cand[0]; break; }
+      R = cand[0];
+    }
+    uX0 = R.x0; uX1 = R.x1; uY0 = R.y0; uY1 = R.y1;
+  }
+
+  let dir = userDir;
+  if (!dir) {
+    const _cov = d => {
+      const acr = (d === 'h') ? (uY1 - uY0) : (uX1 - uX0);
+      const alo = (d === 'h') ? (uX1 - uX0) : (uY1 - uY0);
+      if (acr < matWidthCm || alo < minLenCm) return 0;
+      const n = Math.max(0, Math.floor((acr + gapCm) / (matWidthCm + gapCm)));
+      let rl = cutCm > 0 ? Math.floor(alo / cutCm) * cutCm : alo;
+      if (rl < minLenCm) rl = minLenCm;
+      return (n * matWidthCm * rl) / 10000;
+    };
+    dir = (_cov('h') > _cov('v')) ? 'h' : 'v';
+  }
+
+  const acrossMin = dir === 'h' ? uY0 : uX0, acrossMax = dir === 'h' ? uY1 : uX1;
+  const alongMin = dir === 'h' ? uX0 : uY0, alongMax = dir === 'h' ? uX1 : uY1;
+  const acrossSpan = acrossMax - acrossMin, alongSpan = alongMax - alongMin;
+  const maxRuns = acrossSpan >= matWidthCm ? Math.floor((acrossSpan + gapCm) / (matWidthCm + gapCm)) : 0;
+
+  return { matWidthCm, cutCm, marginCm, gapCm, minLenCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
+}
+
+// Samme per-rad kapasitetssum som autoFillMatSerpentine (STEG 2/Regel B) — hvor mye lengde
+// romformen faktisk gir plass til over ALLE breddeplasser, uavhengig av hvilket produkt som til
+// slutt velges.
+function _matRoomCapacityCm(room, geom) {
+  let capacityCm = 0;
+  for (let r = 0; r < geom.maxRuns; r++) {
+    const perpPos = geom.acrossMin + r * (geom.matWidthCm + geom.gapCm);
+    const segs = _matClippedSegments(room.id, geom.dir, perpPos, geom.matWidthCm, geom.marginCm, 0);
+    const seg = segs.find(s => s.start_cm <= geom.alongMin + 0.5 && s.start_cm + s.length_cm >= geom.alongMin - 0.5);
+    let len = 0;
+    if (seg) {
+      len = Math.max(0, (seg.start_cm + seg.length_cm) - geom.alongMin);
+      len = geom.cutCm > 0 ? Math.floor(len / geom.cutCm) * geom.cutCm : len;
+    }
+    if (len > 0 && len < geom.minLenCm) len = 0;
+    capacityCm += len;
+  }
+  return capacityCm;
+}
+
+// STEG 1 (Regel F+G): uttømmende søk — katalogen har ≤19 størrelser og N er 2-4 i praksis, så en
+// full gjennomgang av alle kombinasjoner er billig (ingen heuristikk). `candidates`:
+// [{p,areaM2,lenCm}], sortert. Prøver N stigende fra 2 (N=1 er allerede enkelt-matte-veien, en
+// ANNEN, allerede løst funksjon — denne kodestien aktiveres kun når N=1 ikke strekker til) og
+// stopper ved FØRSTE N som har minst én gyldig løsning: Regel F pkt. 1 (færrest matter) er en
+// STRENG lexikografisk prioritet foran pkt. 2 (størst dekning) — en høyere N med bedre dekning
+// taper alltid mot en lavere N, selv om lavere N dekker mindre (Kenneths eget eksempel: 2×15=30m²
+// slår 4×8=32m² eksakt). Returnerer { equal, unequal }, hver enten et forslagsobjekt eller null.
+function _matMultiSolve(candidates, alongSpanCm, maxRuns, targetAreaM2, cutCm, maxMats) {
+  const validLs = [];
+  for (let L = cutCm; L <= alongSpanCm + 0.001; L += cutCm) validLs.push(L);
+  if (!validLs.length) return { equal: null, unequal: null };
+
+  function divisiblesAt(L) {
+    return candidates
+      .map(c => ({ ...c, runs: c.lenCm / L }))
+      .filter(c => Number.isInteger(c.runs) && c.runs >= 1 && c.runs <= maxRuns);
+  }
+
+  function bestAtN(N, equal) {
+    let best = null;
+    for (const L of validLs) {
+      const divisibles = divisiblesAt(L);
+      if (!divisibles.length) continue;
+      if (equal) {
+        for (const d of divisibles) {
+          const totalWidths = d.runs * N;
+          if (totalWidths > maxRuns) continue;
+          const totalArea = d.areaM2 * N;
+          if (totalArea > targetAreaM2 + 1e-6) continue;
+          if (!best || totalArea > best.totalArea + 1e-9) best = { L, mats: Array(N).fill(d), totalArea, totalWidths };
+        }
+      } else {
+        const dl = divisibles.length;
+        (function rec(startIdx, chosen, widthsUsed, areaUsed) {
+          if (chosen.length === N) {
+            if (widthsUsed <= maxRuns && areaUsed <= targetAreaM2 + 1e-6) {
+              if (!best || areaUsed > best.totalArea + 1e-9) best = { L, mats: chosen.slice(), totalArea: areaUsed, totalWidths: widthsUsed };
+            }
+            return;
+          }
+          for (let i = startIdx; i < dl; i++) {
+            const d = divisibles[i];
+            if (widthsUsed + d.runs > maxRuns) continue;
+            if (areaUsed + d.areaM2 > targetAreaM2 + 1e-6) continue;
+            chosen.push(d);
+            rec(i, chosen, widthsUsed + d.runs, areaUsed + d.areaM2);
+            chosen.pop();
+          }
+        })(0, [], 0, 0);
+      }
+    }
+    return best;
+  }
+
+  let equal = null, unequal = null;
+  for (let N = 2; N <= maxMats; N++) { const b = bestAtN(N, true); if (b) { equal = { N, ...b }; break; } }
+  for (let N = 2; N <= maxMats; N++) { const b = bestAtN(N, false); if (b) { unequal = { N, ...b }; break; } }
+  return { equal, unequal };
+}
+
+// STEG 2 (Regel F+G): plasserer en valgt (like/ulike) løsning som N mat-objekter i sammenhengende
+// blokker langs tverr-aksen — størst matte (flest breddeplasser) først, samme prinsipp som
+// folie-regelen fra 14.08: den viktigste flaten legges først, restene havner i minst kritiske
+// ende. Skjøten mellom to matter bruker SAMME avstand (gapCm) som mellom to bredder i samme matte
+// — ingen ekstra kald stripe. Hver matte klippes og vakt-sjekkes UAVHENGIG (samme funksjoner som
+// autoFillMatSerpentine), og INGENTING committes til S.mats før ALLE mattene i løsningen validerer
+// — et delvis flermatte-utlegg er verre enn ingen.
+function _matPlaceMultiMats(room, prod, geom, solution) {
+  const { dir, acrossMin, acrossMax, alongMin, alongMax, alongSpan, matWidthCm, gapCm, cutCm, marginCm, minLenCm } = geom;
+  const L = solution.L;
+  const items = solution.mats.slice().sort((a, b) => b.runs - a.runs || b.areaM2 - a.areaM2);
+  const totalWidths = items.reduce((s, d) => s + d.runs, 0);
+  const totalW = totalWidths * matWidthCm + Math.max(0, totalWidths - 1) * gapCm;
+  const fromWall = !!(S.varmematte && S.varmematte.fromWall);
+  const acrossCenter = fromWall ? (acrossMin + totalW / 2) : (acrossMin + acrossMax) / 2;
+  const alongCenter = (alongMin + alongMax) / 2;
+  const blockAcrossStart = acrossCenter - totalW / 2;
+
+  const built = [];
+  let widthsUsed = 0;
+  for (const item of items) {
+    const p = item.p;
+    const blockW = item.runs * matWidthCm + Math.max(0, item.runs - 1) * gapCm;
+    const blockAcrossCenter = blockAcrossStart + widthsUsed * (matWidthCm + gapCm) + blockW / 2;
+    let matX, matY;
+    if (dir === 'h') { matX = alongCenter - L / 2; matY = blockAcrossCenter - blockW / 2; }
+    else { matX = blockAcrossCenter - blockW / 2; matY = alongCenter - L / 2; }
+
+    const alongStart = dir === 'h' ? matX : matY;
+    const perpBase = dir === 'h' ? matY : matX;
+    let anyRunClipped = false;
+    const lens = [], starts = [];
+    for (let r = 0; r < item.runs; r++) {
+      const perpPos = perpBase + r * (matWidthCm + gapCm);
+      const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+      const seg = segs.find(s => s.start_cm <= alongStart + 0.5 && s.start_cm + s.length_cm >= alongStart - 0.5);
+      let len = 0;
+      if (seg) {
+        const reachable = (seg.start_cm + seg.length_cm) - alongStart;
+        len = Math.max(0, Math.min(L, reachable));
+        len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+      }
+      if (len > 0 && len < minLenCm) len = 0;
+      if (len < L - 0.05) anyRunClipped = true;
+      lens.push(len); starts.push(alongStart);
+    }
+    const runLengthsOut = anyRunClipped ? lens : null;
+    const runStartsOut = anyRunClipped ? starts : null;
+
+    const mat = {
+      id: S.counters.nextMatId++, roomId: room.id, productId: p.id,
+      x_cm: matX, y_cm: matY, width_cm: matWidthCm, length_cm: L,
+      num_runs: item.runs, last_run_length_cm: null,
+      runLengths: runLengthsOut, runStarts: runStartsOut,
+      gap_cm: gapCm, rotation_deg: dir === 'h' ? 90 : 0,
+      _effMarginAlongCm: Math.round((marginCm + Math.max(0, alongSpan - L) / 2) * 10) / 10,
+      _equalWidthFallback: false,
+      _multiMatGroup: true,   // STEG 4: flere matter i samme rom — materialliste/label/effekt-kode kan lene seg på dette
+    };
+    if (!_matRunsWithinRoom(mat, room, marginCm)) {
+      console.error('_matPlaceMultiMats: matte falt utenfor rommet — avbrutt', mat);
+      _showToast('Flermatte-utlegg avbrutt: en matte ville ligget utenfor rommet', 'error');
+      return false;
+    }
+    const ruleCheck = _matRunsMatchRule(mat, p, cutCm, anyRunClipped);
+    if (!ruleCheck.ok) {
+      console.error('_matPlaceMultiMats: Regel ' + ruleCheck.rule + ' brutt — avbrutt: ' + ruleCheck.reason, mat);
+      _showToast('Flermatte-utlegg avbrutt: ' + ruleCheck.reason, 'error');
+      return false;
+    }
+    built.push(mat);
+    widthsUsed += item.runs;
+  }
+
+  pushUndo();
+  for (const m of built) S.mats.push(m);
+  _invalidateMatCache();
+  _trackProductUsage(built[0].productId);
+  S.ui.selectedMatId = built[0].id;
+  renderSidebar(); updateCtxBar(); render();
+  return true;
+}
+
+// STEG 3: inngangspunkt fra «Fyll rom»-knappen. Avgjør om rommet trenger flere matter (kapasiteten
+// overstiger den STØRSTE tilgjengelige enkeltmatta) — er det ikke tilfelle, uendret oppførsel,
+// ingen valgboks (STEG 3: «Er rommet lite nok til én matte: ingen endring»).
+function _matFillRoomSmart(productId) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return;
+  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  if (!room || !room.points || room.points.length < 3) { autoFillMatSerpentine(productId); return; }
+  if (!prod.mat_equal_widths) { autoFillMatSerpentine(productId); return; }
+
+  const geom = _matRoomGeomForFill(room, prod);
+  if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) { autoFillMatSerpentine(productId); return; }
+
+  const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
+  const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
+  const variantOf = p => {
+    if (p.product_family && prod.product_family) return p.product_family === prod.product_family;
+    return familyKey && (p.name || '').replace(sizeSuffixRe, '').trim() === familyKey;
+  };
+  const candidates = HEATING_PRODUCTS
+    .filter(p => p.active !== false && p.mat_width_mm === prod.mat_width_mm && _matTotalLengthMm(p) && variantOf(p))
+    .map(p => ({ p, areaM2: p.mat_area_m2 || ((_matTotalLengthMm(p) / 10) * geom.matWidthCm / 10000), lenCm: _matTotalLengthMm(p) / 10 }))
+    .sort((a, b) => a.lenCm - b.lenCm);
+  if (!candidates.length) { autoFillMatSerpentine(productId); return; }
+  const largestAreaM2 = candidates[candidates.length - 1].areaM2;
+
+  const capacityCm = _matRoomCapacityCm(room, geom);
+  const capacityAreaM2 = capacityCm * geom.matWidthCm / 10000;
+  // Kun tilby flere matter når kapasiteten faktisk overstiger den STØRSTE tilgjengelige enkeltmatta
+  // (Kenneth: «dersom rommet krever mer enn 1 stk 15 m² matte») — en liten toleranse (2%) unngår at
+  // et rom som akkurat så vidt får plass til én matte trigger valgboksen unødig.
+  if (capacityAreaM2 <= largestAreaM2 * 1.02) { autoFillMatSerpentine(productId); return; }
+
+  const MAX_MATS = 4;
+  const solved = _matMultiSolve(candidates, geom.alongSpan, geom.maxRuns, capacityAreaM2, geom.cutCm, MAX_MATS);
+  if (!solved.equal && !solved.unequal) {
+    _showToast(`Rommet trenger flere enn ${MAX_MATS} matter for god dekning — bruker den ene som dekker mest i stedet`, 'warn');
+    autoFillMatSerpentine(productId);
+    return;
+  }
+  _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved);
+}
+
+// STEG 3 (panelet): viser like/ulike-forslagene med tall — antall matter, samlet dekning av
+// brukbart areal, og effekt. Standard er «like» (Regel F pkt. 4); brukerens valg huskes for økta
+// (S.varmematte._multiMatPref) slik at neste «Fyll rom» i samme prosjekt husker preferansen.
+function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved) {
+  const wm2 = prod.watt_per_m2 || 0;
+  const _fmtOpt = (sol, kind) => {
+    if (!sol) return null;
+    const byArea = {};
+    for (const d of sol.mats) byArea[d.areaM2] = (byArea[d.areaM2] || 0) + 1;
+    const parts = Object.entries(byArea).sort((a, b) => b[0] - a[0]).map(([a, c]) => `${c} × ${a} m²`);
+    const watt = Math.round(sol.totalArea * wm2);
+    return { kind, N: sol.N, L: sol.L, label: parts.join(' + '), totalArea: sol.totalArea, watt, sol };
+  };
+  const optEqual = _fmtOpt(solved.equal, 'equal');
+  const optUnequal = _fmtOpt(solved.unequal, 'unequal');
+  // STEG 1: «returner begge svarene, selv når de er identiske — UI-et trenger å kunne vise at
+  // ulike ikke gir noe ekstra her.»
+  const unequalAddsNothing = optEqual && optUnequal && Math.abs(optEqual.totalArea - optUnequal.totalArea) < 0.01;
+
+  const pref = (S.varmematte && S.varmematte._multiMatPref) || 'equal';
+  const defaultKind = (pref === 'unequal' && optUnequal) ? 'unequal' : (optEqual ? 'equal' : 'unequal');
+
+  const old = document.getElementById('mat-multi-panel');
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'mat-multi-panel';
+  div.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,0.35);max-width:420px;font-size:13px;color:var(--text)';
+
+  // STEG 4 (Kenneth 19.08.2026): «Ikke gjett på kursregler — vis tallet og flagget, la Kenneth
+  // bestemme grensen.» 16A/230V (3680W, énfas) er den vanligste sikringsstørrelsen i norske bolig-
+  // installasjoner og brukt HER kun som et REFERANSEPUNKT for flagget — ikke en hardkodet regel.
+  // Se commit-meldingen: grensen må avklares med Kenneth før dette flagget kan stoles på ukritisk.
+  const BREAKER_REF_A = 16, VOLTAGE = 230;
+  const rows = [optEqual, optUnequal].filter(Boolean).map(opt => {
+    const noteExtra = (opt.kind === 'unequal' && unequalAddsNothing) ? ' <span style="color:var(--dim);font-size:11px">(gir ingenting ekstra her)</span>' : '';
+    const uncovered = Math.round((capacityAreaM2 - opt.totalArea) * 10) / 10;
+    const amps = Math.round((opt.watt / VOLTAGE) * 10) / 10;
+    const overBreaker = amps > BREAKER_REF_A;
+    const ampNote = overBreaker
+      ? ` <span style="color:#f59e0b;font-weight:600">⚠ ${amps} A — over ${BREAKER_REF_A} A (uavklart grense, se info)</span>`
+      : ` · ${amps} A`;
+    return `<label style="display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid var(--brd);border-radius:6px;margin-bottom:6px;cursor:pointer">
+      <input type="radio" name="mat-multi-choice" value="${opt.kind}" ${opt.kind === defaultKind ? 'checked' : ''} style="margin-top:2px">
+      <span style="flex:1">
+        <div style="font-weight:600">${opt.N} ${opt.kind === 'equal' ? 'like' : 'ulike'} matter${noteExtra}</div>
+        <div style="color:var(--dim);font-size:12px">${esc(opt.label)}</div>
+        <div style="font-size:12px">${opt.totalArea.toFixed(1)} av ${capacityAreaM2.toFixed(1)} m² dekket (${uncovered > 0.05 ? uncovered.toFixed(1) + ' m² udekket' : 'eksakt'}) · ${opt.watt} W${ampNote}</div>
+      </span>
+    </label>`;
+  }).join('');
+
+  div.innerHTML = `<div style="font-weight:700;font-size:14px;margin-bottom:8px">Rommet trenger flere matter</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(room.name || 'Rommet')} har plass til ca. ${capacityAreaM2.toFixed(1)} m² — større enn den største tilgjengelige ${esc(prod.product_family || 'matte')}n.</div>
+    ${rows}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button id="mat-multi-cancel" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer">Avbryt</button>
+      <button id="mat-multi-apply" style="flex:1;padding:8px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Legg ut</button>
+    </div>`;
+  document.body.appendChild(div);
+
+  document.getElementById('mat-multi-cancel').onclick = () => div.remove();
+  document.getElementById('mat-multi-apply').onclick = () => {
+    const chosenKind = div.querySelector('input[name="mat-multi-choice"]:checked')?.value || defaultKind;
+    const sol = chosenKind === 'unequal' ? solved.unequal : solved.equal;
+    if (!sol) { div.remove(); return; }
+    S.varmematte = S.varmematte || {};
+    S.varmematte._multiMatPref = chosenKind;
+    const ok = _matPlaceMultiMats(room, prod, geom, sol);
+    div.remove();
+    if (ok) _showToast(`${sol.N} matter lagt ut (${sol.totalArea.toFixed(1)} m²)`, 'ok');
+  };
 }
 
 // opts.exact: place exactly the given product (skip best-fit variant swap).
