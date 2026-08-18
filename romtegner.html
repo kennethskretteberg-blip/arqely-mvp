@@ -7493,154 +7493,213 @@ function autoFillMatSerpentine(productId, opts) {
     }
   }
 
-  const totalLenMm = _matTotalLengthMm(prod);
-  const totalLengthCm = totalLenMm ? totalLenMm / 10 : null;
-  const isFixedLength = totalLengthCm !== null;
+  // ── REGEL H (LÅST, Kenneth 19.08.2026): aldri overskudd ────────────────────────────────────
+  // Kapasitetsanslaget over (capacityCm) — og selv Regel E sitt (N,L)-søk — er nødvendigvis et
+  // GJETT: begge er regnet mot rommets OMSLUTTENDE boundingboks (alongSpan/maxRuns), ikke den
+  // faktiske, innhukk-klippede formen, og mattas ENDELIGE posisjon (matX/matY/effectiveGapCm) er
+  // ikke kjent før hele blokka er lagt. Løs det ved å MÅLE i stedet for å anta: legg ut, summer
+  // hva som FAKTISK ble klippet (STEG 1-fikset klipping under), og går den valgte rullen ikke opp
+  // (mer enn ett kuttintervall til overs) — gå ned én størrelse og legg om HELT FRA BEGYNNELSEN
+  // (Regel E kan gi et helt annet (N,L)-par for en annen rullengde). Gjentas til det går opp,
+  // eller til ingen mindre variant finnes, med et tak (5 forsøk) mot en fremtidig regresjon som
+  // aldri konvergerer. Gjelder kun det AUTOMATISKE variantsøket over (candidateIdx ≥ 0) — et
+  // eksplisitt brukervalg (opts.exact) endres aldri av denne løkka.
+  let candidateIdx = (!opts.exact) ? candidates.findIndex(c => c.p.id === prod.id) : -1;
+  const MAX_LAYOUT_ATTEMPTS = 5;
 
-  // opts.exact: variantsøket over ble hoppet over (brukerens eksplisitte produktvalg, uendret) —
-  // men Regel E gjelder like fullt FOR DEN VALGTE varianten alene, uten nabosøk (det ville motsagt
-  // «ikke bytt variant»).
-  if (opts.exact && prod.mat_equal_widths && isFixedLength && _matEqualNL == null) {
-    _matEqualNL = _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpan, minLenCm);
-    _matEqualWidthFallback = !_matEqualNL;
-  }
+  let totalLenMm, totalLengthCm, isFixedLength;
+  let matLastRunLen, actualRunsOverride, actualRuns;
+  let effectiveGapCm, totalW, acrossCenter, alongCenter, matX, matY, fromWall;
+  let alongStart, perpBase, anyRunClipped, clippedRunLens, clippedRunStarts;
+  let layoutAttempts = 0;
 
-  // EcoMat: legg ut HELE rullelengden — verken mer eller mindre.
-  // REGEL E (Kenneth 19.08.2026, LÅST — automatisk utlegg): finnes et gyldig (N,L)-par
-  // (_matEqualNL, over) brukes det EKSAKT — alle bredder får samme lengde L, ingen kort siste.
-  // Ellers (ingen kapasitets-egnet variant gikk opp i like bredder): fall tilbake til FØR-Regel-E-
-  // modellen — N−1 LIKE bredder (rundet OPP til raster) + 1 KORTERE siste (= resten), forankret i
-  // skjøt-enden (last_run_length_cm) — samme fallback panelet varsler om via _matEqualWidthFallback.
-  let matLastRunLen = null;
-  let actualRunsOverride = null;
-  if (prod.mat_equal_widths && isFixedLength) {
-    if (_matEqualNL) {
-      runLengthCm = _matEqualNL.L;
-      actualRunsOverride = _matEqualNL.N;
-    } else {
-      const N = maxRuns;
-      let Lc = cutCm > 0 ? Math.ceil((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);   // like bredder, rundet OPP
-      if (Lc > alongSpan) Lc = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;       // maks romlengde
-      if (Lc < minLenCm) Lc = Math.min(minLenCm, alongSpan);
-      let lastLen = totalLengthCm - (N - 1) * Lc;                                                    // resten
-      while (lastLen <= 0 && Lc - cutCm >= minLenCm - 0.01) { Lc -= cutCm; lastLen = totalLengthCm - (N - 1) * Lc; }
-      runLengthCm = Lc;
-      matLastRunLen = (lastLen > 0.5 && lastLen < Lc - 0.5) ? Math.round(lastLen * 10) / 10 : null;  // kun hvis genuint kortere
-    }
-  }
+  for (;;) {
+    layoutAttempts++;
+    totalLenMm = _matTotalLengthMm(prod);
+    totalLengthCm = totalLenMm ? totalLenMm / 10 : null;
+    isFixedLength = totalLengthCm !== null;
 
-  // Cap each run to the mat's physical length. Without this a "0.5×2m"
-  // product (200 cm total) could end up rendered as 5 runs × 336 cm —
-  // physically impossible. Re-snap to cutCm.
-  if (isFixedLength && runLengthCm > totalLengthCm) {
-    runLengthCm = cutCm > 0 ? Math.floor(totalLengthCm / cutCm) * cutCm : totalLengthCm;
-    if (runLengthCm < minLenCm) runLengthCm = Math.min(minLenCm, totalLengthCm);
-  }
+    // Regel E for DENNE spesifikke varianten — kjørt på nytt hvert forsøk, siden en annen
+    // rullengde kan gi et helt annet (N,L)-par (eller ingen i det hele tatt). Erstatter både den
+    // opprinnelige variantsøk-interne beregningen OG den tidligere separate opts.exact-grenen —
+    // begge er nå samme kall, kjørt uansett opts.exact.
+    _matEqualNL = (prod.mat_equal_widths && isFixedLength)
+      ? _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpan, minLenCm)
+      : null;
+    _matEqualWidthFallback = !!(prod.mat_equal_widths && isFixedLength && !_matEqualNL);
 
-  // Always one mat object with num_runs (matches the physical product:
-  // a single mat/roll cut into serpentine lengths, not N separate mats).
-  // For fixed-length products, runs are capped at totalLengthCm/runLengthCm
-  // so the order doesn't exceed what the user actually has.
-  let actualRuns = maxRuns;
-  if (actualRunsOverride != null) {
-    actualRuns = actualRunsOverride;   // REGEL E: N er allerede eksakt kjent fra søket — ikke utled på nytt
-  } else if (isFixedLength && !(prod.mat_equal_widths && matLastRunLen != null)) {
-    // equal_widths med kortere siste bruker ALLTID N (siste er kortere, ikke droppet).
-    const neededRuns = Math.floor(totalLengthCm / runLengthCm);
-    actualRuns = Math.min(maxRuns, neededRuns);
-  }
-  if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
-
-  // Distribute leftover across-axis space as even gaps between mats
-  // (mats can lie flush against each other, but spreading them evenly
-  // gives better heat coverage and looks cleaner). The user's gapCm
-  // setting acts as a minimum — if the even-distribute gap would be
-  // smaller, we fall back to it.
-  // EcoMat: widths lie EDGE-TO-EDGE (no even-spread), centred → the leftover is a cold zone split
-  // equally on both walls (cable-to-cable ≈ 5 cm at the seam via the 2.5 cm kant-inntrekk).
-  const evenGapCm = (!prod.mat_equal_widths && actualRuns > 1)
-    ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
-    : 0;
-  const effectiveGapCm = Math.max(gapCm, evenGapCm);
-  const totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * effectiveGapCm;
-  // «Sentrer» (standard): kaldt felt deles likt på begge vegger. «Fra vegg»: blokka legges inntil
-  // margen på start-siden, alt kaldt felt havner på motsatt vegg.
-  const fromWall = !!(S.varmematte && S.varmematte.fromWall);
-  const acrossCenter = fromWall ? (acrossMin + totalW / 2) : (acrossMin + acrossMax) / 2;
-  const alongCenter = (alongMin + alongMax) / 2;
-
-  // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
-  // along-axis dimension before rotation. rotation_deg=90 swaps them in world.
-  let matX, matY;
-  if (dir === 'h') {
-    matX = alongCenter - totalW / 2;
-    matY = acrossCenter - runLengthCm / 2;
-  } else {
-    matX = acrossCenter - totalW / 2;
-    matY = alongCenter - runLengthCm / 2;
-  }
-
-  // STEG 1 (LÅST REGEL, Kenneth 14.08.2026, oppdatert 19.08.2026 — REGEL A): klipp HVER bredde mot
-  // rommets POLYGON på mattas FAKTISKE, endelige posisjon (matX/matY/effectiveGapCm er nå kjent) —
-  // ikke bare det omsluttende rektangelet across/along-spennene over er basert på. En bredde som
-  // treffer et innhukk/skrå vegg avsluttes FØR veggen i stedet for å stikke forbi den.
-  //
-  // REGEL A (Kenneth 19.08.2026): lengde og startpunkt skal ALLTID komme fra SAMME klippede
-  // segment. Tidligere ble hver bredde alltid klippet ved å regne «reachable» FRA alongStart (blokkens
-  // egen start), mens tegningen (drawMats) forankrer en KORTERE bredde i sømenden etter paritet
-  // (upR = r%2===0 → sømenden/fjern ende, ellers alongStart/nær ende) — SAMME regel som «eksakt
-  // mattelengde»-regelen (08.07) alltid har brukt for siste bredde, nå gjeldende for ALLE bredder.
-  // Når disse to ankrene er ULIKE (upR===true) og bredden faktisk blir klippet, oppsto akkurat
-  // Kenneths symptom: riktig lengde, men forankret i feil ende — breddens synlige rektangel kunne
-  // da stikke ut over en vegg klippingen aldri validerte. Fikset ved å regne reachable FRA DET
-  // ANKERET drawMats faktisk bruker (upR-avhengig), ikke alltid fra alongStart.
-  //
-  // Regelkonflikt (STEG 0 punkt 3): sømflukt (upR===true for en genuint kortere siste bredde) er et
-  // ØNSKE; å holde seg innenfor rommet er ABSOLUTT. Løsning: klipp alltid fra sømenden når upR er
-  // sant (skjøt-flukten respekteres når rommet tillater det), men klipp lengden ned og FLYTT
-  // startpunktet innover når rommet ikke gir plass helt til sømenden — vegg-regelen vinner da uten
-  // at sømflukten mistes der den faktisk får plass.
-  const alongStart = dir === 'h' ? matX : matY;
-  const perpBase = dir === 'h' ? matY : matX;
-  const nominalMatStub = { num_runs: actualRuns, length_cm: runLengthCm, last_run_length_cm: matLastRunLen };
-  let anyRunClipped = false;
-  const clippedRunLens = [];
-  const clippedRunStarts = [];
-  for (let r = 0; r < actualRuns; r++) {
-    const perpPos = perpBase + r * (matWidthCm + effectiveGapCm);
-    const nominalLen = _matRunLenCm(nominalMatStub, r);
-    // Samme paritet som drawMats' upR — se _matRunStartCm. Kun relevant når denne breddens
-    // nominelle lengde faktisk ER kortere enn hele blokka (ellers spiller ankeret ingen rolle).
-    const upR = (r % 2 === 0) && (nominalLen < runLengthCm - 0.05);
-    const nominalStart = upR ? (alongStart + runLengthCm - nominalLen) : alongStart;
-    const anchorPoint = upR ? (nominalStart + nominalLen) : nominalStart;   // sømenden (upR) ELLER alongStart
-    // cutCm=0: se samme note som i idealLenCm-løkken over — snapping skjer ÉN gang, i
-    // Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
-    const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
-    // Kun et segment som faktisk INNEHOLDER forankringspunktet er brukbart — å hoppe til et lengre,
-    // men frakoblet segment ville brutt regelen «ingen kabel i et segment som ikke henger sammen
-    // med resten».
-    const seg = segs.find(s => s.start_cm <= anchorPoint + 0.5 && s.start_cm + s.length_cm >= anchorPoint - 0.5);
-    let len = 0, start = nominalStart;
-    if (seg) {
-      if (upR) {
-        // Forankret i sømenden: reachable strekker seg BAKOVER (mot alongStart) fra ankeret.
-        const reachable = anchorPoint - seg.start_cm;
-        len = Math.max(0, Math.min(nominalLen, reachable));
-        len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
-        start = anchorPoint - len;   // vegg-regelen vinner: flytt startpunktet innover i stedet for å stikke ut
+    // EcoMat: legg ut HELE rullelengden — verken mer eller mindre.
+    // REGEL E (Kenneth 19.08.2026, LÅST — automatisk utlegg): finnes et gyldig (N,L)-par
+    // (_matEqualNL, over) brukes det EKSAKT — alle bredder får samme lengde L, ingen kort siste.
+    // Ellers (ingen kapasitets-egnet variant gikk opp i like bredder): fall tilbake til FØR-Regel-E-
+    // modellen — N−1 LIKE bredder (rundet OPP til raster) + 1 KORTERE siste (= resten), forankret i
+    // skjøt-enden (last_run_length_cm) — samme fallback panelet varsler om via _matEqualWidthFallback.
+    runLengthCm = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;   // reset til nominell hvert forsøk
+    if (runLengthCm < minLenCm) runLengthCm = minLenCm;
+    matLastRunLen = null;
+    actualRunsOverride = null;
+    if (prod.mat_equal_widths && isFixedLength) {
+      if (_matEqualNL) {
+        runLengthCm = _matEqualNL.L;
+        actualRunsOverride = _matEqualNL.N;
       } else {
-        const reachable = (seg.start_cm + seg.length_cm) - anchorPoint;
-        len = Math.max(0, Math.min(nominalLen, reachable));
-        len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
-        start = anchorPoint;
+        const N = maxRuns;
+        let Lc = cutCm > 0 ? Math.ceil((totalLengthCm / N) / cutCm) * cutCm : (totalLengthCm / N);   // like bredder, rundet OPP
+        if (Lc > alongSpan) Lc = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;       // maks romlengde
+        if (Lc < minLenCm) Lc = Math.min(minLenCm, alongSpan);
+        let lastLen = totalLengthCm - (N - 1) * Lc;                                                    // resten
+        while (lastLen <= 0 && Lc - cutCm >= minLenCm - 0.01) { Lc -= cutCm; lastLen = totalLengthCm - (N - 1) * Lc; }
+        runLengthCm = Lc;
+        matLastRunLen = (lastLen > 0.5 && lastLen < Lc - 0.5) ? Math.round(lastLen * 10) / 10 : null;  // kun hvis genuint kortere
       }
     }
-    if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → legg den ikke ut
-    if (len < nominalLen - 0.05 || Math.abs(start - nominalStart) > 0.05) anyRunClipped = true;
-    clippedRunLens.push(len);
-    clippedRunStarts.push(start);
+
+    // Cap each run to the mat's physical length. Without this a "0.5×2m"
+    // product (200 cm total) could end up rendered as 5 runs × 336 cm —
+    // physically impossible. Re-snap to cutCm.
+    if (isFixedLength && runLengthCm > totalLengthCm) {
+      runLengthCm = cutCm > 0 ? Math.floor(totalLengthCm / cutCm) * cutCm : totalLengthCm;
+      if (runLengthCm < minLenCm) runLengthCm = Math.min(minLenCm, totalLengthCm);
+    }
+
+    // Always one mat object with num_runs (matches the physical product:
+    // a single mat/roll cut into serpentine lengths, not N separate mats).
+    // For fixed-length products, runs are capped at totalLengthCm/runLengthCm
+    // so the order doesn't exceed what the user actually has.
+    actualRuns = maxRuns;
+    if (actualRunsOverride != null) {
+      actualRuns = actualRunsOverride;   // REGEL E: N er allerede eksakt kjent fra søket — ikke utled på nytt
+    } else if (isFixedLength && !(prod.mat_equal_widths && matLastRunLen != null)) {
+      // equal_widths med kortere siste bruker ALLTID N (siste er kortere, ikke droppet).
+      const neededRuns = Math.floor(totalLengthCm / runLengthCm);
+      actualRuns = Math.min(maxRuns, neededRuns);
+    }
+    if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
+
+    // Distribute leftover across-axis space as even gaps between mats
+    // (mats can lie flush against each other, but spreading them evenly
+    // gives better heat coverage and looks cleaner). The user's gapCm
+    // setting acts as a minimum — if the even-distribute gap would be
+    // smaller, we fall back to it.
+    // EcoMat: widths lie EDGE-TO-EDGE (no even-spread), centred → the leftover is a cold zone split
+    // equally on both walls (cable-to-cable ≈ 5 cm at the seam via the 2.5 cm kant-inntrekk).
+    const evenGapCm = (!prod.mat_equal_widths && actualRuns > 1)
+      ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
+      : 0;
+    effectiveGapCm = Math.max(gapCm, evenGapCm);
+    totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * effectiveGapCm;
+    // «Sentrer» (standard): kaldt felt deles likt på begge vegger. «Fra vegg»: blokka legges inntil
+    // margen på start-siden, alt kaldt felt havner på motsatt vegg.
+    fromWall = !!(S.varmematte && S.varmematte.fromWall);
+    acrossCenter = fromWall ? (acrossMin + totalW / 2) : (acrossMin + acrossMax) / 2;
+    alongCenter = (alongMin + alongMax) / 2;
+
+    // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
+    // along-axis dimension before rotation. rotation_deg=90 swaps them in world.
+    if (dir === 'h') {
+      matX = alongCenter - totalW / 2;
+      matY = acrossCenter - runLengthCm / 2;
+    } else {
+      matX = acrossCenter - totalW / 2;
+      matY = alongCenter - runLengthCm / 2;
+    }
+
+    // STEG 1 (LÅST REGEL, Kenneth 14.08.2026, oppdatert 19.08.2026 — REGEL A/H): klipp HVER bredde
+    // mot rommets POLYGON på mattas FAKTISKE, endelige posisjon (matX/matY/effectiveGapCm er nå
+    // kjent) — ikke bare det omsluttende rektangelet across/along-spennene over er basert på. En
+    // bredde som treffer et innhukk/skrå vegg avsluttes FØR veggen i stedet for å stikke forbi den.
+    //
+    // REGEL A (Kenneth 19.08.2026): lengde og startpunkt skal ALLTID komme fra SAMME klippede
+    // segment. Tidligere ble hver bredde alltid klippet ved å regne «reachable» FRA alongStart (blokkens
+    // egen start), mens tegningen (drawMats) forankrer en KORTERE bredde i sømenden etter paritet
+    // (upR = r%2===0 → sømenden/fjern ende, ellers alongStart/nær ende) — SAMME regel som «eksakt
+    // mattelengde»-regelen (08.07) alltid har brukt for siste bredde, nå gjeldende for ALLE bredder.
+    // Når disse to ankrene er ULIKE (upR===true) og bredden faktisk blir klippet, oppsto akkurat
+    // Kenneths symptom: riktig lengde, men forankret i feil ende — breddens synlige rektangel kunne
+    // da stikke ut over en vegg klippingen aldri validerte. Fikset ved å regne reachable FRA DET
+    // ANKERET drawMats faktisk bruker (upR-avhengig), ikke alltid fra alongStart.
+    //
+    // Regelkonflikt (STEG 0 punkt 3): sømflukt (upR===true for en genuint kortere siste bredde) er et
+    // ØNSKE; å holde seg innenfor rommet er ABSOLUTT. Løsning: klipp alltid fra sømenden når upR er
+    // sant (skjøt-flukten respekteres når rommet tillater det), men klipp lengden ned og FLYTT
+    // startpunktet innover når rommet ikke gir plass helt til sømenden — vegg-regelen vinner da uten
+    // at sømflukten mistes der den faktisk får plass.
+    alongStart = dir === 'h' ? matX : matY;
+    perpBase = dir === 'h' ? matY : matX;
+    const nominalMatStub = { num_runs: actualRuns, length_cm: runLengthCm, last_run_length_cm: matLastRunLen };
+    anyRunClipped = false;
+    clippedRunLens = [];
+    clippedRunStarts = [];
+    for (let r = 0; r < actualRuns; r++) {
+      const perpPos = perpBase + r * (matWidthCm + effectiveGapCm);
+      const nominalLen = _matRunLenCm(nominalMatStub, r);
+      // Samme paritet som drawMats' upR — se _matRunStartCm. Kun relevant når denne breddens
+      // nominelle lengde faktisk ER kortere enn hele blokka (ellers spiller ankeret ingen rolle).
+      const upR = (r % 2 === 0) && (nominalLen < runLengthCm - 0.05);
+      const nominalStart = upR ? (alongStart + runLengthCm - nominalLen) : alongStart;
+      const anchorPoint = upR ? (nominalStart + nominalLen) : nominalStart;   // sømenden (upR) ELLER alongStart
+      // cutCm=0: se samme note som i idealLenCm-løkken over — snapping skjer ÉN gang, i
+      // Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
+      const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+      // Segmentet som faktisk INNEHOLDER forankringspunktet foretrekkes (bevarer sømflukt der
+      // rommet tillater det).
+      let seg = segs.find(s => s.start_cm <= anchorPoint + 0.5 && s.start_cm + s.length_cm >= anchorPoint - 0.5);
+      let len = 0, start = nominalStart;
+      if (seg) {
+        if (upR) {
+          // Forankret i sømenden: reachable strekker seg BAKOVER (mot alongStart) fra ankeret.
+          const reachable = anchorPoint - seg.start_cm;
+          len = Math.max(0, Math.min(nominalLen, reachable));
+          len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+          start = anchorPoint - len;   // vegg-regelen vinner: flytt startpunktet innover i stedet for å stikke ut
+        } else {
+          const reachable = (seg.start_cm + seg.length_cm) - anchorPoint;
+          len = Math.max(0, Math.min(nominalLen, reachable));
+          len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+          start = anchorPoint;
+        }
+      } else if (segs.length) {
+        // STEG 1 (Regel H, Kenneth 19.08.2026): ingen segment inneholder ankeret — ankeret er
+        // utledet fra rommets OMSLUTTENDE boundingboks og kan derfor ligge utenfor et innhukket
+        // hjørne selv om et stort, brukbart segment finnes et annet sted på denne breddeposisjonen
+        // (Kenneths røde firkant). Ikke gi opp: velg det LENGSTE segmentet som faktisk finnes her,
+        // og forankre fra samme SIDE (nær/fjern, etter paritet — samme ende drawMats/_matRunStartCm
+        // bruker) av DET segmentet. Sømflukt tapes her (den var uansett umulig — ankeret selv ligger
+        // utenfor rommet); å henge sammen med resten via riktig ende og holde seg innenfor veggen
+        // er ABSOLUTT.
+        const alt = segs.reduce((a, b) => (b.length_cm > a.length_cm ? b : a));
+        len = Math.max(0, Math.min(nominalLen, alt.length_cm));
+        len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+        start = upR ? (alt.start_cm + alt.length_cm - len) : alt.start_cm;
+      }
+      if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → legg den ikke ut
+      if (len < nominalLen - 0.05 || Math.abs(start - nominalStart) > 0.05) anyRunClipped = true;
+      clippedRunLens.push(len);
+      clippedRunStarts.push(start);
+    }
+
+    // STEG 2 (Regel H): mål hva som FAKTISK ble lagt ut mot rullens egen lengde. Går den ikke opp
+    // (mer enn ett kuttintervall til overs) og en mindre variant finnes, gå ned og legg om fra
+    // begynnelsen — ellers aksepter resultatet (rommet er enten fullt utnyttet, eller ingen mindre
+    // variant er igjen å prøve).
+    const laidCm = _matLaidLengthCm({ num_runs: actualRuns, runLengths: anyRunClipped ? clippedRunLens : null, last_run_length_cm: matLastRunLen, length_cm: runLengthCm });
+    const shortfallCm = isFixedLength ? (totalLengthCm - laidCm) : 0;
+    const tooLong = shortfallCm > cutCm + 0.05;
+    if (!tooLong || candidateIdx <= 0) {
+      if (tooLong && layoutAttempts >= MAX_LAYOUT_ATTEMPTS) {
+        console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) uten å konvergere — leverer siste forsøk med ${shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: prod.id });
+      }
+      break;
+    }
+    if (layoutAttempts >= MAX_LAYOUT_ATTEMPTS) {
+      console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) før konvergens — leverer siste forsøk med ${shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: prod.id });
+      break;
+    }
+    candidateIdx--;
+    prod = candidates[candidateIdx].p;
+    productId = prod.id;
   }
+
   const runLengthsOut = anyRunClipped ? clippedRunLens : null;
   const runStartsOut = anyRunClipped ? clippedRunStarts : null;
 
@@ -7706,18 +7765,15 @@ function autoFillMatSerpentine(productId, opts) {
   renderSidebar(); updateCtxBar(); render();
 
   const usedLengthCm = _matLaidLengthCm(mat);   // eksakt utlagt (inkl. kortere siste bredde)
+  // STEG 3 (Regel H, Kenneth 19.08.2026): «⚠ Overskudd … kan legges løst med limpistol» er fjernet
+  // — det er aldri kundens jobb å redde en feil dimensjonering, og STEG 1+2 over skal garantere at
+  // automatisk utlegg ikke HAR overskudd. Dukker det likevel opp (fremtidig regresjon, eller
+  // forsøkstaket i STEG 2-løkka ble nådd), logg det som en feil i konsollen slik at det oppdages i
+  // test — ikke en toast brukeren skal håndtere.
   if (isFixedLength) {
     const excessCm = totalLengthCm - usedLengthCm;
     if (excessCm > 10) {
-      const excessM = (excessCm / 100).toFixed(1);
-      let msg = `⚠ Overskudd: ${excessM}m matte`;
-      if (prod.cable_length_m && totalLengthCm > 0) {
-        const cablePerCm = prod.cable_length_m / (totalLengthCm / 100);
-        const excessCableM = (cablePerCm * excessCm / 100).toFixed(1);
-        msg += ` (${excessCableM}m kabel)`;
-      }
-      msg += ' — kan legges løst med limpistol';
-      _showToast(msg, 'warning');
+      console.error(`autoFillMatSerpentine: Regel H — ${(excessCm / 100).toFixed(1)}m matte til overs etter utlegg (bør være ≤ ett kuttintervall)`, { roomId: room.id, prodId: prod.id, excessCm });
     }
   }
 
@@ -34450,7 +34506,16 @@ function _ctxBarItems() {
     const usedM = (usedLenCm / 100).toFixed(1);
     const totalM = totalLenCm ? (totalLenCm / 100).toFixed(1) : null;
     const excessCm = totalLenCm ? totalLenCm - usedLenCm : 0;
-    const excessM = excessCm > 10 ? (excessCm / 100).toFixed(1) : null;
+    // STEG 3 (Regel H, Kenneth 19.08.2026): \u00ab\u26a0 +Xm\u00bb-merket beholdes for MANUELT utlegg (brukeren
+    // styrer selv hvor mye av rullen som brukes per bane, og skal se overskuddet der) \u2014 men skal
+    // ALDRI kunne vises for automatisk utlegg, siden autoFillMatSerpentine (STEG 1+2) n\u00e5 garanterer
+    // at auto-utlegg ikke har overskudd. Dukker det likevel opp, er det en regresjon \u2014 logg den i
+    // stedet for \u00e5 vise den til brukeren.
+    const _isManualMat = !!(mat && mat._manualGroup);
+    const excessM = (excessCm > 10 && _isManualMat) ? (excessCm / 100).toFixed(1) : null;
+    if (excessCm > 10 && !_isManualMat) {
+      console.error('updateCtxBar: automatisk matte har overskudd \u2014 Regel H skal ha forhindret dette', { matId: mat?.id, excessCm });
+    }
     // Length info
     const lenInfo = totalM ? `${usedM}/${totalM}m` : `${Math.round(mat.length_cm)}cm`;
     const excessHtml = excessM
