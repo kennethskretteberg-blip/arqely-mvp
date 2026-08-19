@@ -3313,7 +3313,10 @@ const S = {
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
   varmekabel: { targetWm2: 130, screedThicknessCm: 4, multiCableMode: 'soner' },
-  varmematte: { gapCm: 0 },   // gap between mats (cm). User-controlled, 0-5cm range.
+  // REGEL 9 (spec-matte-utlegg.md): gapCm null = ingen eksplisitt brukervalg ennå → motoren bruker
+  // et produktavhengig standardgap (CC − 2×kant-inntrekk, se _matDefaultGapCm). Et TALL (inkl. 0)
+  // er et eksplisitt brukervalg og respekteres som det (0 = alt kaldt felt mot langveggene).
+  varmematte: { gapCm: null },
   documentation: {},  // keyed by roomId: {checklist, measurements, photos, signature, notes}
   bgs: {}   // keyed by floor id (number) or '__global__'
 };
@@ -7095,6 +7098,39 @@ function _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) 
   return best;
 }
 
+// LÅST REGEL 9 (spec-matte-utlegg.md, Kenneth 19.08.2026): mellomrommet mellom bredder er en
+// FORDELING av slakk (etter at Regel 8 har fastsatt antallet bredder), aldri en reservasjon som
+// spiser plass før antallet regnes (Regel 8, se autoFillMatSerpentine/_matRoomGeomForFill).
+// Standardverdien er CC − 2×kant-inntrekk: fysisk begrunnet ved at to bredder lagt kant-i-kant gir
+// kabel-til-kabel-avstand i skjøten på 2×inntrekk — mindre enn mattas egen CC — så denne åpningen
+// gjør CC likt i skjøten OG inne i matta. Verdiene er verifiserte mot teknisk tegning
+// TPL-ECOMT-CA-2183: 150T har 20mm kant-inntrekk (CC 80mm → standard gap 4cm); 60T/100T har 25mm
+// (CC 120mm → standard gap 7cm) — merk at 150T IKKE deler 60T/100T sin 25mm. Katalogen har ennå
+// ikke et eget kant-inntrekk-felt (mat_edge_inset_mm, brukes hvis det finnes) — CC-verdien, som
+// allerede skiller 150T fra 60T/100T, brukes som fallback-nøkkel til et slikt felt finnes.
+function _matEdgeInsetCm(prod) {
+  if (prod && prod.mat_edge_inset_mm != null) return prod.mat_edge_inset_mm / 10;
+  const ccMm = (prod && prod.mat_cc_mm) || 80;
+  return ccMm <= 80 ? 2.0 : 2.5;
+}
+function _matDefaultGapCm(prod) {
+  const ccCm = ((prod && prod.mat_cc_mm) || 80) / 10;
+  return Math.max(0, ccCm - 2 * _matEdgeInsetCm(prod));
+}
+// Utvidet fra 5cm (kun 150T sitt 4cm standardgap fikk plass) — 60T/100T sitt 7cm standardgap
+// trengte mer rom. 10cm gir slingringsmonn for et brukerstyrt gap utover standarden også.
+const MAT_GAP_MAX_CM = 10;
+// Resolves S.varmematte.gapCm to an actual number: null = ikke eksplisitt valgt → produktets
+// standardgap (Regel 9); ellers brukerens tall, klemt til [0, MAT_GAP_MAX_CM].
+function _matResolveGapCm(prod) {
+  const raw = S.varmematte ? S.varmematte.gapCm : null;
+  // Regel 9 gjelder eksplisitt EcoMat/mat_equal_widths (spec-matte-utlegg.md); den andre
+  // mattefamilien har sin egen fyll-til-vegg-spredning (evenGapCm) og beholder 0 som forvalgt
+  // gulv der, uendret fra før.
+  if (raw == null) return (prod && prod.mat_equal_widths) ? _matDefaultGapCm(prod) : 0;
+  return Math.max(0, Math.min(MAT_GAP_MAX_CM, raw));
+}
+
 // ── Flere matter i samme rom (LÅST REGEL F+G, Kenneth 19.08.2026) ──────────────────────────
 // Når rommet er større enn den største tilgjengelige matten, tilbys to forslag (like/ulike
 // størrelser) i stedet for å legge ut ÉN matte og la resten av rommet stå kaldt. Egen kodesti
@@ -7109,7 +7145,7 @@ function _matRoomGeomForFill(room, prod) {
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
   const marginCm = (prod.min_wall_margin_mm || 50) / 10;
-  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  const gapCm = _matResolveGapCm(prod);   // REGEL 9: null → produktets CC-baserte standard
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
   const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
 
@@ -7458,12 +7494,11 @@ function autoFillMatSerpentine(productId, opts) {
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
   const marginCm = (prod.min_wall_margin_mm || 50) / 10;
-  // Mat gap is user-controlled (0–5 cm), defaults to 0 for max coverage.
-  // The supplier's min_gap_mm is treated as a recommendation, not a hard floor.
-  // Indoor mat gap: user-controlled 0–5 cm, DEFAULT 0 (widths edge-to-edge → max coverage, like the
-  // foil model). The block is centred so the leftover becomes a cold zone split equally on the
-  // walls. EcoMat seam clearance at gap 0 comes from the kant-inntrekk (≈5 cm cable-to-cable).
-  const gapCm = Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
+  // REGEL 9 (spec-matte-utlegg.md, Kenneth 19.08.2026): brukerens mellomrom (0–MAT_GAP_MAX_CM cm,
+  // eksplisitt tall) ELLER produktets CC-baserte standard (ingen eksplisitt valg ennå) — se
+  // _matResolveGapCm/_matDefaultGapCm. Ikke lenger en inngangsverdi som spiser plass i maxRuns
+  // (Regel 8, over) — kun en fordeling av slakken MELLOM breddene, se effectiveGapCm nedenfor.
+  const gapCm = _matResolveGapCm(prod);
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
 
   // Respect user's direction choice (set via the workflow-panel direction
@@ -7728,17 +7763,30 @@ function autoFillMatSerpentine(productId, opts) {
     }
     if (actualRuns <= 0) { alert('Produktet er for kort for dette rommet'); return; }
 
-    // Distribute leftover across-axis space as even gaps between mats
-    // (mats can lie flush against each other, but spreading them evenly
-    // gives better heat coverage and looks cleaner). The user's gapCm
-    // setting acts as a minimum — if the even-distribute gap would be
-    // smaller, we fall back to it.
-    // EcoMat: widths lie EDGE-TO-EDGE (no even-spread), centred → the leftover is a cold zone split
-    // equally on both walls (cable-to-cable ≈ 5 cm at the seam via the 2.5 cm kant-inntrekk).
-    const evenGapCm = (!prod.mat_equal_widths && actualRuns > 1)
-      ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
-      : 0;
-    effectiveGapCm = Math.max(gapCm, evenGapCm);
+    if (prod.mat_equal_widths) {
+      // REGEL 9 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): gapCm (produktets CC-baserte
+      // standard, eller brukerens eget tall) ER gapet — ALDRI auto-spredt til å fylle hele
+      // acrossSpan (det ville viske ut den fysisk begrunnede skjøtåpningen igjen). Blokka forblir
+      // sentrert (eller «fra vegg»), og slakken (acrossSpan − totalW) blir kaldt felt mot
+      // langveggene som før — se _coldTotalCm/«Kaldt felt/side» i panelet.
+      //
+      // Mellomrommet skal likevel ALDRI presse en bredde nærmere veggen enn margen: er gapCm for
+      // stort til at alle breddene + gap får plass i acrossSpan, er det GAPET som gir etter, ikke
+      // margen (maxFitGapCm = det gapet som akkurat fyller acrossSpan uten å gå ut over den).
+      const maxFitGapCm = actualRuns > 1
+        ? Math.max(0, (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1))
+        : gapCm;
+      effectiveGapCm = Math.min(gapCm, maxFitGapCm);
+    } else {
+      // Distribute leftover across-axis space as even gaps between mats (mats can lie flush
+      // against each other, but spreading them evenly gives better heat coverage and looks
+      // cleaner). The user's gapCm setting acts as a minimum — if the even-distribute gap would
+      // be smaller, we fall back to it. Uendret av Regel 9 (gjelder kun mat_equal_widths).
+      const evenGapCm = actualRuns > 1
+        ? (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1)
+        : 0;
+      effectiveGapCm = Math.max(gapCm, evenGapCm);
+    }
     totalW = actualRuns * matWidthCm + Math.max(0, actualRuns - 1) * effectiveGapCm;
     // «Sentrer» (standard): kaldt felt deles likt på begge vegger. «Fra vegg»: blokka legges inntil
     // margen på start-siden, alt kaldt felt havner på motsatt vegg.
@@ -16112,15 +16160,30 @@ document.addEventListener('mousedown', e => {
 // ─── AVSTAND MELLOM VARMEMATTER (GAP-PANEL) ───────────────────
 // Avstand-mellom-matter-velger (Ute/InSnow): tallfelt + pil opp/ned, lik
 // varmefolie-avstandsvelgeren. Min 5 cm (hard), standard 10 cm, steg 1 cm.
+// REGEL 9: panelet leser produktet til den VALGTE matta (om noen) slik at «standard»-hintet og
+// startverdien viser det faktiske CC-baserte gapet for akkurat den mattefamilien — ikke en
+// generisk 0.
+function _matGapPanelProd() {
+  const m = S.ui.selectedMatId != null ? S.mats.find(x => x.id === S.ui.selectedMatId) : null;
+  return m ? HEATING_PRODUCTS.find(p => p.id === m.productId) : null;
+}
 function openMatGapPanel(e) {
   e.stopPropagation();
-  // Indoor mats use the foil-like gap model (min 0 cm, default 0 = mats edge-to-edge, centred).
-  // Snow (Ute/InSnow) keeps its own min 5 cm / standard 10 cm rule.
+  // Indoor mats use the foil-like gap model (min 0 cm). Snow (Ute/InSnow) keeps its own
+  // min 5 cm / standard 10 cm rule.
   const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
-  const minG = snow ? 5 : 0, maxG = snow ? 20 : 5, defG = snow ? 10 : 0;
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : MAT_GAP_MAX_CM;
   if (snow) { if (!(S.varmematte.gapCm >= 5)) S.varmematte.gapCm = 10; }
-  else if (S.varmematte.gapCm == null) S.varmematte.gapCm = 0;
-  const cm = Math.max(minG, Math.min(maxG, Math.round(S.varmematte.gapCm ?? defG)));
+  // Indoor: null (ingen eksplisitt valg) står urørt her — å ÅPNE panelet skal ikke i seg selv
+  // telle som at brukeren har «valgt» 0 (Regel 9). Kun visningsverdien under bruker resolve.
+  const prod = _matGapPanelProd();
+  const cm = snow
+    ? Math.max(minG, Math.min(maxG, Math.round(S.varmematte.gapCm ?? 10)))
+    : Math.round(_matResolveGapCm(prod));
+  const hint = snow ? 'Min 5 cm · standard 10 cm'
+    : (prod && prod.mat_equal_widths
+        ? `Min 0 cm · standard ${_matDefaultGapCm(prod).toFixed(0)} cm (CC − 2×kant-inntrekk)`
+        : 'Min 0 cm · matter inntil hverandre (sentrert)');
   const panel = document.getElementById('gap-panel');
   panel.innerHTML = `
     <div class="gap-title">Avstand mellom matter</div>
@@ -16133,7 +16196,7 @@ function openMatGapPanel(e) {
       <span class="gap-custom-lbl">cm</span>
       <button class="gap-step-btn" onclick="stepMatGap(1)" title="Mer">▲</button>
     </div>
-    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">${snow ? 'Min 5 cm · standard 10 cm' : 'Min 0 cm · matter inntil hverandre (sentrert)'}</div>`;
+    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">${hint}</div>`;
   const W = window.innerWidth, H = window.innerHeight;
   panel.style.display = 'block';
   const pw = panel.offsetWidth || 270, ph = panel.offsetHeight || 120;
@@ -16141,11 +16204,13 @@ function openMatGapPanel(e) {
   panel.style.top  = Math.min(e.clientY + 8, H - ph - 8) + 'px';
 }
 
-// cm: ønsket avstand i cm. Clamp 5–20 cm (aldri under 5). Re-pakker live hvis en
-// snø-matte-forhåndsvisning er aktiv (samme Bruk/Avbryt-flyt som ellers).
+// cm: ønsket avstand i cm. Snø: clamp 5–20 (aldri under 5). Innendørs: clamp 0–MAT_GAP_MAX_CM.
+// Skriver ALLTID et eksplisitt tall — dette er den eneste veien brukeren faktisk «velger» et gap
+// (Regel 9); null (produktets standard) står urørt inntil brukeren gjør nettopp dette.
+// Re-pakker live hvis en snø-matte-forhåndsvisning er aktiv (samme Bruk/Avbryt-flyt som ellers).
 function setMatGap(cm, _live) {
   const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
-  const minG = snow ? 5 : 0, maxG = snow ? 20 : 5;
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : MAT_GAP_MAX_CM;
   const v = Number.isFinite(cm) ? cm : (snow ? 10 : 0);
   S.varmematte.gapCm = Math.max(minG, Math.min(maxG, Math.round(v)));
   _savePrefs();
@@ -16160,7 +16225,11 @@ function setMatGap(cm, _live) {
 }
 
 function stepMatGap(delta) {
-  setMatGap((S.varmematte.gapCm ?? 0) + delta, false);
+  // Steg fra den FAKTISKE resolverte verdien (produktets standard hvis null), ikke fra en
+  // hardkodet 0 — ellers hopper første klikk forbi Regel 9 sin standard i stedet for å justere den.
+  const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
+  const base = snow ? (S.varmematte.gapCm ?? 10) : _matResolveGapCm(_matGapPanelProd());
+  setMatGap(base + delta, false);
   const inp = document.getElementById('mat-gap-cm-input');
   if (inp) inp.value = S.varmematte.gapCm;
 }
@@ -34667,11 +34736,15 @@ function _ctxBarItems() {
          <span style="font-size:11px;padding:0 2px;color:var(--dim)">${nR} lgd</span>
          <button class="snap-chip" onclick="_matChangeRuns(1)" title="Legg til lengde"${nR >= maxPossibleRuns ? ' disabled' : ''}>+</button>`
       : '';
-    const matGapCm = Math.max(5, S.varmematte?.gapCm || 10);
     const matRoom = mat ? S.rooms.find(r => r.id === mat.roomId) : null;
     // «Sentrer / Fra vegg»-toggle (kun innendørs matte — snø pakkes annerledes).
     const _matSnow = (typeof _roomModuleType === 'function' && matRoom) ? _roomModuleType(matRoom.id) === 'snow'
                    : ((typeof _isSnowModule === 'function') && _isSnowModule());
+    // REGEL 9: chippen viste tidligere ALLTID Math.max(5, gapCm||10) uansett — 0 (falsy) ble vist
+    // som «10», og enhver ekte verdi under 5 ble tvunget opp til 5. Feilen fantes fra før (ikke
+    // introdusert her), men ble mer synlig nå som innendørs matte får et ekte CC-basert standardgap
+    // i stedet for 0 — rettet i samme slag siden begge leser samme S.varmematte.gapCm.
+    const matGapCm = _matSnow ? Math.max(5, S.varmematte?.gapCm || 10) : Math.round(_matResolveGapCm(prod));
     const fromWallHtml = _matSnow ? '' :
       `<span class="tc-sep"></span>
        <button class="snap-chip${S.varmematte?.fromWall ? ' on' : ''}" onclick="_matToggleFromWall()" title="Sentrer matten (kaldt felt likt på begge vegger) eller legg den inntil veggen (alt kaldt felt på én side)">${S.varmematte?.fromWall ? 'Fra vegg' : 'Sentrer'}</button>`;
@@ -37019,6 +37092,7 @@ function _restoreProject(data) {
   S.view      = data.view      || S.view;
   if (data.varmefolie) Object.assign(S.varmefolie, data.varmefolie);
   if (data.varmekabel) Object.assign(S.varmekabel, data.varmekabel);
+  if (data.varmematte) Object.assign(S.varmematte, data.varmematte);
   S.documentation = data.documentation || {};
   S.ui.selectedStripId = null;
   S.ui.selectedCableId = null;
