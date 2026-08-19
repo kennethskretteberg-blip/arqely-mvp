@@ -6390,7 +6390,13 @@ function _upcPlaceMat(productId, mode) {
   _clearRoomProductCollections(roomId);
 
   if (mode === 'auto') {
-    autoFillMatSerpentine(productId);
+    // STEG 1 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): «automatisk»
+    // skal bety HELE motoren — sone-oppdeling (Regel 20) og flermatte-søk (Regel F/G), ikke bare
+    // ett-blokk-veien. _matFillRoomSmart er nå DEN ene auto-veien; denne kalte tidligere
+    // autoFillMatSerpentine direkte og hoppet over begge. skipPushUndo:true fordi pushUndo()+
+    // opprydding allerede skjedde rett over — ett angre-steg for hele operasjonen, se
+    // _matFillRoomSmart/_showMat{Zone,Multi}ProposalPanel sin egen kommentar om hvorfor.
+    _matFillRoomSmart(productId, { skipPushUndo: true });
   } else if (mode === 'variant') {
     // Live area preview of the EXACT clicked variant (swappable). Keep the list visible
     // and re-render so the chosen variant is highlighted.
@@ -7435,7 +7441,8 @@ function _matMultiSolve(candidates, alongSpanCm, maxRuns, targetAreaM2, cutCm, m
 // — ingen ekstra kald stripe. Hver matte klippes og vakt-sjekkes UAVHENGIG (samme funksjoner som
 // autoFillMatSerpentine), og INGENTING committes til S.mats før ALLE mattene i løsningen validerer
 // — et delvis flermatte-utlegg er verre enn ingen.
-function _matPlaceMultiMats(room, prod, geom, solution) {
+function _matPlaceMultiMats(room, prod, geom, solution, opts) {
+  opts = opts || {};
   const { dir, acrossMin, acrossMax, alongMin, alongMax, alongSpan, matWidthCm, gapCm, cutCm, marginCm, minLenCm } = geom;
   const L = solution.L;
   const items = solution.mats.slice().sort((a, b) => b.runs - a.runs || b.areaM2 - a.areaM2);
@@ -7502,7 +7509,10 @@ function _matPlaceMultiMats(room, prod, geom, solution) {
     widthsUsed += item.runs;
   }
 
-  pushUndo();
+  // STEG 2 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): en kaller (UPC
+  // via _matFillRoomSmart) kan allerede ha gjort SIN egen pushUndo() rett før forslagspanelet ble
+  // vist — da skal IKKE denne committen legge til et ANDRE angre-steg (opts.skipPushUndo).
+  if (!opts.skipPushUndo) pushUndo();
   for (const m of built) S.mats.push(m);
   _invalidateMatCache();
   _trackProductUsage(built[0].productId);
@@ -7548,30 +7558,83 @@ function _matPlanZones(room, prod) {
   return { zonePlans, excludedZones, totalAreaM2, totalWatt };
 }
 
+// ─── «FYLL ROM AUTOMATISK» BRUKER HELE MOTOREN (Kenneth 19.08.2026) ───────
+// STEG 0-revisjon (Varmeplan-prompt-fyll-rom-automatisk-halve-motoren.md), rapportert FØR fiksen
+// under ble skrevet — samme mønster som 786d95a og 05390a0. Kartlegger HVERT inngangspunkt som
+// legger ut en matte, ikke bare de to Kenneth selv nevnte.
+//
+// Inngangspunkt                        | Sone-oppdeling? | Flermatte? | Variantsøk? | Hindringer?
+// --------------------------------------|-------------------|-------------|---------------|--------------
+// UPC «Fyll rom automatisk ★ Anbefalt»  | NEI (FØR fiksen)  | NEI (FØR)   | JA            | JA (delt lag)
+//  → _upcPlaceMat(id,'auto')            | → autoFillMatSerpentine direkte, hoppet over BEGGE
+// UPC produkt-variantklikk («variant»)  | NEI — RIKTIG      | NEI — RIKTIG| NEI (exact)   | JA
+//  → _upcPlaceMat(id,'variant')         | Kenneth har pekt på ÉN bestemt matte — skal IKKE sone/flermatte-søkes
+// UPC snø-gren i _upcPlaceMat           | NEI               | NEI         | delvis        | JA (arvet)
+//  → _packSnowMats → autoFillMatSerpentine direkte, samme gap som indoor hadde — se «ikke fikset» under
+// Legacy «Fyll rom» (showMatPlacePanel) | JA                | JA          | JA            | JA
+//  → _matFillRoomSmart — DEN ENESTE veien som noensinne nådde sone/flermatte FØR denne fiksen
+// Legacy «Plasser matte» (klikk)        | NEI               | NEI         | NEI           | NEI — kun ptInPoly på klikkpunktet
+// Manuell bane-liste (_matManualApply)  | NEI               | N/A         | NEI           | NEI — ingen polygon-klipping, ingen S.hindrings/S.zones
+// Frihånd (_matFreeStart/matPaths)      | N/A (brukerstyrt) | N/A         | NEI (etterpå) | delvis — bbox-hindringer, S.zones ignoreres
+// _matToggleFromWall (Sentrer/Fra vegg) | NEI               | NEI ⚠️       | JA            | JA
+//
+// Rotårsak: UPC (den faktiske hovedveien — openProduktMenu(From) hopper RETT til den så snart et
+// rom er valgt) sin 'auto'-gren kalte autoFillMatSerpentine direkte og hoppet over BÅDE
+// _matPlanZones (Regel 20, 8684bf2) OG _matMultiSolve (Regel F/G, 72f9267) — begge nås i praksis
+// KUN via legacy-panelet, som selv bare nås gjennom kant-tilfeller (ingen rom valgt, eller rett
+// etter sletting av et produkt). Rom 2104 er derfor ikke en motorfeil — det er en ruting-feil.
+//
+// Svar på spørsmålet prompten selv stilte («er det noen grunn til at UPC-auto IKKE skal ha
+// sone/flermatte?»): nei, ingen funnet — det er nøyaktig den samme motoren, samme produkt,
+// forskjellen er ren ruting.
+//
+// To EKSTRA funn, ingen nevnt i prompten, IKKE fikset her (utenfor omfang, kun rapportert):
+// 1. UPC sin SNØ-gren har SAMME arkitektur-hull som indoor hadde: kaller _packSnowMats →
+//    autoFillMatSerpentine direkte, aldri _matFillRoomSmart — store utendørs felt (Obs Bygg-typen)
+//    får derfor aldri sone/flermatte fra UPC. Prompten sier eksplisitt «Utendørs/snø-veien er urørt
+//    av denne endringen» — respektert, ikke rørt, men verdt å vite at gapet er identisk i form.
+// 2. `_matToggleFromWall` (Sentrer ↔ Fra vegg-knappen) kaller autoFillMatSerpentine direkte —
+//    et rom med et flermatte-utlegg MISTER de ekstra mattene og faller tilbake til én matte hvis
+//    brukeren toggler «Fra vegg» etterpå. Samme feilklasse, annet kallested, ikke i promptens
+//    eksplisitte STEG 1-3-omfang.
+//
+// STEG 1-fiksen: _matFillRoomSmart(productId, opts) — opts.skipPushUndo tres gjennom hvert
+// fallback-kall OG begge forslagspanelene, se kommentarene der. UPC-auto kaller nå denne i stedet
+// for autoFillMatSerpentine direkte.
+
 // STEG 3: inngangspunkt fra «Fyll rom»-knappen. REGEL 20: uregelmessige rom sjekkes FØR noe annet
 // vurderes — se _matPlanZones. Rektangulære rom faller uendret gjennom til den eksisterende
 // ett-blokk-veien under, som ALLEREDE avgjør om rommet trenger flere matter (kapasiteten overstiger
 // den STØRSTE tilgjengelige enkeltmatta) — er det ikke tilfelle, ingen valgboks (STEG 3: «Er
 // rommet lite nok til én matte: ingen endring»).
-function _matFillRoomSmart(productId) {
+// STEG 1 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): opts.skipPushUndo —
+// satt av en kaller som ALLEREDE har gjort sin egen pushUndo()+opprydding (UPC-auto, se
+// _upcPlaceMat) rett før dette kallet. Tres gjennom til HVERT fallback-kall til
+// autoFillMatSerpentine OG til begge forslagspanelene, slik at hele operasjonen — klarering,
+// eventuelt sone-/flermatte-forslag, og til slutt selve utlegget — alltid havner i ÉTT
+// angre-steg, aldri to. Uten dette ville et Avbryt-klikk i et forslagspanel latt rommet stå tomt
+// (det ALLEREDE clearede rommet, uten noen vei tilbake til det opprinnelige innholdet).
+function _matFillRoomSmart(productId, opts) {
+  opts = opts || {};
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return;
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (!room || !room.points || room.points.length < 3) { autoFillMatSerpentine(productId); return; }
-  if (!prod.mat_equal_widths) { autoFillMatSerpentine(productId); return; }
+  if (!room || !room.points || room.points.length < 3) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
+  if (!prod.mat_equal_widths) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
 
   const zonePlan = _matPlanZones(room, prod);
   if (zonePlan) {
     if (!zonePlan.zonePlans.length) {
       _showToast('Ingen sone i rommet har plass til denne matten', 'warn');
+      if (opts.skipPushUndo) undo();   // rommet ble allerede tømt av kalleren — ingen sone kunne fylles, gi det tilbake
       return;
     }
-    _showMatZoneProposalPanel(room, prod, zonePlan);
+    _showMatZoneProposalPanel(room, prod, zonePlan, opts);
     return;
   }
 
   const geom = _matRoomGeomForFill(room, prod);
-  if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) { autoFillMatSerpentine(productId); return; }
+  if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
 
   const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
   const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
@@ -7583,7 +7646,7 @@ function _matFillRoomSmart(productId) {
     .filter(p => p.active !== false && p.mat_width_mm === prod.mat_width_mm && _matTotalLengthMm(p) && variantOf(p))
     .map(p => ({ p, areaM2: p.mat_area_m2 || ((_matTotalLengthMm(p) / 10) * geom.matWidthCm / 10000), lenCm: _matTotalLengthMm(p) / 10 }))
     .sort((a, b) => a.lenCm - b.lenCm);
-  if (!candidates.length) { autoFillMatSerpentine(productId); return; }
+  if (!candidates.length) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
   const largestAreaM2 = candidates[candidates.length - 1].areaM2;
 
   const capacityCm = _matRoomCapacityCm(room, geom);
@@ -7591,7 +7654,7 @@ function _matFillRoomSmart(productId) {
   // Kun tilby flere matter når kapasiteten faktisk overstiger den STØRSTE tilgjengelige enkeltmatta
   // (Kenneth: «dersom rommet krever mer enn 1 stk 15 m² matte») — en liten toleranse (2%) unngår at
   // et rom som akkurat så vidt får plass til én matte trigger valgboksen unødig.
-  if (capacityAreaM2 <= largestAreaM2 * 1.02) { autoFillMatSerpentine(productId); return; }
+  if (capacityAreaM2 <= largestAreaM2 * 1.02) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
 
   // FEIL 1 (Kenneth 19.08.2026, «utendørs: 4-matters-taket sperrer store arealer»): et fast tak på
   // 4 matter ble satt for innendørs rom (2-4 matter er normalt der) — et utendørs areal (Obs Bygg:
@@ -7603,16 +7666,17 @@ function _matFillRoomSmart(productId) {
   const solved = _matMultiSolve(candidates, geom.alongSpan, geom.maxRuns, capacityAreaM2, geom.cutCm, MAX_MATS);
   if (!solved.equal && !solved.unequal) {
     _showToast(`Rommet trenger flere enn ${MAX_MATS} matter for god dekning — bruker den ene som dekker mest i stedet`, 'warn');
-    autoFillMatSerpentine(productId);
+    autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo });
     return;
   }
-  _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved);
+  _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved, opts);
 }
 
 // STEG 3 (panelet): viser like/ulike-forslagene med tall — antall matter, samlet dekning av
 // brukbart areal, og effekt. Standard er «like» (Regel F pkt. 4); brukerens valg huskes for økta
 // (S.varmematte._multiMatPref) slik at neste «Fyll rom» i samme prosjekt husker preferansen.
-function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved) {
+function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved, opts) {
+  opts = opts || {};
   const wm2 = prod.watt_per_m2 || 0;
   // FEIL 1 (Kenneth 19.08.2026): grupper på PRODUKT (navn), ikke bare areal — «10 × InSnow 300T
   // 1x18m» er entydig og leselig uansett N (Obs Bygg: N=10), mens «10 × 18 m²» ikke identifiserer
@@ -7676,16 +7740,22 @@ function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved) {
     </div>`;
   document.body.appendChild(div);
 
-  document.getElementById('mat-multi-cancel').onclick = () => div.remove();
+  // STEG 2 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): når panelet er
+  // åpnet fra en kaller som ALLEREDE har tømt rommet (opts.skipPushUndo — se _matFillRoomSmart),
+  // finnes ingen vei tilbake til det opprinnelige innholdet uten et eksplisitt undo() — «Avbryt»
+  // skal aldri etterlate rommet tomt. I den gamle (legacy) veien er opts.skipPushUndo aldri satt,
+  // og oppførselen er uendret (bare fjern panelet — ingenting var tømt ennå).
+  document.getElementById('mat-multi-cancel').onclick = () => { div.remove(); if (opts.skipPushUndo) undo(); };
   document.getElementById('mat-multi-apply').onclick = () => {
     const chosenKind = div.querySelector('input[name="mat-multi-choice"]:checked')?.value || defaultKind;
     const sol = chosenKind === 'unequal' ? solved.unequal : solved.equal;
-    if (!sol) { div.remove(); return; }
+    if (!sol) { div.remove(); if (opts.skipPushUndo) undo(); return; }
     S.varmematte = S.varmematte || {};
     S.varmematte._multiMatPref = chosenKind;
-    const ok = _matPlaceMultiMats(room, prod, geom, sol);
+    const ok = _matPlaceMultiMats(room, prod, geom, sol, { skipPushUndo: opts.skipPushUndo });
     div.remove();
     if (ok) _showToast(`${sol.N} matter lagt ut (${sol.totalArea.toFixed(1)} m²)`, 'ok');
+    else if (opts.skipPushUndo) undo();   // utlegget feilet — ingenting ble lagt ut, ikke la rommet stå tomt
   };
 }
 
@@ -7693,7 +7763,8 @@ function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved) {
 // hvilken matte som havner i HVILKEN sone, dekning per sone, og areal som ble utelatt (STEG 2) —
 // FØR noe legges ut. Kenneth skal godkjenne forslaget, ikke oppdage det i etterkant (samme «regn
 // ut → vis → commit ved klikk»-mønster som _showMatMultiProposalPanel over).
-function _showMatZoneProposalPanel(room, prod, zonePlan) {
+function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
+  opts = opts || {};
   const netAreaM2 = (() => { try { return compArea(room.points) / 10000; } catch (e) { return null; } })();
   const btaWm2 = netAreaM2 ? Math.round(zonePlan.totalWatt / netAreaM2) : null;
   const targetWm2 = prod.watt_per_m2 || 0;
@@ -7735,11 +7806,16 @@ function _showMatZoneProposalPanel(room, prod, zonePlan) {
     </div>`;
   document.body.appendChild(div);
 
-  document.getElementById('mat-zone-cancel').onclick = () => div.remove();
+  // STEG 2 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): samme resonnement
+  // som _showMatMultiProposalPanel — opts.skipPushUndo betyr kalleren allerede tømte rommet, «Avbryt»
+  // må da gi det tilbake med undo(), ikke bare fjerne panelet.
+  document.getElementById('mat-zone-cancel').onclick = () => { div.remove(); if (opts.skipPushUndo) undo(); };
   document.getElementById('mat-zone-apply').onclick = () => {
     // ÉTT undo-steg for hele batchen (samme prinsipp som snøens forhåndsvisning-før-commit-økt) —
-    // hver sone commiter med opts.exact (SAMME produkt dry-run allerede fant) + skipPushUndo.
-    pushUndo();
+    // hver sone commiter med opts.exact (SAMME produkt dry-run allerede fant) + skipPushUndo. Hopper
+    // over SIN EGEN pushUndo når kalleren allerede har gjort det (opts.skipPushUndo) — ellers ville
+    // hele operasjonen (tøm rom → sone-forslag → legg ut) blitt TO angre-steg i stedet for ett.
+    if (!opts.skipPushUndo) pushUndo();
     let placed = 0;
     for (const zp of zonePlan.zonePlans) {
       const mat = autoFillMatSerpentine(zp.mat.productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true });
@@ -7747,7 +7823,7 @@ function _showMatZoneProposalPanel(room, prod, zonePlan) {
     }
     div.remove();
     if (placed) _showToast(`${placed} matter lagt ut i ${placed} soner (${zonePlan.totalAreaM2.toFixed(1)} m²)`, 'ok');
-    else _showToast('Ingen matter kunne legges ut — prøv igjen', 'error');
+    else { _showToast('Ingen matter kunne legges ut — prøv igjen', 'error'); if (opts.skipPushUndo) undo(); }
   };
 }
 
