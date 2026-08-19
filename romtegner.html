@@ -7006,6 +7006,20 @@ function _matCablePlan(mat, prod) {
 // planen er enig med seg selv, den regner grensen på nytt fra _matRunStartCm/_matRunLenCm og
 // sammenligner. Det er DERFOR den fanger en fremtidig regresjon i selve _matCablePlan, ikke bare i
 // hvordan drawMats bruker den.
+// STEG 1B (Kenneth 19.08.2026, «frihånd: baner kan legges oppå hverandre»): brukbart areal — ren
+// aritmetikk (polygonareal minus omkrets×kantmargin), ingen ekte inn-offset-geometri («en ren
+// aritmetisk sjekk som ikke krever geometri»). Delt av frihånd OG auto-veien slik at grensa
+// «dekket areal ≤ brukbart areal» er den SAMME uansett hvordan mattefeltet ble tegnet.
+function _matUsableAreaM2(room, marginCm) {
+  if (!room || !room.points || room.points.length < 3) return null;
+  const areaCm2 = compArea(room.points);
+  let perimCm = 0;
+  for (let i = 0; i < room.points.length; i++) {
+    const a = room.points[i], b = room.points[(i + 1) % room.points.length];
+    perimCm += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return Math.max(0, areaCm2 - perimCm * (marginCm || 0)) / 10000;
+}
 function _matRunsWithinRoom(mat, room, marginCm, prod) {
   if (!mat || !room || !room.points || room.points.length < 3) return true;
   const n = mat.num_runs || 1;
@@ -7037,6 +7051,14 @@ function _matRunsWithinRoom(mat, room, marginCm, prod) {
         if (y < loBound - 0.5 || y > hiBound + 0.5) return false;
       }
     }
+  }
+  // STEG 3 (samme prompt, «to linjer, gjelder begge veier»): total dekket flate skal aldri
+  // overstige rommets brukbare areal — samme invariant som frihånd, samme delte helper.
+  const usableM2 = _matUsableAreaM2(room, marginCm);
+  if (usableM2 != null) {
+    let coveredCm2 = 0;
+    for (let r = 0; r < n; r++) coveredCm2 += _matRunLenCm(mat, r) * mat.width_cm;
+    if (coveredCm2 / 10000 > usableM2 + 0.01) return false;
   }
   return true;
 }
@@ -8618,6 +8640,7 @@ function _matFreeCandidate(mp, P) {
   const bane = tentative[tentative.length - 1];
   if (bane) {
     move.len = _matFreeClampLen(mp, axis, dir, bane.a, len);
+    move.rawLen = move.len;   // lengden FØR evt. avvisning under — brukt til å tegne en ugyldig ghost i riktig størrelse i stedet for at den bare forsvinner
     // Perpendikulær: den 50 cm brede lanen må få plass i rommet (bbox) — ellers ugyldig
     // (ghost viser 0, klikk legger ikke bane) → ingen bredde havner utenfor / oppå veggen.
     const room = S.rooms.find(r => r.id === mp.roomId);
@@ -8629,6 +8652,12 @@ function _matFreeCandidate(mp, P) {
       const cross = axis === 'h' ? bane.a.y : bane.a.x;
       if (cross - NET / 2 < pMin - 0.5 || cross + NET / 2 > pMax + 0.5) { move.len = 0; move.tooNarrow = true; }
     }
+  }
+  // STEG 1A (live — Kenneth 19.08.2026): den TENTATIVE banen (eksisterende + denne) skal ikke
+  // overlappe en tidligere bane. Stoppes MENS brukeren tegner, samme mønster som tooNarrow over —
+  // banen kan ikke committes, ghosten viser at den er ugyldig (se render-koden).
+  if (move.len > 0 && _matFreeLanesOverlap({ ...mp, moves: [...(mp.moves || []), move] })) {
+    move.len = 0; move.overlaps = true;
   }
   return move;
 }
@@ -8690,25 +8719,46 @@ function _matFreeStart(productId) {
 // Lavere risiko enn auto-motorene (ingen nominell-vs-klippet-splittelse her, banen ER allerede
 // klippet i sanntid — se STEG 0-rapporten), men fanger en FREMTIDIG regresjon i selve
 // klipp-logikken, ikke bare i hvordan den brukes.
+// Returnerer { ok, reason } (ikke lenger bare boolean — STEG 1, Kenneth 19.08.2026): rom 2102
+// skal avvises MED tall («1,03 m² over brukbart areal»), ikke bare et generisk avbrutt-varsel.
+// Eneste kallested er _matFreeExit — trygt å utvide returtypen.
 function _matFreeRunsWithinRoom(mp) {
   const room = S.rooms.find(r => r.id === mp.roomId);
-  if (!room || !room.points || room.points.length < 3) return true;
+  if (!room || !room.points || room.points.length < 3) return { ok: true };
   for (const r of _matFreeDeriveRuns(mp)) {
     const len = _matFreeRunLen(r);
     if (len <= 0.5) continue;
     const maxLen = _matFreeClampLen(mp, r.axis, r.dir, r.a, len);
-    if (maxLen + 0.5 < len) return false;   // banen er lengre enn rommet tillater fra samme startpunkt
+    if (maxLen + 0.5 < len) return { ok: false, reason: 'matta ville ligget utenfor rommet' };
   }
-  return true;
+  // STEG 1B FØR 1A (bevisst rekkefølge): areal er den enkleste, mest informative forklaringen når
+  // BEGGE feiler (Kenneths rom 2102 — for mye matte tegnet ER hvorfor banene endte oppå
+  // hverandre; live-blokkeringen i _matFreeCandidate hindrer normalt at en ferdig-tegnet bane i
+  // det hele tatt NÅR commit i overlappende tilstand, så areal er i praksis den vanlige veien hit).
+  // Ren aritmetikk — dekket areal skal aldri overstige rommets brukbare areal.
+  const usableM2 = _matFreeUsableAreaM2(mp);
+  if (usableM2 != null) {
+    const coveredM2 = _matFreeCoveredAreaM2(mp);
+    if (coveredM2 > usableM2 + 0.01) {
+      const overM2 = coveredM2 - usableM2;
+      return { ok: false, reason: `${overM2.toFixed(2)} m² mer matte enn rommets brukbare areal (${usableM2.toFixed(2)} m²)` };
+    }
+  }
+  // STEG 1A: to baner kan hver for seg være «innenfor rommet» og likevel ligge oppå hverandre —
+  // se _matFreeLanesOverlap. Sjekket etter areal (over) som forklaringsprioritet, men gjelder
+  // uavhengig — en overlapp under arealgrensa (to ulike produkter/bredder) skal fortsatt avvises.
+  if (_matFreeLanesOverlap(mp)) return { ok: false, reason: 'to baner ville ligget oppå hverandre' };
+  return { ok: true };
 }
 function _matFreeExit(commit) {
   if (!S.matPaths) S.matPaths = [];   // eldre prosjekt lastet uten feltet
   if (_matFree && commit && _matFree.moves.length >= 1) {
     const mpNew = { id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
       start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 };
-    if (!_matFreeRunsWithinRoom(mpNew)) {
-      console.error('_matFreeExit: frihånds-matte brøt likevel romgrensa — avbrutt', mpNew);
-      if (typeof _showToast === 'function') _showToast('Frihånd avbrutt: matta ville ligget utenfor rommet', 'error');
+    const guardResult = _matFreeRunsWithinRoom(mpNew);
+    if (!guardResult.ok) {
+      console.error('_matFreeExit: frihånds-matte brøt regelverket — avbrutt', { mpNew, reason: guardResult.reason });
+      if (typeof _showToast === 'function') _showToast('Frihånd avbrutt: ' + guardResult.reason, 'error');
       _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
       if (typeof updMode === 'function') updMode();
       render();
@@ -8791,6 +8841,10 @@ function _matPathPanel() {
   if (!mp) { section.style.display = 'none'; return; }
   const c = _matFreeCatalog(mp);
   const row = (l, v) => `<div style="display:flex;justify-content:space-between"><span>${l}</span><b>${v}</b></div>`;
+  // STEG 2 (Kenneth 19.08.2026, «frihånd: baner kan legges oppå hverandre»): brukbart/dekket
+  // areal — samme tall som avvisnings-vakten bruker, synlig FØR det evt. blir et problem.
+  const usableM2 = _matFreeUsableAreaM2(mp), coveredM2 = _matFreeCoveredAreaM2(mp);
+  const overArea = usableM2 != null && coveredM2 > usableM2 + 0.01;
   section.innerHTML = `<div class="rwp-section-label">✏️ Frihånds-matte — ${esc(c.product?.name || 'Matte')}</div>
     <div style="border-top:1px solid var(--brd);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
       ${row('Tegnet lengde', (c.totalCm / 100).toFixed(1) + ' m')}
@@ -8798,6 +8852,8 @@ function _matPathPanel() {
       ${row('Dekker', (c.coverCm / 100).toFixed(1) + ' m')}
       ${row('Udekket', c.uncoveredCm > 5 ? (c.uncoveredCm / 100).toFixed(1) + ' m' : '—')}
       ${row('Effekt', c.watt + ' W' + (c.ohm ? ' · ' + c.ohm + ' Ω' : ''))}
+      ${usableM2 != null ? row('Brukbart areal', usableM2.toFixed(2) + ' m²') : ''}
+      ${usableM2 != null ? `<div style="display:flex;justify-content:space-between${overArea ? ';color:#dc2626' : ''}"><span>Dekket areal</span><b>${coveredM2.toFixed(2)} m²${overArea ? ' — ' + (coveredM2 - usableM2).toFixed(2) + ' m² for mye' : ''}</b></div>` : ''}
     </div>
     <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px">
       <span>Avstand mellom baner</span>
@@ -8817,16 +8873,54 @@ function _matFreeLaneRectWorld(r, NET) {
     ? { x0: Math.min(r.a.x, r.b.x), y0: r.a.y - NET / 2, x1: Math.max(r.a.x, r.b.x), y1: r.a.y + NET / 2 }
     : { x0: r.a.x - NET / 2, y0: Math.min(r.a.y, r.b.y), x1: r.a.x + NET / 2, y1: Math.max(r.a.y, r.b.y) };
 }
+
+// STEG 1A (Kenneth 19.08.2026, «frihånd: baner kan legges oppå hverandre, og vakten ser det
+// ikke»): _matFreeLaneRectWorld fantes allerede, men ble ALDRI brukt til bane-mot-bane-sjekk — kun
+// til tegning/bounding-box. Hver bane sjekkes individuelt mot rommet (_matFreeClampLen), men to
+// baner kan begge være «innenfor rommet» og likevel ligge oppå hverandre. Parvis rektangel-
+// overlapp med toleranse i BEGGE akser skiller «inntil» (0 cm gap, lovlig — flush hjørnegeometri
+// i _matFreeDeriveRuns er konstruert til å gi nøyaktig 0 overlapp) fra ekte overlapp (positivt i
+// begge akser). Kalles både LIVE (per kandidat-move, _matFreeCandidate) og ved commit
+// (_matFreeRunsWithinRoom) — samme funksjon, ingen risiko for at de to sjekkene sier ulikt.
+function _matFreeLanesOverlap(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const TOL = 0.5;   // cm — avrundingssikker, skiller aldri en ekte overlapp bort
+  const rects = _matFreeDeriveRuns(mp).filter(r => _matFreeRunLen(r) > 0.5).map(r => _matFreeLaneRectWorld(r, NET));
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const ow = Math.min(rects[i].x1, rects[j].x1) - Math.max(rects[i].x0, rects[j].x0);
+      const oh = Math.min(rects[i].y1, rects[j].y1) - Math.max(rects[i].y0, rects[j].y0);
+      if (ow > TOL && oh > TOL) return true;
+    }
+  }
+  return false;
+}
+// STEG 1B: brukbart/dekket areal for frihånd — delt _matUsableAreaM2 (se _matRunsWithinRoom) med
+// samme kantmargin frihånds-kabelen selv bruker (_matFreeCableMarginCm), så grensa er identisk
+// mellom frihånd og auto for samme rom/produkt.
+function _matFreeUsableAreaM2(mp) {
+  const room = S.rooms.find(r => r.id === mp.roomId);
+  return _matUsableAreaM2(room, _matFreeCableMarginCm(mp));
+}
+function _matFreeCoveredAreaM2(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  let cm2 = 0;
+  for (const r of _matFreeDeriveRuns(mp)) { const len = _matFreeRunLen(r); if (len > 0.5) cm2 += len * NET; }
+  return cm2 / 10000;
+}
 // Tegn ett lane-rektangel (verden). ghost = under tegning; covered=false → udekket (grå stiplet).
-function _drawMatLaneRect(R, ghost, covered) {
+// invalid = STEG 1 (Kenneth 19.08.2026): kandidaten ville overlappet/vært utenfor rommet — klart
+// sterkere/tettere rødt enn den vanlige ghost-fargen, så «ugyldig» ikke ser ut som «vanlig ghost».
+function _drawMatLaneRect(R, ghost, covered, invalid) {
   if (!R || (R.x1 - R.x0) < 0.05 || (R.y1 - R.y0) < 0.05) return;
   const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
   const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y), w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
   ctx.save();
-  if (ghost) { ctx.fillStyle = 'rgba(224,86,63,0.10)'; ctx.strokeStyle = 'rgba(224,86,63,0.55)'; ctx.setLineDash([5, 4]); }
+  if (invalid) { ctx.fillStyle = 'rgba(220,38,38,0.32)'; ctx.strokeStyle = 'rgba(220,38,38,0.95)'; ctx.setLineDash([3, 3]); ctx.lineWidth = 2.2; }
+  else if (ghost) { ctx.fillStyle = 'rgba(224,86,63,0.10)'; ctx.strokeStyle = 'rgba(224,86,63,0.55)'; ctx.setLineDash([5, 4]); }
   else if (covered) { ctx.fillStyle = _lc('rgba(60,130,200,0.16)', 'rgba(80,160,240,0.18)'); ctx.strokeStyle = _lc('rgba(40,100,200,0.55)', 'rgba(80,160,240,0.5)'); }
   else { ctx.fillStyle = 'rgba(150,150,160,0.10)'; ctx.strokeStyle = 'rgba(150,150,160,0.55)'; ctx.setLineDash([5, 4]); }   // udekket (rull tok slutt)
-  ctx.lineWidth = 1.4;
+  if (!invalid) ctx.lineWidth = 1.4;
   ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
   ctx.restore();
 }
@@ -9046,21 +9140,30 @@ function _drawMatPathObj(mp, active) {
   }
 
   if (active && mp.ghost) {
-    const gr = _matFreeDeriveRuns({ ...mp, moves: [...mp.moves, mp.ghost] });
+    // STEG 1 (Kenneth 19.08.2026): en avvist kandidat (overlaps/tooNarrow) har len=0 — rawLen er
+    // lengden FØR avvisningen, brukt kun til å TEGNE ghosten i riktig størrelse i rødt, aldri til
+    // faktisk plassering (klikk sjekker fortsatt mp.ghost.len).
+    const invalidGhost = !!(mp.ghost.overlaps || mp.ghost.tooNarrow);
+    const ghostMove = invalidGhost && mp.ghost.rawLen > 0 ? { ...mp.ghost, len: mp.ghost.rawLen } : mp.ghost;
+    const gr = _matFreeDeriveRuns({ ...mp, moves: [...mp.moves, ghostMove] });
     const gr0 = gr[gr.length - 1];
-    _drawMatLaneRect(_matFreeLaneRectWorld(gr0, NET), true, true);
-    // #1: vis serpentin-KABELEN svakt i ghost-banen så montøren ser hvordan matta blir.
-    if (S.view.zoom > 0.25) _drawMatPathCable({ ...mp, moves: [...mp.moves, mp.ghost] }, Infinity, { faint: true, lastOnly: true });
-    // live «+X m»-etikett ved ghost-midtpunkt
-    const mid = w2s((gr0.a.x + gr0.b.x) / 2, (gr0.a.y + gr0.b.y) / 2);
-    const gLen = _matFreeRunLen(gr0);
-    ctx.save();
-    ctx.fillStyle = '#111';
-    const label = '+' + (gLen / 100).toFixed(1).replace('.', ',') + ' m';
-    ctx.font = '11px sans-serif'; const tw = ctx.measureText(label).width;
-    ctx.fillRect(mid.x - tw / 2 - 5, mid.y - 9, tw + 10, 16); ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mid.x, mid.y - 1);
-    ctx.restore();
+    if (gr0) {
+      _drawMatLaneRect(_matFreeLaneRectWorld(gr0, NET), !invalidGhost, true, invalidGhost);
+      // #1: vis serpentin-KABELEN svakt i ghost-banen så montøren ser hvordan matta blir (kun gyldig ghost).
+      if (!invalidGhost && S.view.zoom > 0.25) _drawMatPathCable({ ...mp, moves: [...mp.moves, mp.ghost] }, Infinity, { faint: true, lastOnly: true });
+      // live «+X m»-etikett ved ghost-midtpunkt — «overlapper»/«for smalt» når kandidaten er ugyldig.
+      const mid = w2s((gr0.a.x + gr0.b.x) / 2, (gr0.a.y + gr0.b.y) / 2);
+      const gLen = _matFreeRunLen(gr0);
+      ctx.save();
+      const label = invalidGhost
+        ? (mp.ghost.overlaps ? '⚠ overlapper' : '⚠ for smalt her')
+        : '+' + (gLen / 100).toFixed(1).replace('.', ',') + ' m';
+      ctx.fillStyle = invalidGhost ? '#dc2626' : '#111';
+      ctx.font = '11px sans-serif'; const tw = ctx.measureText(label).width;
+      ctx.fillRect(mid.x - tw / 2 - 5, mid.y - 9, tw + 10, 16); ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, mid.x, mid.y - 1);
+      ctx.restore();
+    }
   }
   // #3: synlig klikkbart STOPP-punkt i fri ende under tegning (avslutter uten at ghost blir med).
   if (active && (mp.moves || []).length >= 1) {
@@ -31399,6 +31502,12 @@ canvas.addEventListener('mousedown', e=>{
     if (m.len <= 0 && m.tooNarrow) {
       const _prodTN = _matFreeProdOf(_matFree), _wTN = Math.round((_prodTN?.mat_width_mm || 500) / 10);
       if (typeof _showToast === 'function') _showToast(`${_wTN} cm matte får ikke plass her — velg en smalere bredde`, 'warn');
+      e.preventDefault(); return;
+    }
+    // STEG 1A (Kenneth 19.08.2026, «baner kan legges oppå hverandre»): banen ville lagt seg oppå
+    // en tidligere — stoppet her (ikke det tilgivende avslutnings-fallet under), tydelig varsel.
+    if (m.len <= 0 && m.overlaps) {
+      if (typeof _showToast === 'function') _showToast('Denne banen ville lagt seg oppå en annen — velg en annen retning', 'warn');
       e.preventDefault(); return;
     }
     // Tilgivende avslutning: klikk ved fri ende (ingen reell bane) på en påbegynt matte
