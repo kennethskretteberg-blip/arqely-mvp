@@ -7208,23 +7208,20 @@ function _matResolveGapCm(prod) {
   return Math.max(0, Math.min(MAT_GAP_MAX_CM, raw));
 }
 
-// ── Flere matter i samme rom (LÅST REGEL F+G, Kenneth 19.08.2026) ──────────────────────────
-// Når rommet er større enn den største tilgjengelige matten, tilbys to forslag (like/ulike
-// størrelser) i stedet for å legge ut ÉN matte og la resten av rommet stå kaldt. Egen kodesti
-// (ikke en gren i autoFillMatSerpentine): geometri-oppsettet under er en liten, stabil DEL av det
-// autoFillMatSerpentine allerede gjør (bbox/margin/hindring/retning/maxRuns) — trygg å duplisere.
-// Selve enkelt-matte-funksjonen er allerede kompleks nok (Regel A-E, variantvalg, klipping) at et
-// tvunget felles kjerne-lag ville økt risikoen begge veier uten reell gevinst.
-
-// Samme bbox+margin+hindring-unngåelse+retningsvalg som autoFillMatSerpentine sin første halvdel,
-// faktorert ut hit så både enkelt- og flermatte-veien bruker nøyaktig samme brukbare rektangel.
-function _matRoomGeomForFill(room, prod) {
-  const matWidthCm = (prod.mat_width_mm || 500) / 10;
-  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
-  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
-  const gapCm = _matResolveGapCm(prod);   // REGEL 9: null → produktets CC-baserte standard
-  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
-  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+// ── Delt geometri-kjerne (STEG 1, «Én mattemotor for alle», Kenneth 19.08.2026) ─────────────
+// Én funksjon for oppsettet ALLE mattemotorer trenger: område-polygon (rom ELLER en utendørs
+// sone — begge er bare et polygon) → retning, brukbar utstrekning, antall bredder. Innendørs
+// auto (autoFillMatSerpentine), flermatte-søket (_matFillRoomSmart) OG snø-auto (STEG 2,
+// _packSnowMats) kaller alle denne ene funksjonen — før fantes oppsettet som TRE separate kopier
+// (se STEG 0-rapporten over _packSnowMats). Innendørs-veien er verifisert riktig (Regel 8/9,
+// 11c9a0e/936452b) — dette uttrekket endrer INGEN formel, kun HVOR koden bor.
+//
+// ctx: { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir }. marginCm=0 er alt utendørs
+// trenger her for å få «ingen vegger» riktig — hindringer unngås fortsatt (bare med 0 buffer i
+// stedet for veggmargin), og selve områdegrensa respekteres uansett margin (Regel 1 er absolutt;
+// det er kun MARGINEN som er null ute, aldri grensen — se STEG 0-rapporten).
+function _matAreaGeom(room, ctx) {
+  const { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir } = ctx;
 
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs), rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
@@ -7278,6 +7275,25 @@ function _matRoomGeomForFill(room, prod) {
 
   return { matWidthCm, cutCm, marginCm, gapCm, minLenCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
 }
+
+// Bygger ctx fra et INNENDØRS produkt (margin fra prod.min_wall_margin_mm, gap fra Regel 9) og
+// kaller kjernen — brukt av flermatte-søket (_matFillRoomSmart).
+function _matRoomGeomForFill(room, prod) {
+  return _matAreaGeom(room, {
+    matWidthCm: (prod.mat_width_mm || 500) / 10,
+    cutCm: (prod.mat_cut_interval_mm || 160) / 10,
+    marginCm: (prod.min_wall_margin_mm || 50) / 10,
+    gapCm: _matResolveGapCm(prod),   // REGEL 9: null → produktets CC-baserte standard
+    minLenCm: (prod.mat_min_length_mm || 1000) / 10,
+    userDir: (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null,
+  });
+}
+
+// ── Flere matter i samme rom (LÅST REGEL F+G, Kenneth 19.08.2026) ──────────────────────────
+// Når rommet er større enn den største tilgjengelige matten, tilbys to forslag (like/ulike
+// størrelser) i stedet for å legge ut ÉN matte og la resten av rommet stå kaldt. Egen kodesti
+// (ikke en gren i autoFillMatSerpentine) — deler nå geometri-KJERNEN (_matAreaGeom, STEG 1) med
+// enkelt-mattaveien, men resten (variantvalg, Regel E-søket, korreksjonssløyfa) forblir separat.
 
 // Samme per-rad kapasitetssum som autoFillMatSerpentine (STEG 2/Regel B) — hvor mye lengde
 // romformen faktisk gir plass til over ALLE breddeplasser, uavhengig av hvilket produkt som til
@@ -7579,75 +7595,20 @@ function autoFillMatSerpentine(productId, opts) {
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
 
   // Respect user's direction choice (set via the workflow-panel direction
-  // picker, shared with varmefolie). Otherwise auto = BEST COVERAGE, chosen below
-  // once the usable rect is known (mat-local; does NOT touch _suggestDirection,
-  // which folie/kabel rely on).
+  // picker, shared with varmefolie). Otherwise auto = BEST COVERAGE — resolved by the shared
+  // geometry core below (mat-local; does NOT touch _suggestDirection, which folie/kabel rely on).
   const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
-  let dir = userDir;
 
-  // Room bounding box
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
-  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
-
-  // Usable rectangle = room bbox inset by the wall margin (5 cm). AVOID HINDRINGER: each obstacle
-  // is inflated by the same margin and the usable rect is greedily cut to the largest obstacle-free
-  // side, so no mat ever lands on (or within 5 cm of) a hindring. A single rectangular mat can't
-  // wrap a central obstacle — it sits on the larger free side; per-run clipping around interior
-  // obstacles is a future refinement.
-  let uX0 = rMinX + marginCm, uX1 = rMaxX - marginCm, uY0 = rMinY + marginCm, uY1 = rMaxY - marginCm;
-  {
-    const hinds = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3)
-      .map(h => { const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
-        return { x0: Math.min(...hx) - marginCm, x1: Math.max(...hx) + marginCm,
-                 y0: Math.min(...hy) - marginCm, y1: Math.max(...hy) + marginCm }; });
-    let R = { x0: uX0, x1: uX1, y0: uY0, y1: uY1 };
-    for (let it = 0; it < hinds.length + 2; it++) {
-      const H = hinds.find(h => h.x0 < R.x1 - 0.1 && h.x1 > R.x0 + 0.1 && h.y0 < R.y1 - 0.1 && h.y1 > R.y0 + 0.1);
-      if (!H) break;
-      const cand = [
-        { x0: R.x0, x1: Math.min(R.x1, H.x0), y0: R.y0, y1: R.y1 },   // keep left of obstacle
-        { x0: Math.max(R.x0, H.x1), x1: R.x1, y0: R.y0, y1: R.y1 },   // keep right
-        { x0: R.x0, x1: R.x1, y0: R.y0, y1: Math.min(R.y1, H.y0) },   // keep below
-        { x0: R.x0, x1: R.x1, y0: Math.max(R.y0, H.y1), y1: R.y1 },   // keep above
-      ].map(c => ({ ...c, area: Math.max(0, c.x1 - c.x0) * Math.max(0, c.y1 - c.y0) }))
-       .sort((a, b) => b.area - a.area);
-      if (cand[0].area <= 0) { R = cand[0]; break; }
-      R = cand[0];
-    }
-    uX0 = R.x0; uX1 = R.x1; uY0 = R.y0; uY1 = R.y1;
-  }
-
-  // AUTO-retning = prøv BEGGE og velg den som dekker MEST areal (mockup-fasiten + folie/kabel-
-  // mønsteret). Regnes på den brukbare (margin- + hindring-innskrenkede) rekta. Brukerens valg
-  // (userDir) vinner. Uavgjort → 'v' (stående), som mockupen.
-  if (!dir) {
-    const _matCov = d => {
-      const acr = (d === 'h') ? (uY1 - uY0) : (uX1 - uX0);
-      const alo = (d === 'h') ? (uX1 - uX0) : (uY1 - uY0);
-      if (acr < matWidthCm || alo < minLenCm) return 0;
-      // REGEL 8 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): antallet bredder er ALLTID
-      // kant-i-kant — gapCm er en fordeling av slakk (Regel 9), ikke en inngangsverdi som spiser
-      // plass FØR antallet regnes. Gjelder også retningsvalget her (dekningsestimatet må bruke
-      // samme antall bredder som selve utlegget, ellers kan retningsvalget stole på et tall
-      // utlegget siden forkaster).
-      const n = Math.max(0, Math.floor(acr / matWidthCm));
-      let rl = cutCm > 0 ? Math.floor(alo / cutCm) * cutCm : alo;
-      if (rl < minLenCm) rl = minLenCm;
-      return (n * matWidthCm * rl) / 10000;
-    };
-    dir = (_matCov('h') > _matCov('v')) ? 'h' : 'v';
-  }
-
-  let acrossMin = dir === 'h' ? uY0 : uX0;
-  let acrossMax = dir === 'h' ? uY1 : uX1;
-  let acrossSpan = acrossMax - acrossMin;
+  // STEG 1 («Én mattemotor for alle», Kenneth 19.08.2026): bbox+margin+hindring-unngåelse+
+  // retningsvalg+maxRuns er nå ÉN delt kjerne (_matAreaGeom) — samme kall som flermatte-søket
+  // (_matRoomGeomForFill) og snø-auto (STEG 2) bruker. Ingen formel endret her, kun flyttet dit.
+  const geom0 = _matAreaGeom(room, { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir });
+  const dir = geom0.dir;
+  let acrossMin = geom0.acrossMin, acrossMax = geom0.acrossMax, acrossSpan = geom0.acrossSpan;
   if (acrossSpan < matWidthCm) return;
 
   // Along-axis: how long each run can be
-  let alongMin = dir === 'h' ? uX0 : uY0;
-  let alongMax = dir === 'h' ? uX1 : uY1;
-  let alongSpan = alongMax - alongMin;
+  let alongMin = geom0.alongMin, alongMax = geom0.alongMax, alongSpan = geom0.alongSpan;
   if (alongSpan < minLenCm) return;
 
   // Snap run length to cut interval
@@ -7655,11 +7616,7 @@ function autoFillMatSerpentine(productId, opts) {
   if (runLengthCm < minLenCm) runLengthCm = minLenCm;
   if (runLengthCm > alongSpan) { alert('Rommet er for kort for denne matten'); return; }
 
-  // REGEL 8 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): antallet bredder avgjøres av
-  // rommets brukbare bredde ALENE, kant-i-kant — gapCm er ALDRI et inngangsledd her (var
-  // rotårsaken til at brukerens mellomrom kostet en hel bredde, se STEG 0-tallene i prompten).
-  // Mellomrommet fordeles i stedet som slakk ETTER at antallet er fastsatt (Regel 9, lenger ned).
-  const maxRuns = Math.floor(acrossSpan / matWidthCm);
+  const maxRuns = geom0.maxRuns;
   if (maxRuns <= 0) return;
 
   // ── Variant picker ─────────────────────────────────────────────
