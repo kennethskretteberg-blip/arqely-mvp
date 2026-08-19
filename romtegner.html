@@ -3835,6 +3835,32 @@ function _roomIdOnActiveFloor(roomId) {
   return _activeFloorRoomIds.has(roomId);
 }
 
+// STEG 1 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): ÉN funksjon avgjør om et objekt
+// hører til den aktive etasjen. Alt som tegnes skal gå gjennom DENNE — også ting uten roomId
+// (f.eks. S.floatingDims). roomId-objekter delegerer til den eksisterende _roomIdOnActiveFloor;
+// objekter med en direkte floorId sammenlignes mot _effectiveActiveFloorId() (samme «aldri vis
+// alt»-prinsipp som bb627f6 rettet for bakgrunn). Har objektet HVERKEN roomId eller floorId,
+// hører det ALDRI hjemme her — standardsvaret er «nei», aldri «vis for sikkerhets skyld».
+//
+// STEG 4: i utviklingsmodus (localhost) logges ett varsel når noe mangler BEGGE — det er
+// nøyaktig situasjonen som ga bakgrunnsfeilen (bb627f6), matte-dimming-feilen (f249db7) og
+// målelinje-lekkasjen denne økta fikset: en ny objekttype lagt til uten etasjetilhørighet.
+const _IS_DEV_HOST = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname);
+const _floorlessWarned = new Set();
+function _onActiveFloor(obj) {
+  if (!obj) return false;
+  if (obj.roomId != null) return _roomIdOnActiveFloor(obj.roomId);
+  if (obj.floorId != null) {
+    const af = _effectiveActiveFloorId();
+    return af == null || obj.floorId === af;
+  }
+  if (_IS_DEV_HOST && obj.id != null && !_floorlessWarned.has(obj.id)) {
+    _floorlessWarned.add(obj.id);
+    console.warn('_onActiveFloor: objekt uten roomId ELLER floorId — vises aldri, hører ikke hjemme noe sted', obj);
+  }
+  return false;
+}
+
 // ─── SNAP DOT (red cursor dot) ──────────────────────────────
 function drawSnapDot() {
   if (!S.drawing.mousePos) return;
@@ -25280,8 +25306,9 @@ function hitAnnotGizmo(sx,sy) {
 function drawUserDimLines() {
   let _dims=[];
   for (const room of S.rooms) { if (_roomOnActiveFloor(room) && room.dims && room.dims.length) _dims=_dims.concat(room.dims); }
-  // Floating dims (not tied to any room — used to verify bg-calibration)
-  if (S.floatingDims && S.floatingDims.length) _dims = _dims.concat(S.floatingDims);
+  // Floating dims (not tied to any room — used to verify bg-calibration). STEG 1 (etasje-
+  // vanntett): filtrert på floorId nå, samme _onActiveFloor alt annet tegnet går gjennom.
+  if (S.floatingDims && S.floatingDims.length) _dims = _dims.concat(S.floatingDims.filter(_onActiveFloor));
   if(!_dims.length) return;
   const TICK=7, OVERHANG=6;
   ctx.save();
@@ -26445,18 +26472,14 @@ function drawBgImage() {
   }
 }
 
-// Background/floor-plan layers visible on the active floor, in draw order (bottom → top).
-// Single source of truth for «hvilke bakgrunner hører til den aktive etasjen» — drawBgImage and
-// _hitBgLayer both read from here (see _bgKeyOnActiveFloor, FEIL 1 over).
+// Background/floor-plan visible on the active floor. Single source of truth for «hvilken
+// bakgrunn hører til den aktive etasjen» — drawBgImage and _hitBgLayer both read from here (see
+// _bgKeyOnActiveFloor, FEIL 1). STEG 3 (etasje-vanntett): S.bgLayers er fjernet — én plantegning
+// per etasje betyr S.bgs ALENE er nok, listen har alltid høyst ett element per aktiv etasje.
 function _bgsOnActiveFloor() {
   const activeFloor = S.ui.activeFloorId;
   const list = [];
-  if (S.bgLayers) for (const [key, layers] of Object.entries(S.bgLayers)) {
-    if (!_bgKeyOnActiveFloor(key, activeFloor)) continue;
-    for (const bg of layers) list.push(bg);
-  }
   for (const [key, bg] of Object.entries(S.bgs)) {
-    if (list.includes(bg)) continue;
     if (!_bgKeyOnActiveFloor(key, activeFloor)) continue;
     list.push(bg);
   }
@@ -26749,8 +26772,12 @@ async function _pdfShowPagePicker(pdf, file, fileName) {
 }
 
 function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
-  const floors = S.floors || [];
-  const floorOpts = floors.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
+  // STEG 3 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): en etasje som ALLEREDE har en
+  // bakgrunn kan ikke være mål lenger — det ville lagt et nytt lag på den, nøyaktig det bgLayers-
+  // fjerningen gjør umulig. «+ Ny etasje» er standardvalget: Kenneths egen test («tre sider gir
+  // tre etasjer») er nettopp dette.
+  const emptyFloors = (S.floors || []).filter(f => !(S.bgs[f.id] && S.bgs[f.id].img));
+  const floorOpts = emptyFloors.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
   const rows = pages.map(p => {
     const label = _pdfPaperLabel(p.paperWidthCm, p.paperHeightCm);
     const titleHtml = p.title ? `<div style="font-size:11px;color:var(--dim)">${esc(p.title)}</div>` : '';
@@ -26762,6 +26789,7 @@ function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
         ${titleHtml}
       </div>
       <select class="_pdf-page-target" data-page="${p.num}" style="padding:5px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px">
+        <option value="__new__" selected>+ Ny etasje</option>
         <option value="">Ikke importer</option>
         <option value="__global__">Global</option>
         ${floorOpts}
@@ -26780,7 +26808,7 @@ function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
         <div style="font-size:16px;font-weight:700;color:var(--text)">Velg side(r) fra PDF</div>
         <button onclick="_pdfPagePickerClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
       </div>
-      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Velg hvilken etasje hver side skal bli bakgrunn for.</div>
+      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Hver side blir bakgrunn for sin egen etasje (én plantegning per etasje) — velg «+ Ny etasje», en tom etasje, «Global», eller «Ikke importer».</div>
       <div>${rows}</div>
       <div style="display:flex;justify-content:flex-end;gap:10px">
         <button onclick="_pdfPagePickerClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
@@ -26804,9 +26832,17 @@ async function _pdfPagePickerRun(pdf, fileName, ov) {
   if (!assignments.length) { _bgAutoStartTwoPoint = false; return; }
   const singleTwoPoint = assignments.length === 1 && _bgAutoStartTwoPoint;
   if (!singleTwoPoint) _bgAutoStartTwoPoint = false;
+  // STEG 3 (etasje-vanntett): «+ Ny etasje» oppretter én NY etasje per side som velger det — «tre
+  // sider gir tre etasjer», Kenneths egen test. Alle nye etasjer havner i samme del (aktiv del).
+  const partId = S.ui.activePartId;
   let lastFloorId = null;
   for (const a of assignments) {
-    const floorId = a.target === '__global__' ? '__global__' : parseInt(a.target, 10);
+    let floorId;
+    if (a.target === '__global__') floorId = '__global__';
+    else if (a.target === '__new__') {
+      const partFloorCount = S.floors.filter(f => f.partId === partId).length;
+      floorId = _addFloorToPart(partId, (partFloorCount + 1) + '. etasje').id;
+    } else floorId = parseInt(a.target, 10);
     await _pdfRenderPageToBg(pdf, a.page, fileName, floorId, { showCalibration: singleTwoPoint });
     lastFloorId = floorId;
   }
@@ -26881,17 +26917,11 @@ function _installBgImage(img, dataUrl, fileName, meta) {
 // _addBgToFloor selv bruker), ellers fylles den eksisterende (tomme) slotten.
 function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
   opts = opts || {};
-  if (!S.bgLayers) S.bgLayers = {};
-  if (!S.bgLayers[floorId]) S.bgLayers[floorId] = [];
-  const existing = S.bgs[floorId];
-  let bg;
-  if (existing && existing.img) {
-    bg = _newBgObj();
-    S.bgLayers[floorId].push(bg);
-  } else {
-    bg = existing || _newBgObj();
-    if (!S.bgLayers[floorId].includes(bg)) S.bgLayers[floorId].push(bg);
-  }
+  // STEG 3 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): én plantegning per etasje —
+  // ingen «legg til som nytt lag»-gren lenger (det var bgLayers sin rolle, se fjerningen av den).
+  // Kallerne (_addBgToFloor, _pdfPagePickerRun) garanterer nå at floorId enten er en HELT NY
+  // etasje eller en eksplisitt valgt tom etasje — denne funksjonen fyller alltid samme slot.
+  const bg = S.bgs[floorId] || _newBgObj();
   S.bgs[floorId] = bg;
 
   bg.img = img;
@@ -26949,12 +26979,9 @@ function toggleBgVisible(checked) {
 }
 function removeBgImage() {
   const bg = _ctxBg(); if (!bg) return;
-  // Remove this layer from the floor's layer array (multi-layer model).
-  // Also clear the S.bgs slot that holds it (may be a different key than activeFloorId).
+  // Clear the S.bgs slot that holds it (may be a different key than activeFloorId). STEG 3
+  // (etasje-vanntett): ingen bgLayers-array å rydde i lenger — én bakgrunn per etasje.
   for (const key in S.bgs) { if (S.bgs[key] === bg) delete S.bgs[key]; }
-  if (S.bgLayers) for (const k in S.bgLayers) {
-    const arr = S.bgLayers[k]; const i = arr.indexOf(bg); if (i >= 0) arr.splice(i, 1);
-  }
   if (S.ui.selectedBg === bg) S.ui.selectedBg = null;
   bg.img = null; bg.dataUrl = null;
   bg.widthCm = 0; bg.heightCm = 0;
@@ -27333,77 +27360,79 @@ function _renderListPartContent(part){
   return h;
 }
 
-// ─── BG LAYERS IN SIDEBAR ────────────────────────────────────
-function _getBgLayersForFloor(floorId) {
-  // Return array of bg objects for a floor. Currently S.bgs[floorId] is a single object.
-  // Wrap in array for forward-compat with multiple bgs.
-  if (!S.bgLayers) S.bgLayers = {};
-  if (!S.bgLayers[floorId]) {
-    // Migrate existing single bg to layers
-    const existing = S.bgs[floorId];
-    S.bgLayers[floorId] = existing && existing.img ? [existing] : [];
-  }
-  return S.bgLayers[floorId];
-}
+// ─── BG I SIDEBAR (STEG 3, etasje-vanntett) ───────────────────
+// LÅST REGEL: én plantegning per etasje. S.bgLayers (flere lag på samme etasje) er fjernet —
+// S.bgs[floorId] er nå den ENESTE kilden, og har høyst ett bilde per etasje. «Legg til
+// plantegning» oppretter derfor en NY etasje i stedet for et nytt lag (se _addBgToFloor).
 function activeBgForFloor(floorId) {
   return S.bgs[floorId] || null;
 }
-function _toggleBgLayerVisible(floorId, idx, visible) {
-  const layers = _getBgLayersForFloor(floorId);
-  if (layers[idx]) { layers[idx].visible = visible; render(); renderSidebar(); }
+function _toggleFloorBgVisible(floorId, visible) {
+  const bg = S.bgs[floorId]; if (bg) { bg.visible = visible; render(); renderSidebar(); }
 }
-function _setBgLayerOpacity(floorId, idx, val) {
-  const layers = _getBgLayersForFloor(floorId);
-  if (layers[idx]) { layers[idx].opacity = val; render(); }
+function _setFloorBgOpacity(floorId, val) {
+  const bg = S.bgs[floorId]; if (bg) { bg.opacity = val; render(); }
+}
+// STEG 1 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): delt kjerne for å opprette en ny
+// etasje — brukt av «+ Legg til etasje»-modalen (_createFloor) og «Legg til plantegning»
+// (_addBgToFloor) og flerside-PDF-importen (_pdfPagePickerRun).
+function _addFloorToPart(partId, name) {
+  const fl = { id: S.counters.nextFloorId++, name, order: S.floors.length, collapsed: false, partId };
+  S.floors.push(fl);
+  return fl;
 }
 function _addBgToFloor(floorId) {
-  setActiveBgFloor(floorId);
-  // Create new bg slot
-  if (!S.bgLayers) S.bgLayers = {};
-  if (!S.bgLayers[floorId]) S.bgLayers[floorId] = [];
-  const newBg = _newBgObj();
-  S.bgLayers[floorId].push(newBg);
-  S.bgs[floorId] = newBg; // make it the active bg for import
+  // STEG 3: én plantegning per etasje. Har DENNE etasjen allerede en bakgrunn, er «legg til enda
+  // en» ALDRI et nytt lag på den (det var nettopp det bgLayers gjorde, og som brøt regelen) — det
+  // er en HELT NY etasje, i samme del, med den nye tegningen på seg. En etasje UTEN bakgrunn ennå
+  // fyller bare sin egen (tomme) plass, som før — se _floorBgItemsHtml sin «ellers»-gren, som
+  // kaller hit nettopp for den tomme etasjen selv.
+  const existing = S.bgs[floorId];
+  let targetFloorId = floorId;
+  if (existing && existing.img) {
+    const refFloor = S.floors.find(f => f.id === floorId);
+    const partId = refFloor ? refFloor.partId : S.ui.activePartId;
+    const partFloorCount = S.floors.filter(f => f.partId === partId).length;
+    targetFloorId = _addFloorToPart(partId, (partFloorCount + 1) + '. etasje').id;
+  }
+  setActiveBgFloor(targetFloorId);
+  renderSidebar();
   document.getElementById('bg-file-inp')?.click();
 }
-function _selectBgLayer(floorId, idx) {
-  const layers = _getBgLayersForFloor(floorId);
-  const bg = layers[idx]; if (!bg) return;
-  S.bgs[floorId] = bg;
+function _selectFloorBg(floorId) {
+  const bg = S.bgs[floorId]; if (!bg) return;
   selectBgLayer(bg); // «Velg plantegning»: går i transform-modus (virker selv om låst)
 }
-function _toggleBgLayerLock(floorId, idx) {
-  const layers = _getBgLayersForFloor(floorId);
-  const bg = layers[idx]; if (!bg) return;
+function _toggleFloorBgLock(floorId) {
+  const bg = S.bgs[floorId]; if (!bg) return;
   bg.locked = !bg.locked;
   if (bg.locked && S.ui.selectedBg === bg) S.ui.selectedBg = null;
   renderSidebar(); updateCtxBar(); render();
 }
 function _floorBgItemsHtml(floorId) {
-  const layers = _getBgLayersForFloor(floorId);
+  const bg = S.bgs[floorId];
   let html = '';
-  for (let i = 0; i < layers.length; i++) {
-    const bg = layers[i];
+  if (bg && bg.img) {
     // STEG 5 (Kenneth 19.08.2026): «plan.pdf, side 2» — så Kenneth ser med en gang om etasjen har
     // fått riktig tegning, FØR hele prosjekteringen er gjort på feil plan.
     const fn = (bg.fileName || 'Plantegning') + (bg.pageNumber != null ? ', side ' + bg.pageNumber : '');
     const sn = fn.length > 26 ? fn.substring(0, 24) + '…' : fn;
     const isSel = bg === S.ui.selectedBg;
-    const hi = isSel || bg === S.bgs[floorId];
     const lockIco = bg.locked
       ? '<svg class="ic ic-lock" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
       : '<svg class="ic ic-lock-open" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.6-1.6"/></svg>';
-    html += `<div class="room-item indented${isSel?' active':''}" style="padding:3px 8px 3px 22px;font-size:11px;gap:6px;opacity:${bg.visible!==false?1:0.45}${isSel?';background:rgba(34,211,238,0.10)':''}" onclick="event.stopPropagation();_selectBgLayer(${floorId},${i})" title="Velg plantegning (transform)">
-      <span style="color:${hi?'var(--accent)':'var(--dim)'}"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg></span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${hi?'var(--accent)':'var(--text)'}" title="${esc(fn)}">${esc(sn)}</span>
-      <button onclick="event.stopPropagation();_toggleBgLayerLock(${floorId},${i})" title="${bg.locked?'Låst — klikk for å låse opp':'Lås mot utilsiktet flytting'}" style="background:none;border:none;padding:0;cursor:pointer;color:${bg.locked?'var(--accent)':'var(--dim)'};display:inline-flex">${lockIco}</button>
-      <input type="checkbox" ${bg.visible!==false?'checked':''} onchange="_toggleBgLayerVisible(${floorId},${i},this.checked);event.stopPropagation()" style="width:13px;height:13px;accent-color:var(--accent)" title="Synlig" onclick="event.stopPropagation()">
-      <input type="range" min="5" max="100" value="${Math.round((bg.opacity??1)*100)}" style="width:48px;height:12px;accent-color:var(--accent)" oninput="_setBgLayerOpacity(${floorId},${i},this.value/100)" title="Dimming" onclick="event.stopPropagation()">
+    html += `<div class="room-item indented${isSel?' active':''}" style="padding:3px 8px 3px 22px;font-size:11px;gap:6px;opacity:${bg.visible!==false?1:0.45}${isSel?';background:rgba(34,211,238,0.10)':''}" onclick="event.stopPropagation();_selectFloorBg(${floorId})" title="Velg plantegning (transform)">
+      <span style="color:${isSel?'var(--accent)':'var(--dim)'}"><svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg></span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${isSel?'var(--accent)':'var(--text)'}" title="${esc(fn)}">${esc(sn)}</span>
+      <button onclick="event.stopPropagation();_toggleFloorBgLock(${floorId})" title="${bg.locked?'Låst — klikk for å låse opp':'Lås mot utilsiktet flytting'}" style="background:none;border:none;padding:0;cursor:pointer;color:${bg.locked?'var(--accent)':'var(--dim)'};display:inline-flex">${lockIco}</button>
+      <input type="checkbox" ${bg.visible!==false?'checked':''} onchange="_toggleFloorBgVisible(${floorId},this.checked);event.stopPropagation()" style="width:13px;height:13px;accent-color:var(--accent)" title="Synlig" onclick="event.stopPropagation()">
+      <input type="range" min="5" max="100" value="${Math.round((bg.opacity??1)*100)}" style="width:48px;height:12px;accent-color:var(--accent)" oninput="_setFloorBgOpacity(${floorId},this.value/100)" title="Dimming" onclick="event.stopPropagation()">
+    </div>`;
+  } else {
+    html += `<div class="room-item indented" style="padding:3px 8px 3px 22px;font-size:11px;cursor:pointer;color:var(--dim)" onclick="event.stopPropagation();_addBgToFloor(${floorId})">
+      ${IC('plus',13)}<span>Legg til plantegning</span>
     </div>`;
   }
-  html += `<div class="room-item indented" style="padding:3px 8px 3px 22px;font-size:11px;cursor:pointer;color:var(--dim)" onclick="event.stopPropagation();_addBgToFloor(${floorId})">
-    ${IC('plus',13)}<span>Legg til plantegning</span>
-  </div>`;
   return html;
 }
 
@@ -28708,8 +28737,7 @@ function confirmLShapeForm() {
 }
 function _createFloor() {
   const n=document.getElementById('floor-name-inp').value.trim(); if(!n) return null;
-  const fl={ id:S.counters.nextFloorId++, name:n, order:S.floors.length, collapsed:false, partId:S.ui.activePartId||null };
-  S.floors.push(fl);
+  const fl = _addFloorToPart(S.ui.activePartId||null, n);
   // Activate the new (empty) floor and clear all selections from other floors
   S.ui.activeFloorId = fl.id;
   S.ui.selectedRoomId = null;
@@ -31192,8 +31220,10 @@ canvas.addEventListener('mousedown', e=>{
       } else {
         // No room selected — used after bg-calibrate to verify the scale.
         // Lives in S.floatingDims and renders alongside room-attached dims.
+        // STEG 1 (etasje-vanntett): floorId satt ved opprettelse — dette ER akkurat situasjonen
+        // som lakk (kontrollmål rett etter kalibrering av en NY plantegning, ingen rom valgt ennå).
         if (!S.floatingDims) S.floatingDims = [];
-        S.floatingDims.push(dimObj);
+        S.floatingDims.push({ ...dimObj, floorId: _effectiveActiveFloorId() });
       }
       S.drawing.dimPending=null;
     } else if (!S.drawing.rectStart) {
@@ -32100,8 +32130,9 @@ canvas.addEventListener('mousedown', e=>{
     }
     // ── Dim line click — select (keep selectedRoomId so room stays visible) ──
     const _allDims=[]; for(const r of S.rooms){if(_roomOnActiveFloor(r) && r.dims) for(const d of r.dims) _allDims.push(d);}
-    // Floating dims (not tied to a room — used for bg-calibration check)
-    if (S.floatingDims) for (const d of S.floatingDims) _allDims.push(d);
+    // Floating dims (not tied to a room — used for bg-calibration check). STEG 1 (etasje-
+    // vanntett): en målelinje på en annen etasje skal aldri kunne klikk-velges her heller.
+    if (S.floatingDims) for (const d of S.floatingDims) if (_onActiveFloor(d)) _allDims.push(d);
     for (const dim of _allDims) {
       const off=dim.offset||0;
       const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
@@ -33930,7 +33961,9 @@ function _hitDimLine(wx, wy, sx, sy) {
     if (!_roomOnActiveFloor(r) || !r.dims) continue;
     for (const d of r.dims) _all.push(d);
   }
-  if (S.floatingDims) for (const d of S.floatingDims) _all.push(d);
+  // STEG 1 (etasje-vanntett): samme filter som click-select over — en målelinje på en annen
+  // etasje skal aldri kunne treffes av hittest, selv om den er usynlig.
+  if (S.floatingDims) for (const d of S.floatingDims) if (_onActiveFloor(d)) _all.push(d);
   for (const dim of _all) {
     const off = dim.offset || 0;
     const wdx = dim.p2.x - dim.p1.x, wdy = dim.p2.y - dim.p1.y;
@@ -34204,23 +34237,15 @@ function _showCtxMore(e, ctx) {
   showProduktDropdown(items, e.clientX, e.clientY);
 }
 
-// The active background layer for the active floor (calibrated + has an image), or null.
-// Falls back to ANY background with an image when the active-floor key has none — legacy
-// projects stored a single bg under '__global__', and the drawing renders from every key,
-// so the controls must stay reachable even when the key doesn't match S.ui.activeFloorId.
+// The active background for the active floor (calibrated + has an image), or null.
+// STEG 3/4 (etasje-vanntett, Kenneth 19.08.2026): IKKE fall tilbake til «en hvilken som helst
+// bakgrunn et annet sted» — det var nøyaktig samme «vis for sikkerhets skyld»-antakelse som ga
+// bakgrunnsfeilen i bb627f6 (den gjaldt tegningen; denne kontrollen ville gjort det samme for
+// ctxbaren). Har den aktive etasjen ingen bakgrunn, skal kontrollene ikke late som om den har
+// det via en annen etasjes.
 function _activeBgLayer() {
   const k = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
-  if (S.bgs[k] && S.bgs[k].img) return S.bgs[k];
-  const layers = (S.bgLayers && S.bgLayers[k]) || [];
-  const inLayer = layers.find(l => l && l.img);
-  if (inLayer) return inLayer;
-  // Fallback: any bg with an image under another key (e.g. '__global__').
-  for (const key in S.bgs) { if (S.bgs[key] && S.bgs[key].img) return S.bgs[key]; }
-  if (S.bgLayers) for (const key in S.bgLayers) {
-    const f = (S.bgLayers[key] || []).find(l => l && l.img);
-    if (f) return f;
-  }
-  return null;
+  return (S.bgs[k] && S.bgs[k].img) ? S.bgs[k] : null;
 }
 
 // Persistent "Bakgrunn" quick-control for the context bar — visibility + dimming + a
@@ -36667,6 +36692,10 @@ function _buildSaveData() {
     plates   : S.plates.map(p=>({...p})),
     aluboard : (S.aluboard||[]).map(a=>({...a})),
     stairs   : S.stairs.map(s=>({...s, segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
+    // STEG 2 (etasje-vanntett, Kenneth 19.08.2026): begge manglet helt fra før (STEG 0-funn) —
+    // floatingDims forsvant derfor stille ved hver lagring, groups likeså.
+    floatingDims: (S.floatingDims||[]).map(d=>({...d, p1:{...d.p1}, p2:{...d.p2}})),
+    groups   : S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     counters   : {...S.counters},
     snap       : {...S.snap},
     view       : {...S.view},
@@ -36885,7 +36914,20 @@ function _restoreProject(data) {
     if (!st.preferredVoltage) st.preferredVoltage = 230;
     if (!st.edgeMargin_cm) st.edgeMargin_cm = 5;
   }
+  S.groups    = data.groups    || [];   // STEG 2 (etasje-vanntett): manglet helt fra før
+  // STEG 2 (etasje-vanntett, Kenneth 19.08.2026): floatingDims manglet helt fra før. Gamle
+  // prosjekt kan ha dims uten floorId (fra FØR STEG 1 ga dem en ved opprettelse) — migrer dem til
+  // FØRSTE etasje i stedet for å la dem forsvinne stille. De er tegnet av brukeren; de skal bli.
+  const _firstFloorId = S.floors.length ? S.floors[0].id : null;
+  S.floatingDims = (data.floatingDims || []).map(d => ({
+    ...d, floorId: d.floorId != null ? +d.floorId : _firstFloorId,
+  }));
   S.counters  = data.counters  || S.counters;
+  // STEG 3 (etasje-vanntett): manglet fra før (samme mangel som de andre under) — ble ikke et
+  // problem før nå, siden ingenting tidligere opprettet etasjer UNDER selve innlastingen (den nye
+  // bgLayers-migreringen lenger ned gjør nettopp det). Avledet fra høyeste eksisterende etasje-id
+  // i stedet for en blind 1, så en ny etasje aldri kan kollidere med en som allerede finnes.
+  if (!S.counters.nextFloorId) S.counters.nextFloorId = S.floors.reduce((m, f) => Math.max(m, (+f.id || 0) + 1), 1);
   if (!S.counters.nextStripId) S.counters.nextStripId = 1;
   if (!S.counters.nextCableId) S.counters.nextCableId = 1;
   if (!S.counters.nextZoneId) S.counters.nextZoneId = 1;
@@ -36950,7 +36992,23 @@ function _restoreProject(data) {
   // into the project opened after it (this caused a bg to «leak» onto other projects until refresh).
   S.bgs = {};
   const _myBgGen = _bgRestoreGen;
-  const _savedBgs = data.bgs || (data.bg && data.bg.dataUrl ? { '__global__': data.bg } : {});
+  // STEG 3 (etasje-vanntett, migrasjon, Kenneth 19.08.2026): S.bgLayers (flere lag på SAMME
+  // etasje) er fjernet, og ble aldri selv lagret av appen (STEG 0-funn) — men behandles defensivt
+  // her i tilfelle eldre/eksternt data likevel har det. Ekstra lag flyttes til NYE etasjer i
+  // samme del; ROMMENE blir værende der de er (allerede låst til sin etasje) — det er kun
+  // bakgrunnene som flytter seg.
+  const _extraBgEntries = {};
+  for (const [key, layerArr] of Object.entries(data.bgLayers || {})) {
+    if (!Array.isArray(layerArr) || layerArr.length <= 1) continue;
+    const refFloor = S.floors.find(f => String(f.id) === String(key));
+    const partId = refFloor ? refFloor.partId : ((S.project.parts[0] && S.project.parts[0].id) ?? null);
+    for (let i = 1; i < layerArr.length; i++) {
+      const partFloorCount = S.floors.filter(f => f.partId === partId).length;
+      const newFloor = _addFloorToPart(partId, (partFloorCount + 1) + '. etasje');
+      _extraBgEntries[newFloor.id] = layerArr[i];
+    }
+  }
+  const _savedBgs = { ...(data.bgs || (data.bg && data.bg.dataUrl ? { '__global__': data.bg } : {})), ..._extraBgEntries };
   let _bgCount = 0;
   for (const [k, bgData] of Object.entries(_savedBgs)) {
     if (!bgData || !bgData.dataUrl) continue;
@@ -47419,6 +47477,10 @@ function _resetProjectState() {
   S.floors   = [];
   S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; S.zones = []; _invalidateStripCache();
   S.cables   = []; S.mats = []; S.plates = []; S.stairs = [];
+  // STEG 2 (etasje-vanntett, Kenneth 19.08.2026): begge nå persisteres (var ikke tilfellet før
+  // denne økten) — uten å nullstille dem her ville en NY, tom prosjekt arvet forrige prosjekts
+  // målelinjer/grupper og faktisk LAGRET dem inn i det.
+  S.floatingDims = []; S.groups = [];
   _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache(); _invalidateStairCache();
   S.counters = { nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextMatPathId:1, nextPlateId:1, nextAluboardId:1, nextStairId:1, nextPartId:1 };
   S.view     = { zoom:1, panX:0, panY:0 };
