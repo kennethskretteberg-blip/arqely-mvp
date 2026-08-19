@@ -7228,11 +7228,32 @@ function _matAreaGeom(room, ctx) {
   const alongMin = dir === 'h' ? uX0 : uY0, alongMax = dir === 'h' ? uX1 : uY1;
   const acrossSpan = acrossMax - acrossMin, alongSpan = alongMax - alongMin;
   // REGEL 8+18 (LÅST, spec-matte-utlegg.md): kant-i-kant PLUSS produktets påkrevde minsteavstand
-  // (0 for EcoMat → identisk med ren Regel 8; 5cm for InSnow, se autoFillMatSerpentine).
+  // (0 for EcoMat → identisk med ren Regel 8; 5cm for InSnow, se autoFillMatSerpentine). Denne
+  // formelen GARANTERER (algebraisk, bevist i tidligere runde) at minMandatoryGapCm alltid får
+  // plass ved maxRuns bredder — «N må reduseres hvis selv det påkrevde minimumet ikke går opp»
+  // (FEIL 2-oppfølgingen) er derfor allerede strukturelt umulig å utløse via DENNE formelen.
   const maxRuns = acrossSpan >= matWidthCm
     ? Math.floor((acrossSpan + minMandatoryGapCm) / (matWidthCm + minMandatoryGapCm)) : 0;
 
-  return { matWidthCm, cutCm, marginCm, gapCm, minLenCm, minMandatoryGapCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
+  // FEIL 2 (Kenneth 19.08.2026, «gapet kappes ikke mot det som får plass»): gapCm herfra og ut må
+  // være det gapet FAKTISK plass til ved maxRuns bredder — Regel 9 sier det allerede («blir summen
+  // for bred, er det gapet som gir etter, ikke margen»), men før denne fiksen ble det RÅ, ukappede
+  // brukervalget brukt til å POSISJONERE bredder i kapasitets-/retningsestimatet (capacityCm-løkka
+  // i autoFillMatSerpentine, _matRoomCapacityCm for flermatte) — et gap på 7cm med 5 bredder kan
+  // spenne 278cm i et rom med bare 269,5cm tilgjengelig, og senere bredder sin posisjon (perpPos)
+  // havnet da delvis UTENFOR margin-innsatt rombredde. Kapasitetsestimatet ble dermed kunstig lavt
+  // (Kenneths diagnose: 1024cm i stedet for riktige 1280cm) — FEIL variant ble valgt, selv om
+  // antallet bredder (maxRuns) i seg selv var riktig. Kapper her, FØR noe annet leser gapCm, så
+  // ALLE nedstrøms forbrukere (kapasitetsloopen i autoFillMatSerpentine, flermatte-veien via
+  // _matRoomGeomForFill/_matRoomCapacityCm) automatisk bruker et gap som faktisk går opp — ingen
+  // egen if-gren noe sted. (Retningsvalget _cov over bruker aldri gapCm i det hele tatt — Regel 8
+  // har ingen gap-ledd der — så det er urørt av denne fiksen.)
+  const maxFitGapCm = maxRuns > 1
+    ? Math.max(minMandatoryGapCm, (acrossSpan - maxRuns * matWidthCm) / (maxRuns - 1))
+    : gapCm;
+  const cappedGapCm = Math.max(minMandatoryGapCm, Math.min(gapCm, maxFitGapCm));
+
+  return { matWidthCm, cutCm, marginCm, gapCm: cappedGapCm, requestedGapCm: gapCm, minLenCm, minMandatoryGapCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
 }
 
 // Bygger ctx fra ETT produkt (margin/gap-krav leses fra PRODUKTET, ikke hardkodet «innendørs») og
@@ -7604,9 +7625,16 @@ function autoFillMatSerpentine(productId, opts) {
   // valgte 26 m — 26 m sin egen, riktige kapasitet ble aldri sjekket mot dens EGEN per-bredde-lengde).
   // For et rent rektangel er dette identisk med før (reachable er allerede begrenset av alongSpan,
   // som snapper til nøyaktig samme runLengthCm) — se regresjonstest.
+  // FEIL 2 (Kenneth 19.08.2026, «gapet kappes ikke mot det som får plass»): posisjonerer med
+  // geom0.gapCm (kappet til det som faktisk går opp ved maxRuns bredder, se _matAreaGeom) — IKKE
+  // den rå lokale gapCm (brukerens ukappede ønske). Et for stort ønsket gap (Kenneths 7cm på et
+  // rom med plass til 4,87cm) posisjonerte tidligere senere bredder delvis utenfor margin-innsatt
+  // rombredde, som gjorde kapasitetsestimatet kunstig lavt og fikk motoren til å velge en altfor
+  // liten variant (Kenneths diagnose: 1024cm i stedet for riktige 1280cm) — selv om maxRuns (5) i
+  // seg selv alltid var riktig.
   let capacityCm = 0;
   for (let r = 0; r < maxRuns; r++) {
-    const perpPos = acrossMin + r * (matWidthCm + gapCm);
+    const perpPos = acrossMin + r * (matWidthCm + geom0.gapCm);
     // cutCm=0 her: _matClippedSegments skal IKKE snappe internt — det ville dobbelt-avrundet
     // sammen med Math.floor(len/cutCm) rett under (fant ~16 cm falsk «klipping» på HVER bredde,
     // også de som aldri traff romformen, ved testing mot repro-rommet).
@@ -7956,6 +7984,10 @@ function autoFillMatSerpentine(productId, opts) {
     // og hvor mye margen ble økt utover sin egen min_wall_margin_mm.
     _effMarginAlongCm: prod.mat_equal_widths ? Math.round((marginCm + Math.max(0, alongSpan - runLengthCm) / 2) * 10) / 10 : null,
     _equalWidthFallback: !!_matEqualWidthFallback,                  // Regel E gikk ikke opp — «N-1 like + kortere siste» ble brukt i stedet
+    // FEIL 2 (Kenneth 19.08.2026): brukerens/standardens ønskede gap (gapCm, FØR romfit-kapping)
+    // satt her KUN når det faktiske gapet (effectiveGapCm) endte lavere — «gapet ga etter, ikke
+    // margen» skal være synlig i panelet, ikke se ut som innstillingen ble ignorert.
+    _gapCappedFromCm: (effectiveGapCm < gapCm - 0.05) ? Math.round(gapCm * 10) / 10 : null,
   };
 
   // STEG 4: siste vaktpost før noe faktisk legges til state. PASS 2 over skal allerede garantere
@@ -29814,6 +29846,7 @@ function updateObjInfo() {
         <div class="soi-row"><span class="soi-k">Valgt rull</span><span class="soi-v" style="${(mp.mat_length_mm/10) > mat._capacityCm + 0.5 ? 'color:var(--warn)' : ''}">${(mp.mat_length_mm/1000).toFixed(1)} m</span></div>` : ''}
         ${koldSideCm!=null?`<div class="soi-row"><span class="soi-k">Kaldt felt/side</span><span class="soi-v">${Math.round(koldSideCm)} cm</span></div>`:''}
         ${mat._effMarginAlongCm!=null?`<div class="soi-row"><span class="soi-k">Avstand langvegg</span><span class="soi-v">${mat._effMarginAlongCm.toFixed(1)} cm</span></div>`:''}
+        ${mat._gapCappedFromCm!=null?`<div class="soi-row" style="color:var(--warn);font-size:11px">Mellomrom kappet: ønsket ${mat._gapCappedFromCm.toFixed(1)} cm → ${mat.gap_cm.toFixed(1)} cm (plassmangel)</div>`:''}
         ${mat._equalWidthFallback?`<div class="soi-row" style="color:var(--warn);font-size:11px">Rullen gikk ikke opp i like bredder — siste bredde er kortere</div>`:''}
         ${_ccMm ? `<div class="soi-row"><span class="soi-k">CC</span><span class="soi-v">${ccCm.toFixed(1)} cm</span></div>` : ''}
         ${kabelM>0?`<div class="soi-row"><span class="soi-k">Kabellengde</span><span class="soi-v">\u2248 ${kabelM.toFixed(1)} m</span></div>`:''}
