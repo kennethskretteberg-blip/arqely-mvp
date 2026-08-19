@@ -39637,10 +39637,29 @@ const CABLE_ACCESSORIES = [
     unit: 'nett', group: 'perRoom', defaultEnabled: false,
     netPerUnit_m2: 0.92, overheadPct: 10,
     calcRoom: (m2) => Math.ceil(m2 * 1.10 / 0.92) },
+  // STEG 1 (LÅST REGEL, Kenneth 19.08.2026): følerrør telles per OPPVARMET ROM (kabel ∪ matte ∪
+  // folie), ikke per kabel-rom — et rom med kabel OG matte har likevel bare ett rør. ctx.heatedRoomCount
+  // kommer fra _heatedRoomIds (injisert i showAccessoriesModal), ikke ctx.cableRoomCount (som
+  // fortsatt brukes uendret av stålnett rett over — den er riktig KUN kabel-rom-basert).
   { id: 'kabel_folerror', name: 'Følerrør Ø=11,5mm/16mm L=2,5m', art_no: 'CVA10526', el_no: '5400784',
     unit: 'stk', group: 'auto', defaultEnabled: false,
-    calc: (ctx) => ctx.cableRoomCount, overheadPct: 0, roundTo: 1,
-    basis: (ctx, qty) => `1 per kabel-rom × ${ctx.cableRoomCount} rom = ${qty} stk` },
+    calc: (ctx) => ctx.heatedRoomCount, overheadPct: 0, roundTo: 1,
+    basis: (ctx, qty) => `1 per oppvarmet rom × ${ctx.heatedRoomCount} rom = ${qty} stk` },
+];
+
+// ─── MAT ACCESSORIES (varmematte-tilbehør, samme deklarative mønster) ────────
+// En ny tilbehørsartikkel = en ny oppføring, ikke ny spesial-logikk (samme prinsipp som
+// CABLE_ACCESSORIES over). Følerrøret er DELT med kabel-tilbehøret (samme fysiske artikkel, samme
+// LÅSTE REGEL — én per oppvarmet rom) — se showAccessoriesModal for hvordan de to unngår å telle
+// det samme rommet to ganger: matCtx.heatedRoomCount er 0 når kabel-seksjonen allerede viser
+// (og dermed dekker) totalen, ellers hele totalen. Ingen andre artikler er lagt til her ennå —
+// Kenneth har ikke bekreftet hva mer som hører til en EcoMat-installasjon (montasjetape/primer/
+// avretting), så listen skal IKKE fylles med gjetninger.
+const MAT_ACCESSORIES = [
+  { id: 'mat_folerror', name: 'Følerrør Ø=11,5mm/16mm L=2,5m', art_no: 'CVA10526', el_no: '5400784',
+    unit: 'stk', group: 'auto', defaultEnabled: false,
+    calc: (ctx) => ctx.heatedRoomCount, overheadPct: 0, roundTo: 1,
+    basis: (ctx, qty) => `1 per oppvarmet rom × ${ctx.heatedRoomCount} rom = ${qty} stk` },
 ];
 
 // Slå opp et katalogprodukt på navn-fragment (lowercase). Returnerer {art_no, el_no, found}.
@@ -39709,6 +39728,48 @@ function _computeFoilContext() {
   };
 }
 
+// Avled matte-kontekst fra det som FAKTISK er lagt ut — S.mats (rektangulær) OG S.matPaths
+// (frihånds) teller BEGGE, samme mønster som _computeCableContext. Kun innendørs rom: snø-
+// modulen bruker samme S.mats/S.matPaths-strukturer, men «gulvføler» er et innendørs-begrep og
+// skal aldri telles for uteareal (se _isIndoorRoomId).
+function _computeMatContext() {
+  const roomIds = new Set();
+  for (const m of (S.mats || []))     if (_isIndoorRoomId(m.roomId))  roomIds.add(m.roomId);
+  for (const mp of (S.matPaths || [])) if (_isIndoorRoomId(mp.roomId)) roomIds.add(mp.roomId);
+  const matRooms = [...roomIds].map(rid => {
+    const r = (S.rooms || []).find(rr => rr.id === rid);
+    return { id: rid, name: r ? (r.name || ('Rom ' + rid)) : ('Rom ' + rid) };
+  });
+  const matCount = (S.mats || []).filter(m => _isIndoorRoomId(m.roomId)).length
+    + (S.matPaths || []).filter(mp => _isIndoorRoomId(mp.roomId)).length;
+  return { matCount, matRooms, matRoomCount: matRooms.length };
+}
+
+// Rommet hører til en INNENDØRS del (eller et gammelt prosjekt uten del-info) — «gulvføler» er et
+// innendørs-begrep, og snø-modulens rom (samme S.mats/S.matPaths-strukturer) skal aldri telles.
+function _isIndoorRoomId(roomId) {
+  const r = (S.rooms || []).find(rr => rr.id === roomId);
+  if (!r) return false;
+  const part = (S.project.parts || []).find(p => p.id === r.partId);
+  return !part || part.moduleType === 'indoor';
+}
+
+// STEG 1 (LÅST REGEL, Kenneth 19.08.2026): «1 gulvføler per oppvarmet rom», uansett hvor mange
+// utlegg eller varmetyper (kabel/matte/folie) rommet har — tellingen følger ROMMET, ikke utlegget.
+// Delt av kabel- og matte-tilbehørets følerrør-oppføringer, se der for hvordan de to unngår å
+// dobbelttelle et rom som har begge typer.
+function _heatedRoomIds() {
+  const ids = new Set();
+  for (const c of (S.cables || [])) if (_isIndoorRoomId(c.roomId)) ids.add(c.roomId);
+  for (const m of (S.mats || []))   if (_isIndoorRoomId(m.roomId)) ids.add(m.roomId);
+  for (const mp of (S.matPaths || [])) if (_isIndoorRoomId(mp.roomId)) ids.add(mp.roomId);
+  for (const s of (S.strips || [])) {
+    const p = HEATING_PRODUCTS.find(pp => pp.id === s.productId);
+    if (p && _productModuleType(p.id) === 'foil' && _isIndoorRoomId(s.roomId)) ids.add(s.roomId);
+  }
+  return ids;
+}
+
 function _applyAccessoryCalc(acc, ctx) {
   let qty = Number(acc.calc(ctx) || 0);
   if (acc.overheadPct) qty = qty * (1 + acc.overheadPct / 100);
@@ -39741,11 +39802,22 @@ function showAccessoriesModal() {
     // Typeavhengig: avled «hva er brukt» fra det som faktisk er lagt ut.
     const foilCtx  = _computeFoilContext();
     const cableCtx = _computeCableContext();
+    const matCtx   = _computeMatContext();
     const foilUsed  = !!(foilCtx && foilCtx.stripCount);
     const cableUsed = !!(cableCtx && cableCtx.cableCount);
-    // Verken folie eller kabel (f.eks. kun matte) → ingen tilbehørsmodal.
-    if (!foilUsed && !cableUsed) { resolve({ items: [] }); return; }
+    const matUsed   = !!(matCtx && matCtx.matCount);
+    // STEG 2 (Kenneth 19.08.2026): et rent matte-prosjekt skal IKKE lenger hoppe over dialogen —
+    // kun ingen varme i det hele tatt (verken folie, kabel eller matte) hopper over den.
+    if (!foilUsed && !cableUsed && !matUsed) { resolve({ items: [] }); return; }
     const prefs = _loadAccessoryPrefs() || { enabled: {}, rkkDim: '1.5', stalnettRooms: {} };
+
+    // STEG 1 (LÅST REGEL): følerrør telles per oppvarmet rom uansett varmetype — delt tall satt
+    // på BEGGE kontekstene. Kabel-seksjonen (når den finnes) viser hele totalen; matte-seksjonens
+    // egen følerrør-rad blir da 0 (i stedet for et dobbelt, duplisert tall) — ingen ekstra
+    // spesial-logikk i selve rendring/lesing, kun konteksttallet den leser fra.
+    const heatedRoomCount = _heatedRoomIds().size;
+    cableCtx.heatedRoomCount = heatedRoomCount;
+    matCtx.heatedRoomCount = cableUsed ? 0 : heatedRoomCount;
 
     let overlay = document.getElementById('modal-accessories');
     if (!overlay) {
@@ -39878,6 +39950,30 @@ function showAccessoriesModal() {
       }
     }
 
+    // ── MAT (STEG 2, Kenneth 19.08.2026) ──
+    const matAuto = MAT_ACCESSORIES.filter(a => a.group === 'auto');
+    const matAutoQtys = {}, matBasis = {}, matResolved = {};
+    for (const a of MAT_ACCESSORIES) {
+      if (a.art_no) matResolved[a.id] = { art_no: a.art_no, el_no: _accessoryElNo(a.art_no, a.el_no), found: true };
+      else if (a.fromCatalog) matResolved[a.id] = _catalogLookupByName(a.fromCatalog);
+      else matResolved[a.id] = { art_no: '', el_no: '', found: false };
+    }
+    for (const a of matAuto) {
+      matAutoQtys[a.id] = _applyAccessoryCalc(a, matCtx);
+      matBasis[a.id] = a.basis ? a.basis(matCtx, matAutoQtys[a.id]) : '';
+    }
+
+    let matHtml = '';
+    if (matUsed) {
+      matHtml = sectionHdr('Varmematte')
+        + `<div style="font-size:11px;color:var(--dim);margin-bottom:4px">${matCtx.matCount} matte · ${matCtx.matRoomCount} rom</div>`
+        + subHdr('Auto-foreslått')
+        + `<div>${matAuto.map(a => {
+              const warn = (!matResolved[a.id].found && !matResolved[a.id].art_no) ? 'Art.nr/EL-nr ikke funnet i katalogen' : '';
+              return renderRow(a, matAutoQtys[a.id], matBasis[a.id], warn);
+            }).join('')}</div>`;
+    }
+
     overlay.innerHTML = `
       <div style="background:var(--bg,#fff);border-radius:10px;padding:24px;max-width:560px;width:90%;max-height:90vh;overflow:auto;color:var(--text,#111)">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -39886,6 +39982,7 @@ function showAccessoriesModal() {
         </div>
         ${foilHtml}
         ${cableHtml}
+        ${matHtml}
         <div style="display:flex;gap:8px;margin-top:18px">
           <button id="acc-cancel" class="adm-btn ghost" style="flex:1">Avbryt</button>
           <button id="acc-confirm" class="adm-btn primary" style="flex:1">Generer rapport →</button>
@@ -39972,6 +40069,11 @@ function showAccessoriesModal() {
               unit: stalnett.unit, qty: total, source: 'auto', type: 'cable', rooms: chosen });
           }
         }
+      }
+
+      // MAT (STEG 2)
+      if (matUsed) {
+        for (const a of matAuto) readRow(a, matAutoQtys[a.id], 'auto', 'mat', matResolved[a.id]);
       }
 
       _saveAccessoryPrefs({ enabled: newEnabled, rkkDim, stalnettRooms: newStal });
