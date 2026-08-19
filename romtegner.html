@@ -7441,15 +7441,64 @@ function _matPlaceMultiMats(room, prod, geom, solution) {
   return true;
 }
 
-// STEG 3: inngangspunkt fra «Fyll rom»-knappen. Avgjør om rommet trenger flere matter (kapasiteten
-// overstiger den STØRSTE tilgjengelige enkeltmatta) — er det ikke tilfelle, uendret oppførsel,
-// ingen valgboks (STEG 3: «Er rommet lite nok til én matte: ingen endring»).
+// REGEL 20 (LÅST, «del rommet i soner», Kenneth 19.08.2026): planlegger ett mat-utlegg PER SONE
+// for uregelmessige rom (L/T-formet osv.) — samme grunnleggende maskineri folien har brukt siden
+// juli (_decomposeRoomToRects), portet til matter (femte gang denne uka funksjonalitet skrevet for
+// folie aldri ble løftet til matte-siden — se STEG 0 i prompten). Returnerer null hvis rommet
+// praktisk talt ER et rektangel (_decomposeRoomToRects gir ≤1 sone) — kalleren beholder da
+// dagens ETT-blokk-vei UENDRET (hovedregresjonstesten, se _matRegressionTest).
+//
+// STEG 2 (små soner): en sone som ikke engang får plass til ÉN bredde i produktets minste
+// brukslengde (mat_min_length_mm) hopper ut. autoFillMatSerpentine sine EGNE vakter
+// (acrossSpan<matWidthCm / alongSpan<minLenCm / maxRuns<=0) ER allerede nøyaktig denne grensen —
+// en dryRun-kjøring som returnerer null ER «for liten», ingen egen terskel-kode trengs. Utelatt
+// areal spores for panelet i stedet for å forsvinne i stillhet.
+//
+// Hver sone kjøres med SAMME startprodukt (familien/bredden Kenneth valgte) — autoFillMatSerpentine
+// sitt EGET variantsøk (Regel B/E) finner den beste STØRRELSEN for AKKURAT den sonen, uendret fra
+// hvordan det allerede virker for ett rektangulært rom. «La resten av motoren gå som i dag.»
+function _matPlanZones(room, prod) {
+  const rects = _decomposeRoomToRects(room);
+  if (!rects || rects.length <= 1) return null;
+  rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
+
+  const wm2 = prod.watt_per_m2 || 0;
+  const zonePlans = [], excludedZones = [];
+  let totalAreaM2 = 0, totalWatt = 0;
+  for (const rect of rects) {
+    const zoneAreaM2 = (rect.x1 - rect.x0) * (rect.y1 - rect.y0) / 10000;
+    const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect });
+    if (!mat) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
+    const laidCm = _matLaidLengthCm(mat);
+    const coveredM2 = mat.width_cm * laidCm / 10000;
+    const watt = Math.round(wm2 * coveredM2);
+    zonePlans.push({ rect, mat, zoneAreaM2, coveredM2, watt });
+    totalAreaM2 += coveredM2; totalWatt += watt;
+  }
+  return { zonePlans, excludedZones, totalAreaM2, totalWatt };
+}
+
+// STEG 3: inngangspunkt fra «Fyll rom»-knappen. REGEL 20: uregelmessige rom sjekkes FØR noe annet
+// vurderes — se _matPlanZones. Rektangulære rom faller uendret gjennom til den eksisterende
+// ett-blokk-veien under, som ALLEREDE avgjør om rommet trenger flere matter (kapasiteten overstiger
+// den STØRSTE tilgjengelige enkeltmatta) — er det ikke tilfelle, ingen valgboks (STEG 3: «Er
+// rommet lite nok til én matte: ingen endring»).
 function _matFillRoomSmart(productId) {
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return;
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room || !room.points || room.points.length < 3) { autoFillMatSerpentine(productId); return; }
   if (!prod.mat_equal_widths) { autoFillMatSerpentine(productId); return; }
+
+  const zonePlan = _matPlanZones(room, prod);
+  if (zonePlan) {
+    if (!zonePlan.zonePlans.length) {
+      _showToast('Ingen sone i rommet har plass til denne matten', 'warn');
+      return;
+    }
+    _showMatZoneProposalPanel(room, prod, zonePlan);
+    return;
+  }
 
   const geom = _matRoomGeomForFill(room, prod);
   if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) { autoFillMatSerpentine(productId); return; }
@@ -7557,8 +7606,104 @@ function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved) {
   };
 }
 
+// STEG 3 (REGEL 20, «del rommet i soner», Kenneth 19.08.2026): viser _matPlanZones sitt forslag —
+// hvilken matte som havner i HVILKEN sone, dekning per sone, og areal som ble utelatt (STEG 2) —
+// FØR noe legges ut. Kenneth skal godkjenne forslaget, ikke oppdage det i etterkant (samme «regn
+// ut → vis → commit ved klikk»-mønster som _showMatMultiProposalPanel over).
+function _showMatZoneProposalPanel(room, prod, zonePlan) {
+  const netAreaM2 = (() => { try { return compArea(room.points) / 10000; } catch (e) { return null; } })();
+  const btaWm2 = netAreaM2 ? Math.round(zonePlan.totalWatt / netAreaM2) : null;
+  const targetWm2 = prod.watt_per_m2 || 0;
+
+  const zoneRows = zonePlan.zonePlans.map((zp, i) => {
+    const p = HEATING_PRODUCTS.find(x => x.id === zp.mat.productId);
+    const uncoveredM2 = Math.max(0, zp.zoneAreaM2 - zp.coveredM2);
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
+      <div style="font-weight:600">Sone ${i + 1} — ${zp.zoneAreaM2.toFixed(1)} m²</div>
+      <div style="color:var(--dim);font-size:12px">${esc(p ? p.name : '?')} — ${zp.mat.num_runs} bredder à ${Math.round(zp.mat.length_cm)}cm</div>
+      <div style="font-size:12px">${zp.coveredM2.toFixed(1)} m² dekket${uncoveredM2 > 0.05 ? ` · ${uncoveredM2.toFixed(1)} m² udekket i sonen` : ''} · ${zp.watt} W</div>
+    </div>`;
+  }).join('');
+
+  const excludedTotalM2 = zonePlan.excludedZones.reduce((s, e) => s + e.areaM2, 0);
+  const excludedNote = zonePlan.excludedZones.length
+    ? `<div style="margin-top:8px;padding:8px;background:rgba(245,158,11,0.1);border-radius:6px;font-size:12px;color:var(--warn,#f59e0b)">
+        ${excludedTotalM2.toFixed(1)} m² i ${zonePlan.excludedZones.length} sone(r) utelatt — enten for smalt/kort til én bredde, eller ingen tilgjengelig ${esc(prod.product_family || prod.name)}-størrelse passer sonens kapasitet (STEG 2).
+      </div>`
+    : '';
+
+  const btaNote = btaWm2 != null
+    ? `<div style="font-size:12px;margin-top:4px">Samlet: ${zonePlan.totalAreaM2.toFixed(1)} m² dekket · ${zonePlan.totalWatt} W · <b>${btaWm2} W/m² BTA</b>${targetWm2 ? ` (mål ${targetWm2} W/m²)` : ''}</div>`
+    : `<div style="font-size:12px;margin-top:4px">Samlet: ${zonePlan.totalAreaM2.toFixed(1)} m² dekket · ${zonePlan.totalWatt} W</div>`;
+
+  const old = document.getElementById('mat-zone-panel');
+  if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'mat-zone-panel';
+  div.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,0.35);max-width:440px;max-height:80vh;overflow-y:auto;font-size:13px;color:var(--text)';
+  div.innerHTML = `<div style="font-weight:700;font-size:14px;margin-bottom:4px">Rommet deles i ${zonePlan.zonePlans.length} soner</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(room.name || 'Rommet')} er ikke rektangulært — hver sone fylles for seg, breddene ligger tett i sonen og slakken ligger mot ytterveggene (Regel 20).</div>
+    ${zoneRows}
+    ${btaNote}
+    ${excludedNote}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button id="mat-zone-cancel" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer">Avbryt</button>
+      <button id="mat-zone-apply" style="flex:1;padding:8px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Legg ut</button>
+    </div>`;
+  document.body.appendChild(div);
+
+  document.getElementById('mat-zone-cancel').onclick = () => div.remove();
+  document.getElementById('mat-zone-apply').onclick = () => {
+    // ÉTT undo-steg for hele batchen (samme prinsipp som snøens forhåndsvisning-før-commit-økt) —
+    // hver sone commiter med opts.exact (SAMME produkt dry-run allerede fant) + skipPushUndo.
+    pushUndo();
+    let placed = 0;
+    for (const zp of zonePlan.zonePlans) {
+      const mat = autoFillMatSerpentine(zp.mat.productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true });
+      if (mat) placed++;
+    }
+    div.remove();
+    if (placed) _showToast(`${placed} matter lagt ut i ${placed} soner (${zonePlan.totalAreaM2.toFixed(1)} m²)`, 'ok');
+    else _showToast('Ingen matter kunne legges ut — prøv igjen', 'error');
+  };
+}
+
+// REGEL 20: klemmer _matClippedSegments sitt resultat til sonens EGNE along-grenser — rommets
+// EKTE polygon-klipping vet ingenting om soneskiller, så uten dette kunne en bredde funnet et
+// fritt segment i NESTE sone (eller en annen arm av et T-formet rom) og forankret seg der. No-op
+// (returnerer segs uendret) når loBound er null — dvs. for ALLE ikke-sone-kall, bit-for-bit likt.
+function _matClipSegsToZone(segs, loBound, hiBound) {
+  if (loBound == null) return segs;
+  const out = [];
+  for (const s of segs) {
+    const lo = Math.max(s.start_cm, loBound), hi = Math.min(s.start_cm + s.length_cm, hiBound);
+    if (hi - lo > 0.01) out.push({ start_cm: lo, length_cm: hi - lo });
+  }
+  return out;
+}
+
+// REGEL 20: bygger et syntetisk «rom» (kun .points) — sonens rektangel, INNSATT med sone-bevisst
+// margin. En kant som åpner mot en NABOSONE (_rectEdgeIsSoneBoundary, samme mekanisme folien har
+// brukt siden juli) får IKKE veggmargin — breddene skal ligge tett der, ikke ha slakk mellom seg
+// og nabosonen. Kun kanter som faktisk ER en ytterVEGG (eller hindring/forbudt sone) beholder full
+// margin — «slakken legges mot ytterveggene, ikke i soneskillene» (Regel 20 pkt. 4, Kenneths egen
+// presisering: minst mulig avstand MELLOM sonene, heller mer udekket mot ytterveggene). Kalt med
+// marginCm=0 inn i _matAreaGeom etterpå — den delte kjernen forblir uendret for alle andre kallere.
+function _matZoneUsableRoom(room, rect, marginCm) {
+  const loSoneX = _rectEdgeIsSoneBoundary(room, rect, 'x0'), hiSoneX = _rectEdgeIsSoneBoundary(room, rect, 'x1');
+  const loSoneY = _rectEdgeIsSoneBoundary(room, rect, 'y0'), hiSoneY = _rectEdgeIsSoneBoundary(room, rect, 'y1');
+  const ix0 = rect.x0 + (loSoneX ? 0 : marginCm), ix1 = rect.x1 - (hiSoneX ? 0 : marginCm);
+  const iy0 = rect.y0 + (loSoneY ? 0 : marginCm), iy1 = rect.y1 - (hiSoneY ? 0 : marginCm);
+  return { points: [{ x: ix0, y: iy0 }, { x: ix1, y: iy0 }, { x: ix1, y: iy1 }, { x: ix0, y: iy1 }] };
+}
+
 // opts.exact: place exactly the given product (skip best-fit variant swap).
 // opts.keepPanel: don't hide the product panel after placing (for live variant preview).
+// opts.zoneRect: se REGEL 20-kommentaren ved _matZoneUsableRoom.
+// opts.dryRun: regn ut og returner mat-objektet UTEN å committe (pushUndo/S.mats.push/render) —
+// brukt av sone-orkestreringen (_matPlanZones) for å bygge en forhåndsvisning brukeren må
+// godkjenne før noe faktisk legges ut (samme «regn ut → vis panel → commit ved klikk»-mønster som
+// den eksisterende _showMatMultiProposalPanel/_matPlaceMultiMats allerede bruker).
 function autoFillMatSerpentine(productId, opts) {
   opts = opts || {};
   let prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -7584,10 +7729,19 @@ function autoFillMatSerpentine(productId, opts) {
   // geometry core below (mat-local; does NOT touch _suggestDirection, which folie/kabel rely on).
   const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
 
+  // REGEL 20 (LÅST, «del rommet i soner», Kenneth 19.08.2026): opts.zoneRect — satt av
+  // sone-orkestreringen (_matPlanZones) for uregelmessige rom — begrenser
+  // geometrien til ÉN sone-rektangel i stedet for rommets omsluttende boks. Se
+  // _matZoneUsableRoom for hva sone-bevisst margin betyr.
+  let geomRoom = room, geomMarginCm = marginCm, zoneAlongMin = null, zoneAlongMax = null;
+  if (opts.zoneRect) {
+    geomRoom = _matZoneUsableRoom(room, opts.zoneRect, marginCm);
+    geomMarginCm = 0;
+  }
   // STEG 1 («Én mattemotor for alle», Kenneth 19.08.2026): bbox+margin+hindring-unngåelse+
   // retningsvalg+maxRuns er nå ÉN delt kjerne (_matAreaGeom) — samme kall som flermatte-søket
   // (_matRoomGeomForFill) og snø-auto (STEG 2) bruker. Ingen formel endret her, kun flyttet dit.
-  const geom0 = _matAreaGeom(room, { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir, minMandatoryGapCm });
+  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: geomMarginCm, gapCm, userDir, minMandatoryGapCm });
   const dir = geom0.dir;
   let acrossMin = geom0.acrossMin, acrossMax = geom0.acrossMax, acrossSpan = geom0.acrossSpan;
   if (acrossSpan < matWidthCm) return;
@@ -7595,6 +7749,12 @@ function autoFillMatSerpentine(productId, opts) {
   // Along-axis: how long each run can be
   let alongMin = geom0.alongMin, alongMax = geom0.alongMax, alongSpan = geom0.alongSpan;
   if (alongSpan < minLenCm) return;
+  // Sonens EGET along-område (etter sone-bevisst margin over) — brukt til å klemme
+  // _matClippedSegments-resultater lenger ned, slik at en bredde aldri kan «lekke» inn i en
+  // nabosone eller en annen arm av rommet via rommets EKTE polygon-klipping (som ikke selv vet
+  // noe om soner). Uten dette ville en bredde kunne finne et fritt segment langt inne i
+  // NESTE sone og forankre seg der — nøyaktig den typen sammenblanding sonene skal forhindre.
+  if (opts.zoneRect) { zoneAlongMin = alongMin; zoneAlongMax = alongMax; }
 
   // Snap run length to cut interval
   let runLengthCm = cutCm > 0 ? Math.floor(alongSpan / cutCm) * cutCm : alongSpan;
@@ -7638,7 +7798,7 @@ function autoFillMatSerpentine(productId, opts) {
     // cutCm=0 her: _matClippedSegments skal IKKE snappe internt — det ville dobbelt-avrundet
     // sammen med Math.floor(len/cutCm) rett under (fant ~16 cm falsk «klipping» på HVER bredde,
     // også de som aldri traff romformen, ved testing mot repro-rommet).
-    const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+    const segs = _matClipSegsToZone(_matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0), zoneAlongMin, zoneAlongMax);
     const seg = segs.find(s => s.start_cm <= alongMin + 0.5 && s.start_cm + s.length_cm >= alongMin - 0.5);
     let len = 0;
     if (seg) {
@@ -7870,7 +8030,7 @@ function autoFillMatSerpentine(productId, opts) {
       const anchorPoint = upR ? (nominalStart + nominalLen) : nominalStart;   // sømenden (upR) ELLER alongStart
       // cutCm=0: se samme note som i idealLenCm-løkken over — snapping skjer ÉN gang, i
       // Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
-      const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+      const segs = _matClipSegsToZone(_matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0), zoneAlongMin, zoneAlongMax);
       // Segmentet som faktisk INNEHOLDER forankringspunktet foretrekkes (bevarer sømflukt der
       // rommet tillater det).
       let seg = segs.find(s => s.start_cm <= anchorPoint + 0.5 && s.start_cm + s.length_cm >= anchorPoint - 0.5);
@@ -7992,20 +8152,27 @@ function autoFillMatSerpentine(productId, opts) {
 
   // STEG 4: siste vaktpost før noe faktisk legges til state. PASS 2 over skal allerede garantere
   // dette, men hvis noe likevel bryter (fremtidig regresjon), ikke commit et utlegg som legger
-  // kabel utenfor rommet — logg og varsle i stedet for å stille legge det ut.
+  // kabel utenfor rommet — logg og varsle i stedet for å stille legge det ut. Vakten kjøres i
+  // dry-run også (sone-forhåndsvisningen skal aldri love noe den ikke kan holde) — kun selve
+  // commit-en (pushUndo/S.mats.push/toast/render) hoppes over.
   if (!_matRunsWithinRoom(mat, room, marginCm, prod)) {
     console.error('autoFillMatSerpentine: klippet utlegg brøt likevel romgrensa — avbrutt', mat);
-    _showToast('Auto-utlegg avbrutt: ville lagt kabel utenfor rommet', 'error');
-    return;
+    if (!opts.dryRun) _showToast('Auto-utlegg avbrutt: ville lagt kabel utenfor rommet', 'error');
+    return null;
   }
   const _ruleCheck = _matRunsMatchRule(mat, prod, cutCm, anyRunClipped);
   if (!_ruleCheck.ok) {
     console.error('autoFillMatSerpentine: Regel ' + _ruleCheck.rule + ' brutt — avbrutt: ' + _ruleCheck.reason, mat);
-    _showToast('Auto-utlegg avbrutt: ' + _ruleCheck.reason, 'error');
-    return;
+    if (!opts.dryRun) _showToast('Auto-utlegg avbrutt: ' + _ruleCheck.reason, 'error');
+    return null;
   }
 
-  pushUndo();
+  if (opts.dryRun) return mat;   // REGEL 20: sone-orkestreringen bruker mat-objektet til forhåndsvisning
+
+  // opts.skipPushUndo: sone-commit-flyten legger ut flere matter (én per sone) fra ETT klikk —
+  // ett undo-steg for hele batchen (samme prinsipp som snøens forhåndsvisning-før-commit-økt),
+  // ikke ett per matte. Kalleren tar sitt eget pushUndo() FØR løkka i så fall.
+  if (!opts.skipPushUndo) pushUndo();
   S.mats.push(mat);
   // REGEL B (STEG 2): ingen katalogvariant var ≤ rommets kapasitet — minste tilgjengelige ble brukt
   // som beste delvis dekning, men brukeren skal vite at rullen faktisk er lengre enn rommet tar imot.
