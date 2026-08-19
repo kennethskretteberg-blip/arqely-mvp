@@ -7844,48 +7844,28 @@ function autoFillMatSerpentine(productId, opts) {
   let _matCapacityShortfall = false;
   let _matEqualNL = null;   // {N,L} når Regel E (jevne bredder) går opp eksakt for VALGT variant
   let _matEqualWidthFallback = false;   // Regel E ble forsøkt men ingen kapasitets-egnet variant gikk opp
+  // REGEL 6 RYKKER NED (Kenneth 19.08.2026, «dekning skal slå like bredder», rom 2102, bekreftet
+  // FØR koding): dekning (Regel 3/B) rangeres nå OVER like bredder (Regel 6/E) — velg alltid den
+  // STØRSTE varianten som er ≤ kapasitet, punktum. MAX_EQUAL_WIDTH_NEIGHBORS-søket nedover er
+  // fjernet — det fantes bare for å redde like bredder på bekostning av dekning (kostet Kenneth
+  // en hel m²: 20m/10m² i stedet for 22m/11m² i et rom som skal ha 150 W/m²), meningsløst nå.
+  // Like bredder brukes kun som TIE-BREAK mellom varianter med IDENTISK dekning (samme lenMm) —
+  // sjelden i praksis (katalog-duplikater), men riktig når det skjer. Går IKKE den valgte varianten
+  // opp i like bredder, brukes fallbacken lenger ned (N−1 like + én kortere siste = hele rullen).
   if (!opts.exact && candidates.length >= 1) {
-    if (prod.mat_equal_widths) {
-      // REGEL E (Kenneth 19.08.2026, automatisk utlegg): blant de kapasitets-egnede variantene
-      // (Regel B, størst først), foretrekk den STØRSTE som i tillegg går opp i like bredder
-      // (_matEqualWidthNL). STEG 3: «prøv NABOVARIANTENE» — de nærmeste, ikke ubegrenset nedover.
-      // Et par hopp (24→22→20) er et forsøk på å redde EKSAKT samme dekning; å fortsette helt ned
-      // til en mye mindre variant bare fordi DEN tilfeldigvis går opp i hele kuttenheter ville gitt
-      // et mye dårligere resultat enn fallback-modellen på den opprinnelige, kapasitets-beste
-      // varianten — coverage taper for jevnhet langt utover det Kenneth ba om.
-      const MAX_EQUAL_WIDTH_NEIGHBORS = 3;
-      let pick = null, pickNL = null, bestCapacityPick = null, neighborTries = 0;
-      for (let i = candidates.length - 1; i >= 0; i--) {       // largest first
-        const totalLenCm = candidates[i].lenMm / 10;
-        if (totalLenCm > capacityCm + 0.01) continue;          // REGEL B: aldri over kapasiteten
-        if (!bestCapacityPick) bestCapacityPick = candidates[i];   // Regel B sitt opprinnelige valg — fallback-mål
-        if (neighborTries < MAX_EQUAL_WIDTH_NEIGHBORS) {
-          neighborTries++;
-          const nl = _matEqualWidthNL(totalLenCm, cutCm, maxRuns, alongSpan, minLenCm);
-          if (nl) { pick = candidates[i]; pickNL = nl; break; }
-        }
-      }
-      if (!pick && bestCapacityPick) {
-        // Ingen av de nærmeste kapasitets-egnede variantene gikk opp i like bredder — fall tilbake
-        // til Regel B sitt OPPRINNELIGE (størst ≤ kapasitet) valg, med «N-1 like + kortere siste»
-        // lenger ned (matLastRunLen), i stedet for å bytte til en mye mindre variant.
-        _matEqualWidthFallback = true;
-        pick = bestCapacityPick;
-      }
-      if (!pick) { pick = candidates[0]; _matCapacityShortfall = true; }   // ingen ≤ kapasitet → minste, varsle
-      prod = pick.p; productId = pick.p.id;
-      _matEqualNL = pickNL;
-    } else if (candidates.length > 1) {
-      let pick = null;
-      for (let i = candidates.length - 1; i >= 0; i--) {       // largest first
-        if (candidates[i].lenMm / 10 <= capacityCm + 0.01) { pick = candidates[i]; break; }
-      }
-      if (!pick) { pick = candidates[0]; _matCapacityShortfall = true; }
-      if (pick.p.id !== prod.id) {
-        prod = pick.p;
-        productId = pick.p.id;
+    let pick = null;
+    for (let i = candidates.length - 1; i >= 0; i--) {       // størst først
+      if (candidates[i].lenMm / 10 <= capacityCm + 0.01) { pick = candidates[i]; break; }
+    }
+    if (!pick) { pick = candidates[0]; _matCapacityShortfall = true; }   // ingen ≤ kapasitet → minste, varsle
+    else if (prod.mat_equal_widths) {
+      const tied = candidates.filter(c => Math.abs(c.lenMm - pick.lenMm) < 0.01);
+      if (tied.length > 1) {
+        const evenTied = tied.find(c => _matEqualWidthNL(c.lenMm / 10, cutCm, maxRuns, alongSpan, minLenCm));
+        if (evenTied) pick = evenTied;
       }
     }
+    prod = pick.p; productId = pick.p.id;
   }
 
   // ── REGEL H (LÅST, Kenneth 19.08.2026): aldri overskudd ────────────────────────────────────
@@ -8144,6 +8124,21 @@ function autoFillMatSerpentine(productId, opts) {
   const runLengthsOut = anyRunClipped ? clippedRunLens : null;
   const runStartsOut = anyRunClipped ? clippedRunStarts : null;
 
+  // STEG 2 (Kenneth 19.08.2026, «dekning skal slå like bredder»): når REGEL 6 rykket ned og det
+  // valgte (størst-dekning) produktet IKKE gikk opp i like bredder (_matEqualWidthFallback), finn
+  // den nærmeste MINDRE varianten som VILLE gitt like bredder — vist i panelet så brukeren ser at
+  // ulike bredder her er et BEVISST valg (mer dekning), ikke en feil.
+  let _matEqualWidthAlt = null;
+  if (_matEqualWidthFallback) {
+    const curLenCm = _matTotalLengthMm(prod) / 10;
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const c = candidates[i];
+      if (c.lenMm / 10 >= curLenCm - 0.01) continue;   // kun MINDRE enn valgt
+      const nl = _matEqualWidthNL(c.lenMm / 10, cutCm, maxRuns, alongSpan, minLenCm);
+      if (nl) { _matEqualWidthAlt = { name: c.p.name, areaM2: c.p.mat_area_m2 || null }; break; }
+    }
+  }
+
   const mat = {
     id: S.counters.nextMatId++,
     roomId: room.id,
@@ -8166,6 +8161,7 @@ function autoFillMatSerpentine(productId, opts) {
     // og hvor mye margen ble økt utover sin egen min_wall_margin_mm.
     _effMarginAlongCm: prod.mat_equal_widths ? Math.round((marginCm + Math.max(0, alongSpan - runLengthCm) / 2) * 10) / 10 : null,
     _equalWidthFallback: !!_matEqualWidthFallback,                  // Regel E gikk ikke opp — «N-1 like + kortere siste» ble brukt i stedet
+    _equalWidthAlt: _matEqualWidthAlt,                              // STEG 2: nærmeste MINDRE variant som ville gitt like bredder (navn+areal), for panelforklaringen
     // FEIL 2 (Kenneth 19.08.2026): brukerens/standardens ønskede gap (gapCm, FØR romfit-kapping)
     // satt her KUN når det faktiske gapet (effectiveGapCm) endte lavere — «gapet ga etter, ikke
     // margen» skal være synlig i panelet, ikke se ut som innstillingen ble ignorert.
@@ -30204,7 +30200,12 @@ function updateObjInfo() {
         ${koldSideCm!=null?`<div class="soi-row"><span class="soi-k">Kaldt felt/side</span><span class="soi-v">${Math.round(koldSideCm)} cm</span></div>`:''}
         ${mat._effMarginAlongCm!=null?`<div class="soi-row"><span class="soi-k">Avstand langvegg</span><span class="soi-v">${mat._effMarginAlongCm.toFixed(1)} cm</span></div>`:''}
         ${mat._gapCappedFromCm!=null?`<div class="soi-row" style="color:var(--warn);font-size:11px">Mellomrom kappet: ønsket ${mat._gapCappedFromCm.toFixed(1)} cm → ${mat.gap_cm.toFixed(1)} cm (plassmangel)</div>`:''}
-        ${mat._equalWidthFallback?`<div class="soi-row" style="color:var(--warn);font-size:11px">Rullen gikk ikke opp i like bredder — siste bredde er kortere</div>`:''}
+        ${mat._equalWidthFallback?(()=>{
+          const diffCm = mat.last_run_length_cm!=null ? Math.round(mat.length_cm - mat.last_run_length_cm) : null;
+          const alt = mat._equalWidthAlt;
+          const altTxt = (alt && alt.areaM2!=null) ? ` ${esc(alt.name)} ville gitt like bredder, men ${(dekketM2 - alt.areaM2).toFixed(1)} m² mindre.` : '';
+          return `<div class="soi-row" style="color:var(--warn);font-size:11px">${dekketM2.toFixed(1)} m² dekning valgt${diffCm?`; siste bredde ${diffCm} cm kortere`:''}.${altTxt}</div>`;
+        })():''}
         ${_ccMm ? `<div class="soi-row"><span class="soi-k">CC</span><span class="soi-v">${ccCm.toFixed(1)} cm</span></div>` : ''}
         ${kabelM>0?`<div class="soi-row"><span class="soi-k">Kabellengde</span><span class="soi-v">\u2248 ${kabelM.toFixed(1)} m</span></div>`:''}
         ${_cutMm ? `<div class="soi-row"><span class="soi-k">Klipp</span><span class="soi-v">hver ${_cutMm} mm</span></div>` : ''}
