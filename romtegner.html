@@ -7178,30 +7178,21 @@ function _matAreaGeom(room, ctx) {
   const { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir } = ctx;
   const minMandatoryGapCm = ctx.minMandatoryGapCm || 0;
 
+  // REGEL 1-OPPFØLGING (LÅST, Kenneth 19.08.2026, «hindring-beskjæringen kaster bort lengde»): det
+  // brukbare rektangelet er KUN romboksen minus veggmargin — INGEN grådig forhåndsbeskjæring mot
+  // hindringer her lenger. Den forhåndsbeskjæringen (fjernet) krympet HELE rektangelet til den
+  // største hindringsfrie SIDEN, én hindring om gangen — en levning fra FØR per-bredde-klipping
+  // fantes (kommentaren sa det selv: «per-run clipping around interior obstacles is a future
+  // refinement»). Den refinementen kom (_matClippedSegments, Regel 1/A, 1cb674e→5bdc0c0): hver
+  // bredde klippes nå presist mot POLYGON + hindringer + forbudte soner. Forhåndsbeskjæringen her
+  // gjorde derfor ikke lenger noe nyttig — den bare krympet løsningsrommet FØR den presise
+  // klippingen fikk sjansen (rom 1110, 279×272 med én hindring: alongSpan falt fra ~262 til 142,
+  // og auto-utlegget valgte en helt feil, altfor liten rull). Sikkerhetsnettet er
+  // _matRunsWithinRoom (vakten) + selve _matClippedSegments-kallene per bredde lenger ned/i
+  // _matRoomCapacityCm — de avviser fortsatt alt som havner oppå en hindring.
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs), rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
-  let uX0 = rMinX + marginCm, uX1 = rMaxX - marginCm, uY0 = rMinY + marginCm, uY1 = rMaxY - marginCm;
-  {
-    const hinds = S.hindrings.filter(h => h.roomId === room.id && h.points && h.points.length >= 3)
-      .map(h => { const hx = h.points.map(p => p.x), hy = h.points.map(p => p.y);
-        return { x0: Math.min(...hx) - marginCm, x1: Math.max(...hx) + marginCm,
-                 y0: Math.min(...hy) - marginCm, y1: Math.max(...hy) + marginCm }; });
-    let R = { x0: uX0, x1: uX1, y0: uY0, y1: uY1 };
-    for (let it = 0; it < hinds.length + 2; it++) {
-      const H = hinds.find(h => h.x0 < R.x1 - 0.1 && h.x1 > R.x0 + 0.1 && h.y0 < R.y1 - 0.1 && h.y1 > R.y0 + 0.1);
-      if (!H) break;
-      const cand = [
-        { x0: R.x0, x1: Math.min(R.x1, H.x0), y0: R.y0, y1: R.y1 },
-        { x0: Math.max(R.x0, H.x1), x1: R.x1, y0: R.y0, y1: R.y1 },
-        { x0: R.x0, x1: R.x1, y0: R.y0, y1: Math.min(R.y1, H.y0) },
-        { x0: R.x0, x1: R.x1, y0: Math.max(R.y0, H.y1), y1: R.y1 },
-      ].map(c => ({ ...c, area: Math.max(0, c.x1 - c.x0) * Math.max(0, c.y1 - c.y0) }))
-       .sort((a, b) => b.area - a.area);
-      if (cand[0].area <= 0) { R = cand[0]; break; }
-      R = cand[0];
-    }
-    uX0 = R.x0; uX1 = R.x1; uY0 = R.y0; uY1 = R.y1;
-  }
+  const uX0 = rMinX + marginCm, uX1 = rMaxX - marginCm, uY0 = rMinY + marginCm, uY1 = rMaxY - marginCm;
 
   let dir = userDir;
   if (!dir) {
@@ -7695,6 +7686,7 @@ function autoFillMatSerpentine(productId, opts) {
   let effectiveGapCm, totalW, acrossCenter, alongCenter, matX, matY, fromWall;
   let alongStart, perpBase, anyRunClipped, clippedRunLens, clippedRunStarts;
   let layoutAttempts = 0;
+  let bestAttempt = null;   // REGEL H-oppfølging, se kommentar ved shortfallCm nedenfor
 
   for (;;) {
     layoutAttempts++;
@@ -7884,14 +7876,43 @@ function autoFillMatSerpentine(productId, opts) {
     const laidCm = _matLaidLengthCm({ num_runs: actualRuns, runLengths: anyRunClipped ? clippedRunLens : null, last_run_length_cm: matLastRunLen, length_cm: runLengthCm });
     const shortfallCm = isFixedLength ? (totalLengthCm - laidCm) : 0;
     const tooLong = shortfallCm > cutCm + 0.05;
+
+    // REGEL H-OPPFØLGING (Kenneth 19.08.2026, «hindring-beskjæringen kaster bort lengde»): en
+    // hindring midt i ÉN bredde skaper et shortfallCm nedgraderingsløkka aldri kan fjerne helt —
+    // klippingen er LOKAL (samme hindring rammer samme sted uansett rullengde), så HVERT forsøk
+    // krymper isteden ALLE fem breddene i håp om å bli kvitt et underskudd som egentlig bare
+    // gjelder én av dem. Uten et gulv nedgraderer løkka helt til søppel (sett i praksis: alle fem
+    // breddene klippet til 0cm ved siste forsøk — et STRENGT DÅRLIGERE resultat enn selve det
+    // FØRSTE forsøket). Spor derfor det BESTE forsøket sett (minst shortfallCm — Regel H sin egen
+    // prioritet om å unngå bortkastet rull, uendret; uavgjort brytes av mest lagt lengde) og bruk
+    // DET hvis løkka gir opp uten en ren match, i stedet for blindt det SISTE (minste, ofte
+    // verste) forsøket. Ingen endring for rom UTEN hindringer: attempt 1 konvergerer da alltid
+    // umiddelbart (shortfallCm=0), og er triviselt sitt eget beste forsøk.
+    if (!bestAttempt || shortfallCm < bestAttempt.shortfallCm - 0.01 ||
+        (Math.abs(shortfallCm - bestAttempt.shortfallCm) <= 0.01 && laidCm > bestAttempt.laidCm)) {
+      bestAttempt = { prod, productId, actualRuns, runLengthCm, matLastRunLen, effectiveGapCm, totalW,
+        acrossCenter, alongCenter, matX, matY, alongStart, perpBase, anyRunClipped,
+        clippedRunLens: clippedRunLens.slice(), clippedRunStarts: clippedRunStarts.slice(),
+        laidCm, shortfallCm };
+    }
     if (!tooLong || candidateIdx <= 0) {
+      if (tooLong && bestAttempt.shortfallCm < shortfallCm - 0.01) {
+        ({ prod, productId, actualRuns, runLengthCm, matLastRunLen, effectiveGapCm, totalW,
+           acrossCenter, alongCenter, matX, matY, alongStart, perpBase, anyRunClipped,
+           clippedRunLens, clippedRunStarts } = bestAttempt);
+      }
       if (tooLong && layoutAttempts >= MAX_LAYOUT_ATTEMPTS) {
-        console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) uten å konvergere — leverer siste forsøk med ${shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: prod.id });
+        console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) uten å konvergere — leverer beste forsøk med ${bestAttempt.shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: bestAttempt.prod.id });
       }
       break;
     }
     if (layoutAttempts >= MAX_LAYOUT_ATTEMPTS) {
-      console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) før konvergens — leverer siste forsøk med ${shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: prod.id });
+      if (bestAttempt.shortfallCm < shortfallCm - 0.01) {
+        ({ prod, productId, actualRuns, runLengthCm, matLastRunLen, effectiveGapCm, totalW,
+           acrossCenter, alongCenter, matX, matY, alongStart, perpBase, anyRunClipped,
+           clippedRunLens, clippedRunStarts } = bestAttempt);
+      }
+      console.error(`autoFillMatSerpentine: Regel H nådde forsøkstaket (${MAX_LAYOUT_ATTEMPTS}) før konvergens — leverer beste forsøk med ${bestAttempt.shortfallCm.toFixed(1)}cm til overs`, { roomId: room.id, prodId: bestAttempt.prod.id });
       break;
     }
     candidateIdx--;
