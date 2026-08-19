@@ -6927,12 +6927,72 @@ function _matRunStartCm(mat, i) {
   return alongStart;
 }
 
+// REGEL I+J (LÅST, Kenneth 19.08.2026): kabelplanen for ÉN matte — ÉN kilde brukt av BÅDE
+// tegningen (drawMats) og vakten (_matRunsWithinRoom), slik at de aldri kan divergere (nettopp
+// det var rotårsaken: nettet leste _matRunStartCm/_matRunLenCm per bredde, kabelen leste alltid
+// fra blokkens nominelle -hl/mat.length_cm, og vakten så bare nettet).
+//
+// Regel J: hver bredde er uavhengig — ingen streng er bundet til en bestemt ende fordi naboen
+// slutter der. Rasteret (yOfK) er likevel ÉTT globalt, verdensbasert rutenett for HELE matta
+// (forankret i blokkens nominelle start, ccCm fra hverandre) — DERFOR flukter to nabobredder som
+// faktisk overlapper, helt uten at noen «vandrende indeks» trenger å holde styr på det: de er
+// bare to bredder som (tilfeldigvis) deler samme k. Retningen (descending for like r, ascending
+// for odde r) er den SAMME vekslingen tegningen alltid har brukt — den reproduserer dagens
+// flukt-mønster eksakt for et uklippet rom, og gir naturlig INGEN flukt der en klippet bredde sitt
+// gyldige k-område ikke når helt til naboens.
+const _matCableGapWarned = new Set();   // STEG 2: logg «nett uten kabelplass» kun ÉN gang per matte+bredde
+function _matCablePlan(mat, prod) {
+  const numRuns = mat.num_runs || 1;
+  const ccCm = (prod?.mat_cc_mm || 80) / 10;
+  const minLenMgn = 2.0;   // endemargin langs breddens LENGDE (uendret, LÅST mockup-konstant)
+  const alongStartCm = mat.rotation_deg === 90 ? mat.x_cm : mat.y_cm;
+  const usableLen = mat.length_cm - 2 * minLenMgn;
+  const nCableRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
+  const totalSpan = (nCableRuns - 1) * ccCm;
+  const edgeMgn = (mat.length_cm - totalSpan) / 2;
+  const yOfK = k => alongStartCm + edgeMgn + k * ccCm;   // verdenskoordinat (cm) — FAST for hele matta
+
+  const runs = [];
+  let prevEndK = null;
+  for (let r = 0; r < numRuns; r++) {
+    const netLen = _matRunLenCm(mat, r);
+    if (netLen <= 0) { runs.push(null); prevEndK = null; continue; }   // STEG 2: hoppet over, aldri stopp
+    const netStart = _matRunStartCm(mat, r);
+    const netEnd = netStart + netLen;
+    const loBound = netStart + minLenMgn, hiBound = netEnd - minLenMgn;
+    if (loBound > hiBound + 1e-6) { runs.push(null); prevEndK = null; continue; }   // for kort til én eneste streng
+    // ALLE k innenfor DENNE breddens EGNE grenser — aldri utenfor, uansett hva blokken sier.
+    let kLo = Math.ceil((loBound - alongStartCm - edgeMgn) / ccCm - 1e-6);
+    let kHi = Math.floor((hiBound - alongStartCm - edgeMgn) / ccCm + 1e-6);
+    kLo = Math.max(0, kLo); kHi = Math.min(nCableRuns - 1, kHi);
+    if (kLo > kHi) { runs.push(null); prevEndK = null; continue; }
+    const descending = (r % 2 === 0);
+    const ks = [];
+    if (descending) for (let k = kHi; k >= kLo; k--) ks.push(k);
+    else for (let k = kLo; k <= kHi; k++) ks.push(k);
+    const flukt = prevEndK != null && ks[0] === prevEndK;   // Regel J: kun ekte, felles k flukter
+    runs.push({ r, netStart, netEnd, ks, yWorld: ks.map(yOfK), flukt });
+    prevEndK = ks[ks.length - 1];
+  }
+  return { runs, ccCm, minLenMgn, edgeMgn, nCableRuns };
+}
+
 // STEG 4 (vakt mot regelbrudd, LÅST REGEL Kenneth 14.08.2026): verifiser at HVER streng på en
 // matte faktisk ligger innenfor rommets polygon minus veggmargin. Sikkerhetslinje mot FREMTIDIGE
 // regresjoner i klippe-logikken (STEG 1-3), ikke bare denne ene bugen. Generell nok til å kunne
 // gjenbrukes for snø-matter/frihånds-matter senere (leser kun mat.x_cm/y_cm/width_cm/gap_cm/
 // rotation_deg/num_runs + _matRunLenCm — ingen antakelse om HVORDAN mattas felt ble beregnet).
-function _matRunsWithinRoom(mat, room, marginCm) {
+//
+// REGEL I (LÅST, Kenneth 19.08.2026, matte-kabel-i-eget-nett-prompten): denne vakten valideret
+// tidligere KUN nettet — kabelen har sin egen geometri (_matCablePlan) som vakten aldri så, så den
+// besto mens tegningen lå forskjøvet under og utenfor rommet. `prod` (valgfri — funksjonen skal
+// fortsatt virke uten, for kall som ikke har den for hånden) utvider sjekken til kabelen: hver
+// streng skal ligge innenfor SITT EGET netts grenser minus endemarginen. Sjekken er BEVISST
+// uavhengig av _matCablePlan sin egen (allerede korrekte) grense-utledning — den stoler ikke på at
+// planen er enig med seg selv, den regner grensen på nytt fra _matRunStartCm/_matRunLenCm og
+// sammenligner. Det er DERFOR den fanger en fremtidig regresjon i selve _matCablePlan, ikke bare i
+// hvordan drawMats bruker den.
+function _matRunsWithinRoom(mat, room, marginCm, prod) {
   if (!mat || !room || !room.points || room.points.length < 3) return true;
   const n = mat.num_runs || 1;
   const dir = mat.rotation_deg === 90 ? 'h' : 'v';
@@ -6950,6 +7010,19 @@ function _matRunsWithinRoom(mat, room, marginCm) {
     const segs = _matClippedSegments(room.id, dir, perpPos, mat.width_cm, marginCm, 0);
     const fits = segs.some(s => s.start_cm <= start + 0.5 && s.start_cm + s.length_cm >= start + len - 0.5);
     if (!fits) return false;
+  }
+  if (prod) {
+    const plan = _matCablePlan(mat, prod);
+    for (let r = 0; r < n; r++) {
+      const run = plan.runs[r];
+      if (!run) continue;   // STEG 2: ingen kabel her er gyldig (ikke et brudd) — intet å validere
+      const netLen = _matRunLenCm(mat, r);
+      const netStart = _matRunStartCm(mat, r);
+      const loBound = netStart + plan.minLenMgn, hiBound = netStart + netLen - plan.minLenMgn;
+      for (const y of run.yWorld) {
+        if (y < loBound - 0.5 || y > hiBound + 0.5) return false;
+      }
+    }
   }
   return true;
 }
@@ -7227,7 +7300,7 @@ function _matPlaceMultiMats(room, prod, geom, solution) {
       _equalWidthFallback: false,
       _multiMatGroup: true,   // STEG 4: flere matter i samme rom — materialliste/label/effekt-kode kan lene seg på dette
     };
-    if (!_matRunsWithinRoom(mat, room, marginCm)) {
+    if (!_matRunsWithinRoom(mat, room, marginCm, p)) {
       console.error('_matPlaceMultiMats: matte falt utenfor rommet — avbrutt', mat);
       _showToast('Flermatte-utlegg avbrutt: en matte ville ligget utenfor rommet', 'error');
       return false;
@@ -7794,7 +7867,7 @@ function autoFillMatSerpentine(productId, opts) {
   // STEG 4: siste vaktpost før noe faktisk legges til state. PASS 2 over skal allerede garantere
   // dette, men hvis noe likevel bryter (fremtidig regresjon), ikke commit et utlegg som legger
   // kabel utenfor rommet — logg og varsle i stedet for å stille legge det ut.
-  if (!_matRunsWithinRoom(mat, room, marginCm)) {
+  if (!_matRunsWithinRoom(mat, room, marginCm, prod)) {
     console.error('autoFillMatSerpentine: klippet utlegg brøt likevel romgrensa — avbrutt', mat);
     _showToast('Auto-utlegg avbrutt: ville lagt kabel utenfor rommet', 'error');
     return;
@@ -18201,18 +18274,17 @@ function drawMats() {
       ctx.strokeRect(runCenterX - hw, ry0, hw * 2, rh);
     }
 
-    // Serpentine cable pattern inside each run + U-turn arcs between runs
+    // Serpentine cable pattern inside each run + U-turn arcs between runs.
+    // REGEL I+J (LÅST, Kenneth 19.08.2026): strengene regnes fra _matCablePlan — samme kilde som
+    // vakten (_matRunsWithinRoom) bruker — ALDRI fra blokkens nominelle -hl/mat.length_cm. Det var
+    // nettopp den nominelle referansen som lot kabelen ligge forskjøvet under og utenfor nettet:
+    // nettet leste _matRunStartCm/_matRunLenCm per bredde, kabelen gjorde det aldri.
     if (S.view.zoom > 0.25) {
-      const ccCm = (prod?.mat_cc_mm || 80) / 10;
       const cutCm = (prod?.mat_cut_interval_mm || 160) / 10;
-      const minLenMgn = 2.0;
-      const usableLen = mat.length_cm - 2 * minLenMgn;
-      const nCableRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
-      const totalSpan = (nCableRuns - 1) * ccCm;
-      const edgeMgn = (mat.length_cm - totalSpan) / 2;
-      const ccPx = ccCm * sc;
+      const plan = _matCablePlan(mat, prod);
+      const ccPx = plan.ccCm * sc;
       const rPx = ccPx / 2;                    // U-sving = halvsirkel radius cc/2 (LÅST)
-      const insetPx = (2.5 + ccCm / 2) * sc;   // streng inn EDGE(2,5)+cc/2 → svingen lander på 2,5 cm
+      const insetPx = (2.5 + plan.ccCm / 2) * sc;   // streng inn EDGE(2,5)+cc/2 → svingen lander på 2,5 cm
 
       // Cable color
       ctx.strokeStyle = isSel
@@ -18220,36 +18292,35 @@ function drawMats() {
         : _lc('rgba(200, 60, 30, 0.28)', 'rgba(255, 100, 60, 0.22)');
       ctx.lineWidth = Math.max(0.7, sc * 0.4);
 
-      // ÉN sammenhengende kabel over ALLE baner (LÅST mockup-geometri):
+      // ÉN sammenhengende kabel over ALLE baner som faktisk henger sammen (LÅST mockup-geometri):
       //  • baner tas VENSTRE→HØYRE (kabel starter nederst til venstre på matte 1)
       //  • strenger går på tvers av 50 cm-bredden, avanserer cc langs lengden
       //  • U-svinger = HALVSIRKLER radius cc/2, strengene trukket inn cc/2 → svingen lander på 2,5 cm-margen (aldri utenfor 50 cm)
-      //  • i skjøten mellom baner går kabelen RETT OVER (flukt) — ingen sving, ingen Y-splitt
-      const yOf = k => -hl + (edgeMgn + k * ccCm) * sc;
+      //  • i skjøten mellom baner som DELER samme k (plan.flukt) går kabelen RETT OVER — ingen
+      //    sving, ingen Y-splitt. REGEL J: baner som IKKE deler en k er fysisk skilt av en ~1m
+      //    forbindelseskabel revet fri fra nettet — den tegnes aldri (moveTo, ikke lineTo).
+      const localY = worldY => (worldY - alongStartCm) * sc - hl;
       ctx.beginPath();
       let pen = null, startPt = null, startDirX = 1;
-      // k-posisjonen VANDRER kontinuerlig over HELE kabelen (ikke uavhengig utledet per bane fra
-      // en fast «start på 0 eller 35»-antakelse) — se note nedenfor for hvorfor dette måtte endres
-      // fra den opprinnelige (kun siste bane kunne være kortere) modellen.
-      let curK = nCableRuns - 1, curDir = -1;                          // matcher opprinnelig bane 0: up=true, jj=0 → k=nCableRuns-1
-      for (let vi = 0; vi < numRuns; vi++) {
-        const r = vi;                                                  // VENSTRE→HØYRE (kabel starter på venstre matte)
-        const rLenVi = _matRunLenCm(mat, vi);
-        // Klippet vekk helt (STEG 2): kabelen kan ikke hoppe over en manglende bane uten Y-splitt
-        // (LÅST REGEL) — stopp den sammenhengende serpentinen her i stedet for å gjette en bro.
-        if (rLenVi <= 0) break;
+      for (let ri = 0; ri < plan.runs.length; ri++) {
+        const run = plan.runs[ri];
+        // STEG 2: bane uten gyldig kabelplass (bortklippet, ELLER for kort til én eneste streng
+        // innenfor endemarginen) — hopp over, aldri stopp resten. En bane som falt helt bort
+        // betyr rullens meter ikke er lagt ut (Regel 13-territorium, _matRunsMatchRule sin jobb —
+        // ikke skjul det her, logg det slik at det oppdages i test).
+        if (!run) {
+          const _warnKey = mat.id + ':' + ri;
+          if (_matRunLenCm(mat, ri) > 0 && !_matCableGapWarned.has(_warnKey)) {
+            _matCableGapWarned.add(_warnKey);   // logg ÉN gang per matte+bredde, ikke hvert render
+            console.error(`drawMats: matte ${mat.id} bredde ${ri} har nett men ingen gyldig kabelplass — hoppet over`, { matId: mat.id, runIdx: ri, netLen: _matRunLenCm(mat, ri) });
+          }
+          continue;
+        }
+        const r = run.r;
         const cxr = -htw + hw + r * (mat.width_cm + gapCm) * sc;
         const loX = cxr - hw + insetPx, hiX = cxr + hw - insetPx;      // strengens tverr-endepunkter
-        // Kortere bredde (siste ELLER romform-klippet) → færre strenger i den banen (forankret i
-        // skjøt-enden — curK fortsetter alltid derfra den forrige banen faktisk sluttet, IKKE fra
-        // en antatt fast ende (0/nCableRuns-1). Det ANTAGELSEN var selve bugen: en klippet bane
-        // slutter på en k midt i rekka, og neste banes «flukt»-skjøt hoppet likevel til den faste
-        // enden — en lang, feilaktig strek tvers over flere bredder, potensielt utenfor rommet.
-        const runsThisBane = (rLenVi >= mat.length_cm - 0.05) ? nCableRuns
-          : Math.max(1, Math.min(nCableRuns, Math.floor((rLenVi - 2 * minLenMgn) / ccCm) + 1));
-        for (let jj = 0; jj < runsThisBane; jj++) {
-          const k = curK;
-          const y = yOf(k);
+        for (let jj = 0; jj < run.ks.length; jj++) {
+          const y = localY(run.yWorld[jj]);
           const startHi = (jj % 2 === 1);                              // første streng starter VENSTRE → første sving på HØYRE
           const ax = startHi ? hiX : loX;                             // strengens start-x
           const bx = startHi ? loX : hiX;                             // strengens slutt-x
@@ -18257,7 +18328,8 @@ function drawMats() {
             ctx.moveTo(ax, y);
             startPt = { x: ax, y: y }; startDirX = Math.sign(bx - ax) || 1;   // Del 2: kaldskjøt-start + retning
           } else if (jj === 0) {
-            ctx.lineTo(ax, y);                                        // flukt-skjøt mellom baner (rett over — SAMME y, siden curK ikke ble nullstilt)
+            if (run.flukt) ctx.lineTo(ax, y);                          // ekte flukt — samme k som forrige banes siste
+            else ctx.moveTo(ax, y);                                    // Regel J: ingen felles k → ingen strek over hoppet
           } else {
             // Halvsirkel radius cc/2 mellom to strenger (cc fra hverandre langs lengden), buler ut
             // mot veggen på lo-siden (venstre) eller hi-siden (høyre) → lander på 2,5 cm-margen.
@@ -18271,15 +18343,7 @@ function drawMats() {
           }
           ctx.lineTo(bx, y);
           pen = { x: bx, y: y };
-          if (jj < runsThisBane - 1) {
-            curK += curDir;
-            // Defensivt: en full-lengde bane som følger flere klippede baner kan i teorien
-            // begynne vandringen fra en k som ikke er ved enden — klem inn i gyldig område i
-            // stedet for å tegne utenfor strengrekka.
-            curK = Math.max(0, Math.min(nCableRuns - 1, curK));
-          }
         }
-        curDir = -curDir;                                              // vekslende retning for NESTE bane
       }
       ctx.stroke();
 
