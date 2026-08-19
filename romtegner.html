@@ -4146,12 +4146,13 @@ function _computeRoomStats(room) {
     matAreaM2 += (mat.width_cm * _matLaidLengthCm(mat)) / 10000; // coverage = laid geometry (eksakt, inkl. kortere siste)
     matW += _matRatedW(mp, mat);                              // power = product rated per physical mat
   }
-  // Frihånds-matter: areal + effekt fra valgt katalog-rull (dekket del).
+  // Frihånds-matter: areal + effekt fra valgte katalog-ruller (dekket del). DEL A (Kenneth
+  // 19.08.2026): én bane kan nå gi FLERE ruller — summer over segments[], ikke bare første.
   for (const mpath of (S.matPaths || [])) {
     if (mpath.roomId !== room.id) continue;
     const c = _matFreeCatalog(mpath);
-    matAreaM2 += c.chosenA;   // katalog-mattas areal (rull dekker denne)
-    matW += c.watt;
+    for (const seg of c.segments) matAreaM2 += seg.areaM2;
+    matW += c.totalWatt;
   }
   let plateW = 0, plateAreaM2 = 0, plateCount = 0;
   for (const plate of _platesForRoom(room.id)) {
@@ -8731,6 +8732,51 @@ function _matFreeStopHitR() { return _matFreeStopIconR() + 9; }   // ikon + samm
 // Effekt/motstand fra det valgte produktet (R=U²/P hvis ikke oppgitt).
 // Regresjon EcoMat: mat_total_length_mm = 2×areal×1000 der (44234) → bit-identisk med gammel
 // areal×200-beregning, som bare gjaldt for 0,5 m-bredde.
+// DEL A (Kenneth 19.08.2026, «frihånd: 52m skal bli to matter»): del EN sammenhengende tegnet
+// lengde (inkl. U-svinger, se STEG 0-rapporten over) i FÆRREST mulige katalogruller fra samme
+// familie/bredde/spenning — aldri overskudd (Regel 13), og innenfor samme antall: så like lengder
+// som mulig (26+26 slår 24+28 slår 22+30 — rangert på spredning). Klatrer i antall (K) kun til
+// resten (uncoveredCm) er MINDRE enn den KORTESTE tilgjengelige rullen — da kan ingen flere ruller
+// uansett hjelpe (Regel 4, «rest under korteste matte skal være så liten som mulig», operasjonalisert
+// direkte som stoppkriterium). Samme rangeringsprinsipp som Regel F/G (_matMultiSolve), men for 1D
+// lengde i stedet for 2D areal/bredde-akse — _matMultiSolve selv passer ikke (ingen bredde-akse/
+// maxRuns-begrep her), så dette er en egen, liten partisjon med samme regel, ikke en ny oppfinnelse.
+function _matFreeSplitPlan(totalCm, cands) {
+  const lens = [...new Set(cands.map(p => _matTotalLengthMm(p) / 10))].sort((a, b) => a - b);
+  if (!lens.length) return null;
+  const smallest = lens[0];
+  if (smallest > totalCm + 1e-6) return null;   // ikke plass til en gang den minste rullen
+  const CAP = 8;   // generøs — ingen reelt tegnet bane trenger flere ruller enn dette
+
+  const spread = arr => Math.max(...arr) - Math.min(...arr);
+  function bestAtK(K) {
+    let best = null;
+    (function rec(startIdx, chosen, sum) {
+      if (chosen.length === K) {
+        if (!best || sum > best.sum + 1e-9 || (Math.abs(sum - best.sum) < 1e-9 && spread(chosen) < spread(best.lens) - 1e-9)) {
+          best = { lens: chosen.slice(), sum };
+        }
+        return;
+      }
+      for (let i = startIdx; i < lens.length; i++) {
+        const v = lens[i];
+        if (sum + v > totalCm + 1e-6) continue;   // Regel 13: aldri overskudd
+        chosen.push(v);
+        rec(i, chosen, sum + v);   // i (ikke i+1): samme rull-lengde flere ganger er lovlig
+        chosen.pop();
+      }
+    })(0, [], 0);
+    return best;
+  }
+
+  for (let K = 1; K <= CAP; K++) {
+    if (K * smallest > totalCm + 1e-6) break;   // selv K minste ruller får ikke plass — stopp
+    const b = bestAtK(K);
+    if (!b) continue;
+    if (totalCm - b.sum < smallest - 1e-6 || K === CAP) return b.lens;
+  }
+  return null;
+}
 function _matFreeCatalog(mp) {
   const fam = _matFreeProdOf(mp);
   const totalCm = _matFreeTotalCm(mp);
@@ -8739,18 +8785,43 @@ function _matFreeCatalog(mp) {
       && (p.mat_width_mm || 500) === widthMm && (p.voltage || 230) === voltage
       && p.active !== false && _matTotalLengthMm(p) > 0)
     .sort((a, b) => _matTotalLengthMm(a) - _matTotalLengthMm(b));
-  let chosen = null;
-  for (const p of cands) if (_matTotalLengthMm(p) / 10 <= totalCm + 1e-6) chosen = p;
-  const tooShort = (chosen == null);
-  if (tooShort) chosen = cands[0] || fam;
-  const rollCm = (_matTotalLengthMm(chosen) || 0) / 10;
-  const coverCm = Math.min(totalCm, rollCm);
-  const chosenA = chosen?.mat_area_m2 || 0;
-  const wm2 = chosen?.watt_per_m2 || 0;
-  const watt = chosen?.total_effect_w || Math.round(wm2 * chosenA);
-  const volt = chosen?.rated_volt || 230;
-  const ohm = chosen?.resistance_ohm || (watt > 0 ? Math.round(volt * volt / watt * 10) / 10 : null);
-  return { fam, product: chosen, totalCm, chosenA, rollCm, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), watt, wm2, ohm, tooShort };
+
+  const _segFor = (product, fromCm, lenCm) => {
+    const areaM2 = product?.mat_area_m2 || 0;
+    const wm2 = product?.watt_per_m2 || 0;
+    const watt = product?.total_effect_w || Math.round(wm2 * areaM2);
+    const volt = product?.rated_volt || 230;
+    const ohm = product?.resistance_ohm || (watt > 0 ? Math.round(volt * volt / watt * 10) / 10 : null);
+    return { product, fromCm, toCm: fromCm + lenCm, lenCm, areaM2, watt, ohm };
+  };
+
+  const planLens = cands.length ? _matFreeSplitPlan(totalCm, cands) : null;
+  const segments = [];
+  if (planLens) {
+    let acc = 0;
+    for (const lenCm of planLens) {
+      const product = cands.find(p => Math.abs(_matTotalLengthMm(p) / 10 - lenCm) < 0.05);
+      segments.push(_segFor(product, acc, lenCm));
+      acc += lenCm;
+    }
+  }
+  const tooShort = segments.length === 0;
+  if (tooShort) {
+    // Ingen rull går opp i det hele tatt (tegnet lengde kortere enn selv minste tilgjengelige rull,
+    // eller ingen kandidater finnes) — behold ORIGINAL oppførsel: vis minste tilgjengelige som
+    // «dekker alt tegnet, men er lengre enn nødvendig», ikke som «udekket».
+    segments.push(_segFor(cands[0] || fam, 0, totalCm));
+  }
+  const coverCm = segments.reduce((s, seg) => s + seg.lenCm, 0);
+  const totalWatt = segments.reduce((s, seg) => s + seg.watt, 0);
+  const first = segments[0];
+  return {
+    fam, totalCm, segments, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), totalWatt, tooShort,
+    // Bakoverkompatible aliaser til FØRSTE segment — for kallere som bevisst bare trenger
+    // hovedproduktet. Tell/summer-flater (materiallister, romstatistikk) MÅ bruke segments[].
+    product: first?.product ?? null, chosenA: first?.areaM2 ?? 0, rollCm: first?.lenCm ?? 0,
+    watt: first?.watt ?? 0, wm2: first?.product?.watt_per_m2 ?? 0, ohm: first?.ohm ?? null,
+  };
 }
 
 // Kabel-margin mot vegg/hindring: 5 cm INNENDØRS EcoMat; InSnow (utendørs) pakkes til kanten
@@ -8950,11 +9021,20 @@ function _matFreeExit(commit) {
     S.matPaths.push(mpNew);
     S.ui.selectedMatPathId = mpNew.id;   // vis justerings-panelet med en gang
     _invalidateMatCache && _invalidateMatCache();
-    // Katalog-oppsummering (≤ tegnet) — effekt/motstand fra valgt produkt.
+    // Katalog-oppsummering (≤ tegnet) — DEL A (Kenneth 19.08.2026): kan nå være FLERE ruller.
+    // Toasten sier hva som faktisk ble lagt ut, gruppert på produkt («2 × EcoMat 0,5x26m»), ikke
+    // bare navnet på ett enkelt produkt.
     if (typeof _showToast === 'function') {
       const c = _matFreeCatalog(mpNew);
+      const byProd = {};
+      for (const seg of c.segments) {
+        const key = seg.product?.id ?? seg.product?.name ?? 'ukjent';
+        if (!byProd[key]) byProd[key] = { name: seg.product?.name || 'Matte', count: 0 };
+        byProd[key].count++;
+      }
+      const label = Object.values(byProd).map(g => `${g.count} × ${g.name}`).join(' + ');
       const und = c.uncoveredCm > 5 ? ` · ${(c.uncoveredCm / 100).toFixed(1)} m udekket` : '';
-      _showToast(`${c.product?.name || 'Matte'} — ${c.chosenA} m² (rull ${(c.rollCm / 100)} m), ${c.watt} W${c.ohm ? ' · ' + c.ohm + ' Ω' : ''} · tegnet ${(c.totalCm / 100).toFixed(1)} m${und}`, c.tooShort ? 'warn' : 'success');
+      _showToast(`${label || 'Matte'} — ${c.segments.reduce((s, x) => s + x.areaM2, 0)} m², ${c.totalWatt} W · tegnet ${(c.totalCm / 100).toFixed(1)} m${und}`, c.tooShort ? 'warn' : 'success');
     }
   }
   _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
@@ -9027,13 +9107,24 @@ function _matPathPanel() {
   // areal — samme tall som avvisnings-vakten bruker, synlig FØR det evt. blir et problem.
   const usableM2 = _matFreeUsableAreaM2(mp), coveredM2 = _matFreeCoveredAreaM2(mp);
   const overArea = usableM2 != null && coveredM2 > usableM2 + 0.01;
-  section.innerHTML = `<div class="rwp-section-label">✏️ Frihånds-matte — ${esc(c.product?.name || 'Matte')}</div>
+  // DEL A (Kenneth 19.08.2026, «frihånd: 52m skal bli to matter»): «Valgt matte» kan nå være
+  // FLERE ruller — én rad per segment (gruppert på produkt), ikke lenger én linje for ett produkt.
+  const byProd = {};
+  for (const seg of c.segments) {
+    const key = seg.product?.id ?? seg.product?.name ?? 'ukjent';
+    if (!byProd[key]) byProd[key] = { name: seg.product?.name || 'Matte', areaM2: seg.areaM2, lenCm: seg.lenCm, count: 0 };
+    byProd[key].count++;
+  }
+  const segRows = Object.values(byProd).map(g =>
+    row(g.count > 1 ? `${g.count} × ${esc(g.name)}` : esc(g.name), (g.areaM2 * g.count) + ' m² · rull ' + (g.lenCm / 100) + ' m')).join('');
+  const title = c.segments.length > 1 ? `Frihånds-matte — ${c.segments.length} ruller` : `Frihånds-matte — ${esc(c.product?.name || 'Matte')}`;
+  section.innerHTML = `<div class="rwp-section-label">✏️ ${title}</div>
     <div style="border-top:1px solid var(--brd);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
       ${row('Tegnet lengde', (c.totalCm / 100).toFixed(1) + ' m')}
-      ${row('Valgt matte (≤ tegnet)', c.chosenA + ' m² · rull ' + (c.rollCm / 100) + ' m')}
+      ${segRows}
       ${row('Dekker', (c.coverCm / 100).toFixed(1) + ' m')}
       ${row('Udekket', c.uncoveredCm > 5 ? (c.uncoveredCm / 100).toFixed(1) + ' m' : '—')}
-      ${row('Effekt', c.watt + ' W' + (c.ohm ? ' · ' + c.ohm + ' Ω' : ''))}
+      ${row('Effekt', c.totalWatt + ' W')}
       ${usableM2 != null ? row('Brukbart areal', usableM2.toFixed(2) + ' m²') : ''}
       ${usableM2 != null ? `<div style="display:flex;justify-content:space-between${overArea ? ';color:#dc2626' : ''}"><span>Dekket areal</span><b>${coveredM2.toFixed(2)} m²${overArea ? ' — ' + (coveredM2 - usableM2).toFixed(2) + ' m² for mye' : ''}</b></div>` : ''}
     </div>
@@ -9259,9 +9350,16 @@ function _drawMatPathObj(mp, active) {
   const coverCm = cat ? cat.coverCm : Infinity;
   const uL = _matFreeUTurnLen(mp);
   let acc = 0;
+  // DEL A STEG 2 (Kenneth 19.08.2026, «frihånd: 52m skal bli to matter»): en committet bane kan nå
+  // dekkes av FLERE ruller (cat.segments) — skjøtpunktene (segments[i].toCm, unntatt siste) skal
+  // være synlige for montøren. Samler world-posisjonene her mens vi likevel går gjennom hver bane,
+  // tegner markørene etter løkka (se under).
+  const jointCmSet = (cat && cat.segments.length > 1) ? new Set(cat.segments.slice(0, -1).map(s => s.toCm)) : null;
+  const jointPts = [];
   for (const r of runs) {
     if (r.uturn) acc += uL;
     const rl = _matFreeRunLen(r);
+    const runStartAcc = acc;
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
     acc += rl;
     if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
@@ -9270,8 +9368,39 @@ function _drawMatPathObj(mp, active) {
       if (covLen > 0.5) _drawMatLaneRect(sp.covR, false, true);
       if (covLen < rl - 0.5) _drawMatLaneRect(sp.uncR, false, false);
     }
+    // Ligger et skjøtpunkt inni DENNE banen (mellom runStartAcc og runStartAcc+rl, ikke ved en
+    // bane-grense)? Regn ut world-posisjonen langs banen og legg til for markør-tegning under.
+    if (jointCmSet) {
+      for (const jCm of jointCmSet) {
+        if (jCm > runStartAcc + 0.5 && jCm < runStartAcc + rl - 0.5) {
+          const t = (jCm - runStartAcc) / rl;
+          jointPts.push({ x: r.a.x + (r.b.x - r.a.x) * t, y: r.a.y + (r.b.y - r.a.y) * t, axis: r.axis });
+        }
+      }
+    }
   }
   if (S.view.zoom > 0.25 && (mp.moves || []).length) _drawMatPathCable(mp, coverCm);
+  // Tegn skjøt-markørene: en tydelig strek på tvers av banen + «Skjøt»-etikett, så montøren ser
+  // nøyaktig hvor matte 1 slutter og matte 2 begynner.
+  if (jointPts.length && S.view.zoom > 0.15) {
+    ctx.save();
+    for (const jp of jointPts) {
+      const s = w2s(jp.x, jp.y);
+      const halfW = (NET / 2) * S.view.zoom * BASE_SCALE;
+      ctx.strokeStyle = '#d97706'; ctx.lineWidth = 2.4; ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      if (jp.axis === 'h') { ctx.moveTo(s.x, s.y - halfW); ctx.lineTo(s.x, s.y + halfW); }
+      else { ctx.moveTo(s.x - halfW, s.y); ctx.lineTo(s.x + halfW, s.y); }
+      ctx.stroke();
+      if (S.view.zoom > 0.35) {
+        ctx.setLineDash([]); ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const lbl = 'Skjøt'; const tw = ctx.measureText(lbl).width;
+        ctx.fillStyle = '#d97706'; ctx.fillRect(s.x - tw / 2 - 3, s.y - halfW - 14, tw + 6, 13);
+        ctx.fillStyle = '#fff'; ctx.fillText(lbl, s.x, s.y - halfW - 7.5);
+      }
+    }
+    ctx.restore();
+  }
 
   // #5: lengde pr bredde (bane) — kappe-klar for elektriker, midt i hver lane (committet).
   if (!active && S.view.zoom > 0.35) {
@@ -9306,7 +9435,19 @@ function _drawMatPathObj(mp, active) {
       let fontSize = LABEL_FONT_CM * _sc;
       if (!S.ui?._pdfMode) fontSize = Math.max(6, fontSize);
 
-      const name = cat2.product.name;
+      // DEL A STEG 2 (Kenneth 19.08.2026): flere ruller (cat2.segments) → navnet skal vise ALLE,
+      // gruppert på produkt («2 × EcoMat 0,5x26m»), ikke bare det første. Samme mønster som toasten
+      // i _matFreeExit og _matPathPanel over.
+      let name = cat2.product.name;
+      if (cat2.segments && cat2.segments.length > 1) {
+        const byProd = {};
+        for (const seg of cat2.segments) {
+          const key = seg.product?.id ?? seg.product?.name ?? 'ukjent';
+          if (!byProd[key]) byProd[key] = { n: seg.product?.name || 'Matte', count: 0 };
+          byProd[key].count++;
+        }
+        name = Object.values(byProd).map(g => `${g.count} × ${g.n}`).join(' + ');
+      }
       // Linje 2 (som kabel/rektangulær matte, Kenneths beslutning): flateeffekt · effekt pr BTA ·
       // CC — delt bygger (_matLabelInfoLine) med rektangulær matte. «Tegnet X m · rull Y m» er
       // lengdeinformasjon og hører hjemme i materiallista.
@@ -28023,6 +28164,48 @@ function _clearRoomProductCollections(roomId) {
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
 }
 
+// STEG 4 (Kenneth 19.08.2026, «samme påstand som sist, utvidet»): d480535 fanget om en samling
+// beholder en roomId etter Slett rom — det er en RUNTIME-tilstand, lett å sjekke. «Er hver samling
+// representert i hver produktvisende flate» er derimot et KODE-dekningsspørsmål, ikke en
+// tilstand — det finnes ingen data å sjekke mot, kun kilden. Løsningen her er derfor en
+// kildekode-inspeksjon (samme prinsipp: en påstand, ikke en liste noen må huske å oppdatere) —
+// hver flate-funksjon sin egen .toString() sjekkes for at den i det hele tatt NEVNER hver
+// samling (direkte som S.<key>, eller via dens etablerte per-rom-hjelper, f.eks. _platesForRoom
+// for plates). Kjøres AUTOMATISK ved sideinnlasting i utviklingsmodus (som _onActiveFloor sitt
+// floorless-varsel) — ingen grunn til å vente på at noen husker å kjøre den manuelt, samme
+// «gjør neste forglemmelse umulig»-prinsipp gjelder selve VARSELET, ikke bare sjekken. Også
+// kjørbar på nytt fra konsollen (_assertProductSurfacesCoverAllCollections()) etter en kodeendring
+// midt i økta. Ingen sideeffekter — kaller ALDRI de tunge eksport-funksjonene selv, kun leser
+// kildeteksten deres (.toString()), trygt å kjøre når som helst.
+const ROOM_PRODUCT_SURFACE_PATTERNS = {
+  strips: ['S.strips', '_stripsForRoom'],
+  cables: ['S.cables', '_cablesForRoom'],
+  mats: ['S.mats', '_matsForRoom'],
+  matPaths: ['S.matPaths', '_matFreeCatalog'],
+  plates: ['S.plates', '_platesForRoom'],
+  aluboard: ['S.aluboard', '_aluboardsForRoom', '_aluboardComponents'],
+};
+function _assertProductSurfacesCoverAllCollections() {
+  const surfaces = {
+    'Sidepanel (_renderDetailPanel)': typeof _renderDetailPanel === 'function' ? _renderDetailPanel : null,
+    'HTML-forhåndsvisning matlist (_expPreviewSection)': typeof _expPreviewSection === 'function' ? _expPreviewSection : null,
+    'PDF-eksport (exportPDF)': typeof exportPDF === 'function' ? exportPDF : null,
+    'XLSX-bestilling (_exportMaterialListXLSX)': typeof _exportMaterialListXLSX === 'function' ? _exportMaterialListXLSX : null,
+  };
+  const leaks = [];
+  for (const [surfaceName, fn] of Object.entries(surfaces)) {
+    if (!fn) { leaks.push(`${surfaceName}: funksjonen finnes ikke (mulig navnebytte)`); continue; }
+    const src = fn.toString();
+    for (const key of ROOM_PRODUCT_KEYS) {
+      const patterns = ROOM_PRODUCT_SURFACE_PATTERNS[key] || [`S.${key}`];
+      if (!patterns.some(p => src.includes(p))) leaks.push(`${surfaceName}: nevner ALDRI «${key}»`);
+    }
+  }
+  if (leaks.length) console.error('_assertProductSurfacesCoverAllCollections: en samling er glemt i en flate:\n' + leaks.join('\n'));
+  return { ok: leaks.length === 0, leaks };
+}
+if (_IS_DEV_HOST) _assertProductSurfacesCoverAllCollections();
+
 function _cleanupRoomData(id) {
   // Collect strip IDs for group cleanup before filtering
   const deletedStripIds = new Set(S.strips.filter(s => s.roomId === id).map(s => s.id));
@@ -28540,12 +28723,19 @@ function _renderDetailPanel(roomId) {
   const roomPlates = _platesForRoom(roomId);
   // Aluboard platesystem
   const roomAluboard = _aluboardsForRoom(roomId);
+  // DEL B (Kenneth 19.08.2026, «frihånds-matta mangler i romlista»): matPaths manglet helt her —
+  // et rom med KUN en frihånds-matte fikk totalElements=0 og hele «Varme»-seksjonen ble skjult.
+  const roomMatPaths = (S.matPaths || []).filter(mp => mp.roomId === roomId);
   // Zones
   const roomZones = S.zones.filter(z => z.roomId === roomId);
   // Hindrings
   const roomHindrings = S.hindrings.filter(h => h.roomId === roomId);
 
-  const totalElements = roomStrips.length + roomCables.length + roomMats.length + roomPlates.length + roomAluboard.length;
+  // DEL A/B (Kenneth 19.08.2026): tell RADER, ikke baner — én matPath kan etter DEL A gi flere
+  // segmenter/rader (samme antall som faktisk rendres under).
+  const roomMatPathSegCounts = roomMatPaths.map(mp => _matFreeCatalog(mp).segments.length);
+  const totalElements = roomStrips.length + roomCables.length + roomMats.length + roomPlates.length + roomAluboard.length
+    + roomMatPathSegCounts.reduce((s, n) => s + n, 0);
   if (totalElements > 0 || roomGroups.length > 0) {
     h += `<div class="sb-detail-section">
       <div class="sb-detail-section-hdr" onclick="_toggleDetailSection(this)">
@@ -28624,6 +28814,21 @@ function _renderDetailPanel(roomId) {
         <span class="strip-nm">Aluboard</span>
         <span class="strip-len">${ab.cableChosenM ? ab.cableChosenM.toFixed(1) + ' m' : ''}${w ? ' \u00b7 ' + w + 'W' : ''}</span>
       </div>`;
+    }).join('');
+
+    // DEL B (Kenneth 19.08.2026, \u00abfrih\u00e5nds-matta mangler i romlista\u00bb): \u00e9n rad PER SEGMENT \u2014 etter
+    // DEL A kan \u00e9n tegnet bane gi flere fysiske ruller, samme prinsipp som roomMats over (\u00e9n rad
+    // per fysisk produkt). Alle rader for samme bane velger samme S.ui.selectedMatPathId \u2014 det
+    // finnes ingen per-segment-etikett/utvalg enn\u00e5, kun \u00e9n bane \u00e5 klikke p\u00e5.
+    h += roomMatPaths.map(mp => {
+      const psel = S.ui.selectedMatPathId === mp.id ? ' sel' : '';
+      const c = _matFreeCatalog(mp);
+      return c.segments.map(seg => `<div class="strip-item${psel}"
+        onclick="_matPathSelect(${mp.id});event.stopPropagation()">
+        <span class="strip-ico">\u{1F7EB}</span>
+        <span class="strip-nm">${esc(seg.product?.name || 'Frih\u00e5nds-matte')}</span>
+        <span class="strip-len">${(seg.lenCm / 100).toFixed(1)} m \u00b7 ${seg.watt}W</span>
+      </div>`).join('');
     }).join('');
 
     h += `</div></div>`;
@@ -38429,13 +38634,24 @@ function _expPreviewSection(kind) {
     (S.strips || []).forEach(s => addP(s.productId, s.length_cm, 'Varmefolie'));
     (S.cables || []).forEach(c => addP(c.productId, 0, 'Varmekabel'));
     (S.mats || []).forEach(m => addP(m.productId, 0, 'Varmematte'));
-    (S.matPaths || []).forEach(mp => addP(_matFreeCatalog(mp).product?.id, 0, 'Varmematte'));
+    // DEL A (Kenneth 19.08.2026, «frihånd: 52m skal bli to matter»): én bane kan nå gi FLERE
+    // ruller — tell hvert segment for seg, ikke bare det første.
+    (S.matPaths || []).forEach(mp => { for (const seg of _matFreeCatalog(mp).segments) addP(seg.product?.id, 0, 'Varmematte'); });
     (S.plates || []).forEach(p => addP(p.productId, 0, 'Varmeplate'));
+    // STEG 4-funn (Kenneth 19.08.2026, «samme påstand som sist, utvidet»): Aluboard manglet HELT
+    // i denne HTML-forhåndsvisningen — fanget av _assertProductSurfacesCoverAllCollections rett
+    // etter den ble skrevet. Samme kildekomponenter (_aluboardComponents) som PDF/XLSX bruker.
+    (S.aluboard || []).forEach(ab => {
+      const c = _aluboardComponents(ab); if (!c) return;
+      if (c.rette && c.cnt.rette > 0) addP(c.rette.id, 0, 'Plate (Aluboard)');
+      if (c.vende && c.cnt.vende > 0) addP(c.vende.id, 0, 'Plate (Aluboard)');
+      if (c.cable) addP(c.cable.id, 0, 'Kabel (Aluboard)');
+    });
     (S.stairs || []).forEach(st => { if (st.cables && st.cables.length) st.cables.forEach(c => addP(c.productId || st.cableProductId, 0, 'Varmekabel (trapp)')); else if (st.cableProductId) addP(st.cableProductId, 0, 'Varmekabel (trapp)'); });
     const _entries = Object.entries(mat).map(([pid, info]) => ({ info, pr: HEATING_PRODUCTS.find(p => p.id === +pid) }));
     const _th = `<tr style="color:var(--muted);font-size:11px;text-transform:uppercase"><th style="text-align:left;padding:0 8px 4px 0">Produkt</th><th style="text-align:left;padding:0 8px 4px">Antall</th><th style="text-align:left;padding:0 8px 4px">Enhet</th><th style="text-align:left;padding:0 8px 4px">El.nr</th><th style="text-align:left;padding:0 8px 4px">Lev.art.nr</th></tr>`;
     let _inner = '';
-    for (const gl of ['Varmefolie', 'Varmekabel', 'Varmematte', 'Varmeplate', 'Varmekabel (trapp)']) {
+    for (const gl of ['Varmefolie', 'Varmekabel', 'Varmematte', 'Varmeplate', 'Plate (Aluboard)', 'Kabel (Aluboard)', 'Varmekabel (trapp)']) {
       const rows = _entries.filter(e => e.info.type === gl);
       if (!rows.length) continue;
       const rowsHtml = rows.map(e => { const foil = e.info.type === 'Varmefolie'; const antall = foil ? (e.info.len / 100).toFixed(1) : e.info.count; const enhet = foil ? 'm' : 'stk'; return `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px 5px 0">${E(e.pr ? e.pr.name : 'Ukjent')}</td><td style="padding:5px 8px">${antall}</td><td style="padding:5px 8px">${enhet}</td><td style="padding:5px 8px;color:var(--muted)">${e.pr && e.pr.el_no || '—'}</td><td style="padding:5px 8px;color:var(--muted)">${e.pr && e.pr.article_no || '—'}</td></tr>`; }).join('');
@@ -39385,14 +39601,19 @@ async function exportPDF(opts) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === k);
     matList[k].watt += _matRatedW(p, m); // rated power per physical mat (not laid geometry)
   }
-  // Frihånds-matter → valgt katalog-produkt (1 stk pr matte); areal/effekt fra katalog.
+  // Frihånds-matter → valgte katalog-produkter; areal/effekt fra katalog. DEL A (Kenneth
+  // 19.08.2026, «frihånd: 52m skal bli to matter»): én bane kan nå gi FLERE ruller — tell hvert
+  // segment for seg (samme mønster som S.mats over: én rad per fysisk produkt).
   for (const mp of (S.matPaths || [])) {
-    const c = _matFreeCatalog(mp); const k = c.product?.id; if (k == null) continue;
-    if (!matList[k]) matList[k] = { type: 'Matte', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
-    matList[k].count++;
-    matList[k].totalLen += c.coverCm;
-    matList[k].areaM2 += c.chosenA;
-    matList[k].watt += c.watt;
+    const c = _matFreeCatalog(mp);
+    for (const seg of c.segments) {
+      const k = seg.product?.id; if (k == null) continue;
+      if (!matList[k]) matList[k] = { type: 'Matte', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+      matList[k].count++;
+      matList[k].totalLen += seg.lenCm;
+      matList[k].areaM2 += seg.areaM2;
+      matList[k].watt += seg.watt;
+    }
   }
   for (const pl of S.plates) {
     const k = pl.productId;
@@ -45455,6 +45676,16 @@ async function _exportMaterialListXLSX() {
       const areaM2 = (m.width_cm * totLenCm) / 10000;
       const watt = (p.watt_per_m2||0) * areaM2;
       items.push({ product: p, kind: 'Matte', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2, lenM: totLenCm/100, watt });
+    });
+    // DEL B (Kenneth 19.08.2026, «frihånds-matta mangler i romlista og i Excel-bestillingen»):
+    // XLSX-bestillingen brukte (S.mats||[]) direkte og hoppet dermed over frihånds-matter helt —
+    // samme kilde (_matFreeCatalog) som HTML/PDF-materiallista bruker allerede. DEL A: én bane kan
+    // nå gi FLERE segmenter/ruller — én linje per fysisk produkt, samme mønster som S.mats over.
+    (S.matPaths||[]).filter(mp => mp.roomId === room.id).forEach(mp => {
+      for (const seg of _matFreeCatalog(mp).segments) {
+        if (!seg.product) continue;
+        items.push({ product: seg.product, kind: 'Matte', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2: seg.areaM2, lenM: seg.lenCm/100, watt: seg.watt });
+      }
     });
     (S.plates||[]).filter(pl => pl.roomId === room.id).forEach(pl => {
       const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
