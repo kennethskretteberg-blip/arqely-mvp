@@ -6835,114 +6835,29 @@ function _snowLongestMat(prod) {
 // _matFreeCatalog/toast, :8378-8383).
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-// SNOW MAT PACKING ENGINE
-// Lays mats along the LONG axis, combines them end-to-end per column, and fills the
-// far-end remainder with a crosswise (rotated 90°) mat. Each physical mat = one S.mats
-// object, so the material list aggregates to "N× product". Returns { placedIds, summary,
-// N, k, remainder } or null. Geometry verified against Cenika PDF (Sone 1 + Kenneth's variant).
+// SNOW MAT PACKING ENGINE (STEG 2, «Én mattemotor for alle», Kenneth 19.08.2026) — delegerer nå
+// til DEN SAMME motoren som EcoMat (autoFillMatSerpentine): bredde-modellen (ÉT mat-objekt,
+// num_runs/runLengths, klippet mot områdets EKTE polygon via _matClippedSegments, validert av
+// _matRunsWithinRoom) erstatter den gamle N-kolonner×k-separate-matter-modellen (bbox-only, ingen
+// polygon-klipping, ingen vakt kalt — se STEG 0-rapporten over). InSnow sine produktfelt
+// (mat_equal_widths, min_wall_margin_mm=0, min_gap_mm=50 → Regel 18, mat_cc_mm=100,
+// mat_stagger_half_cc → Regel 19, se _ensureOutdoorMatProducts) gjør resten: ingen egen
+// snø-if-gren i selve geometrien — samme ctx-drevne design som Regel 8/9/18 allerede bruker.
+//
+// Beholder ekstern kontrakt ({placedIds:[id]} eller null) og roomId/productId-signaturen — eneste
+// kalleren (_upcPlaceMat) forventer nettopp dette, og har allerede ryddet rommet + kalt pushUndo()
+// FØR dette kallet (samme «forhåndsvisning før commit»-mønster som indre variant-klikk bruker).
 function _packSnowMats(roomId, productId) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
-  const mainProd = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!mainProd) return null;
-  const w = (mainProd.mat_width_mm || 500) / 10;       // mat width (cm)
-  const ell = (_matTotalLengthMm(mainProd) || 0) / 10; // mat length (cm)
-  if (ell <= 0) return null;
-
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const Wx = maxX - minX, Wy = maxY - minY;
-  // Default: mats run along the LONG axis. Honor the direction override (v=along Y, h=along X).
-  const dirOverride = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
-  const runAlongY = dirOverride ? (dirOverride === 'v') : (Wy >= Wx);
-  const Lalong = runAlongY ? Wy : Wx;
-  const Wacross = runAlongY ? Wx : Wy;
-  const alongMin = runAlongY ? minY : minX;
-  const acrossMin = runAlongY ? minX : minY;
-
-  // Gap mellom matter: brukerverdi, men ALDRI under 5 cm (hard regel). Standard 10 cm.
-  const gap = Math.max(5, (S.varmematte && S.varmematte.gapCm > 0) ? S.varmematte.gapCm : 10);
-  const N = Math.max(1, Math.floor((Wacross + gap) / (w + gap)));   // columns across
-  const usedAcross = N * w + (N - 1) * gap;
-  // INGEN kantsone/margin (m=0): matter pakkes helt inntil områdets ytterkant.
-  // Gap-regelen gjelder bare MELLOM matter, ikke mot ytterkanten.
-  const acrossStart = acrossMin;
-  const k = Math.max(0, Math.floor(Lalong / ell));                  // mats end-to-end per column
-  const coveredAlong = k * ell;
-
-  // Build a mat object centered at (acrossCenter, alongCenter); rotation maps local→world.
-  const _mk = (aC, lC, widthCm, lengthCm, nruns, mgap, rotation, pid) => {
-    const totalW = nruns * widthCm + Math.max(0, nruns - 1) * mgap;
-    const WCX = runAlongY ? aC : lC;
-    const WCY = runAlongY ? lC : aC;
-    return {
-      id: S.counters.nextMatId++, roomId, productId: pid,
-      x_cm: WCX - totalW / 2, y_cm: WCY - lengthCm / 2,
-      width_cm: widthCm, length_cm: lengthCm, num_runs: nruns, gap_cm: mgap,
-      rotation_deg: rotation
-    };
-  };
-
-  const mats = [];
-  const rotMain = runAlongY ? 0 : 90;
-  for (let i = 0; i < N; i++) {
-    const aC = acrossStart + i * (w + gap) + w / 2;
-    for (let j = 0; j < k; j++) {
-      const lC = alongMin + j * ell + ell / 2;
-      mats.push(_mk(aC, lC, w, ell, 1, 0, rotMain, productId));
-    }
-  }
-
-  // Remainder at the far end of the long axis → fill with crosswise bands (rotated 90° from
-  // main), RECURSIVELY: each band covers part of the leftover, then we re-pick a product for
-  // what remains, until the leftover is below mat-min (~40cm). Handles Sone 2-type zones where
-  // one band can't cover the whole remainder.
-  const runLen_r = N * w; // crosswise run spans the width covered by the lengthwise mats
-  const cat = mainProd.category_id, volt = mainProd.voltage || 230;
-  const remCands = HEATING_PRODUCTS.filter(p => p.category_id === cat && (p.voltage || 230) === volt
-    && p.active !== false && _matTotalLengthMm(p) > 0);
-  const rotRem = runAlongY ? 90 : 0;
-  let remStart = alongMin + coveredAlong;
-  let remRemaining = Lalong - coveredAlong;
-  let remainderName = null, remGuard = 0;
-  while (remRemaining >= 40 && remGuard++ < 10) {
-    let best = null;
-    for (const p of remCands) {
-      const wr = (p.mat_width_mm || 500) / 10;
-      const pl = (_matTotalLengthMm(p)) / 10;
-      const wantRuns = Math.max(1, Math.floor(remRemaining / wr)); // runs to fill what's left
-      const maxRuns = Math.floor(pl / runLen_r);                   // runs the mat length allows
-      const runs = Math.min(wantRuns, maxRuns);
-      if (runs < 1) continue;
-      const cover = Math.min(runs * wr, remRemaining);
-      const lenWaste = pl - runs * runLen_r;
-      const score = cover * 100 - wr * 8 - lenWaste * 0.5; // more coverage, narrower, less waste
-      if (!best || score > best.score) best = { p, wr, runs, cover, score };
-    }
-    if (!best || best.cover < 1) break;
-    const aC = acrossStart + usedAcross / 2;
-    const lC = remStart + (best.runs * best.wr) / 2;
-    mats.push(_mk(aC, lC, best.wr, runLen_r, best.runs, 0, rotRem, best.p.id));
-    remainderName = remainderName ? remainderName + ' + ' + best.p.name : best.p.name;
-    remStart += best.runs * best.wr;
-    remRemaining -= best.runs * best.wr;
-  }
-
-  if (!mats.length) return null;
-  for (const m of mats) S.mats.push(m); // undo handled by caller (preview→commit session)
-  _invalidateMatCache();
-  _trackProductUsage(productId);
-  S.ui.selectedMatId = mats[0].id;
-  const byProd = {};
-  for (const m of mats) byProd[m.productId] = (byProd[m.productId] || 0) + 1;
-  const summary = Object.entries(byProd).map(([pid, count]) => {
-    const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-    return { productId: +pid, name: p ? p.name : ('#' + pid), count };
-  });
-  renderSidebar(); updateCtxBar(); render();
-  console.log(`_packSnowMats: ${N}×${k} hovedmatter + rest=${remainderName || 'ingen'} (${mats.length} stk totalt)`);
-  return { placedIds: mats.map(m => m.id), summary, N, k, remainderName };
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!prod) return null;
+  const prevSelected = S.ui.selectedRoomId;
+  S.ui.selectedRoomId = roomId;   // autoFillMatSerpentine leser alltid det aktive rommet
+  const mat = autoFillMatSerpentine(productId);
+  S.ui.selectedRoomId = prevSelected;
+  if (!mat) return null;
+  return { placedIds: [mat.id] };
 }
 
 // Klipp ÉN matte-bredde mot rommets POLYGON (ikke bare det omsluttende rektangelet) + hindringer/
@@ -7013,13 +6928,21 @@ function _matRunStartCm(mat, i) {
 // fra blokkens nominelle -hl/mat.length_cm, og vakten så bare nettet).
 //
 // Regel J: hver bredde er uavhengig — ingen streng er bundet til en bestemt ende fordi naboen
-// slutter der. Rasteret (yOfK) er likevel ÉTT globalt, verdensbasert rutenett for HELE matta
-// (forankret i blokkens nominelle start, ccCm fra hverandre) — DERFOR flukter to nabobredder som
-// faktisk overlapper, helt uten at noen «vandrende indeks» trenger å holde styr på det: de er
-// bare to bredder som (tilfeldigvis) deler samme k. Retningen (descending for like r, ascending
-// for odde r) er den SAMME vekslingen tegningen alltid har brukt — den reproduserer dagens
-// flukt-mønster eksakt for et uklippet rom, og gir naturlig INGEN flukt der en klippet bredde sitt
-// gyldige k-område ikke når helt til naboens.
+// slutter der. Rasteret (yOfK) er ÉTT globalt, verdensbasert rutenett for HELE matta (forankret i
+// blokkens nominelle start, ccCm fra hverandre) — DERFOR flukter to nabobredder som faktisk
+// overlapper, helt uten at noen «vandrende indeks» trenger å holde styr på det: de er bare to
+// bredder som (tilfeldigvis) deler samme k. Retningen (descending for like r, ascending for odde
+// r) er den SAMME vekslingen tegningen alltid har brukt — den reproduserer dagens flukt-mønster
+// eksakt for et uklippet rom, og gir naturlig INGEN flukt der en klippet bredde sitt gyldige
+// k-område ikke når helt til naboens.
+//
+// REGEL 19 (LÅST, spec-matte-utlegg.md, «Én mattemotor for alle», Kenneth 19.08.2026): EcoMat
+// legges i FLUKT (rutenettet over, uendret) — InSnow i FORBANDT: annenhver bredde (r%2===1)
+// forskyves en halv CC langs lengdeaksen (prod.mat_stagger_half_cc, se
+// _ensureOutdoorMatProducts). Flukt-invarianten er derfor produktavhengig, ikke universell — den
+// forskjøvne bredden får sitt EGET rutenett (samme ccCm, forskjøvet startpunkt), så «flukt»
+// mellom en flush og en forskjøvet nabo blir naturlig usann (ks[0] treffer nesten aldri
+// prevEndK når rutenettene er halv-CC fra hverandre) — ingen egen if-gren trengs i flukt-sjekken.
 const _matCableGapWarned = new Set();   // STEG 2: logg «nett uten kabelplass» kun ÉN gang per matte+bredde
 function _matCablePlan(mat, prod) {
   const numRuns = mat.num_runs || 1;
@@ -7030,29 +6953,40 @@ function _matCablePlan(mat, prod) {
   const nCableRuns = Math.max(2, Math.floor(usableLen / ccCm) + 1);
   const totalSpan = (nCableRuns - 1) * ccCm;
   const edgeMgn = (mat.length_cm - totalSpan) / 2;
-  const yOfK = k => alongStartCm + edgeMgn + k * ccCm;   // verdenskoordinat (cm) — FAST for hele matta
+  const stagger = !!(prod && prod.mat_stagger_half_cc);
 
   const runs = [];
-  let prevEndK = null;
+  // REGEL 19-fallgruve: for forskjøvne produkter deler naboer IKKE lenger samme rutenett, så
+  // «samme k-indeks» ikke lenger betyr «samme verdensposisjon» (to ulike ankre bruker samme
+  // indeksområde 0..nCableRuns-1). Flukt spores derfor på VERDENSPOSISJON (prevEndY), ikke
+  // k-indeks — bit-identisk med før for uforskjøvne produkter (anchorCm er da lik for alle r, så
+  // k-indeks og verdensposisjon er ekvivalente), men unngår falske flukt-treff når ankrene faktisk
+  // er halv-CC fra hverandre.
+  let prevEndY = null;
   for (let r = 0; r < numRuns; r++) {
     const netLen = _matRunLenCm(mat, r);
-    if (netLen <= 0) { runs.push(null); prevEndK = null; continue; }   // STEG 2: hoppet over, aldri stopp
+    if (netLen <= 0) { runs.push(null); prevEndY = null; continue; }   // STEG 2: hoppet over, aldri stopp
+    // REGEL 19: forbandt-forskyvningen er en PER-BREDDE offset på rutenettets forankring — kun
+    // ODDE bredder (r%2===1) flyttes en halv CC. Anker for k-utregningen under.
+    const offR = (stagger && r % 2 === 1) ? ccCm / 2 : 0;
+    const anchorCm = alongStartCm + edgeMgn + offR;
     const netStart = _matRunStartCm(mat, r);
     const netEnd = netStart + netLen;
     const loBound = netStart + minLenMgn, hiBound = netEnd - minLenMgn;
-    if (loBound > hiBound + 1e-6) { runs.push(null); prevEndK = null; continue; }   // for kort til én eneste streng
+    if (loBound > hiBound + 1e-6) { runs.push(null); prevEndY = null; continue; }   // for kort til én eneste streng
     // ALLE k innenfor DENNE breddens EGNE grenser — aldri utenfor, uansett hva blokken sier.
-    let kLo = Math.ceil((loBound - alongStartCm - edgeMgn) / ccCm - 1e-6);
-    let kHi = Math.floor((hiBound - alongStartCm - edgeMgn) / ccCm + 1e-6);
+    let kLo = Math.ceil((loBound - anchorCm) / ccCm - 1e-6);
+    let kHi = Math.floor((hiBound - anchorCm) / ccCm + 1e-6);
     kLo = Math.max(0, kLo); kHi = Math.min(nCableRuns - 1, kHi);
-    if (kLo > kHi) { runs.push(null); prevEndK = null; continue; }
+    if (kLo > kHi) { runs.push(null); prevEndY = null; continue; }
     const descending = (r % 2 === 0);
     const ks = [];
     if (descending) for (let k = kHi; k >= kLo; k--) ks.push(k);
     else for (let k = kLo; k <= kHi; k++) ks.push(k);
-    const flukt = prevEndK != null && ks[0] === prevEndK;   // Regel J: kun ekte, felles k flukter
-    runs.push({ r, netStart, netEnd, ks, yWorld: ks.map(yOfK), flukt });
-    prevEndK = ks[ks.length - 1];
+    const yWorld = ks.map(k => anchorCm + k * ccCm);
+    const flukt = prevEndY != null && Math.abs(yWorld[0] - prevEndY) < 1e-6;   // Regel J: kun EKTE, felles verdensposisjon flukter
+    runs.push({ r, netStart, netEnd, ks, yWorld, flukt });
+    prevEndY = yWorld[yWorld.length - 1];
   }
   return { runs, ccCm, minLenMgn, edgeMgn, nCableRuns };
 }
@@ -7197,15 +7131,27 @@ function _matDefaultGapCm(prod) {
 // Utvidet fra 5cm (kun 150T sitt 4cm standardgap fikk plass) — 60T/100T sitt 7cm standardgap
 // trengte mer rom. 10cm gir slingringsmonn for et brukerstyrt gap utover standarden også.
 const MAT_GAP_MAX_CM = 10;
+// REGEL 18 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): produktets PÅKREVDE minsteavstand
+// mellom bredder — 0 for EcoMat (ingen bærematte-krav), 5cm for InSnow (min_gap_mm:50, se
+// _ensureOutdoorMatProducts): InSnow har INGEN bærematte, kabelens ytre svingkurve ER selve
+// mattebredden (kant-inntrekk 0) — kabel-til-kabel MÅ derfor ha reell klaring, to bredder kan
+// ALDRI ligge kant-i-kant. Speiler _productMinGapCm (strimler) sitt mønster for mattenes eget felt.
+function _matProductMinGapCm(prod) {
+  return (prod && prod.min_gap_mm != null) ? prod.min_gap_mm / 10 : 0;
+}
 // Resolves S.varmematte.gapCm to an actual number: null = ikke eksplisitt valgt → produktets
-// standardgap (Regel 9); ellers brukerens tall, klemt til [0, MAT_GAP_MAX_CM].
+// standardgap (Regel 9); ellers brukerens tall, klemt til [0, MAT_GAP_MAX_CM]. Produktets PÅKREVDE
+// minimum (Regel 18) er et gulv brukeren aldri kan velge seg under — ulikt Regel 9 sin standard,
+// som bare er et FORSLAG (0 er et gyldig brukervalg for EcoMat).
 function _matResolveGapCm(prod) {
   const raw = S.varmematte ? S.varmematte.gapCm : null;
   // Regel 9 gjelder eksplisitt EcoMat/mat_equal_widths (spec-matte-utlegg.md); den andre
   // mattefamilien har sin egen fyll-til-vegg-spredning (evenGapCm) og beholder 0 som forvalgt
   // gulv der, uendret fra før.
-  if (raw == null) return (prod && prod.mat_equal_widths) ? _matDefaultGapCm(prod) : 0;
-  return Math.max(0, Math.min(MAT_GAP_MAX_CM, raw));
+  const resolved = (raw == null)
+    ? ((prod && prod.mat_equal_widths) ? _matDefaultGapCm(prod) : 0)
+    : Math.max(0, Math.min(MAT_GAP_MAX_CM, raw));
+  return Math.max(resolved, _matProductMinGapCm(prod));
 }
 
 // ── Delt geometri-kjerne (STEG 1, «Én mattemotor for alle», Kenneth 19.08.2026) ─────────────
@@ -7216,12 +7162,21 @@ function _matResolveGapCm(prod) {
 // (se STEG 0-rapporten over _packSnowMats). Innendørs-veien er verifisert riktig (Regel 8/9,
 // 11c9a0e/936452b) — dette uttrekket endrer INGEN formel, kun HVOR koden bor.
 //
-// ctx: { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir }. marginCm=0 er alt utendørs
-// trenger her for å få «ingen vegger» riktig — hindringer unngås fortsatt (bare med 0 buffer i
-// stedet for veggmargin), og selve områdegrensa respekteres uansett margin (Regel 1 er absolutt;
-// det er kun MARGINEN som er null ute, aldri grensen — se STEG 0-rapporten).
+// ctx: { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir, minMandatoryGapCm }. marginCm=0
+// er alt utendørs trenger her for å få «ingen vegger» riktig — hindringer unngås fortsatt (bare
+// med 0 buffer i stedet for veggmargin), og selve områdegrensa respekteres uansett margin (Regel 1
+// er absolutt; det er kun MARGINEN som er null ute, aldri grensen — se STEG 0-rapporten).
+//
+// minMandatoryGapCm (STEG 2, Regel 18, Kenneth 19.08.2026): produktets PÅKREVDE minsteavstand
+// mellom bredder — 0 for EcoMat (Regel 8 gjelder uendret: rent kant-i-kant, INGEN gap-ledd), men
+// f.eks. 5cm for InSnow (ingen bærematte — kabel-til-kabel MÅ ha klaring, to bredder kan aldri
+// ligge kant-i-kant). Ulikt Regel 9 sitt gap (som er BRUKERENS ønske og kan senkes til 0),
+// minMandatoryGapCm er et produktkrav brukeren aldri kan senke — derfor telles det ALLTID med i
+// maxRuns, mens Regel 9-gapet aldri gjør det. Default 0 gjør formelen bit-for-bit identisk med
+// Regel 8 for enhver kaller som ikke sender den (innendørs).
 function _matAreaGeom(room, ctx) {
   const { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir } = ctx;
+  const minMandatoryGapCm = ctx.minMandatoryGapCm || 0;
 
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs), rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
@@ -7254,12 +7209,12 @@ function _matAreaGeom(room, ctx) {
       const acr = (d === 'h') ? (uY1 - uY0) : (uX1 - uX0);
       const alo = (d === 'h') ? (uX1 - uX0) : (uY1 - uY0);
       if (acr < matWidthCm || alo < minLenCm) return 0;
-      // REGEL 8 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): antallet bredder er ALLTID
-      // kant-i-kant — gapCm er en fordeling av slakk (Regel 9), ikke en inngangsverdi som spiser
-      // plass FØR antallet regnes. Gjelder også retningsvalget her (dekningsestimatet må bruke
-      // samme antall bredder som selve utlegget, ellers kan retningsvalget stole på et tall
-      // utlegget siden forkaster).
-      const n = Math.max(0, Math.floor(acr / matWidthCm));
+      // REGEL 8+18 (LÅST, spec-matte-utlegg.md, Kenneth 19.08.2026): antallet bredder er kant-i-
+      // kant PLUSS produktets påkrevde minsteavstand (minMandatoryGapCm, 0 for EcoMat) — Regel 9
+      // sitt gap er aldri et inngangsledd her. Gjelder også retningsvalget her (dekningsestimatet
+      // må bruke samme antall bredder som selve utlegget, ellers kan retningsvalget stole på et
+      // tall utlegget siden forkaster).
+      const n = Math.max(0, Math.floor((acr + minMandatoryGapCm) / (matWidthCm + minMandatoryGapCm)));
       let rl = cutCm > 0 ? Math.floor(alo / cutCm) * cutCm : alo;
       if (rl < minLenCm) rl = minLenCm;
       return (n * matWidthCm * rl) / 10000;
@@ -7270,14 +7225,17 @@ function _matAreaGeom(room, ctx) {
   const acrossMin = dir === 'h' ? uY0 : uX0, acrossMax = dir === 'h' ? uY1 : uX1;
   const alongMin = dir === 'h' ? uX0 : uY0, alongMax = dir === 'h' ? uX1 : uY1;
   const acrossSpan = acrossMax - acrossMin, alongSpan = alongMax - alongMin;
-  // REGEL 8 (LÅST, spec-matte-utlegg.md): kant-i-kant, ingen gap-ledd — se autoFillMatSerpentine.
-  const maxRuns = acrossSpan >= matWidthCm ? Math.floor(acrossSpan / matWidthCm) : 0;
+  // REGEL 8+18 (LÅST, spec-matte-utlegg.md): kant-i-kant PLUSS produktets påkrevde minsteavstand
+  // (0 for EcoMat → identisk med ren Regel 8; 5cm for InSnow, se autoFillMatSerpentine).
+  const maxRuns = acrossSpan >= matWidthCm
+    ? Math.floor((acrossSpan + minMandatoryGapCm) / (matWidthCm + minMandatoryGapCm)) : 0;
 
-  return { matWidthCm, cutCm, marginCm, gapCm, minLenCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
+  return { matWidthCm, cutCm, marginCm, gapCm, minLenCm, minMandatoryGapCm, dir, acrossMin, acrossMax, acrossSpan, alongMin, alongMax, alongSpan, maxRuns };
 }
 
-// Bygger ctx fra et INNENDØRS produkt (margin fra prod.min_wall_margin_mm, gap fra Regel 9) og
-// kaller kjernen — brukt av flermatte-søket (_matFillRoomSmart).
+// Bygger ctx fra ETT produkt (margin/gap-krav leses fra PRODUKTET, ikke hardkodet «innendørs») og
+// kaller kjernen — brukt av flermatte-søket (_matFillRoomSmart). Fungerer for InSnow også (0
+// margin, 5cm påkrevd gap leses av seg selv fra produktfeltene) — ingen egen snø-gren her.
 function _matRoomGeomForFill(room, prod) {
   return _matAreaGeom(room, {
     matWidthCm: (prod.mat_width_mm || 500) / 10,
@@ -7285,6 +7243,7 @@ function _matRoomGeomForFill(room, prod) {
     marginCm: (prod.min_wall_margin_mm || 50) / 10,
     gapCm: _matResolveGapCm(prod),   // REGEL 9: null → produktets CC-baserte standard
     minLenCm: (prod.mat_min_length_mm || 1000) / 10,
+    minMandatoryGapCm: _matProductMinGapCm(prod),   // REGEL 18: 0 for EcoMat, 5cm for InSnow
     userDir: (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null,
   });
 }
@@ -7593,6 +7552,9 @@ function autoFillMatSerpentine(productId, opts) {
   // (Regel 8, over) — kun en fordeling av slakken MELLOM breddene, se effectiveGapCm nedenfor.
   const gapCm = _matResolveGapCm(prod);
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  // REGEL 18 (spec-matte-utlegg.md, Kenneth 19.08.2026): 0 for EcoMat, 5cm for InSnow — se
+  // _matProductMinGapCm. Teller ALLTID med i maxRuns (Regel 8+18), ulikt Regel 9 sitt gap.
+  const minMandatoryGapCm = _matProductMinGapCm(prod);
 
   // Respect user's direction choice (set via the workflow-panel direction
   // picker, shared with varmefolie). Otherwise auto = BEST COVERAGE — resolved by the shared
@@ -7602,7 +7564,7 @@ function autoFillMatSerpentine(productId, opts) {
   // STEG 1 («Én mattemotor for alle», Kenneth 19.08.2026): bbox+margin+hindring-unngåelse+
   // retningsvalg+maxRuns er nå ÉN delt kjerne (_matAreaGeom) — samme kall som flermatte-søket
   // (_matRoomGeomForFill) og snø-auto (STEG 2) bruker. Ingen formel endret her, kun flyttet dit.
-  const geom0 = _matAreaGeom(room, { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir });
+  const geom0 = _matAreaGeom(room, { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir, minMandatoryGapCm });
   const dir = geom0.dir;
   let acrossMin = geom0.acrossMin, acrossMax = geom0.acrossMax, acrossSpan = geom0.acrossSpan;
   if (acrossSpan < matWidthCm) return;
@@ -7807,10 +7769,13 @@ function autoFillMatSerpentine(productId, opts) {
       // Mellomrommet skal likevel ALDRI presse en bredde nærmere veggen enn margen: er gapCm for
       // stort til at alle breddene + gap får plass i acrossSpan, er det GAPET som gir etter, ikke
       // margen (maxFitGapCm = det gapet som akkurat fyller acrossSpan uten å gå ut over den).
+      // Gulvet er minMandatoryGapCm (REGEL 18: 0 for EcoMat, 5cm for InSnow) — det gapet kan
+      // ALDRI gi etter, uansett hvor trangt rommet er (maxRuns er konstruert til å garantere plass
+      // til akkurat dette gulvet, se _matAreaGeom).
       const maxFitGapCm = actualRuns > 1
-        ? Math.max(0, (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1))
+        ? Math.max(minMandatoryGapCm, (acrossSpan - actualRuns * matWidthCm) / (actualRuns - 1))
         : gapCm;
-      effectiveGapCm = Math.min(gapCm, maxFitGapCm);
+      effectiveGapCm = Math.max(minMandatoryGapCm, Math.min(gapCm, maxFitGapCm));
     } else {
       // Distribute leftover across-axis space as even gaps between mats (mats can lie flush
       // against each other, but spreading them evenly gives better heat coverage and looks
@@ -47116,10 +47081,17 @@ function _ensureOutdoorMatProducts() {
   }
   const catId = outdoorMatCat.id;
   let sortIdx = 0;
-  // InSnow 300T — FASTE størrelser (300 W/m²). Hver art.nr er én fysisk matte som brukes i sin
-  // helhet; matte-motoren «slanger» den faste lengden ut i parallelle bredder (klipp bærematte,
-  // snu 180°, ~5 cm mellom bredder) via mat_total_length_mm → isFixedLength. mat_cc_mm/
-  // mat_cut_interval_mm er rimelige visuelle standarder — verifiser eksakte verdier mot Cenika.
+  // InSnow 300T — FASTE størrelser (300 W/m²). Hver art.nr er én fysisk rull som legges i SIN
+  // HELHET som EcoMat («Én mattemotor for alle», STEG 2, Kenneth 19.08.2026): båndet kappes,
+  // rullen vendes tilbake så breddene ligger parallelt — mat_equal_widths:true, samme motor
+  // (autoFillMatSerpentine) som EcoMat, ikke en egen kolonne-modell.
+  // mat_cc_mm=100 (Kenneth 19.08.2026, bekreftet mot produktdata: 0,5×10m=5m², 1500W ⇒ 300W/m²,
+  // kabellengde=5/CC ⇒ W/m=300×CC — CC=0,10 gir 30W/m ✓ — var 80 (uttrykkelig plassholder i
+  // kommentaren her, aldri verifisert). mat_edge_inset_mm=0 (INGEN bærematte — kabelens ytre
+  // svingkurve ER selve mattebredden). min_gap_mm=50 (5cm) er en PÅKREVD produktregel, ikke en
+  // brukerinnstilling (Regel 18) — to InSnow-bredder kan ALDRI ligge kant-i-kant (30W/m er svært
+  // varmt). mat_stagger_half_cc=true (Regel 19, forbandt — se _matCablePlan), ulikt EcoMat sin
+  // flukt. mat_cut_interval_mm=160 er FORTSATT en plassholder — IKKE avklart, IKKE endret her.
   const add = (art, name, widthMm, lengthMm, areaM2, effW, voltage) => {
     HEATING_PRODUCTS.push({
       id: 96500 + (++sortIdx), category_id: catId, article_no: art, name,
@@ -47127,7 +47099,8 @@ function _ensureOutdoorMatProducts() {
       product_family: 'InSnow 300T',
       watt_per_m2: 300, voltage: voltage, total_effect_w: effW, mat_area_m2: areaM2,
       mat_width_mm: widthMm, mat_total_length_mm: lengthMm, mat_length_step_mm: 10,
-      mat_cc_mm: 80, mat_cut_interval_mm: 160,
+      mat_cc_mm: 100, mat_cut_interval_mm: 160, mat_edge_inset_mm: 0,
+      mat_equal_widths: true, mat_stagger_half_cc: true,
       min_gap_mm: 50, min_wall_margin_mm: 0, min_obstacle_distance_mm: 50
     });
   };
