@@ -7335,7 +7335,12 @@ function _matRoomCapacityCm(room, geom) {
   let capacityCm = 0;
   for (let r = 0; r < geom.maxRuns; r++) {
     const perpPos = geom.acrossMin + r * (geom.matWidthCm + geom.gapCm);
-    const segs = _matClippedSegments(room.id, geom.dir, perpPos, geom.matWidthCm, geom.marginCm, 0);
+    // DEL A STEG 1 (Kenneth 19.08.2026, «én matte per sone er taket»): geom.zoneAlongMin/Max — satt
+    // av _matZonePlanFor for et sone-kall, alltid null for et vanlig romkall — klemmer segmentene
+    // til SONENS egne along-grenser, samme mekanisme autoFillMatSerpentine sin egen zoneRect-gren
+    // allerede bruker (_matClipSegsToZone). No-op (segs uendret) når zoneAlongMin er null, altså
+    // bit-for-bit uendret for ethvert rektangulært rom.
+    const segs = _matClipSegsToZone(_matClippedSegments(room.id, geom.dir, perpPos, geom.matWidthCm, geom.marginCm, 0), geom.zoneAlongMin, geom.zoneAlongMax);
     const seg = segs.find(s => s.start_cm <= geom.alongMin + 0.5 && s.start_cm + s.length_cm >= geom.alongMin - 0.5);
     let len = 0;
     if (seg) {
@@ -7444,7 +7449,8 @@ function _matMultiSolve(candidates, alongSpanCm, maxRuns, targetAreaM2, cutCm, m
 // — et delvis flermatte-utlegg er verre enn ingen.
 function _matPlaceMultiMats(room, prod, geom, solution, opts) {
   opts = opts || {};
-  const { dir, acrossMin, acrossMax, alongMin, alongMax, alongSpan, matWidthCm, gapCm, cutCm, marginCm, minLenCm } = geom;
+  const { dir, acrossMin, acrossMax, alongMin, alongMax, alongSpan, matWidthCm, gapCm, cutCm, marginCm, minLenCm,
+    zoneAlongMin, zoneAlongMax } = geom;
   const L = solution.L;
   const items = solution.mats.slice().sort((a, b) => b.runs - a.runs || b.areaM2 - a.areaM2);
   const totalWidths = items.reduce((s, d) => s + d.runs, 0);
@@ -7470,7 +7476,9 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
     const lens = [], starts = [];
     for (let r = 0; r < item.runs; r++) {
       const perpPos = perpBase + r * (matWidthCm + gapCm);
-      const segs = _matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0);
+      // DEL A STEG 1: samme sone-klemming som _matRoomCapacityCm over — no-op (segs uendret) når
+      // zoneAlongMin er null (ethvert kall utenfor sone-flyten, uendret oppførsel).
+      const segs = _matClipSegsToZone(_matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0), zoneAlongMin, zoneAlongMax);
       const seg = segs.find(s => s.start_cm <= alongStart + 0.5 && s.start_cm + s.length_cm >= alongStart - 0.5);
       let len = 0;
       if (seg) {
@@ -7497,18 +7505,24 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
     };
     if (!_matRunsWithinRoom(mat, room, marginCm, p)) {
       console.error('_matPlaceMultiMats: matte falt utenfor rommet — avbrutt', mat);
-      _showToast('Flermatte-utlegg avbrutt: en matte ville ligget utenfor rommet', 'error');
-      return false;
+      if (!opts.dryRun) _showToast('Flermatte-utlegg avbrutt: en matte ville ligget utenfor rommet', 'error');
+      return opts.dryRun ? null : false;
     }
     const ruleCheck = _matRunsMatchRule(mat, p, cutCm, anyRunClipped);
     if (!ruleCheck.ok) {
       console.error('_matPlaceMultiMats: Regel ' + ruleCheck.rule + ' brutt — avbrutt: ' + ruleCheck.reason, mat);
-      _showToast('Flermatte-utlegg avbrutt: ' + ruleCheck.reason, 'error');
-      return false;
+      if (!opts.dryRun) _showToast('Flermatte-utlegg avbrutt: ' + ruleCheck.reason, 'error');
+      return opts.dryRun ? null : false;
     }
     built.push(mat);
     widthsUsed += item.runs;
   }
+
+  // DEL A STEG 1 (Kenneth 19.08.2026, «én matte per sone er taket»): sone-forhåndsvisningen
+  // (_matZonePlanFor/_matPlanZones) bruker et flermatte-utlegg til å VISE forslaget FØR commit —
+  // samme «regn ut → vis panel → commit ved klikk»-mønster autoFillMatSerpentine sin egen
+  // opts.dryRun allerede har. Returner de bygde mat-objektene UTEN å røre S/undo/render.
+  if (opts.dryRun) return built;
 
   // STEG 2 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): en kaller (UPC
   // via _matFillRoomSmart) kan allerede ha gjort SIN egen pushUndo() rett før forslagspanelet ble
@@ -7519,10 +7533,83 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
   _trackProductUsage(built[0].productId);
   S.ui.selectedMatId = built[0].id;
   renderSidebar(); updateCtxBar(); render();
-  return true;
+  // DEL A STEG 1: returnerer nå de committede mat-objektene (ikke bare `true`) — sone-apply-
+  // handleren (_showMatZoneProposalPanel) teller `.length` for å rapportere «N matter lagt ut».
+  // Bakoverkompatibelt: den ENESTE andre kalleren (_showMatMultiProposalPanel) sjekker kun
+  // sannhetsverdi (`if (ok)`), og et ikke-tomt array er sant akkurat som `true` var.
+  return built;
 }
 
-// REGEL 20 (LÅST, «del rommet i soner», Kenneth 19.08.2026): planlegger ett mat-utlegg PER SONE
+// ─── DEL A — «ÉN MATTE PER SONE ER TAKET» (Kenneth 19.08.2026) ────────────────────────────────
+// Symptom: rom 1102 (uregelmessig, 31,83 m²) fikk kun 20 m² — sonene fantes og delte rommet
+// riktig, men HVER sone fikk maksimalt ÉN matte selv når sonen selv var stor nok til flere. Samme
+// feilklasse som Rom 4-folie-runden (a3ffaa6/8595889): to allerede-eksisterende, allerede-låste
+// motorer (Regel 20 sone-deling, Regel F+G flermatte-søk) møttes aldri fordi _matFillRoomSmart
+// returnerte rett etter sone-panelet uten noensinne å nå _matRoomCapacityCm/_matMultiSolve/
+// MAX_MATS lenger ned i samme funksjon — de nås i praksis KUN av et rektangulært rom.
+//
+// _matZonePlanFor(room, rect, prod) kjører NØYAKTIG samme kapasitets-/flermatte-vurdering PER
+// SONE som _matFillRoomSmart allerede gjør for et helt rektangulært rom (samme
+// _matRoomCapacityCm → MAX_MATS-formel → _matMultiSolve) — bare med geometrien begrenset til
+// sonens eget rektangel (_matZoneUsableRoom, samme sone-bevisste margin autoFillMatSerpentine sin
+// zoneRect-gren allerede bruker) i stedet for rommets omsluttende boks. Ingen ny motor.
+function _matZonePlanFor(room, rect, prod) {
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
+  const gapCm = _matResolveGapCm(prod);
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const minMandatoryGapCm = _matProductMinGapCm(prod);
+  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+
+  // Samme geometri-kjerne autoFillMatSerpentine sin zoneRect-gren selv bygger: sonens rektangel,
+  // innsatt med sone-bevisst margin (ingen margin mot en nabosone), marginCm=0 inn i _matAreaGeom
+  // siden geomRoom allerede ER innsatt. zoneAlongMin/Max = sonens EGNE along-grenser, brukt av
+  // _matRoomCapacityCm/_matPlaceMultiMats til å klemme segmenter (aldri lekke inn i nabosonen).
+  const geomRoom = _matZoneUsableRoom(room, rect, marginCm);
+  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir, minMandatoryGapCm });
+  if (geom0.maxRuns <= 0 || geom0.alongSpan < minLenCm) return null;   // for liten — samme grense autoFillMatSerpentine selv bruker
+  const geom = { ...geom0, marginCm, zoneAlongMin: geom0.alongMin, zoneAlongMax: geom0.alongMax };
+
+  const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
+  const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
+  const variantOf = p => {
+    if (p.product_family && prod.product_family) return p.product_family === prod.product_family;
+    return familyKey && (p.name || '').replace(sizeSuffixRe, '').trim() === familyKey;
+  };
+  const candidates = HEATING_PRODUCTS
+    .filter(p => p.active !== false && p.mat_width_mm === prod.mat_width_mm && _matTotalLengthMm(p) && variantOf(p))
+    .map(p => ({ p, areaM2: p.mat_area_m2 || ((_matTotalLengthMm(p) / 10) * matWidthCm / 10000), lenCm: _matTotalLengthMm(p) / 10 }))
+    .sort((a, b) => a.lenCm - b.lenCm);
+  // Ingen katalogdata å søke flermatte over — la enkelt-matte-veien (autoFillMatSerpentine, uendret)
+  // håndtere sonen alene, akkurat som FØR denne fiksen fantes.
+  if (!candidates.length) return { geom, mode: 'single' };
+
+  const largestAreaM2 = candidates[candidates.length - 1].areaM2;
+  const capacityCm = _matRoomCapacityCm(room, geom);
+  const capacityAreaM2 = capacityCm * matWidthCm / 10000;
+  // Samme 2%-toleranse som _matFillRoomSmart: tilby kun flere matter når sonen faktisk krever mer
+  // enn den ene, STØRSTE tilgjengelige mattestørrelsen kan gi.
+  if (capacityAreaM2 <= largestAreaM2 * 1.02) return { geom, mode: 'single' };
+
+  const MAX_MATS = Math.min(40, Math.max(2, Math.ceil(capacityAreaM2 / largestAreaM2)));
+  const solved = _matMultiSolve(candidates, geom.alongSpan, geom.maxRuns, capacityAreaM2, geom.cutCm, MAX_MATS);
+  const bestMultiArea = Math.max(solved.equal ? solved.equal.totalArea : 0, solved.unequal ? solved.unequal.totalArea : 0);
+  // Sikkerhetsnett — KUN i denne (nye) sone-veien, _matFillRoomSmart sin whole-room-vei er bevisst
+  // urørt: _matMultiSolve søker ALDRI N=1 («en ANNEN, allerede løst funksjon», se dens egen
+  // kommentar), så en tvunget lav N (typisk MAX_MATS=2 rett over 1,02-terskelen over) kan i
+  // sjeldne katalog/geometri-kombinasjoner (kuttintervallets divisjon går ikke opp for en større
+  // variant ved N=2) gi en gyldig løsning som likevel dekker MINDRE enn den ENE STØRSTE
+  // tilgjengelige matta ville alene. Funnet under testing (700×300-sone, katalog begrenset til
+  // 15 m² maks: N=2×6 m²=12 m² < én enkelt 15 m²-matte). En sone skal ALDRI ende DÅRLIGERE stilt
+  // av denne fiksen enn enkelt-matte-veien (som alltid var trygg) — fall tilbake dit når det skjer.
+  if (bestMultiArea <= largestAreaM2 + 0.01) return { geom, mode: 'single' };
+  const pref = (S.varmematte && S.varmematte._multiMatPref) || 'equal';
+  const sol = (pref === 'unequal' && solved.unequal) ? solved.unequal : (solved.equal || solved.unequal);
+  return { geom, mode: 'multi', prod, sol };
+}
+
+// REGEL 20 (LÅST, «del rommet i soner», Kenneth 19.08.2026): planlegger mat-utlegg PER SONE
 // for uregelmessige rom (L/T-formet osv.) — samme grunnleggende maskineri folien har brukt siden
 // juli (_decomposeRoomToRects), portet til matter (femte gang denne uka funksjonalitet skrevet for
 // folie aldri ble løftet til matte-siden — se STEG 0 i prompten). Returnerer null hvis rommet
@@ -7530,14 +7617,59 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
 // dagens ETT-blokk-vei UENDRET (hovedregresjonstesten, se _matRegressionTest).
 //
 // STEG 2 (små soner): en sone som ikke engang får plass til ÉN bredde i produktets minste
-// brukslengde (mat_min_length_mm) hopper ut. autoFillMatSerpentine sine EGNE vakter
-// (acrossSpan<matWidthCm / alongSpan<minLenCm / maxRuns<=0) ER allerede nøyaktig denne grensen —
-// en dryRun-kjøring som returnerer null ER «for liten», ingen egen terskel-kode trengs. Utelatt
-// areal spores for panelet i stedet for å forsvinne i stillhet.
+// brukslengde (mat_min_length_mm) hopper ut. _matZonePlanFor sin egen guard ER akkurat denne
+// grensen (samme som autoFillMatSerpentine selv bruker). Utelatt areal spores for panelet i
+// stedet for å forsvinne i stillhet.
 //
-// Hver sone kjøres med SAMME startprodukt (familien/bredden Kenneth valgte) — autoFillMatSerpentine
-// sitt EGET variantsøk (Regel B/E) finner den beste STØRRELSEN for AKKURAT den sonen, uendret fra
-// hvordan det allerede virker for ett rektangulært rom. «La resten av motoren gå som i dag.»
+// DEL A STEG 1: hver sone kan nå gi FLERE matter (_matZonePlanFor over), ikke lenger maksimalt én
+// — _matMultiSolve/MAX_MATS kjøres per sone, samme som _matFillRoomSmart allerede gjorde for et
+// helt rektangulært rom. Enkelt-matte-veien (autoFillMatSerpentine) er UENDRET for soner som selv
+// bare trenger én matte.
+//
+// ─── DEL A STEG 2 — RAPPORT: en sone-fri, kabel-lignende serpentin (Kenneth 19.08.2026) ───────
+// Spørsmål fra prompten: kan _decomposeRoomToRects/sonepakking erstattes med én sammenhengende
+// serpentin (clipScanlineToPolygon per tverr-posisjon, «fram og tilbake som kabelstrengene») uten
+// å bryte (i) «lengde og startpunkt fra samme klippede segment», (ii) «én breddelengde for hele
+// rommet», (iii) EcoMat sin flukt-invariant? Rapportert FØR noe bygges, som bedt om — ingen
+// geometri er endret i denne commiten.
+//
+// (i) INGEN KONFLIKT. Regelen dette faktisk viser til er REGEL A (:6934, «startpunktet for en
+// streng skal komme fra SAMME kilde som lengden») — en PER-BREDDE mekanisme (unngå «riktig lengde,
+// feil posisjon»), uavhengig av om ulike bredder i samme utlegg har ulik lengde. En polygon-
+// følgende serpentin ville uansett klippe hver bredde via clipScanlineToPolygon (eller den
+// eksisterende _matClippedSegments, som allerede bruker samme clipStripToRoom-primitiv), og ville
+// naturlig respektere REGEL A akkurat som i dag — denne regelen sier ingenting om hvorvidt
+// NABObredder må matche hverandre.
+//
+// (ii) EKTE KONFLIKT — og den avgjørende. Det prompten kaller «én breddelengde for hele rommet» ER
+// `prod.mat_equal_widths` (Regel E/_matEqualWidthNL): EcoMat og InSnow er FYSISK én sammenhengende
+// rull, kappet og brettet fram og tilbake — ALLE bredder i SAMME matte-objekt må derfor ha SAMME
+// lengde (unntatt den ENE, bevisste fallback-regelen fra 08.07: N−1 like + én kortere SISTE,
+// forankret i sømenden — se _matRunStartCm/upR). En serpentin som følger et uregelmessig polygon
+// (T/L-form, skrå vegger) vil PER DEFINISJON klippe HVER bredde til hva polygonet akkurat der gir
+// plass til — mange ULIKE lengder spredt gjennom rommet, ikke bare den siste. Det er ikke en
+// implementasjonsdetalj å fikse — det er fysisk umulig for én sammenhengende rull: du kan ikke
+// brette en rull med bredde 1 kortere enn bredde 2 midt i rekka uten enten å kaste bort rull-
+// lengde (samme problem Regel H allerede finnes for) eller etterlate et hull, OG U-svingene mellom
+// strengene (samme CC-radius, samme halvsirkel-geometri som kabelmotoren) forutsetter symmetriske,
+// like lange brett for å henge sammen visuelt uten Y-forgreininger. Dette ER nøyaktig samme klasse
+// «ingen Y-splitt, alle strenger like lange»-regel CLAUDE.md låser for KABEL — og kabelen sin egen
+// låste regel sier det rett ut: «Equal-length runs... MANDATORY... NEVER optional... for irregular
+// rooms, equalization means some areas won't be covered — this is acceptable.» Samme fysikk, samme
+// konklusjon for en mattePOLYGON-serpentin.
+//
+// (iii) IKKE RELEVANT PÅ DETTE NIVÅET. REGEL 19 (:6968, flukt/forbandt) er en regel for KABELEN
+// INNI én bredde (rutenett-forankring på tvers av breddene i SAMME matte) — ikke for hvordan
+// mattas EGNE bredder forholder seg til romformen. Uendret av dette spørsmålet uansett utfall.
+//
+// KONKLUSJON: en generell, sone-fri serpentin som lar HVER bredde ha sin egen, polygon-bestemte
+// lengde bryter (ii) for `mat_equal_widths`-produkter — som er default/dominerende produkttype i
+// systemet (EcoMat, InSnow). Bygges IKKE, som bedt om når en regel må brytes. DEL A STEG 1 (over)
+// dekker allerede en betydelig del av det opprinnelige gapet (flere matter PER sone, hver med sin
+// EGEN uniforme breddelengde — Regel 10/E respekteres FULLT UT innenfor hver sone). Det som
+// gjenstår er FEIL 3 (sonekant kutter en bredde som kunne fortsatt inn i nabosonen) — et SMALERE,
+// mer avgrenset problem enn en full serpentin-omskriving, og ikke adressert her (utenfor STEG 1-3
+// sitt eksplisitte omfang i denne prompten).
 function _matPlanZones(room, prod) {
   const rects = _decomposeRoomToRects(room);
   if (!rects || rects.length <= 1) return null;
@@ -7548,15 +7680,94 @@ function _matPlanZones(room, prod) {
   let totalAreaM2 = 0, totalWatt = 0;
   for (const rect of rects) {
     const zoneAreaM2 = (rect.x1 - rect.x0) * (rect.y1 - rect.y0) / 10000;
-    const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect });
-    if (!mat) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
-    const laidCm = _matLaidLengthCm(mat);
-    const coveredM2 = mat.width_cm * laidCm / 10000;
+    const plan = _matZonePlanFor(room, rect, prod);
+    if (!plan) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
+    let mats;
+    if (plan.mode === 'multi') {
+      mats = _matPlaceMultiMats(room, plan.prod, plan.geom, plan.sol, { dryRun: true });
+    } else {
+      const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect });
+      mats = mat ? [mat] : null;
+    }
+    if (!mats || !mats.length) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
+    let coveredM2 = 0;
+    for (const m of mats) coveredM2 += m.width_cm * _matLaidLengthCm(m) / 10000;
     const watt = Math.round(wm2 * coveredM2);
-    zonePlans.push({ rect, mat, zoneAreaM2, coveredM2, watt });
+    zonePlans.push({ rect, mats, mode: plan.mode, zoneAreaM2, coveredM2, watt });
     totalAreaM2 += coveredM2; totalWatt += watt;
   }
   return { zonePlans, excludedZones, totalAreaM2, totalWatt };
+}
+
+// ─── SONE-REGRESJONSTEST (STEG 3, «én matte per sone er taket», Kenneth 19.08.2026) ────────────
+// «1102 Garderobe» (uregelmessig, L-form) er den ENESTE fasit-testen som dekker sone+flermatte
+// SAMMEN — verken _matRegressionTest (rektangulære 1110/1105) eller _foilRegressionTest (folie,
+// ikke matte) treffer denne kombinasjonen. Egen, DEDIKERT katalog begrenset til 15 m² maks (ikke
+// _matRegressionTest sin delte 1-30 m²-katalog): fant under testing at samme sone, samme rom, mot
+// den BREDERE katalogen, gir single-mat-veien (autoFillMatSerpentine sin zoneRect-gren — PRE-
+// EKSISTERENDE, urørt av denne saken) et markant dårligere resultat (17 bredder, mest 368cm + én
+// kort 112cm, 30 m²-produkt) enn samme rektangel testet FRITTSTÅENDE (samme produkt, samme
+// geometri utenfor sone-konteksten) — en ekte, men UAVGRENSET oppfølgingssak i selve
+// autoFillMatSerpentine sin zoneRect+Regel E-søk, IKKE i STEG 1-koden denne testen låser (bekreftet
+// ved direkte sammenligning: _matMultiSolve-siden har FULL paritet mellom sone og fritt rektangel,
+// kun single-mat-zoneRect-veien avviker). Rapportert her, ikke fikset — utenfor STEG 1-3 sitt
+// eksplisitte omfang. Låst fasit derfor mot EN katalog der utfallet er entydig verifisert.
+function _matZoneRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedMats = S.mats, savedHindrings = S.hindrings, savedZones = S.zones,
+    savedSelectedRoomId = S.ui.selectedRoomId;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    HEATING_PRODUCTS.length = 0;
+    const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let pid = 901000;
+    areas.forEach(area => {
+      const lenM = area * 2;
+      HEATING_PRODUCTS.push({
+        id: ++pid, category_id: 9800, active: true, supplier: 'Cenika AS',
+        article_no: 'ZONETEST' + pid, product_family: 'EcoMat 150T',
+        name: `EcoMat 150T 0,5×${lenM}m ${Math.round(150 * area)}W`,
+        voltage: 230, watt_per_m2: 150, total_effect_w: Math.round(150 * area), mat_area_m2: area,
+        mat_width_mm: 500, mat_total_length_mm: lenM * 1000,
+        mat_min_length_mm: 1000, mat_max_length_mm: lenM * 1000, mat_length_step_mm: 10,
+        mat_cc_mm: 80, mat_cut_interval_mm: 160, mat_equal_widths: true,
+        min_wall_margin_mm: 50, min_gap_mm: 50, min_obstacle_distance_mm: 50,
+      });
+    });
+    _normalizeEcoMat();
+
+    // «1102» L-form-analog (IKKE Kenneths eksakte polygon): 45 m² brutto, delt i to soner
+    // (_decomposeRoomToRects): 35,84 m² (skal ta 3 matter) + 8,76 m² (skal forbli én matte).
+    const RID = 901101;
+    const pts = [{ x: 0, y: 0 }, { x: 900, y: 0 }, { x: 900, y: 400 }, { x: 300, y: 400 }, { x: 300, y: 700 }, { x: 0, y: 700 }];
+    const room = { id: RID, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) };
+    S.rooms = [room]; S.mats = []; S.hindrings = []; S.zones = [];
+    S.ui.selectedRoomId = RID;
+
+    const prod = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 15);
+    const zonePlan = _matPlanZones(room, prod);
+
+    check('1102 gir 2 soner', '2', zonePlan.zonePlans.length === 2, zonePlan.zonePlans.length);
+    const big = zonePlan.zonePlans.find(zp => zp.zoneAreaM2 > 20);
+    const small = zonePlan.zonePlans.find(zp => zp.zoneAreaM2 <= 20);
+    check('Stor sone (35,84 m²): flermatte, 3 matter, 24,0 m²', 'multi, 3 matter, 24,0 m²',
+      big && big.mode === 'multi' && big.mats.length === 3 && Math.abs(big.coveredM2 - 24) < 0.05,
+      big ? `${big.mode}, ${big.mats.length} matter, ${big.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
+    check('Liten sone (8,76 m²): enkelt-matte, 1 matte, 6,96 m²', 'single, 1 matte, 6,96 m²',
+      small && small.mode === 'single' && small.mats.length === 1 && Math.abs(small.coveredM2 - 6.96) < 0.05,
+      small ? `${small.mode}, ${small.mats.length} matte(r), ${small.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
+    check('Samlet dekning ~31,0 m² av 45,0 m² (var ~15-20 m² FØR STEG 1)', '~30,96 m²',
+      Math.abs(zonePlan.totalAreaM2 - 30.96) < 0.1, zonePlan.totalAreaM2.toFixed(2));
+  } finally {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.mats = savedMats; S.hindrings = savedHindrings; S.zones = savedZones;
+    S.ui.selectedRoomId = savedSelectedRoomId;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matZoneRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
 }
 
 // ─── «FYLL ROM AUTOMATISK» BRUKER HELE MOTOREN (Kenneth 19.08.2026) ───────
@@ -7770,12 +7981,23 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
   const btaWm2 = netAreaM2 ? Math.round(zonePlan.totalWatt / netAreaM2) : null;
   const targetWm2 = prod.watt_per_m2 || 0;
 
+  // DEL A STEG 1: en sone kan nå ha FLERE matter (zp.mats, plan.mode==='multi') — én linje per
+  // matte i sonen, samme «${count} × navn»-gruppering som _showMatMultiProposalPanel bruker for et
+  // helt rektangulært rom.
   const zoneRows = zonePlan.zonePlans.map((zp, i) => {
-    const p = HEATING_PRODUCTS.find(x => x.id === zp.mat.productId);
+    const byProd = {};
+    for (const m of zp.mats) {
+      const p = HEATING_PRODUCTS.find(x => x.id === m.productId);
+      const key = m.productId;
+      if (!byProd[key]) byProd[key] = { name: p ? p.name : '?', runs: m.num_runs, lenCm: m.length_cm, count: 0 };
+      byProd[key].count++;
+    }
+    const matLines = Object.values(byProd).map(g =>
+      `${g.count > 1 ? g.count + ' × ' : ''}${esc(g.name)} — ${g.runs} bredder à ${Math.round(g.lenCm)}cm`).join('<br>');
     const uncoveredM2 = Math.max(0, zp.zoneAreaM2 - zp.coveredM2);
     return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
-      <div style="font-weight:600">Sone ${i + 1} — ${zp.zoneAreaM2.toFixed(1)} m²</div>
-      <div style="color:var(--dim);font-size:12px">${esc(p ? p.name : '?')} — ${zp.mat.num_runs} bredder à ${Math.round(zp.mat.length_cm)}cm</div>
+      <div style="font-weight:600">Sone ${i + 1} — ${zp.zoneAreaM2.toFixed(1)} m²${zp.mats.length > 1 ? ` · ${zp.mats.length} matter` : ''}</div>
+      <div style="color:var(--dim);font-size:12px">${matLines}</div>
       <div style="font-size:12px">${zp.coveredM2.toFixed(1)} m² dekket${uncoveredM2 > 0.05 ? ` · ${uncoveredM2.toFixed(1)} m² udekket i sonen` : ''} · ${zp.watt} W</div>
     </div>`;
   }).join('');
@@ -7817,13 +8039,25 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
     // over SIN EGEN pushUndo når kalleren allerede har gjort det (opts.skipPushUndo) — ellers ville
     // hele operasjonen (tøm rom → sone-forslag → legg ut) blitt TO angre-steg i stedet for ett.
     if (!opts.skipPushUndo) pushUndo();
-    let placed = 0;
+    // DEL A STEG 1: 'single'-soner commiter uendret via autoFillMatSerpentine (samme kall som FØR
+    // denne fiksen). 'multi'-soner regner PÅ NYTT (samme mønster som 'single' allerede gjorde —
+    // ingenting i rommet skal ha endret seg mellom forhåndsvisning og klikk) og commiter via
+    // _matPlaceMultiMats — SAMME funksjon _showMatMultiProposalPanel bruker for et helt rom.
+    let placedMats = 0, placedZones = 0;
     for (const zp of zonePlan.zonePlans) {
-      const mat = autoFillMatSerpentine(zp.mat.productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true });
-      if (mat) placed++;
+      if (zp.mode === 'multi') {
+        const rePlan = _matZonePlanFor(room, zp.rect, prod);
+        const mats = (rePlan && rePlan.mode === 'multi')
+          ? _matPlaceMultiMats(room, rePlan.prod, rePlan.geom, rePlan.sol, { skipPushUndo: true })
+          : null;
+        if (mats && mats.length) { placedMats += mats.length; placedZones++; }
+      } else {
+        const mat = autoFillMatSerpentine(zp.mats[0].productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true });
+        if (mat) { placedMats++; placedZones++; }
+      }
     }
     div.remove();
-    if (placed) _showToast(`${placed} matter lagt ut i ${placed} soner (${zonePlan.totalAreaM2.toFixed(1)} m²)`, 'ok');
+    if (placedMats) _showToast(`${placedMats} matter lagt ut i ${placedZones} soner (${zonePlan.totalAreaM2.toFixed(1)} m²)`, 'ok');
     else { _showToast('Ingen matter kunne legges ut — prøv igjen', 'error'); if (opts.skipPushUndo) undo(); }
   };
 }
@@ -8845,7 +9079,13 @@ function _matFreeClampLen(mp, axis, dir, from, len) {
   catch (e) { return len; }
   if (!intervals || !intervals.length) return len;
   const iv = intervals.find(([lo, hi]) => along >= lo - 1 && along <= hi + 1);
-  if (!iv) return len;                             // start utenfor rommet → ikke klamp
+  // DEL B FEIL 2 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): startet FEIL ÅPEN — «fant
+  // ikke noe intervall som inneholder startpunktet» ble lest som «ingenting å klampe mot», og
+  // banen fikk tegnes med FULL, uklippet lengde. Den ENE tilstanden funksjonen absolutt må stoppe
+  // (start utenfor polygonet) var den den ga opp på. En bane uten et lovlig startpunkt har ingen
+  // lovlig lengde — 0, ikke len. Etter FEIL 1-fiksen (_matFreeStartFor) skal selve START-punktet
+  // aldri lenger havne her, men senere baner (hver ny _matFreeCandidate-ende) må stå på egne ben.
+  if (!iv) return 0;
   let limit = dir > 0 ? iv[1] : iv[0];            // rom-grense i baneretningen
   // Hindringer: meshen kan ikke ligge oppå → stopp ved hindring-kant (bbox) i baneretningen.
   for (const h of (S.hindrings || [])) {
@@ -8917,6 +9157,15 @@ function _matFreeCandidate(mp, P) {
 
 // Start-punkt (kaldskjøt) i nedre-venstre hjørne, gitt første banes akse. ½ cc fra vegg mot
 // KORTSIDEN (bane-enden) og 5 cm fra vegg mot LANGSIDEN (den 50 cm brede mesh-kanten).
+//
+// DEL B FEIL 1 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): bbox-hjørnet (minX/maxX/
+// minY/maxY) er romMENS omsluttende boks, ikke romMENS FORM — for et uregelmessig rom (Kenneths
+// 1108) kan selve hjørnet ligge et sted polygonet aldri dekker, og startpunktet havner utenfor
+// veggen. Finn i stedet polygonets EGET tverr-intervall nærmest ønsket kryss-linje (samme
+// clipScanlineToPolygon som _matFreeClampLen allerede stoler på under selve tegningen — ingen ny
+// klippe-mekanisme), og forankre startpunktet i DET intervallet. Rektangulære rom er BIT-FOR-BIT
+// uendret: der treffer skannelinja polygonet på FØRSTE forsøk (bbox-kant ER polygon-kant), og
+// intervallet er identisk med [minX,maxX]/[minY,maxY] — samme tall som FØR denne fiksen.
 function _matFreeStartFor(room, prod, axis) {
   const { NET, cc } = _matFreeConsts(prod);
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -8930,14 +9179,37 @@ function _matFreeStartFor(room, prod, axis) {
   const corner = (S.varmefolie && S.varmefolie.startCorner) || 'bl';
   const left = corner.charAt(1) === 'l';     // bl/tl → venstre
   const bottom = corner.charAt(0) === 'b';   // bl/br → bunn
+
+  // Søker kryss-linja innover (bort fra bbox-kanten, mot rommets senter) til den faktisk treffer
+  // polygonet — nødvendig for et innhukk/utstikk der bbox-hjørnet selv er «luft». STEP er fin nok
+  // til å finne en smal arm (en brøkdel av cc), grov nok til å konvergere på under 400 forsøk for
+  // enhver realistisk romstørrelse.
+  function findInterval(scanKind, startPos, towardMin, boundMin, boundMax) {
+    const STEP = Math.max(1, cc / 8);
+    let pos = startPos;
+    for (let i = 0; i < 400 && pos > boundMin - 0.5 && pos < boundMax + 0.5; i++) {
+      let ivs;
+      try { ivs = clipScanlineToPolygon(scanKind, pos, room.points); } catch (e) { ivs = null; }
+      if (ivs && ivs.length) return { pos, interval: ivs.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a)) };
+      pos += towardMin ? -STEP : STEP;
+    }
+    return null;   // skulle aldri skje for et gyldig (≥3 punkter) polygon
+  }
+
   if (axis === 'h') {
     // Liggende bane: kortkant = venstre/høyre ende (½ cc); langkant = topp/bunn (5 cm).
-    return { x: left ? minX + shortM : maxX - shortM,
-             y: bottom ? maxY - NET / 2 - longM : minY + NET / 2 + longM };
+    const crossStart = bottom ? maxY - NET / 2 - longM : minY + NET / 2 + longM;
+    const found = findInterval('x', crossStart, bottom, minY, maxY);
+    if (!found) return { x: left ? minX + shortM : maxX - shortM, y: crossStart };   // bbox-fallback
+    const [lo, hi] = found.interval, mid = (lo + hi) / 2;
+    return { x: left ? Math.min(lo + shortM, mid) : Math.max(hi - shortM, mid), y: found.pos };
   }
   // Stående bane: kortkant = topp/bunn ende (½ cc); langkant = venstre/høyre (5 cm).
-  return { x: left ? minX + NET / 2 + longM : maxX - NET / 2 - longM,
-           y: bottom ? maxY - shortM : minY + shortM };
+  const crossStart = left ? minX + NET / 2 + longM : maxX - NET / 2 - longM;
+  const found = findInterval('y', crossStart, !left, minX, maxX);
+  if (!found) return { x: crossStart, y: bottom ? maxY - shortM : minY + shortM };   // bbox-fallback
+  const [lo, hi] = found.interval, mid = (lo + hi) / 2;
+  return { x: found.pos, y: bottom ? Math.max(hi - shortM, mid) : Math.min(lo + shortM, mid) };
 }
 
 // Start frihånds-modus for et produkt: start i rommets nedre-venstre indre hjørne (+margin).
@@ -8982,6 +9254,13 @@ function _matFreeRunsWithinRoom(mp) {
     const len = _matFreeRunLen(r);
     if (len <= 0.5) continue;
     const maxLen = _matFreeClampLen(mp, r.axis, r.dir, r.a, len);
+    // DEL B FEIL 3 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): skill «selve
+    // startpunktet ligger utenfor rommet» (maxLen=0 etter FEIL 2-fiksen i _matFreeClampLen) fra
+    // «banen ble bare klippet kortere enn tegnet» — to ulike årsaker, to ulike meldinger. FØR
+    // FEIL 2 var disse umulige å skille her: en bane som startet utenfor fikk maxLen=len («bestått»)
+    // og den EGENTLIGE årsaken dukket i stedet opp lenger ned som en misvisende arealmelding —
+    // «det skjer ikke stort», akkurat Kenneths symptom.
+    if (maxLen <= 0.5) return { ok: false, reason: 'banen starter utenfor rommet' };
     if (maxLen + 0.5 < len) return { ok: false, reason: 'matta ville ligget utenfor rommet' };
   }
   // STEG 1B FØR 1A (bevisst rekkefølge): areal er den enkleste, mest informative forklaringen når
@@ -9012,8 +9291,13 @@ function _matFreeExit(commit) {
     if (!guardResult.ok) {
       console.error('_matFreeExit: frihånds-matte brøt regelverket — avbrutt', { mpNew, reason: guardResult.reason });
       if (typeof _showToast === 'function') _showToast('Frihånd avbrutt: ' + guardResult.reason, 'error');
-      _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
-      if (typeof updMode === 'function') updMode();
+      // DEL B FEIL 4 (Kenneth 19.08.2026, «frihånd starter utenfor rommet» — «trykker jeg stopp,
+      // skjer det ikke stort»): FØR denne fiksen nullstilte en avvist commit HELE tegningen
+      // (_matFree=null, drawMode=null) — alt Kenneth hadde tegnet forsvant tyst, og «ikke stort
+      // skjer» var bokstavelig hele opplevelsen. _matFree beholdes nå UENDRET og drawMode blir
+      // værende i 'mat-freehand' — tegningen står igjen, meldingen over sier hva som er galt, og
+      // Backspace (_matFreeUndoMove, se keydown-handleren) fjerner den siste, feilende banen i
+      // stedet for at hele arbeidet må gjøres på nytt.
       render();
       return;
     }
@@ -9045,6 +9329,114 @@ function _matFreeExit(commit) {
   render();
 }
 function _matFreeUndoMove() { if (_matFree && _matFree.moves.length) { _matFree.moves.pop(); render(); } }
+
+// ─── FRIHÅND-REGRESJONSTEST (STEG 3, «frihånd starter utenfor rommet», Kenneth 19.08.2026) ─────
+// «1108 Garderobe» — låst fasit for FEIL 1-4: bbox-hjørnet på et uregelmessig rom kan ligge utenfor
+// polygonet (FEIL 1), klampen må feile LUKKET når et startpunkt likevel havner utenfor (FEIL 2),
+// commit-vakten skal navngi den EKTE årsaken (FEIL 3), og en avvist commit skal beholde tegningen
+// (FEIL 4) — samme try/finally-mønster som _matZoneRegressionTest/_matRegressionTest, men må i
+// tillegg lagre/gjenopprette den globale _matFree (ikke et S.*-felt).
+function _matFreeRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedMatPaths = S.matPaths, savedHindrings = S.hindrings,
+    savedSelectedRoomId = S.ui.selectedRoomId, savedDrawMode = S.ui.drawMode,
+    savedStartCorner = S.varmefolie && S.varmefolie.startCorner, savedNextMatPathId = S.counters.nextMatPathId,
+    savedSelectedMatPathId = S.ui.selectedMatPathId, savedMatFree = _matFree;
+  // _matFreeExit sin commit-gren kaller renderSidebar/updateCtxBar/render/_matPathPanel — DOM-
+  // rendering som ikke er del av det denne testen faktisk verifiserer (logikken/state, ikke
+  // skjermbildet), og som kan krasje på ELDRE UI-state fra en tidligere, urelatert markørvalg i
+  // samme browser-økt (S.ui.selectedMatId pekte på et objekt som ikke lenger fantes). Stubbet ut
+  // for varigheten av testen, samme prinsipp som _scheduleAutoSave stubbes i disse øktenes egen
+  // etablerte testmetodikk — gjenopprettet uansett utfall.
+  const savedRenderSidebar = renderSidebar, savedUpdateCtxBar = updateCtxBar, savedRender = render,
+    savedMatPathPanel = typeof _matPathPanel === 'function' ? _matPathPanel : null;
+  renderSidebar = () => {}; updateCtxBar = () => {}; render = () => {};
+  if (savedMatPathPanel) _matPathPanel = () => {};
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    HEATING_PRODUCTS.length = 0;
+    const prod = { id: 992001, category_id: 9800, active: true, product_family: 'EcoMat 150T',
+      name: 'EcoMat 150T 0,5x20m', watt_per_m2: 150, mat_area_m2: 10, mat_width_mm: 500,
+      mat_total_length_mm: 20000, mat_min_length_mm: 1000, mat_cc_mm: 80, mat_cut_interval_mm: 160,
+      min_wall_margin_mm: 50, min_gap_mm: 50 };
+    HEATING_PRODUCTS.push(prod);
+
+    // «1108» L-form-analog (IKKE Kenneths eksakte polygon): bbox 0..500 × 0..400, men bunn-venstre
+    // hjørne (x:0-200, y:200-400) mangler helt — bbox-hjørnet (0,400) ligger derfor UTENFOR
+    // polygonet, akkurat symptomet Kenneth beskrev («matten starter på UTSIDEN av rommet»).
+    const RID = 901108;
+    const pts = [{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 400 }, { x: 200, y: 400 }, { x: 200, y: 200 }, { x: 0, y: 200 }];
+    const room = { id: RID, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) };
+    S.rooms = [room]; S.matPaths = []; S.hindrings = [];
+    S.ui.selectedRoomId = RID;
+    S.varmefolie = S.varmefolie || {};
+    S.varmefolie.startCorner = 'bl';
+
+    // FEIL 1: begge akser skal lande INNE i polygonet, ikke i det manglende hjørnet.
+    const startV = _matFreeStartFor(room, prod, 'v');
+    const startH = _matFreeStartFor(room, prod, 'h');
+    const inside = p => { const ivs = clipScanlineToPolygon('x', p.y, pts); return ivs.some(([lo, hi]) => p.x >= lo - 0.5 && p.x <= hi + 0.5); };
+    check('1108 loddrett startpunkt er inne i polygonet', 'inne', inside(startV), JSON.stringify(startV));
+    check('1108 liggende startpunkt er inne i polygonet', 'inne', inside(startH), JSON.stringify(startH));
+
+    // Regresjon: et RENT rektangel skal gi BIT-FOR-BIT samme startpunkt som bbox-formelen ga FØR
+    // FEIL 1-fiksen (30,296 for bl/v med denne produktkonstanten — cc=8→shortM=4, NET=50→longM=5).
+    const rectRoom = { id: 901109, points: [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 300 }, { x: 0, y: 300 }] };
+    const rectStart = _matFreeStartFor(rectRoom, prod, 'v');
+    check('Rektangulært rom: startpunkt uendret (30,296)', '{x:30,y:296}',
+      Math.abs(rectStart.x - 30) < 0.01 && Math.abs(rectStart.y - 296) < 0.01, JSON.stringify(rectStart));
+
+    // FEIL 2: klampen feiler LUKKET (0) når startpunktet likevel er utenfor polygonet.
+    const outsideFrom = { x: 30, y: 396 };   // det manglende hjørnet
+    const clampedOutside = _matFreeClampLen({ roomId: RID, productId: prod.id, moves: [], gapCm: 0 }, 'v', -1, outsideFrom, 100);
+    check('Klamp: startpunkt utenfor rommet gir lengde 0 (ikke uklampet)', '0', clampedOutside === 0, clampedOutside);
+
+    // FEIL 3: commit-vakten navngir den EKTE årsaken («starter utenfor», ikke en generisk arealfeil).
+    const mpOutside = { roomId: RID, productId: prod.id, start: outsideFrom,
+      moves: [{ axis: 'v', dir: -1, len: 100, conn: 'first', side: 1 }], gapCm: 0 };
+    const guardOutside = _matFreeRunsWithinRoom(mpOutside);
+    check('Vakt: bane som starter utenfor rommet avvises MED riktig begrunnelse', 'banen starter utenfor rommet',
+      !guardOutside.ok && guardOutside.reason === 'banen starter utenfor rommet', JSON.stringify(guardOutside));
+
+    // FEIL 4: en avvist commit beholder _matFree/drawMode — tegningen kastes IKKE.
+    S.ui.drawMode = 'mat-freehand';
+    S.counters.nextMatPathId = 1;
+    _matFree = { roomId: RID, productId: prod.id, start: outsideFrom,
+      moves: [{ axis: 'v', dir: -1, len: 100, conn: 'first', side: 1 }], gapCm: 0, offX: 0, offY: 0 };
+    const matPathsBeforeReject = S.matPaths.length;
+    _matFreeExit(true);
+    check('Avvist commit: _matFree beholdes (ikke nullstilt)', 'ikke null', _matFree !== null, _matFree);
+    check('Avvist commit: drawMode blir værende i mat-freehand', 'mat-freehand', S.ui.drawMode === 'mat-freehand', S.ui.drawMode);
+    check('Avvist commit: INGEN matPath lagt til', '0', S.matPaths.length === matPathsBeforeReject, S.matPaths.length - matPathsBeforeReject);
+
+    // Sunnhetssjekk: en GYLDIG bane (fra det FEIL 1-fiksede startpunktet, raster-justert lengde)
+    // committer normalt og avslutter frihånds-modus som før.
+    const validStart = _matFreeStartFor(room, prod, 'h');
+    _matFree = { roomId: RID, productId: prod.id, start: validStart,
+      moves: [{ axis: 'h', dir: 1, len: 240, conn: 'first', side: 1 }], gapCm: 0, offX: 0, offY: 0 };
+    S.ui.drawMode = 'mat-freehand';
+    const matPathsBeforeValid = S.matPaths.length;
+    _matFreeExit(true);
+    check('Gyldig bane: committer (matPaths +1) og forlater frihånds-modus', '+1, drawMode null',
+      S.matPaths.length === matPathsBeforeValid + 1 && S.ui.drawMode === null,
+      `matPaths ${S.matPaths.length - matPathsBeforeValid}, drawMode ${S.ui.drawMode}`);
+  } finally {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.matPaths = savedMatPaths; S.hindrings = savedHindrings;
+    S.ui.selectedRoomId = savedSelectedRoomId; S.ui.drawMode = savedDrawMode;
+    S.ui.selectedMatPathId = savedSelectedMatPathId;
+    if (S.varmefolie) S.varmefolie.startCorner = savedStartCorner;
+    S.counters.nextMatPathId = savedNextMatPathId;
+    _matFree = savedMatFree;
+    renderSidebar = savedRenderSidebar; updateCtxBar = savedUpdateCtxBar; render = savedRender;
+    if (savedMatPathPanel) _matPathPanel = savedMatPathPanel;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matFreeRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
 
 // ── Del 4: justering (avstand mellom baner + Sentrer) + valg/slett ──
 // Sentrer: midtstill mattas bounding-box i ROMMETS bbox → i størst mulig grad like store
@@ -34934,6 +35326,11 @@ document.addEventListener('keydown', e=>{
   // FEIL 2 (Kenneth 19.08.2026, «er det mulig å trykke Enter når man er fornøyd?»): Enter
   // avslutter og committer — samme mønster som polygon/wbw/hindring-polygon under.
   if (e.key==='Enter'&&S.ui.drawMode==='mat-freehand'&&_matFree&&_matFree.moves.length>=1) { _matFreeExit(true); return; }
+  // DEL B FEIL 4 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): Backspace fjerner den
+  // SISTE banen — _matFreeUndoMove fantes fra før men var aldri koblet til noen tastatur-handling.
+  // Kobles inn her: nettopp verktøyet Kenneth trenger for å «rette den siste banen» etter en
+  // avvist Enter (_matFreeExit beholder nå tegningen i stedet for å nullstille, se der).
+  if (e.key==='Backspace'&&S.ui.drawMode==='mat-freehand'&&_matFree&&_matFree.moves.length) { _matFreeUndoMove(); e.preventDefault(); return; }
   if (e.key==='Enter'&&S.ui.drawMode==='skillevegg'&&S.drawing.skillevegg.phase===2) { commitSkillevegg(); return; }
   if (e.key==='Enter'&&S.ui.wallThicknessMode) { exitWallThicknessMode(true); return; }
   if (e.key==='Enter'&&S.ui.drawMode==='wbw') { finishWbwRoom(); return; }
