@@ -10584,6 +10584,23 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
  * Keeping both profiles here preserves today's exact ranking while ending the
  * ad-hoc score math that used to live in _scoreLayout / _autoFillBothDirections.
  */
+// LÅST REGEL (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist»):
+// banekostnad og breddetype-kostnad for 'long'-profilen, i ÉN navngitt konstant slik at de kan
+// justeres uten å lete gjennom koden. Uttrykt som ANDEL av rommets brutto areal (netCm2) — SAMME
+// enhet (cm²) som selve dekningen (coveredArea), slik at de er direkte sammenlignbare i étt tall.
+// Det var ALDRI vektene som var problemet — de rangerer allerede riktig (se Rom 4 under). Feilen
+// satt i _statsAtLeastAsGood, som lot et separat, ukalibrert prosentpoeng-bånd overstyre denne
+// scoren FØR den noensinne ble konsultert. Fjernet der, ikke her.
+//
+// Rom 4 (uregelmessig, 14,34 m²/143 400 cm² netCm2), tre reelle utlegg fra samme rom — bekrefter at
+// disse vektene ALLEREDE rangerer B > C > A, riktig i Kenneths egne øyne:
+//   A (auto, sone, 7 baner, 3 breddetyper, 13,50 m² dekket): score = 135000−7×143400×0,08−2×143400×0,12 = 20 280
+//   B (Kenneth, 3 baner, 3 breddetyper,   12,96 m² dekket): score = 129600−3×143400×0,08−2×143400×0,12 = 60 768
+//   C (Kenneth, 6 baner, 3 breddetyper,   13,58 m² dekket): score = 135800−6×143400×0,08−2×143400×0,12 = 32 552
+const FOIL_SCORE_WEIGHTS = {
+  stripCostFrac: 0.08,      // hver bane (= én tilkobling) koster ~8% av rommets areal
+  widthTypeCostFrac: 0.12,  // hver EKSTRA breddetype (utover den første) koster ~12% av rommets areal
+};
 function _scoreFoilLayout(defs, ctx) {
   const profile = (ctx && ctx.profile) || 'select';
 
@@ -10602,8 +10619,8 @@ function _scoreFoilLayout(defs, ctx) {
     }
     const netCm2 = (ctx && ctx.netCm2) || (coveredArea / 0.85);   // fallback if not supplied
     return coveredArea
-         - defs.length * netCm2 * 0.08         // each strip (= one connection) costs ~8% of room
-         - (widthSet.size - 1) * netCm2 * 0.12; // extra width type costs ~12%
+         - defs.length * netCm2 * FOIL_SCORE_WEIGHTS.stripCostFrac
+         - (widthSet.size - 1) * netCm2 * FOIL_SCORE_WEIGHTS.widthTypeCostFrac;
   }
 
   if (profile === 'zone') {
@@ -11205,6 +11222,13 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
   return working;
 }
 
+// STEG 3 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist»): nedre
+// NYTTEgrense i effekt — Kenneth la selv en 20cm×0,4m bane (4W) for hånd i sitt eget C-utlegg; han
+// er villig til å ta en sliver for å hente de siste kvadratcentimeterne. Men når MOTOREN gjør det
+// automatisk blir det en egen tilkobling for nesten ingenting. Egen navngitt konstant (ikke et
+// hardkodet tall spredt i pakkeren) — juster HER, ikke i _layoutRulePenalty sin kropp.
+const FOIL_MIN_USEFUL_WATT = 15;
+
 // Straff for et utlegg som bryter regler eller er oppstykket — trekkes fra scoren så
 // «anbefalt» (★) aldri går til et regelbrytende/dårligere alternativ. Folie i hindring
 // koster ~1× romareal (dominerer) → et slikt utlegg vinner aldri.
@@ -11224,13 +11248,26 @@ function _layoutRulePenalty(defs, room) {
       else if (_rectMinDistToPolyEdge(R.x0, R.y0, R.x1, R.y1, h.points) < m - 0.01) { penalty += netCm2 * 0.15; break; } // <25 mm fra hindring
     }
     if (d.length_cm < 30) penalty += (30 - d.length_cm) * nc * 2;   // oppstykking: svært korte strimler
+    // STEG 3: samme skala/mønster som lengde-straffen over, men i EFFEKT — fanger en smal OG kort
+    // bane som til sammen gir for lite watt, selv om lengden alene ville sluppet gjennom 30cm-testen.
+    const watt = pp ? (pp.watt_per_m2 || 60) * nc * d.length_cm / 10000 : 0;
+    if (watt > 0 && watt < FOIL_MIN_USEFUL_WATT) penalty += (FOIL_MIN_USEFUL_WATT - watt) * nc * 2;
   }
   return penalty;
 }
 
 // Per-direction stats block for a foil layout (shape the compare panel expects).
+// FEIL 4 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist»): teller
+// nå breddeTYPER på SAMME grunnlag scoren selv bruker (nettobredde, «nc») — ikke produkt-id. To
+// produkter med lik nettobredde (ulik effekt/rullengde) telte tidligere som 2 her men 1 i scoren;
+// samme «ett felt, to betydninger»-mønster som min_gap_mm. Panelet og scoren viser nå samme tall.
+// STEG 1: netCm2 sendes nå EKSPLISITT inn — SAMME grunnlag (Math.abs(compArea(room.points)))
+// _longStripsLayout selv brukte da den fant «best» — uten dette falt scoren her tilbake til
+// _scoreFoilLayout sin selv-refererende coveredArea/0.85, som IKKE er samme tall som søket faktisk
+// optimerte mot (et rent tilfeldig, ikke bevisst avvik — retter det i samme slag som resten).
 function _foilLayoutStats(defs, room, scoreProfile) {
   const netArea = _calcNetArea(room);
+  const netCm2 = Math.abs(compArea(room.points)) || 1;
   let coveredArea = 0, totalW = 0; const widthSet = new Set();
   for (const d of defs) {
     const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
@@ -11238,7 +11275,7 @@ function _foilLayoutStats(defs, room, scoreProfile) {
     const nc = (p.netto_width_mm || p.width_mm) / 10;
     coveredArea += nc * d.length_cm / 10000;
     totalW += (p.watt_per_m2 || 60) * nc * d.length_cm / 10000;
-    widthSet.add(p.id);
+    widthSet.add(nc);
   }
   return {
     stripCount: defs.length,
@@ -11246,7 +11283,7 @@ function _foilLayoutStats(defs, room, scoreProfile) {
     totalWatt: Math.round(totalW),
     wattPerM2: netArea > 0 ? Math.round(totalW / netArea) : 0,
     widthTypes: widthSet.size,
-    score: _scoreFoilLayout(defs, { profile: scoreProfile }) - _layoutRulePenalty(defs, room)
+    score: _scoreFoilLayout(defs, { profile: scoreProfile, netCm2 }) - _layoutRulePenalty(defs, room)
   };
 }
 
@@ -11261,6 +11298,24 @@ function _longStripsLayout(room, sortedProds, direction, marginCm) {
   for (const prod of sortedProds) {
     for (const fromHigh of [false, true]) {
       const defs = _autoFillRoomOnce(room, [prod], direction, fromHigh, undefined, marginCm, true);
+      const s = score(defs);
+      if (defs.length && s > bestS) { bestS = s; best = defs; }
+    }
+  }
+  // STEG 2 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist» —
+  // Regel 21 for folie, samme sak vi låste for matte): den globale veien kunne KUN uttrykke én
+  // uniform bredde (løkka over sender alltid [prod], ett produkt). Kenneths egne manuelle utlegg
+  // (B: 140+80+100, C: 140/140/140+60+20) er nøyaktig «grådig fra bredest, smalere bredder fyller
+  // gapet en bredere ikke dekker» — over hele rommet, IKKE sone-fragmentert. Den maskinen finnes
+  // allerede: _autoFillRoomOnce sin longMode=false-gren (brukt av 'coverage'-strategien, se
+  // _autoFillBothDirections) plukker allerede adaptivt bredeste-som-får-plass per kolonne når den
+  // får HELE sortedProds i stedet for ett produkt. Legges inn som en EKSTRA kandidat her — vurdert
+  // med SAMME score som uniform-kandidatene over, vinner kun når den faktisk scorer bedre (ikke en
+  // ny motor, gjenbruk av en som allerede fantes for en annen strategi). «Hold søket i tømme»: to
+  // ekstra kall (fromHigh true/false), ikke et kombinatorisk søk.
+  if (sortedProds.length > 1) {
+    for (const fromHigh of [false, true]) {
+      const defs = _autoFillRoomOnce(room, sortedProds, direction, fromHigh, undefined, marginCm, false);
       const s = score(defs);
       if (defs.length && s > bestS) { bestS = s; best = defs; }
     }
@@ -11410,25 +11465,99 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
   _previewAutoFillOption(better);
 }
 
-// Dekning-først, score-tiebreak: 'a' er minst like bra som 'b' hvis dekningen er >3 %-poeng
-// bedre, ELLER dekningen er ~lik (innen 3 %-poeng) og scoren er ≥. Samme regel brukes til å
-// velge H vs V (_betterFoilDir) OG sone- vs global-utlegg for SAMME retning (showAutoFillComparison
-// over) — én kilde til sannhet for «bedre», så et alternativ med flere/ulike striper eller et hull
-// aldri vinner på ren dekning-tellemetode alene når scoren (som inkluderer regelbrudd/oppstykking)
-// sier det motsatte.
+// STEG 1 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist»): FJERNET
+// 3-poengsbåndet som lot dekning (i prosentpoeng) overstyre scoren (i cm²) — to spaker i ulik
+// valuta, der båndet i praksis slo av scoren for alt annet enn nesten-uavgjort (Rom 4: A vant på
+// 4-6 poeng dekningsforsprang mot B/C, selv om A scoret 3× DÅRLIGERE — scoren ble aldri konsultert).
+// _scoreFoilLayout (se FOIL_SCORE_WEIGHTS) uttrykker ALLEREDE dekning, banekostnad og breddetype-
+// kostnad i samme enhet (cm²) — én ren >= er derfor riktig, ikke en ny beregning. Samme regel
+// brukes til å velge H vs V (_betterFoilDir) OG sone- vs global-utlegg for SAMME retning
+// (showAutoFillComparison over) — én kilde til sannhet for «bedre».
 function _statsAtLeastAsGood(a, b) {
-  const d = a.coveragePct - b.coveragePct;
-  if (Math.abs(d) > 3) return d > 0;
   return a.score >= b.score;
 }
 
-// Auto = BEST DEKNING: velg retningen som dekker mest areal. Den sammensatte 'long'-scoren
-// (straffer strip-antall 0,08×areal + breddetyper 0,12×areal + regelbrudd) brukes KUN som
-// tie-break når dekningen er ~lik (innen 3 %-poeng). Ellers ville et lett skjevt (håndtegnet)
-// rom, der den best-dekkende retningen splitter i flere/ulike striper, tape på score og gi et
-// dårligere, «hullete» utlegg enn montørens manuelle. Coverage-først = auto matcher/slår manuelt.
+// Auto = BEST SCORE (se FOIL_SCORE_WEIGHTS/_statsAtLeastAsGood over): velg retningen med høyest
+// sammensatt score — dekning, banekostnad og breddetype-kostnad i SAMME enhet (cm²), ikke lenger
+// et separat prosentpoengs-forsprang på dekning alene. (Tidligere kommentar her beskrev et
+// dekning-først-med-3pp-tie-break-regime — det er FJERNET, se STEG 1-kommentaren over.)
 function _betterFoilDir(results) {
   return _statsAtLeastAsGood(results.h.stats, results.v.stats) ? 'h' : 'v';
+}
+
+// ─── FOLIE-REGRESJONSTEST (STEG 3, «foliemotorens egen score rangerer dens eget utlegg sist»,
+// Kenneth 19.08.2026) ─────────────────────────────────────────────────────────────────────────
+// Ingen tidligere test dekket folie-motoren i det hele tatt (_matRegressionTest er mattemotor-
+// only) — «Rom 4» (samme uregelmessige rom som STEG 0-rapporten over: 550×300cm, skrå
+// venstrevegg + utstikk nede til venstre, 14,00 m²) låses her som fasit, samme try/finally-mønster
+// som _matRegressionTest. Reproduserer selve VALGET showAutoFillComparison gjør (global vs sone
+// per retning, så H vs V) uten å røre DOM-panelet, med en syntetisk 7-bredders folie-familie
+// (20/40/60/80/100/120/140cm netto). Fasiten er selve BUGEN sitt motstykke: FØR fiksen valgte
+// dette rommet h-sone (score 40240, LAVEST av de fire alternativene) — nå skal det velge
+// h-global (score ~94290, HØYEST), 2 baner, 1 breddetype, ~83 % dekning.
+function _foilRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedStrips = S.strips, savedHindrings = S.hindrings,
+    savedZones = S.zones, savedSelectedRoomId = S.ui.selectedRoomId,
+    savedFoilStrategy = S.varmefolie && S.varmefolie.foilStrategy,
+    savedCompare = S.ui.autoFillCompare, savedCompareCatId = S.ui.autoFillCompareCategoryId,
+    savedFillTargetZoneId = S.ui.fillTargetZoneId;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    const RID = 900101, catId = 980100;
+    HEATING_PRODUCTS.length = 0;
+    const widthsCm = [20, 40, 60, 80, 100, 120, 140];
+    widthsCm.forEach((w, i) => HEATING_PRODUCTS.push({
+      id: 900200 + i, category_id: catId, active: true, product_family: 'RegFoil',
+      name: `RegFoil ${w}cm`, voltage: 230, watt_per_m2: 60,
+      netto_width_mm: w * 10, width_mm: w * 10 + 10,
+    }));
+    const roomPts = [{ x: 150, y: 0 }, { x: 550, y: 0 }, { x: 550, y: 300 }, { x: 0, y: 300 }, { x: 0, y: 200 }, { x: 100, y: 200 }];
+    S.rooms = [{
+      id: RID, floorId: null, partId: null, shape: 'polygon', wallThicknessCm: 0,
+      points: roomPts, walls: [], dims: [], area: Math.abs(compArea(roomPts)),
+    }];
+    S.strips = []; S.hindrings = []; S.zones = [];
+    S.ui.selectedRoomId = RID;
+    S.ui.fillTargetZoneId = null;
+    S.varmefolie = S.varmefolie || {};
+    S.varmefolie.foilStrategy = 'long';
+
+    const room = S.rooms[0];
+    const prods = HEATING_PRODUCTS.filter(p => p.category_id === catId && p.product_family === 'RegFoil')
+      .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
+    const fillResults = _autoFillBothDirections(room, prods);
+    for (const dir of ['h', 'v']) {
+      const zd = _zonedDefsForDirection(room, prods[0].id, dir);
+      if (!zd || !zd.length) continue;
+      const zStats = _foilLayoutStats(zd, room, 'long');
+      if (_statsAtLeastAsGood(zStats, fillResults[dir].stats)) fillResults[dir] = { defs: zd, stats: zStats };
+    }
+    const chosen = _betterFoilDir(fillResults);
+    const hSt = fillResults.h.stats, vSt = fillResults.v.stats;
+
+    check('Rom 4 velger H (global, ikke sone)', 'h',
+      chosen === 'h', chosen);
+    check('Rom 4 H: 2 baner, 1 breddetype, ~83% dekning', '2 baner, 1 breddetype, 83%',
+      hSt.stripCount === 2 && hSt.widthTypes === 1 && hSt.coveragePct === 83,
+      `${hSt.stripCount} baner, ${hSt.widthTypes} breddetype(r), ${hSt.coveragePct}%`);
+    check('Rom 4 H-score er høyest av H/V', 'h.score >= v.score',
+      hSt.score >= vSt.score, `h=${hSt.score}, v=${vSt.score}`);
+    check('Rom 4 H-score er positiv og troverdig (ikke sone-fallback ~40000)', '> 80000',
+      hSt.score > 80000, hSt.score);
+  } finally {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.strips = savedStrips; S.hindrings = savedHindrings; S.zones = savedZones;
+    S.ui.selectedRoomId = savedSelectedRoomId;
+    if (S.varmefolie) S.varmefolie.foilStrategy = savedFoilStrategy;
+    S.ui.autoFillCompare = savedCompare; S.ui.autoFillCompareCategoryId = savedCompareCatId;
+    S.ui.fillTargetZoneId = savedFillTargetZoneId;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_foilRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
 }
 
 function _renderAutoFillComparePanel(results, selectedDir) {
