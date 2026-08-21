@@ -9543,6 +9543,51 @@ function _matFreeRegressionTest() {
     check('Gyldig bane: committer (matPaths +1) og forlater frihånds-modus', '+1, drawMode null',
       S.matPaths.length === matPathsBeforeValid + 1 && S.ui.drawMode === null,
       `matPaths ${S.matPaths.length - matPathsBeforeValid}, drawMode ${S.ui.drawMode}`);
+
+    // DEL A-regresjon (Kenneth 21.08.2026, «fargene forsvant da banen ble delt»): e840b73 (Modell A)
+    // gjorde at hver committet matPath alltid har NØYAKTIG ett cat.segments-element — fargegrenen i
+    // _drawMatPathObj var FØR betinget på `cat.segments.length > 1`, en betingelse som ble PERMANENT
+    // usann og slukket fargene helt. Denne testen fanger AKKURAT det scenarioet, for BEGGE former
+    // objekter kan ha (tre uavhengige Modell A-objekter ELLER ett eldre objekt med tre segmenter fra
+    // FØR e840b73) — ingen av dem skal noensinne kunne gå tilbake til «alle blå».
+    HEATING_PRODUCTS.length = 0;
+    for (const L of [8, 26, 30]) {
+      HEATING_PRODUCTS.push({ id: 993000 + L, category_id: 9800, active: true, product_family: 'EcoMat 150T',
+        name: `EcoMat 150T 0,5x${L}m`, voltage: 230, watt_per_m2: 150, mat_area_m2: L * 0.5,
+        mat_width_mm: 500, mat_total_length_mm: L * 1000, mat_cc_mm: 80, mat_cut_interval_mm: 160,
+        min_wall_margin_mm: 5, min_gap_mm: 0 });
+    }
+    const RID_COLOR = 902108;
+    const colorRoom = { id: RID_COLOR, floorId: null,
+      points: [{ x: 0, y: 0 }, { x: 7000, y: 0 }, { x: 7000, y: 300 }, { x: 0, y: 300 }],
+      walls: [], dims: [], area: 7000 * 300 };
+    S.rooms = [colorRoom]; S.matPaths = [];
+
+    // Scenario 1: tre UAVHENGIGE matPath-objekter (Modell A, dagens vei — hver med ett segment).
+    S.matPaths.push(
+      { id: 1, roomId: RID_COLOR, productId: 993008, start: { x: 20, y: 50 }, moves: [{ axis: 'h', dir: 1, len: 800, conn: 'first', side: 1 }], gapCm: 0, centered: false, offX: 0, offY: 0 },
+      { id: 2, roomId: RID_COLOR, productId: 993026, start: { x: 20, y: 100 }, moves: [{ axis: 'h', dir: 1, len: 2600, conn: 'first', side: 1 }], gapCm: 0, centered: false, offX: 0, offY: 0 },
+      { id: 3, roomId: RID_COLOR, productId: 993030, start: { x: 20, y: 150 }, moves: [{ axis: 'h', dir: 1, len: 3000, conn: 'first', side: 1 }], gapCm: 0, centered: false, offX: 0, offY: 0 },
+    );
+    const colorsIndependent = S.matPaths.map(mp => _matPathSegColor(mp, 0));
+    check('Tre uavhengige matPath-objekter: tre ULIKE farger', 'alle ulike, ingen null',
+      colorsIndependent.every(c => c != null) && new Set(colorsIndependent).size === 3, JSON.stringify(colorsIndependent));
+
+    // Scenario 2: ETT eldre objekt fra FØR e840b73 med tre segmenter (samme bane, ikke splittet).
+    S.matPaths = [{ id: 4, roomId: RID_COLOR, productId: 993030, start: { x: 20, y: 50 },
+      moves: [{ axis: 'h', dir: 1, len: 6400, conn: 'first', side: 1 }], gapCm: 0, centered: false, offX: 0, offY: 0 }];
+    const legacyCat = _matFreeCatalog(S.matPaths[0]);
+    check('Eldre ett-objekt-bane: katalogen har flere segmenter (forutsetning for testen)', '>1',
+      legacyCat.segments.length > 1, legacyCat.segments.length);
+    const colorsLegacy = legacyCat.segments.map((_, si) => _matPathSegColor(S.matPaths[0], si));
+    check('Ett eldre matPath-objekt med flere segmenter: ett ULIK farge per segment', 'alle ulike, ingen null',
+      colorsLegacy.every(c => c != null) && new Set(colorsLegacy).size === colorsLegacy.length, JSON.stringify(colorsLegacy));
+
+    // Regresjon (uendret fra FØR): ett fysisk stykke i rommet → null → default blå.
+    S.matPaths = [{ id: 5, roomId: RID_COLOR, productId: 993008, start: { x: 20, y: 50 },
+      moves: [{ axis: 'h', dir: 1, len: 800, conn: 'first', side: 1 }], gapCm: 0, centered: false, offX: 0, offY: 0 }];
+    check('Enkelt-rull frihånds-matte: ingen farge (default blå, uendret)', 'null',
+      _matPathSegColor(S.matPaths[0], 0) === null, _matPathSegColor(S.matPaths[0], 0));
   } finally {
     HEATING_PRODUCTS.length = 0;
     HEATING_PRODUCTS.push(...savedProducts);
@@ -9967,12 +10012,16 @@ function _drawMatPathObj(mp, active) {
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
     acc += rl;
     if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
-    // EDIT 1 (Kenneth 19.08.2026, «frihånds-matta mangler farge»): FLERE ruller (cat.segments.length>1,
-    // samme betingelse jointCmSet under bruker) — del den dekkede delen av DENNE banen ved hver
-    // segment-grense som faller innenfor, og fargelegg hver skive for seg (_matFreeSegSliceRect,
-    // samme cumulative along-basis som skjøtmarkørene). ÉTT segment (vanligste tilfellet, uendret
-    // fra før): samme _matFreeCoveredSplit-kall som tidligere, ingen farge (default blå).
-    else if (cat.segments.length > 1) {
+    // DEL A (Kenneth 21.08.2026, «fargene forsvant da banen ble delt»): FØR var denne grenen betinget
+    // på `cat.segments.length > 1` — «har DENNE BANEN flere ruller». Etter e840b73 (Modell A) har
+    // hver committet matPath-objekt NØYAKTIG ETT segment (banen ER allerede delt til uavhengige
+    // objekter FØR den tegnes), så betingelsen ble PERMANENT usann og fargegrenen kjørte aldri —
+    // alle mattene tegnet i standard blå. Riktig spørsmål er «har DETTE ROMMET flere fysiske
+    // matter», og det svarer `_matPathSegColor` (via `_matRoomPhysicalPieces`) allerede på selv —
+    // returnerer null (default blå, uendret) når rommet har ≤1 fysisk matte. Fargen bes derfor ALLTID
+    // om her; skive-løkka under trengs fortsatt for prosjekter lagret FØR e840b73 (ett matPath-objekt
+    // med flere segmenter) — den løkka virker uendret enten cat.segments har 1 eller flere elementer.
+    else {
       if (covLen > 0.5) {
         for (let si = 0; si < cat.segments.length; si++) {
           const seg = cat.segments[si];
@@ -9982,11 +10031,6 @@ function _drawMatPathObj(mp, active) {
         }
       }
       if (covLen < rl - 0.5) _drawMatLaneRect(_matFreeCoveredSplit(r, NET, covLen).uncR, false, false);
-    }
-    else {
-      const sp = _matFreeCoveredSplit(r, NET, covLen);
-      if (covLen > 0.5) _drawMatLaneRect(sp.covR, false, true);
-      if (covLen < rl - 0.5) _drawMatLaneRect(sp.uncR, false, false);
     }
     // Ligger et skjøtpunkt inni DENNE banen (mellom runStartAcc og runStartAcc+rl, ikke ved en
     // bane-grense)? Regn ut world-posisjonen langs banen og legg til for markør-tegning under.
@@ -10073,8 +10117,18 @@ function _drawMatPathObj(mp, active) {
       // lengdeinformasjon og hører hjemme i materiallista.
       const infoLine = _matLabelInfoLine(mp.roomId, cat2.product);
 
+      // DEL A (Kenneth 21.08.2026): «labelen til hver matte skal ha samme farge som matta si».
+      // _matPathSegColor(mp,0) — segIdx 0, siden et committet Modell A-objekt alltid har nøyaktig
+      // ett segment (for et eldre, flersegment-objekt fra FØR e840b73: første fysiske stykkes farge,
+      // samme «første»-konvensjon labelNAVNET over allerede bruker for blandede produkter). Sendt
+      // via en midlertidig kopi (job.strip), ALDRI skrevet til mp selv — fargen er avledet av
+      // rommets nåværende sammensetning (_matRoomPhysicalPieces), ikke en lagret bruker-innstilling,
+      // og skal ikke persisteres/serialiseres. _drawStripLabel leser kun strip.labelColor/.id/
+      // .labelPos/.labelScale/.labelRotation og skriver aldri til strip selv (kun til
+      // boundsStore/geomStore, keyed på strip.id — uendret siden id-en er den samme).
+      const pieceColor = _matPathSegColor(mp, 0);
       _drawStripLabel({
-        strip: mp, name, infoLine,
+        strip: pieceColor ? { ...mp, labelColor: pieceColor } : mp, name, infoLine,
         nx: _mnx, ny: _mny, nw: _mnw, nh: _mnh, dir: 'h',
         roomId: mp.roomId, fontSize,
         boundsStore: _matLabelBounds, geomStore: _matLabelGeom,
