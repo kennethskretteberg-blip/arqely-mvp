@@ -3277,7 +3277,10 @@ const S = {
     selectedCableId: null,       // selected cable id
     selectedZoneId: null,        // selected zone id
     selectedMatId: null,         // selected mat id
-    selectedMatPathId: null,     // selected frihånds-matte (S.matPaths)
+    selectedMatPathId: null,     // selected frihånds-matte (S.matPaths) — banen
+    selectedMatPathSegIdx: null, // EDIT 2 (Kenneth 19.08.2026, «frihånds-matta mangler valg»): HVILKET
+                                  // fysisk segment (_matFreeCatalog(mp).segments) innenfor banen — banen
+                                  // alene identifiserer ikke ETT fysisk produkt når den gir flere matter
     selectedPlateId: null,       // selected plate id
     selectedAluboardId: null,    // selected Aluboard platesystem id
     selectedStairId: null,       // selected stair id
@@ -6632,11 +6635,36 @@ function _hexA(hex, a) {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
+// EDIT 1 (Kenneth 19.08.2026, «frihånds-matta mangler farge, valg og flytende verktøylinje»):
+// _matColor leste KUN S.mats — en frihånds-matte (S.matPaths) med flere fysiske ruller
+// (_matFreeCatalog, DEL A/7428c56) fikk aldri fargen sin, og et rom med BÅDE én auto-matte og én
+// frihånds-matte kunne få to matter med SAMME farge (hver samling telte fra 0 for seg). Samme felle
+// som «rommets produkter» (d480535): to lister som teller hver for seg. Nå ÉN ordnet liste over
+// ALLE fysiske matter i rommet — auto (S.mats, én oppføring hver) OG frihånd (S.matPaths, én
+// oppføring PER SEGMENT i _matFreeCatalog) — som BEGGE fargefunksjonene under indekserer i.
+function _matRoomPhysicalPieces(roomId) {
+  const pieces = [];
+  for (const m of (S.mats || [])) if (m.roomId === roomId) pieces.push({ kind: 'mat', id: m.id });
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== roomId) continue;
+    const segs = _matFreeCatalog(mp).segments;
+    segs.forEach((seg, segIdx) => pieces.push({ kind: 'matpath', id: mp.id, segIdx }));
+  }
+  return pieces;
+}
 function _matColor(mat) {
   if (!mat) return null;
-  const roomMats = S.mats.filter(m => m.roomId === mat.roomId);
-  if (roomMats.length <= 1) return null; // single-mat room → default color (unchanged)
-  const idx = roomMats.findIndex(m => m.id === mat.id);
+  const pieces = _matRoomPhysicalPieces(mat.roomId);
+  if (pieces.length <= 1) return null; // single physical mat in room → default color (unchanged)
+  const idx = pieces.findIndex(p => p.kind === 'mat' && p.id === mat.id);
+  return MAT_COLORS[(idx < 0 ? 0 : idx) % MAT_COLORS.length];
+}
+// Fargen for ETT fysisk segment av en frihånds-bane — samme delte indeks som _matColor over.
+function _matPathSegColor(mp, segIdx) {
+  if (!mp) return null;
+  const pieces = _matRoomPhysicalPieces(mp.roomId);
+  if (pieces.length <= 1) return null;
+  const idx = pieces.findIndex(p => p.kind === 'matpath' && p.id === mp.id && p.segIdx === segIdx);
   return MAT_COLORS[(idx < 0 ? 0 : idx) % MAT_COLORS.length];
 }
 // Rated power of ONE physical mat = the product's nominal effect (fixed snow mats), NOT the
@@ -9452,26 +9480,59 @@ function _matFreeCenter(mp) {
   mp.offX = (rx0 + rx1) / 2 - (x0 + x1) / 2;
   mp.offY = (ry0 + ry1) / 2 - (y0 + y1) / 2;
 }
+// EDIT 3 (Kenneth 19.08.2026, «frihånds-matta mangler ... flytende verktøylinje»): verdens-
+// bounding-box for HELE banen (alle lanes), samme «union av _matFreeLaneRectWorld»-mønster
+// _matFreeCenter allerede bruker — trukket ut hit for _selectedObjectWorldBBox under, slik at den
+// flytende linja følger frihånds-mattas faktiske plassering i stedet for å falle tilbake til
+// topp-senter.
+function _matPathBoundsWorld(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const runs = _matFreeDeriveRuns(mp); if (!runs.length) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const r of runs) { const R = _matFreeLaneRectWorld(r, NET); x0 = Math.min(x0, R.x0); y0 = Math.min(y0, R.y0); x1 = Math.max(x1, R.x1); y1 = Math.max(y1, R.y1); }
+  return x0 === Infinity ? null : { minX: x0, minY: y0, maxX: x1, maxY: y1 };
+}
 // Frihånds-matte under et verdenspunkt (treffer en lane) → id, ellers null.
+// EDIT 2 (Kenneth 19.08.2026, «frihånds-matta mangler ... valg»): returnerer nå {id, segIdx} —
+// HVILKET fysiske segment (_matFreeCatalog(mp).segments) klikk-punktet faktisk falt innenfor, ikke
+// bare hvilken BANE. segIdx regnes fra SAMME kumulative along-basis skjøtmarkørene i
+// _drawMatPathObj allerede bruker (uturn lagt til FØR runStartAcc for DENNE banen — se kommentaren
+// der; _matFreeTotalCm sin egen, annerledes rekkefølge er kun riktig for SLUTTSUMMEN).
 function _matPathAtWorld(wp) {
   for (let i = (S.matPaths || []).length - 1; i >= 0; i--) {
     const mp = S.matPaths[i]; if (!_roomIdOnActiveFloor(mp.roomId)) continue;
     const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+    const uL = _matFreeUTurnLen(mp);
+    let acc = 0;
     for (const r of _matFreeDeriveRuns(mp)) {
+      if (r.uturn) acc += uL;
+      const rl = _matFreeRunLen(r);
+      const runStartAcc = acc;
+      acc += rl;
       const R = _matFreeLaneRectWorld(r, NET);
-      if (wp.x >= R.x0 - 1 && wp.x <= R.x1 + 1 && wp.y >= R.y0 - 1 && wp.y <= R.y1 + 1) return mp.id;
+      if (wp.x >= R.x0 - 1 && wp.x <= R.x1 + 1 && wp.y >= R.y0 - 1 && wp.y <= R.y1 + 1) {
+        const horiz = r.axis === 'h';
+        const alongInRun = Math.max(0, Math.min(rl, Math.abs((horiz ? wp.x : wp.y) - (horiz ? r.a.x : r.a.y))));
+        const cumPos = runStartAcc + alongInRun;
+        const segs = _matFreeCatalog(mp).segments;
+        let segIdx = segs.findIndex(seg => cumPos < seg.toCm - 0.01);
+        if (segIdx < 0) segIdx = Math.max(0, segs.length - 1);
+        return { id: mp.id, segIdx };
+      }
     }
   }
   return null;
 }
-function _matPathSelect(id) {
-  S.ui.selectedMatPathId = id; S.ui.selectedMatId = null;
+function _matPathSelect(id, segIdx) {
+  const mp = (S.matPaths || []).find(m => m.id === id);
+  S.ui.selectedMatPathId = id; S.ui.selectedMatPathSegIdx = segIdx ?? 0; S.ui.selectedMatId = null;
+  if (mp) S.ui.selectedRoomId = mp.roomId;   // parity med auto-matte-valg (hitMat-flyten)
   if (typeof updateCtxBar === 'function') updateCtxBar();
   _matPathPanel(); render();
 }
 function _matPathSetGap(id, v) {
   const mp = (S.matPaths || []).find(m => m.id === id); if (!mp) return;
-  pushUndo(); mp.gapCm = Math.max(0, +v || 0); if (mp.centered) _matFreeCenter(mp);
+  pushUndo(); mp.gapCm = Math.max(0, Math.min(MAT_GAP_MAX_CM, +v || 0)); if (mp.centered) _matFreeCenter(mp);
   _invalidateMatCache && _invalidateMatCache(); _matPathPanel(); render();
 }
 function _matPathToggleCenter(id) {
@@ -9483,7 +9544,7 @@ function _matPathToggleCenter(id) {
 function _matPathDelete(id) {
   if (!S.matPaths) return; pushUndo();
   S.matPaths = S.matPaths.filter(m => m.id !== id);
-  if (S.ui.selectedMatPathId === id) S.ui.selectedMatPathId = null;
+  if (S.ui.selectedMatPathId === id) { S.ui.selectedMatPathId = null; S.ui.selectedMatPathSegIdx = null; }
   _invalidateMatCache && _invalidateMatCache();
   if (typeof renderSidebar === 'function') renderSidebar();
   if (typeof updateCtxBar === 'function') updateCtxBar();
@@ -9576,13 +9637,17 @@ function _matFreeCoveredAreaM2(mp) {
 // Tegn ett lane-rektangel (verden). ghost = under tegning; covered=false → udekket (grå stiplet).
 // invalid = STEG 1 (Kenneth 19.08.2026): kandidaten ville overlappet/vært utenfor rommet — klart
 // sterkere/tettere rødt enn den vanlige ghost-fargen, så «ugyldig» ikke ser ut som «vanlig ghost».
-function _drawMatLaneRect(R, ghost, covered, invalid) {
+// EDIT 1 (Kenneth 19.08.2026, «frihånds-matta mangler farge»): valgfri `color` (hex, fra
+// MAT_COLORS via _matPathSegColor) — brukt KUN i covered-grenen (ghost/invalid/udekket beholder
+// sine faste farger uendret). Ingen color → bit-for-bit samme blå som før denne fiksen.
+function _drawMatLaneRect(R, ghost, covered, invalid, color) {
   if (!R || (R.x1 - R.x0) < 0.05 || (R.y1 - R.y0) < 0.05) return;
   const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
   const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y), w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
   ctx.save();
   if (invalid) { ctx.fillStyle = 'rgba(220,38,38,0.32)'; ctx.strokeStyle = 'rgba(220,38,38,0.95)'; ctx.setLineDash([3, 3]); ctx.lineWidth = 2.2; }
   else if (ghost) { ctx.fillStyle = 'rgba(224,86,63,0.10)'; ctx.strokeStyle = 'rgba(224,86,63,0.55)'; ctx.setLineDash([5, 4]); }
+  else if (covered && color) { ctx.fillStyle = _hexA(color, 0.20); ctx.strokeStyle = _hexA(color, 0.65); }
   else if (covered) { ctx.fillStyle = _lc('rgba(60,130,200,0.16)', 'rgba(80,160,240,0.18)'); ctx.strokeStyle = _lc('rgba(40,100,200,0.55)', 'rgba(80,160,240,0.5)'); }
   else { ctx.fillStyle = 'rgba(150,150,160,0.10)'; ctx.strokeStyle = 'rgba(150,150,160,0.55)'; ctx.setLineDash([5, 4]); }   // udekket (rull tok slutt)
   if (!invalid) ctx.lineWidth = 1.4;
@@ -9604,6 +9669,27 @@ function _matFreeCoveredSplit(r, NET, covLen) {
     else { covR = { x0: R.x0, y0: R.y1 - cov, x1: R.x1, y1: R.y1 }; uncR = { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y1 - cov }; }
   }
   return { covR, uncR, cov, full };
+}
+// EDIT 1 (Kenneth 19.08.2026, «frihånds-matta mangler farge»): rektangelet for ÉTT fysisk segment
+// [startLocal, endLocal) INNI én lane (run-lokal cm, fra a-enden) — et skjøtpunkt kan ligge MIDT i
+// en bane (samme mekanisme skjøtmarkørene i _drawMatPathObj allerede bruker, jointCmSet), så
+// fargeskiftet må kunne dele ÉTT lane-rektangel i to. Gjenbruker _matFreeCoveredSplit (kalt to
+// ganger, samme «a-ende + covLen»-modell den allerede bruker) i stedet for å skrive en ny splitter:
+// outer = alt opp til endLocal, inner = alt opp til startLocal — begge forankret i SAMME a-ende, så
+// differansen mellom dem ER nettopp segmentets egen skive.
+function _matFreeSegSliceRect(r, NET, startLocal, endLocal) {
+  const outer = _matFreeCoveredSplit(r, NET, endLocal).covR;
+  if (startLocal <= 0.01) return outer;
+  const inner = _matFreeCoveredSplit(r, NET, startLocal).covR;
+  const horiz = r.axis === 'h';
+  const k0 = horiz ? 'x0' : 'y0', k1 = horiz ? 'x1' : 'y1';
+  const o0 = horiz ? 'y0' : 'x0', o1 = horiz ? 'y1' : 'x1';
+  let lo, hi;
+  if (Math.abs(inner[k0] - outer[k0]) < 0.01) { lo = inner[k1]; hi = outer[k1]; }   // forankret lavt → vokser mot høy
+  else { lo = outer[k0]; hi = inner[k0]; }                                          // forankret høyt → vokser mot lav
+  return horiz
+    ? { x0: Math.min(lo, hi), x1: Math.max(lo, hi), y0: outer[o0], y1: outer[o1] }
+    : { y0: Math.min(lo, hi), y1: Math.max(lo, hi), x0: outer[o0], x1: outer[o1] };
 }
 // Halvsirkel-bue (radius r) fra a til b som buler mot retning (bx,by). Velger vri-flagget
 // hvis bue-midtpunkt ligger nærmest bule-retningen (robust uansett orientering).
@@ -9755,6 +9841,22 @@ function _drawMatPathObj(mp, active) {
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
     acc += rl;
     if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
+    // EDIT 1 (Kenneth 19.08.2026, «frihånds-matta mangler farge»): FLERE ruller (cat.segments.length>1,
+    // samme betingelse jointCmSet under bruker) — del den dekkede delen av DENNE banen ved hver
+    // segment-grense som faller innenfor, og fargelegg hver skive for seg (_matFreeSegSliceRect,
+    // samme cumulative along-basis som skjøtmarkørene). ÉTT segment (vanligste tilfellet, uendret
+    // fra før): samme _matFreeCoveredSplit-kall som tidligere, ingen farge (default blå).
+    else if (cat.segments.length > 1) {
+      if (covLen > 0.5) {
+        for (let si = 0; si < cat.segments.length; si++) {
+          const seg = cat.segments[si];
+          const lo = Math.max(0, seg.fromCm - runStartAcc), hi = Math.min(covLen, seg.toCm - runStartAcc);
+          if (hi - lo < 0.5) continue;
+          _drawMatLaneRect(_matFreeSegSliceRect(r, NET, lo, hi), false, true, false, _matPathSegColor(mp, si));
+        }
+      }
+      if (covLen < rl - 0.5) _drawMatLaneRect(_matFreeCoveredSplit(r, NET, covLen).uncR, false, false);
+    }
     else {
       const sp = _matFreeCoveredSplit(r, NET, covLen);
       if (covLen > 0.5) _drawMatLaneRect(sp.covR, false, true);
@@ -17505,6 +17607,29 @@ function _matGapPanelProd() {
   const m = S.ui.selectedMatId != null ? S.mats.find(x => x.id === S.ui.selectedMatId) : null;
   return m ? HEATING_PRODUCTS.find(p => p.id === m.productId) : null;
 }
+
+// ─── RAPPORT — CC eller gap, hva viser chippene faktisk i dag? (EDIT 3, Kenneth 19.08.2026,
+// «frihånds-matta mangler farge, valg og flytende verktøylinje») ───────────────────────────────
+// Spurt før noe bygges, som bedt om — ingen chip-merking er endret i denne commiten.
+//
+// FOLIE-chippen (⟷ N mm, _ctxBarItems «Strip selected»-grenen, onclick=openGapPanel): viser
+// S.varmefolie.gapCm, tittel «Juster avstand mellom varmefolier» — GAP (mellomrommet MELLOM to
+// folier), i mm.
+// AUTO-MATTE-chippen (↔ N cm, _ctxBarItems «selectedMatId»-grenen, onclick=openMatGapPanel): viser
+// _matResolveGapCm(prod), tittel «Avstand mellom matter» — SAMME begrep, GAP, i cm. Panelets eget
+// hint sier det rett ut: «standard N cm (CC − 2×kant-inntrekk)» — dvs. GAP er CC MINUS to
+// kant-inntrekk, ikke CC selv.
+// KABEL-chippen (til sammenligning, «Cable selected»-grenen): viser cable.spacing_cm merket «CC»
+// eksplisitt — CC har altså ALLEREDE en egen, etablert betydning i denne appen (senter-til-senter
+// for STRENGENE inni ÉN kabel/matte), en helt annen størrelse enn gapet MELLOM to fysiske matter.
+//
+// KONKLUSJON: begge eksisterende matte-/folie-chipper viser GAP, aldri CC — «CC» i Kenneths egen
+// formulering («innstilling for avstand i cm for CC») er mest sannsynlig en løs betegnelse for
+// «det samme tallet auto-mattas ↔-chip allerede viser», ikke et ønske om en NY, CC-merket
+// innstilling. Den nye frihånds-chippen (under) bruker derfor SAMME merking som auto-matte-
+// chippen — «↔ N cm», tittel «Avstand mellom matter» — og leser/skriver mp.gapCm (frihåndens EGET
+// gap-mellom-baner-felt, uendret betydning, kun et øvre MAT_GAP_MAX_CM-tak lagt til for parity med
+// _matResolveGapCm sin egen klemming — se _matPathSetGap). Ingen ny mening lagt på gapCm noe sted.
 function openMatGapPanel(e) {
   e.stopPropagation();
   // Indoor mats use the foil-like gap model (min 0 cm). Snow (Ute/InSnow) keeps its own
@@ -17570,6 +17695,56 @@ function stepMatGap(delta) {
   setMatGap(base + delta, false);
   const inp = document.getElementById('mat-gap-cm-input');
   if (inp) inp.value = S.varmematte.gapCm;
+}
+
+// EDIT 3 (Kenneth 19.08.2026, «frihånds-matta mangler ... flytende verktøylinje»): samme
+// #gap-panel-DOM og samme stepper-mønster som openMatGapPanel/setMatGap/stepMatGap over — men
+// scoped til ÉN SPESIFIKK bane (mp.gapCm, en per-instans verdi), ikke det globale
+// S.varmematte.gapCm en auto-matte deler med resten av rommet. Samme merking som auto-mattas
+// chip («Avstand mellom matter») — se CC/gap-rapporten rett over openMatGapPanel.
+function openMatPathGapPanel(e, mpId) {
+  e.stopPropagation();
+  const mp = (S.matPaths || []).find(m => m.id === mpId); if (!mp) return;
+  const snow = (typeof _roomModuleType === 'function') ? _roomModuleType(mp.roomId) === 'snow'
+             : ((typeof _isSnowModule === 'function') && _isSnowModule());
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : MAT_GAP_MAX_CM;
+  const cm = Math.round(mp.gapCm || 0);
+  const hint = snow ? 'Min 5 cm · standard 10 cm' : 'Min 0 cm';
+  const panel = document.getElementById('gap-panel');
+  panel.innerHTML = `
+    <div class="gap-title">Avstand mellom matter</div>
+    <div class="gap-custom-row" style="justify-content:center;gap:8px">
+      <button class="gap-step-btn" onclick="stepMatPathGap(${mpId},-1)" title="Mindre">▼</button>
+      <input id="matpath-gap-cm-input" class="gap-mm-input" type="number" min="${minG}" max="${maxG}" step="1" value="${cm}"
+        style="font-family:var(--font-mono);width:56px;text-align:center"
+        onclick="event.stopPropagation()"
+        oninput="setMatPathGap(${mpId}, parseFloat(this.value))" />
+      <span class="gap-custom-lbl">cm</span>
+      <button class="gap-step-btn" onclick="stepMatPathGap(${mpId},1)" title="Mer">▲</button>
+    </div>
+    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">${hint}</div>`;
+  const W = window.innerWidth, H = window.innerHeight;
+  panel.style.display = 'block';
+  const pw = panel.offsetWidth || 270, ph = panel.offsetHeight || 120;
+  panel.style.left = Math.min(e.clientX, W - pw - 8) + 'px';
+  panel.style.top  = Math.min(e.clientY + 8, H - ph - 8) + 'px';
+}
+function setMatPathGap(mpId, cm) {
+  const mp = (S.matPaths || []).find(m => m.id === mpId); if (!mp) return;
+  const snow = (typeof _roomModuleType === 'function') ? _roomModuleType(mp.roomId) === 'snow'
+             : ((typeof _isSnowModule === 'function') && _isSnowModule());
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : MAT_GAP_MAX_CM;
+  const v = Number.isFinite(cm) ? cm : (snow ? 10 : 0);
+  _matPathSetGap(mpId, Math.max(minG, Math.min(maxG, Math.round(v))));
+  const inp = document.getElementById('matpath-gap-cm-input');
+  if (inp && document.activeElement !== inp) inp.value = mp.gapCm;
+  updateCtxBar();
+}
+function stepMatPathGap(mpId, delta) {
+  const mp = (S.matPaths || []).find(m => m.id === mpId); if (!mp) return;
+  setMatPathGap(mpId, (mp.gapCm || 0) + delta);
+  const inp = document.getElementById('matpath-gap-cm-input');
+  if (inp) inp.value = mp.gapCm;
 }
 
 // gapMm: desired gap in millimetres; skipUndo = true when called live from input field
@@ -28798,7 +28973,7 @@ function _cleanupRoomData(id) {
   S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null;
   S.ui.selectedMatId = null;
-  S.ui.selectedMatPathId = null;
+  S.ui.selectedMatPathId = null; S.ui.selectedMatPathSegIdx = null;
   S.ui.selectedPlateId = null;
   S.ui.selectedZoneId = null;
   S.ui.selectedHindringId = null; S.ui.selectedHindringWallIdx = null;
@@ -29385,19 +29560,22 @@ function _renderDetailPanel(roomId) {
       </div>`;
     }).join('');
 
-    // DEL B (Kenneth 19.08.2026, \u00abfrih\u00e5nds-matta mangler i romlista\u00bb): \u00e9n rad PER SEGMENT \u2014 etter
-    // DEL A kan \u00e9n tegnet bane gi flere fysiske ruller, samme prinsipp som roomMats over (\u00e9n rad
-    // per fysisk produkt). Alle rader for samme bane velger samme S.ui.selectedMatPathId \u2014 det
-    // finnes ingen per-segment-etikett/utvalg enn\u00e5, kun \u00e9n bane \u00e5 klikke p\u00e5.
+    // DEL B (Kenneth 19.08.2026, \u00abfrih\u00e5nds-matta mangler i romlista\u00bb) + EDIT 2 (19.08.2026,
+    // \u00abfrih\u00e5nds-matta mangler ... valg\u00bb): \u00e9n rad PER SEGMENT \u2014 etter DEL A kan \u00e9n tegnet bane gi
+    // flere fysiske ruller, samme prinsipp som roomMats over (\u00e9n rad per fysisk produkt). Hver rad
+    // velger n\u00e5 SITT EGET segment (mp.id + idx), ikke lenger bare banen \u2014 to rader for samme bane
+    // fremhever ikke lenger begge samtidig.
     h += roomMatPaths.map(mp => {
-      const psel = S.ui.selectedMatPathId === mp.id ? ' sel' : '';
       const c = _matFreeCatalog(mp);
-      return c.segments.map(seg => `<div class="strip-item${psel}"
-        onclick="_matPathSelect(${mp.id});event.stopPropagation()">
+      return c.segments.map((seg, idx) => {
+        const psel = (S.ui.selectedMatPathId === mp.id && S.ui.selectedMatPathSegIdx === idx) ? ' sel' : '';
+        return `<div class="strip-item${psel}"
+        onclick="_matPathSelect(${mp.id},${idx});event.stopPropagation()">
         <span class="strip-ico">\u{1F7EB}</span>
         <span class="strip-nm">${esc(seg.product?.name || 'Frih\u00e5nds-matte')}</span>
         <span class="strip-len">${(seg.lenCm / 100).toFixed(1)} m \u00b7 ${seg.watt}W</span>
-      </div>`).join('');
+      </div>`;
+      }).join('');
     }).join('');
 
     h += `</div></div>`;
@@ -32405,7 +32583,7 @@ function _buildCycleCandidates(wx, wy) {
   const hc = hitCable(wx, wy);            if (hc)            list.push({type:'cable',    id:hc.id});
   const hz = hitZone(wx, wy);             if (hz)            list.push({type:'zone',     id:hz.id});
   const hm = hitMat(wx, wy);              if (hm !== null)   list.push({type:'mat',      id:hm});
-  const hmp = _matPathAtWorld({x:wx, y:wy}); if (hmp !== null) list.push({type:'matpath', id:hmp});
+  const hmp = _matPathAtWorld({x:wx, y:wy}); if (hmp !== null) list.push({type:'matpath', id:hmp.id, segIdx:hmp.segIdx});
   const hp = hitPlate(wx, wy);            if (hp !== null)   list.push({type:'plate',    id:hp});
   const hal = hitAluboard(wx, wy);        if (hal !== null)  list.push({type:'aluboard', id:hal});
   const hst = hitStair(wx, wy);           if (hst)           list.push({type:'stair',    id:hst.id});
@@ -32420,8 +32598,8 @@ function _buildCycleCandidates(wx, wy) {
 /** Select a single cycle candidate (no drag) — reuses existing select flows. */
 function _applyCycleSelection(cand) {
   // Rydd frihånds-matte-valg når noe annet velges (skjuler justerings-panelet).
-  if (cand.type !== 'matpath' && S.ui.selectedMatPathId != null) { S.ui.selectedMatPathId = null; if (typeof _matPathPanel === 'function') _matPathPanel(); }
-  if (cand.type === 'matpath') { _matPathSelect(cand.id); renderSidebar(); return; }
+  if (cand.type !== 'matpath' && S.ui.selectedMatPathId != null) { S.ui.selectedMatPathId = null; S.ui.selectedMatPathSegIdx = null; if (typeof _matPathPanel === 'function') _matPathPanel(); }
+  if (cand.type === 'matpath') { _matPathSelect(cand.id, cand.segIdx); renderSidebar(); return; }
   if (cand.type === 'strip')  { selStrip(cand.id, false); updateCtxBar(); render(); return; }
   if (cand.type === 'cable')  { selectCable(cand.id); return; }
   if (cand.type === 'zone')   { selectZone(cand.id); renderSidebar(); return; }
@@ -35110,7 +35288,7 @@ function _clearRoomProducts(roomId) {
   S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null;
   S.ui.selectedMatId = null;
-  S.ui.selectedMatPathId = null;
+  S.ui.selectedMatPathId = null; S.ui.selectedMatPathSegIdx = null;
   S.ui.selectedPlateId = null;
   renderSidebar(); updateCtxBar(); render();
   _showToast(`${total} produkt(er) fjernet`);
@@ -35751,6 +35929,12 @@ function _selectedObjectWorldBBox() {
     }
   }
 
+  // ── Frihånds-matte (EDIT 3, Kenneth 19.08.2026, «...flytende verktøylinje») ──
+  if (ui.selectedMatPathId != null) {
+    const mp = (S.matPaths || []).find(mm => mm.id === ui.selectedMatPathId);
+    if (mp) { const bb = _matPathBoundsWorld(mp); if (bb) return bb; }
+  }
+
   // ── Plate ──
   if (ui.selectedPlateId != null) {
     const p = S.plates.find(pp => pp.id === ui.selectedPlateId);
@@ -36231,6 +36415,35 @@ function _ctxBarItems() {
       <button class="snap-chip${matRoom?.matDimSnap?' on':''}" id="chip-dim-matte" onclick="toggleMatDimSnap()" title="Vis avstander mellom matter og til vegg"><span class="snap-dot"></span>M\u00e5lsett Matte</button>
       <span class="tc-sep"></span>
       <button class="snap-chip" onclick="deleteMat(${ui.selectedMatId})" title="Slett matte">\u{1F5D1} Slett</button>`;
+  }
+
+  // EDIT 3 (Kenneth 19.08.2026, «frihånds-matta mangler farge, valg og flytende verktøylinje»):
+  // frihånds-matte selected — modellert på selectedMatId-grenen rett over. updateCtxBar hadde
+  // INGEN gren for selectedMatPathId i det hele tatt, så frihånds-matta fikk aldri en flytende
+  // linje (auto-matte får sin over, folie sin lenger ned) — kun venstre sidepanel.
+  //
+  // «Målsett»-chippen (toggleMatDimSnap) er BEVISST utelatt: _drawMatDimChainForRoom leser KUN
+  // S.mats, aldri S.matPaths — chippen ville sett ut som den virker, men ikke tegne noe for en
+  // frihånds-matte. Å utvide målsættlinjene til frihånd er en egen, større oppgave (vilkårlig
+  // serpentin-geometri, ikke bare rektangler), ikke bygget her — rapportert, ikke gjettet på.
+  if (ui.selectedMatPathId != null) {
+    const mp = (S.matPaths || []).find(m => m.id === ui.selectedMatPathId);
+    if (mp) {
+      const cat = _matFreeCatalog(mp);
+      const segs = cat.segments;
+      const labelHtml = segs.length > 1
+        ? `${segs.length} ruller — ${(cat.coverCm / 100).toFixed(1)} m · ${cat.totalWatt} W`
+        : `${esc(segs[0]?.product?.name || 'Frihånds-matte')} — ${((segs[0]?.lenCm || 0) / 100).toFixed(1)} m · ${segs[0]?.watt || 0} W`;
+      const gapCm = Math.round(mp.gapCm || 0);
+      return `<span class="ctxbar-lbl">\u{1F7EB} Frihånds-matte</span>
+        <span style="font-size:12px;color:var(--dim);padding:0 4px">${labelHtml}</span>
+        <span class="tc-sep"></span>
+        <button class="snap-chip" onclick="openMatPathGapPanel(event,${mp.id})" title="Avstand mellom matter">↔ <span style="font-family:var(--font-mono)">${gapCm}</span> cm</button>
+        <span class="tc-sep"></span>
+        <button class="snap-chip${mp.centered ? ' on' : ''}" onclick="_matPathToggleCenter(${mp.id})" title="Sentrer hele arrangementet i rommet (slakk likt på begge ytterveggene)">Sentrer</button>
+        <span class="tc-sep"></span>
+        <button class="snap-chip" onclick="_matPathDelete(${mp.id})" title="Slett frihånds-matte">\u{1F5D1} Slett</button>`;
+    }
   }
 
   // Hindring selected
