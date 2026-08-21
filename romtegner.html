@@ -9342,6 +9342,47 @@ function _matFreeRunsWithinRoom(mp) {
 // matte 1 ligger. Dette er en forventet, konsistent følge av at mattene skal kunne flyttes uavhengig
 // av hverandre — ikke en regresjon, men en bevisst forenkling som følger direkte av at «gruppen»
 // ikke lenger er ett meningsfylt objekt etter splitten.
+
+// DEL B STEG 1 (Modell A): skjærer den ORIGINALE move-sekvensen til et uavhengig {start, moves}-par
+// som dekker DENNE bitens cumulative lengdeintervall [fromCm, toCm] langs banens egen along-basis
+// (SAMME rekkefølge — uturn lagt til FØR run-startAcc — som _matPathAtWorld/_drawMatPathObj bruker).
+// Rett bane (vanligste, inkl. 55,6m-eksempelet): trivielt, ett move, samme akse/retning som kilden.
+// Kornet bane: en run som er DELVIS med (halen av den første, eller starten av den siste) skjæres
+// ved lineær interpolasjon av r.a/r.b — allerede FULLT oppløste world-koordinater (uturn-geometri er
+// allerede bakt inn av _matFreeDeriveRuns), så dette er robust uansett om runden selv var en corner-
+// eller uturn-tilkobling. En run som er HELT med, midt i intervallet, kopierer kildens EGEN conn/side
+// mot FORRIGE inkluderte run — lokal geometri mellom to påfølgende moves avhenger ikke av global
+// posisjon. Den FØRSTE inkluderte runden i et nytt objekt får ALDRI en corner/uturn-tilkobling (det
+// finnes ingen «forrige» i det nye objektet) — _matFreeDeriveRuns sin egen `prev`-sjekk håndterer
+// dette automatisk siden `prev` alltid er null ved første iterasjon, uansett hvilken conn-verdi som
+// står i moves[0].
+function _matFreeSliceMoves(mp, fromCm, toCm) {
+  const uL = _matFreeUTurnLen(mp);
+  const runs = _matFreeDeriveRuns(mp);
+  let acc = 0, start = null, first = true;
+  const moves = [];
+  for (let i = 0; i < runs.length; i++) {
+    const r = runs[i];
+    if (r.uturn) acc += uL;
+    const rl = _matFreeRunLen(r);
+    const runStartAcc = acc;
+    acc += rl;
+    if (rl < 0.01) continue;
+    const lo = Math.max(runStartAcc, fromCm), hi = Math.min(runStartAcc + rl, toCm);
+    if (hi - lo < 0.5) continue;
+    const tLo = (lo - runStartAcc) / rl, tHi = (hi - runStartAcc) / rl;
+    const pLo = { x: r.a.x + (r.b.x - r.a.x) * tLo, y: r.a.y + (r.b.y - r.a.y) * tLo };
+    if (first) {
+      start = pLo;
+      moves.push({ axis: r.axis, dir: r.dir, len: hi - lo, conn: 'first', side: 1 });
+      first = false;
+    } else {
+      const srcMove = mp.moves[i] || { conn: 'first', side: 1 };
+      moves.push({ axis: r.axis, dir: r.dir, len: hi - lo, conn: srcMove.conn, side: srcMove.side });
+    }
+  }
+  return start ? { start, moves } : null;
+}
 function _matFreeExit(commit) {
   if (!S.matPaths) S.matPaths = [];   // eldre prosjekt lastet uten feltet
   if (_matFree && commit && _matFree.moves.length >= 1) {
@@ -9362,14 +9403,35 @@ function _matFreeExit(commit) {
       return;
     }
     pushUndo();
-    S.matPaths.push(mpNew);
-    S.ui.selectedMatPathId = mpNew.id;   // vis justerings-panelet med en gang
+    // DEL B STEG 1 (Modell A, Kenneth 19.08.2026): en bane som deles i FLERE fysiske ruller
+    // committes nå som like mange UAVHENGIGE matPath-objekter — hver med sin egen start/moves
+    // (_matFreeSliceMoves), sitt eget productId (den SPESIFIKKE rullens produktrad, ikke det
+    // opprinnelig tegnede), og derfor automatisk sin egen label/posisjon/drag via det eksisterende
+    // per-objekt-maskineriet (_drawMatPathObj kaller allerede _drawStripLabel én gang PER mp).
+    // Én rull (vanligste, uendret fra før): behold ETT objekt bit-for-bit som tidligere.
+    const c = _matFreeCatalog(mpNew);
+    let committed;
+    if (c.segments.length <= 1 || c.tooShort) {
+      S.matPaths.push(mpNew);
+      committed = [mpNew];
+    } else {
+      committed = [];
+      for (const seg of c.segments) {
+        const sliced = _matFreeSliceMoves(mpNew, seg.fromCm, seg.toCm);
+        if (!sliced) continue;   // bør aldri skje (segmentene kommer fra samme totalCm) — defensivt hoppet over, ikke krasj
+        const piece = { id: S.counters.nextMatPathId++, roomId: mpNew.roomId, productId: seg.product.id,
+          start: sliced.start, moves: sliced.moves, gapCm: mpNew.gapCm, centered: false, offX: 0, offY: 0 };
+        S.matPaths.push(piece);
+        committed.push(piece);
+      }
+      if (!committed.length) { S.matPaths.push(mpNew); committed = [mpNew]; }   // defensivt fallback
+    }
+    S.ui.selectedMatPathId = committed[0].id;   // vis justerings-panelet med en gang
     _invalidateMatCache && _invalidateMatCache();
     // Katalog-oppsummering (≤ tegnet) — DEL A (Kenneth 19.08.2026): kan nå være FLERE ruller.
     // Toasten sier hva som faktisk ble lagt ut, gruppert på produkt («2 × EcoMat 0,5x26m»), ikke
-    // bare navnet på ett enkelt produkt.
+    // bare navnet på ett enkelt produkt. Bruker DEN OPPRINNELIGE c (før splitten) — samme tall som før.
     if (typeof _showToast === 'function') {
-      const c = _matFreeCatalog(mpNew);
       const byProd = {};
       for (const seg of c.segments) {
         const key = seg.product?.id ?? seg.product?.name ?? 'ukjent';
@@ -9652,6 +9714,38 @@ function _matFreeLanesOverlap(mp) {
     }
   }
   return false;
+}
+// DEL B STEG 2 (Kenneth 19.08.2026, Modell A): _matFreeLanesOverlap over sjekker KUN SELV-overlapp
+// innad i ÉN banes egne lanes — bekreftet i STEG 0-rapporten at INGEN kryss-objekt-sjekk fantes i
+// kodebasen fra før. Egen funksjon (ikke en utvidelse av _matFreeLanesOverlap selv, som fortsatt
+// brukes uendret av _matFreeRunsWithinRoom for sin egen, andre hensikt) — sjekker DENNE banen mot
+// ALLE ANDRE matPath i samme rom, samme rect-overlapp-prinsipp.
+function _matPathOverlapsOthers(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const TOL = 0.5;
+  const myRects = _matFreeDeriveRuns(mp).filter(r => _matFreeRunLen(r) > 0.5).map(r => _matFreeLaneRectWorld(r, NET));
+  if (!myRects.length) return false;
+  for (const other of (S.matPaths || [])) {
+    if (other.id === mp.id || other.roomId !== mp.roomId) continue;
+    const { NET: oNET } = _matFreeConsts(_matFreeProdOf(other));
+    const otherRects = _matFreeDeriveRuns(other).filter(r => _matFreeRunLen(r) > 0.5).map(r => _matFreeLaneRectWorld(r, oNET));
+    for (const a of myRects) for (const b of otherRects) {
+      const ow = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+      const oh = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      if (ow > TOL && oh > TOL) return true;
+    }
+  }
+  return false;
+}
+// Samlet gyldighetssjekk for en FLYTTET matpath (STEG 2): gjenbruker _matFreeRunsWithinRoom
+// UENDRET (rom-grense + veggmargin + hindring, via _matFreeClampLen — se der — pluss areal- og
+// selv-overlapp-sjekk, alt allerede riktig for ETT objekt), og legger KUN til kryss-objekt-sjekken
+// over, som ikke fantes. Samme returform {ok, reason} som _matFreeRunsWithinRoom.
+function _matPathMoveValid(mp) {
+  const guard = _matFreeRunsWithinRoom(mp);
+  if (!guard.ok) return guard;
+  if (_matPathOverlapsOthers(mp)) return { ok: false, reason: 'overlapper en annen matte' };
+  return { ok: true };
 }
 // STEG 1B: brukbart/dekket areal for frihånd — delt _matUsableAreaM2 (se _matRunsWithinRoom) med
 // samme kantmargin frihånds-kabelen selv bruker (_matFreeCableMarginCm), så grensa er identisk
@@ -10021,6 +10115,30 @@ function _drawMatPathObj(mp, active) {
     ctx.fillStyle = 'rgba(47,125,85,0.96)'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.fillRect(s.x - sq, s.y - sq, sq * 2, sq * 2);   // hvitt stopp-kvadrat
+    ctx.restore();
+  }
+  // DEL B STEG 2 (Kenneth 19.08.2026, «illegal move must be shown as invalid, not silently snap
+  // back»): mens DENNE committede matta dras til en ugyldig posisjon, tegn et rødt varselomriss —
+  // samme fargespråk som draw-ghostens egen invalidGhost (#dc2626) over, gjenbrukt for konsistens.
+  // Selve avvisningen (tilbakestilling + toast) skjer først ved slipp, i mouseup — se _matDragInvalid.
+  if (!active && _matDragging && _matDragKind === 'matpath' && _matDragId === mp.id && _matDragInvalid) {
+    ctx.save();
+    ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2.5; ctx.setLineDash([5, 4]);
+    for (const r of runs) {
+      const R = _matFreeLaneRectWorld(r, NET);
+      const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
+      ctx.strokeRect(Math.min(p0.x, p1.x), Math.min(p0.y, p1.y), Math.abs(p1.x - p0.x), Math.abs(p1.y - p0.y));
+    }
+    ctx.setLineDash([]);
+    const bb = _matPathBoundsWorld(mp);
+    if (bb) {
+      const top = w2s((bb.minX + bb.maxX) / 2, bb.minY);
+      const label = '⚠ ugyldig plassering';
+      ctx.font = '11px sans-serif'; const tw = ctx.measureText(label).width;
+      ctx.fillStyle = '#dc2626'; ctx.fillRect(top.x - tw / 2 - 5, top.y - 20, tw + 10, 16);
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, top.x, top.y - 12);
+    }
     ctx.restore();
   }
 }
@@ -32618,6 +32736,13 @@ let _dhDragging=false, _dhId=-1, _dhOrigStart={x:0,y:0}, _dhOrigPts=null, _dhLas
 let _dhRotating=false, _dhRotStart=0, _dhRotOrigPts=null, _dhRotCenter={x:0,y:0};
 // Mat drag/rotate
 let _matDragging=false, _matDragId=-1, _matDragAxis='free';
+// DEL B STEG 2 (Kenneth 19.08.2026, Modell A): _matDragging/_matDragId GJENBRUKT for frihånds-matte
+// (matPath), ikke en ny, parallell drag-mekanikk — kun _matDragKind skiller hvilken samling/felt som
+// oppdateres. _matDragInvalid/_matDragOrigCentered er matpath-spesifikke (S.mats-grenen bruker dem
+// aldri): matpath følger musa FRITT under drag (ingen live-klamping som S.mats har) og viser status
+// i _drawMatPathObj — avvises først ved slipp med en forklarende toast, samme «ikke en stille snap
+// tilbake»-prinsipp som _matFreeExit sin egen FEIL 4-fiks.
+let _matDragKind='mat', _matDragInvalid=false, _matDragOrigCentered=false;
 let _matDragOrigStart={x:0,y:0}, _matDragOrigPos={x:0,y:0};
 let _matRotating=false, _matRotId=-1, _matRotStart=0, _matRotOrigDeg=0;
 let _matRotCenter={x:0,y:0};
@@ -32661,7 +32786,11 @@ function pushUndo() {
     // STEG 2-funn (Kenneth 19.08.2026, «Tøm rom ser ikke frihånds-matter»): matPaths manglet her
     // fra før — en nylig tegnet frihånds-matte kunne ikke angres, og «Tøm rom» kunne ikke
     // gjenopprette den. Samme mønster som mats, egen id-teller (nextMatPathId).
-    matPaths:  (S.matPaths||[]).map(mp=>({...mp, moves:(mp.moves||[]).map(m=>({...m}))})),
+    // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): start ble FØR kun spredt («...mp»), altså DELT
+    // objekt-referanse mellom snapshotet og det levende matPath-objektet — usett inntil nå fordi
+    // ingen kode mutere mp.start i PLASS FØR flytte-draget under. moves fikk allerede sin egen
+    // klone; start manglet den samme — angre ville vært en stille no-op for en flyttet matte.
+    matPaths:  (S.matPaths||[]).map(mp=>({...mp, start: mp.start ? {...mp.start} : mp.start, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates:    S.plates.map(p=>({...p})),
     aluboard:  (S.aluboard||[]).map(a=>({...a})),
     stairs:    S.stairs.map(s=>({...s, surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
@@ -33907,6 +34036,26 @@ canvas.addEventListener('mousedown', e=>{
         // (CYCLE_INLINE_TYPES) i stedet for ett hardkodet spesialtilfelle per type.
         if (!CYCLE_INLINE_TYPES.has(_chosen.type)) {
           _applyCycleSelection(_chosen);
+          // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): en frihånds-matte får nå samme «velg + start
+          // flytting umiddelbart»-mønster som S.mats sin egen «── Mat body click ──» under — men kun
+          // ved et FRISKT klikk (idx===0, samme regel resten av nedfallet allerede følger for om et
+          // klikk skal starte en drag eller bare velge en gravd-fram nabo).
+          if (_chosen.type === 'matpath' && _idx === 0) {
+            const mpDrag = (S.matPaths || []).find(m => m.id === _chosen.id);
+            if (mpDrag) {
+              pushUndo();
+              _matDragging = true;
+              _matDragKind = 'matpath';
+              _matDragId = mpDrag.id;
+              _matDragAxis = 'free';
+              _matDragInvalid = false;
+              _matDragOrigStart = { x: e.clientX, y: e.clientY };
+              _matDragOrigPos = { x: mpDrag.start.x, y: mpDrag.start.y };
+              _matDragOrigCentered = !!mpDrag.centered;
+              mpDrag.centered = false;   // en manuell flytting slår av «Sentrer» — posisjonen er ikke lenger avledet
+              canvas.style.cursor = 'crosshair';
+            }
+          }
           return;
         }
         if (_idx > 0) {
@@ -34034,6 +34183,7 @@ canvas.addEventListener('mousedown', e=>{
       if (matGizmoHit) {
         pushUndo();
         _matDragging = true;
+        _matDragKind = 'mat';
         _matDragId = S.ui.selectedMatId;
         _matDragAxis = matGizmoHit;
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
@@ -34119,6 +34269,7 @@ canvas.addEventListener('mousedown', e=>{
       if (mat) {
         pushUndo();
         _matDragging = true;
+        _matDragKind = 'mat';
         _matDragId = hmid;
         _matDragAxis = 'free';
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
@@ -34602,6 +34753,31 @@ canvas.addEventListener('mousemove', e=>{
   }
   // ── Mat dragging ──
   if (_matDragging) {
+    // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): matpath-grenen følger musa FRITT (ingen live-
+    // klamping som S.mats/_clampMatToRoom har) — _matPathMoveValid kjøres hver frame og styrer kun
+    // om _drawMatPathObj tegner mattа rød/ugyldig; selve avvisningen (tilbakestilling + toast) skjer
+    // først ved slipp, se mouseup under.
+    if (_matDragKind === 'matpath') {
+      const mp = (S.matPaths || []).find(m => m.id === _matDragId);
+      if (mp) {
+        const sc = S.view.zoom * BASE_SCALE;
+        let totalDx = (e.clientX - _matDragOrigStart.x) / sc;
+        let totalDy = (e.clientY - _matDragOrigStart.y) / sc;
+        if (S.snap.grid && !S.shiftHeld) {
+          const nx = Math.round((_matDragOrigPos.x + totalDx) / GRID) * GRID;
+          const ny = Math.round((_matDragOrigPos.y + totalDy) / GRID) * GRID;
+          totalDx = nx - _matDragOrigPos.x;
+          totalDy = ny - _matDragOrigPos.y;
+        }
+        // Nytt objekt, ikke mutasjon av mp.start i plass — pushUndo sitt snapshot av start er nå
+        // klonet (se over), men å ALDRI dele referansen i utgangspunktet er billig ekstra vern.
+        mp.start = { x: _matDragOrigPos.x + totalDx, y: _matDragOrigPos.y + totalDy };
+        mp.offX = 0; mp.offY = 0;
+        _matDragInvalid = !_matPathMoveValid(mp).ok;
+        _invalidateMatCache && _invalidateMatCache();
+      }
+      render(); return;
+    }
     const mat = S.mats.find(m => m.id === _matDragId);
     if (mat) {
       const sc = S.view.zoom * BASE_SCALE;
@@ -35393,7 +35569,25 @@ canvas.addEventListener('mouseup', e=>{
     return;
   }
   if (_matRotating) { _matRotating=false; _matRotId=-1; canvas.style.cursor='default'; render(); return; }
-  if (_matDragging) { _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return; }
+  if (_matDragging) {
+    // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): avvisning ved slipp, ikke stille under draget —
+    // samme prinsipp som _matFreeExit sin egen FEIL 4-fiks. Posisjon OG «Sentrer»-flagg tilbakestilt
+    // sammen (dradd = ikke lenger sentrert, men en AVVIST drag skal ikke etterlate den slått av).
+    if (_matDragKind === 'matpath') {
+      const mp = (S.matPaths || []).find(m => m.id === _matDragId);
+      if (mp && _matDragInvalid) {
+        const v = _matPathMoveValid(mp);   // årsak FØR posisjonen tilbakestilles
+        mp.start = { ..._matDragOrigPos };
+        mp.offX = 0; mp.offY = 0;
+        mp.centered = _matDragOrigCentered;
+        if (typeof _showToast === 'function') _showToast('Flytting avbrutt: ' + (v.reason || 'ugyldig plassering'), 'error');
+        _invalidateMatCache && _invalidateMatCache();
+      }
+      _matDragging = false; _matDragId = -1; _matDragAxis = 'free'; _matDragKind = 'mat'; _matDragInvalid = false;
+      canvas.style.cursor = 'default'; render(); return;
+    }
+    _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return;
+  }
   if (_plateDragging) { _plateDragging=false; _plateDragId=-1; _plateDragAxis='free'; canvas.style.cursor='default'; render(); return; }
   if (_stairDragging) { _stairDragging=false; _stairDragAxis='free'; canvas.style.cursor='default'; render(); return; }
   if (_dhRotating) { _dhRotating=false; _dhId=-1; canvas.style.cursor='default'; return; }
