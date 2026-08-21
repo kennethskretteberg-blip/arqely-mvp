@@ -3304,8 +3304,9 @@ const S = {
     manualPlaceMode: false,      // manual strip placement active
     manualFamilyName: null,      // family name for manual placement
     manualCategoryId: null,      // category id for manual placement
-    dragWidth: null,             // {productId} — width being dragged from palette
+    dragWidth: null,             // {productId, kind} — kind omitted/'strip' = folie (legacy), 'mat' = matte
     dropPreviewStrip: null,      // ghost strip during drag
+    dropPreviewMat: null,        // ghost matte during drag (STEG-drag, Kenneth 19.08.2026)
     palettePosX: null,           // manual palette position (null = docked to sidebar)
     palettePosY: null,
     vfPlacePosX: null,           // vf placement panel position
@@ -3805,6 +3806,7 @@ function render() {
   drawStairs();
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
+  if (S.ui.dropPreviewMat) drawDropPreviewMat();
   drawAllDimAnnotations();
   drawHindrings();
   drawZones();
@@ -5891,9 +5893,6 @@ function _upcRefreshResults() {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) { container.innerHTML = '<div style="color:var(--dim)">Velg et rom først</div>'; return; }
 
-  // Manuell matte-modus (snø) eier #upc-results mens den er aktiv → vis bane-lista, ikke produktlista.
-  if (_matManual && _matManual.snow && _matManual.roomId === roomId) { _matManualRenderPanel(); return; }
-
   if (modType === 'cable') {
     _upcRenderCableResults(container, familyName, categoryId, roomId);
   } else if (modType === 'mat') {
@@ -6329,9 +6328,14 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
     onclick="_upcPlaceMat(${prods[0].id},'auto')">
     <svg class="ic ic-zap" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg> Fyll rom automatisk <span style="color:var(--accent)">★ Anbefalt</span>
   </div>`;
-  // Manuell bane-liste (faste InSnow-matter, bland retning) — bruker valgt bredde.
+  // STEG-drag (Kenneth 19.08.2026, «dra inn matter fra artikkellista, og sentrer dem etterpå»):
+  // «Manuell» åpner nå en EKTE draggbar produktliste (startMatManualPlace/renderMatManualPalette),
+  // samme mønster som varmefolie sin egen «Manuelt»-knapp (_upcPlaceFoil('manual',...) →
+  // startManualPlace) — erstatter den gamle, forvirrende bane-lista (fjernet helt, se
+  // _matManualApply-historikken i STEG 0-rapporten over).
+  const sqFam = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
   html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:6px 12px;font-size:12px"
-    onclick="_matSnowManualStart(${shown[0].id})">\u{1F7EB} Manuell (bane-liste)</div>`;
+    onclick="startMatManualPlace(${sqFam(familyName)},${categoryId})">\u{1F7EB} Manuell</div>`;
   // Frihånd: tegn matta med musa (ghost + klikk for å snu) → nærmeste katalog-matte. Bruker valgt bredde.
   html += `<div class="ctx-item vfp-btn" style="text-align:left;padding:6px 12px;font-size:12px"
     onclick="_matFreeStart(${shown[0].id})">✏️ Frihånd (tegn matta)</div>`;
@@ -6541,6 +6545,7 @@ function showMatPlacePanel(familyName, categoryId) {
   hideProduktMenu();
   const section = document.getElementById('rwp-product-actions');
   if (!section) return;
+  const sq = s => `'${s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}'`;
 
   const prods = HEATING_PRODUCTS
     .filter(p => p.category_id === categoryId && p.active !== false
@@ -6594,7 +6599,7 @@ function showMatPlacePanel(familyName, categoryId) {
       </div>
       <div style="display:flex;gap:4px;margin-top:4px">
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
-          onclick="_matManualStart(${firstP.id})">Manuell (bane-liste)</div>
+          onclick="startMatManualPlace(${sq(familyName)},${categoryId})">Manuell</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
           onclick="_matFreeStart(${firstP.id})">✏️ Frihånd</div>
       </div>`;
@@ -6618,7 +6623,7 @@ function showMatPlacePanel(familyName, categoryId) {
       </div>
       <div style="display:flex;gap:4px;margin-top:4px">
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
-          onclick="_matManualStart(${p.id})">Manuell (bane-liste)</div>
+          onclick="startMatManualPlace(${sq(familyName)},${categoryId})">Manuell</div>
         <div class="ctx-item vfp-btn" style="flex:1;text-align:center"
           onclick="_matFreeStart(${p.id})">✏️ Frihånd</div>
       </div>`;
@@ -8860,189 +8865,6 @@ function _matRegressionTest() {
   return { ok: allOk, results };
 }
 
-// ─── MANUELL MATTE-MODUS (bane-liste) ──────────────────────────────────────
-// Hver bane = en EGEN matte (num_runs=1) med egen serpentin/kabel (som mockupen). Banene
-// hylle-pakkes venstre→høyre fra rommets margin-hjørne og brytes til ny hylle ved rombredden.
-// Arbeidslista ligger i _matManual; _matManualApply materialiserer den til mat-objekter tagget
-// med _manualGroup, slik at all eksisterende rendering/hit/lagring gjenbrukes.
-let _matManual = null;   // { roomId, productId, banes: [{orient:'v'|'h', len}] }
-
-function _matRasterCm(prod) { return 2 * ((prod?.mat_cc_mm || 80) / 10); }
-
-// Kabellengde (m) for én bane: areal / cc  (som mockup: (NET·Ls/1e4)/(cc/100)).
-function _matBaneCableM(prod, LsCm) {
-  const NET = (prod?.mat_width_mm || 500) / 10, cc = (prod?.mat_cc_mm || 80) / 10;
-  if (cc <= 0) return 0;
-  return (NET * LsCm / 1e4) / (cc / 100);
-}
-
-// Bygg (på nytt) mat-objektene for den manuelle bane-lista i _matManual. Fjerner forrige
-// _manualGroup for rommet først. Returnerer de opprettede mattene.
-//
-// Alle kabelmatter (innendørs EcoMat OG snø InSnow) er samme fysikk: fast kabel + KAPPBART nett →
-// bane-lengden er fri, men kappes ved helt raster (2×cc). `snow`-flagget styrer BARE
-// installasjonsreglene:
-//  • Innendørs (snow=false): veggmargin (min 5 cm); gap 0–5 cm.
-//  • Snø (snow=true): ingen veggmargin (pakkes til kanten); gap min 5 cm.
-function _matManualApply() {
-  if (!_matManual) return [];
-  const { roomId, snow } = _matManual;
-  const room = S.rooms.find(r => r.id === roomId);
-  if (!room || !room.points || room.points.length < 3) return [];
-  const defProd = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-  const gap = snow ? Math.max(5, (S.varmematte && S.varmematte.gapCm > 0) ? S.varmematte.gapCm : 10)
-                   : Math.max(0, Math.min(5, S.varmematte?.gapCm ?? 0));
-  const marginCm = snow ? 0 : Math.max(5, (defProd?.min_wall_margin_mm || 50) / 10);
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const uX0 = Math.min(...xs) + marginCm, uX1 = Math.max(...xs) - marginCm;
-  const uY0 = Math.min(...ys) + marginCm;
-  // Fjern forrige manuelle gruppe for dette rommet
-  S.mats = S.mats.filter(m => !(m.roomId === roomId && m._manualGroup));
-  let cx = uX0, cy = uY0, shelfH = 0;
-  const created = [];
-  (_matManual.banes || []).forEach((b, idx) => {
-    const prod = HEATING_PRODUCTS.find(p => p.id === (b.productId || _matManual.productId)) || defProd;
-    if (!prod) return;
-    const NET = (prod.mat_width_mm || 500) / 10;
-    const cutCm = _matRasterCm(prod);
-    // Kabelmatte (både innendørs EcoMat og snø InSnow): fast kabel, KAPPBART nett → bane-lengden
-    // er fri, men må kappes ved helt raster (2×cc). Samme regel uansett modul.
-    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
-    const w = b.orient === 'v' ? NET : Ls;   // verdensbredde (langs hylla)
-    const hh = b.orient === 'v' ? Ls : NET;  // verdenshøyde (hylle-tykkelse)
-    if (cx + w > uX1 + 0.1 && cx > uX0 + 0.001) { cx = uX0; cy += shelfH + gap; shelfH = 0; }
-    // verdens-topp-venstre = (cx, cy); regn om til pre-rotasjons x_cm/y_cm (rot 90 for liggende)
-    let x_cm, y_cm, rot;
-    if (b.orient === 'v') { x_cm = cx; y_cm = cy; rot = 0; }
-    else { x_cm = cx + Ls / 2 - NET / 2; y_cm = cy - Ls / 2 + NET / 2; rot = 90; }
-    const mat = {
-      id: S.counters.nextMatId++, roomId, productId: prod.id, x_cm, y_cm,
-      width_cm: NET, length_cm: Ls, num_runs: 1, gap_cm: 0, rotation_deg: rot,
-      _manualGroup: true, _manualBaneIdx: idx
-    };
-    S.mats.push(mat); created.push(mat);
-    cx += w + gap; shelfH = Math.max(shelfH, hh);
-  });
-  _invalidateMatCache();
-  return created;
-}
-
-// Standard mattestørrelser (m²) for familien — fra katalogen, ellers fallback.
-function _matStdSizes(prod) {
-  const fam = prod?.product_family;
-  const cat = HEATING_PRODUCTS.filter(p => fam && p.product_family === fam && p.mat_area_m2 > 0)
-    .map(p => p.mat_area_m2);
-  const uniq = [...new Set(cat)].sort((a, b) => a - b);
-  return uniq.length ? uniq : [1, 1.5, 2, 3, 4, 5, 6, 7, 8, 10, 12];
-}
-
-// Start manuell modus for et produkt: init bane-lista (én stående bane) og vis panelet.
-function _matManualStart(productId) {
-  const roomId = S.ui.selectedRoomId;
-  if (!roomId) { alert('Velg et rom først'); return; }
-  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!prod) return;
-  pushUndo();
-  _matManual = { roomId, productId, snow: false, banes: [{ orient: 'v', len: 8 * _matRasterCm(prod), productId }] };
-  _matManualApply();
-  S.ui.selectedMatId = null;
-  _matManualRenderPanel();
-  updateCtxBar(); render();
-}
-
-// Snø-inngang: samme kappbar-modell som innendørs (fast kabel, kappbart nett → fri bane-lengde
-// snappet til raster). Snø skiller seg bare på installasjonsreglene: ingen veggmargin (pakkes til
-// kanten) og gap min 5 cm — begge håndtert av `snow`-flagget i _matManualApply.
-function _matSnowManualStart(productId) {
-  const roomId = S.ui.selectedRoomId;
-  if (!roomId) { alert('Velg et rom først'); return; }
-  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!prod) return;
-  pushUndo();
-  // rydd rommet (som snø-auto gjør før utlegg)
-  S.mats = S.mats.filter(m => m.roomId !== roomId);
-  _matManual = { roomId, productId, snow: true, banes: [{ orient: 'v', len: 8 * _matRasterCm(prod), productId }] };
-  _matManualApply();
-  S.ui.selectedMatId = null;
-  _matManualRenderPanel();
-  updateCtxBar(); render();
-}
-
-function _matManualRenderPanel() {
-  if (!_matManual) return;
-  const snow = !!_matManual.snow;
-  const section = document.getElementById(snow ? 'upc-results' : 'rwp-product-actions');
-  if (!section) return;
-  const defProd = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-  let totArea = 0, totCable = 0, rows = '';
-  _matManual.banes.forEach((b, i) => {
-    const prod = HEATING_PRODUCTS.find(p => p.id === (b.productId || _matManual.productId)) || defProd;
-    const NET = (prod?.mat_width_mm || 500) / 10, cutCm = _matRasterCm(prod);
-    const Ls = Math.max(cutCm, Math.floor((b.len || 0) / cutCm) * cutCm);
-    const cable = _matBaneCableM(prod, Ls);
-    totArea += NET * Ls / 1e4; totCable += cable;
-    rows += `<div style="display:flex;align-items:center;gap:3px;margin:3px 0">
-      <span style="width:12px;color:var(--dim);font-size:11px">${i + 1}</span>
-      <button class="snap-chip${b.orient === 'v' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'v')">Stå</button>
-      <button class="snap-chip${b.orient === 'h' ? ' on' : ''}" style="font-size:10px;padding:2px 6px" onclick="_matManualSetOrient(${i},'h')">Ligg</button>
-      <input type="number" value="${b.len}" min="0" step="1" style="width:52px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matManualSetLen(${i},this.value)"><span style="font-size:10px;color:var(--dim)">cm</span>
-      <span style="flex:1;text-align:right;font-size:10px;color:var(--dim)">${cable.toFixed(1)} m</span>
-      <button class="snap-chip" style="font-size:10px;padding:2px 5px" onclick="_matManualDelBane(${i})" title="Slett bane">✕</button>
-    </div>`;
-  });
-  const STD = _matStdSizes(defProd);
-  const suggest = [...STD].reverse().find(a => a <= totArea) || STD[0];
-  const wm2 = defProd?.watt_per_m2 || 0, totW = Math.round(totArea * wm2);
-  const hint = `Bland Stå/Ligg. Hver bane = egen matte med egen kabel. Nettet kappes ved raster (${_matRasterCm(defProd)} cm).`;
-  section.innerHTML = `<div class="rwp-section-label">\u{1F7EB} Manuell — ${esc(defProd?.product_family || defProd?.name || 'Matte')}</div>
-    <div style="font-size:11px;color:var(--dim);margin:2px 0 4px">${hint}</div>
-    ${rows}
-    <div class="ctx-item vfp-btn" style="text-align:center;margin-top:4px" onclick="_matManualAddBane()">+ Legg til bane</div>
-    <div style="border-top:1px solid var(--brd);margin-top:6px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
-      <div style="display:flex;justify-content:space-between"><span>Antall baner</span><b>${_matManual.banes.length}</b></div>
-      <div style="display:flex;justify-content:space-between"><span>Dekket areal</span><b>${totArea.toFixed(2)} m²</b></div>
-      <div style="display:flex;justify-content:space-between"><span>Kabellengde</span><b>≈ ${totCable.toFixed(1)} m</b></div>
-      <div style="display:flex;justify-content:space-between"><span>Effekt</span><b>${totW} W (${wm2} W/m²)</b></div>
-      <div style="display:flex;justify-content:space-between;color:var(--dim)"><span>Foreslått matte ≤</span><b>${suggest} m²</b></div>
-    </div>
-    <div class="ctx-item vfp-btn" style="text-align:center;margin-top:6px;background:var(--accent);color:#fff" onclick="_matManualExit()">Ferdig</div>`;
-  section.style.display = 'block';
-  if (!snow && typeof showRoomWorkflowPanel === 'function') showRoomWorkflowPanel();
-}
-
-function _matManualAddBane() {
-  if (!_matManual) return;
-  const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-  _matManual.banes.push({ orient: 'v', len: 8 * _matRasterCm(prod), productId: _matManual.productId });
-  _matManualApply(); _matManualRenderPanel(); render();
-}
-function _matManualDelBane(i) {
-  if (!_matManual) return;
-  _matManual.banes.splice(i, 1);
-  if (!_matManual.banes.length) {
-    const prod = HEATING_PRODUCTS.find(p => p.id === _matManual.productId);
-    _matManual.banes.push({ orient: 'v', len: 2 * _matRasterCm(prod), productId: _matManual.productId });
-  }
-  _matManualApply(); _matManualRenderPanel(); render();
-}
-function _matManualSetOrient(i, o) {
-  if (!_matManual || !_matManual.banes[i]) return;
-  _matManual.banes[i].orient = o;
-  _matManualApply(); _matManualRenderPanel(); render();
-}
-function _matManualSetLen(i, v) {
-  if (!_matManual || !_matManual.banes[i]) return;
-  _matManual.banes[i].len = Math.max(0, +v || 0);
-  _matManualApply(); _matManualRenderPanel(); render();
-}
-function _matManualExit() {
-  const wasSnow = _matManual && _matManual.snow;
-  _matManual = null;
-  renderSidebar(); updateCtxBar(); render();
-  if (wasSnow) { if (typeof _upcRefreshResults === 'function') _upcRefreshResults(); }
-  else if (typeof showMatPlacePanel === 'function' && S.ui.manualFamilyName) showMatPlacePanel(S.ui.manualFamilyName, S.ui.manualCategoryId);
-}
-
 // ─── FRIHÅNDS-MATTE (Del 1: tegning + geometri + lane-render) ─────────────────
 // Relativ moves-modell (som mockup «Varmeplan-matte-frihand»). Verden Y ned.
 // Arbeids-sesjon i _matFree; committes til S.matPaths ved «Avslutt matte».
@@ -9051,7 +8873,7 @@ let _matFreeLastClick = null;   // for dobbeltklikk-deteksjon i mousedown
 
 function _matFreeConsts(prod) {
   const NET = (prod?.mat_width_mm || 500) / 10;   // 50/100 cm bred (netto)
-  const cc  = (prod?.mat_cc_mm || 80) / 10;       // felles fallback med _matRasterCm/drawMats (80mm)
+  const cc  = (prod?.mat_cc_mm || 80) / 10;       // felles fallback med drawMats (80mm)
   return { NET, cc, RASTER: 2 * cc };             // kuttraster = 2×cc
 }
 function _matFreeProdOf(mp) { return HEATING_PRODUCTS.find(p => p.id === mp.productId); }
@@ -9343,7 +9165,7 @@ function _matFreeStartFor(room, prod, axis) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
   // Langkant-margin (mattas 50/100 cm brede kant mot vegg): snø pakkes til kanten (0), som
-  // _packSnowMats (6544) og _matManualApply (6918); innendørs EcoMat holder 5 cm.
+  // _packSnowMats; innendørs EcoMat holder 5 cm.
   const snow = (typeof _roomModuleType === 'function' && _roomModuleType(room.id) === 'snow')
     || (typeof _isSnowModule === 'function' && _isSnowModule());
   const shortM = cc / 2, longM = snow ? 0 : 5;
@@ -9395,7 +9217,7 @@ function _matFreeStart(productId) {
   // ≥5 cm fra vegg mot mattas LANGSIDE (den 50 cm brede kanten).
   const start = _matFreeStartFor(room, prod, 'v');   // foreløpig (loddrett); oppdateres av ghost
   // Gap mellom baner: snø-standard 10 cm (min 5), innendørs 0 — samme regel som gap-panelet
-  // (openMatGapPanel/setMatGap) og _matManualApply, så ghosten ikke endrer figur ved commit.
+  // (openMatGapPanel/setMatGap), så ghosten ikke endrer figur ved commit.
   const snowGap = (typeof _roomModuleType === 'function' && _roomModuleType(roomId) === 'snow')
     || (typeof _isSnowModule === 'function' && _isSnowModule());
   const startGapCm = snowGap ? 10 : 0;
@@ -18160,6 +17982,7 @@ function cancelManualPlace() {
   S.ui.manualPlaceMode = false;
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
+  S.ui.dropPreviewMat = null;
   // Hide in workflow panel
   const s = document.getElementById('rwp-manual-palette');
   if (s) s.style.display = 'none';
@@ -18319,6 +18142,55 @@ function manualDragStart(e, productId) {
 function manualDragEnd(e) {
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
+  S.ui.dropPreviewMat = null;   // STEG-drag (Kenneth 19.08.2026): generisk opprydding for begge slag
+}
+
+// STEG-drag (Kenneth 19.08.2026, «dra inn matter fra artikkellista, og sentrer dem etterpå»):
+// «Manuell» for matter — SAMME mønster som startManualPlace/renderManualPalette (folie) rett over.
+// Egen funksjon, ikke bit-for-bit gjenbruk: matte-produktenes felt (mat_width_mm, ikke
+// netto_width_mm) og drop-målet (S.mats, ikke S.strips) er andre. Gjenbruker den DELTE
+// #rwp-manual-palette/#rwp-palette-items-widgeten (kun én manuell-modus aktiv om gangen — samme
+// docking/drag-håndtak, _initPaletteDrag, uendret) og S.ui.dragWidth (nå med kind:'mat' for å
+// skille fra folie sin i canvas sine dragover/drop-handlere).
+function startMatManualPlace(familyName, categoryId) {
+  const roomId = S.ui.selectedRoomId;
+  if (!roomId) { _showToast('Velg et rom først', 'warn'); return; }
+  S.ui.manualPlaceMode = true;
+  S.ui.manualFamilyName = familyName;
+  S.ui.manualCategoryId = categoryId;
+  renderMatManualPalette();
+}
+function renderMatManualPalette() {
+  const { manualFamilyName, manualCategoryId } = S.ui;
+  const prods = HEATING_PRODUCTS
+    .filter(p => p.category_id === manualCategoryId && p.active !== false &&
+      (p.product_family ? p.product_family === manualFamilyName : p.name.startsWith(manualFamilyName)))
+    .sort((a, b) => (b.mat_width_mm || 0) - (a.mat_width_mm || 0));
+
+  const items = prods.map(p => {
+    const nc = Math.round((p.mat_width_mm || 500) / 10);
+    const totalMm = _matTotalLengthMm(p);
+    const lenTxt = totalMm ? `${(totalMm / 1000).toFixed(1)}m` : '';
+    const watt = p.watt_per_m2 ? `${p.watt_per_m2}W/m²` : '';
+    const label = esc(p.name);
+    return `<div class="mp-item" draggable="true" data-prod-id="${p.id}"
+      ondragstart="matManualDragStart(event,${p.id})"
+      ondragend="manualDragEnd(event)">
+      <span>${label}</span>
+      <span class="mp-item-info">${nc}cm${lenTxt ? ' × ' + lenTxt : ''}${watt ? ' · ' + watt : ''}</span>
+    </div>`;
+  }).join('');
+
+  const palItems = document.getElementById('rwp-palette-items');
+  if (palItems) palItems.innerHTML = items;
+  const section = document.getElementById('rwp-manual-palette');
+  if (section) section.style.display = 'block';
+  showRoomWorkflowPanel();
+}
+function matManualDragStart(e, productId) {
+  S.ui.dragWidth = { productId, kind: 'mat' };
+  e.dataTransfer.effectAllowed = 'copy';
+  e.dataTransfer.setData('text/plain', String(productId));
 }
 
 // Ghosten viser ALLTID nøyaktig posisjonen folien faktisk vil lande på (allerede snappet av
@@ -18354,6 +18226,29 @@ function drawDropPreview() {
     ctx.fillRect(bx, by, bw, bh);
     ctx.strokeRect(bx, by, bw, bh);
   }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// STEG-drag (Kenneth 19.08.2026, «dra inn matter fra artikkellista»): samme fargekonvensjon som
+// drawDropPreview over (grønn=snappet mot vegg/nabomatte, gul=fri plassering, rød=ugyldig — får
+// ikke plass, Regel 18). _matPlaceCandidate sin egen «x==null» (rommet ikke funnet/peker utenfor)
+// tegnes ikke — samme «vis ingenting fremfor noe misvisende»-valg som strip-ghosten.
+function drawDropPreviewMat() {
+  const cand = S.ui.dropPreviewMat;
+  if (!cand || cand.x == null) return;
+  const p0 = w2s(cand.x, cand.y), p1 = w2s(cand.x + cand.widthCm, cand.y + cand.lengthCm);
+  const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y), w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
+  ctx.save();
+  ctx.globalAlpha = cand.snapped ? 0.65 : 0.5;
+  const color = cand.valid === false ? 'rgba(255,80,80,1)' : cand.snapped ? 'rgba(34,197,94,0.95)' : 'rgba(255,220,80,1)';
+  const fillColor = cand.valid === false ? 'rgba(255,60,60,0.35)' : cand.snapped ? 'rgba(34,197,94,0.25)' : 'rgba(255,200,80,0.35)';
+  ctx.fillStyle = fillColor;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 3]);
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x, y, w, h);
   ctx.setLineDash([]);
   ctx.restore();
 }
@@ -18614,6 +18509,14 @@ canvas.addEventListener('dragover', e => {
   e.dataTransfer.dropEffect = 'copy';
   const wp = _getDropPosition(e);
   _lastDropWp = wp;
+  // STEG-drag (Kenneth 19.08.2026, «dra inn matter fra artikkellista»): kind:'mat' bruker
+  // _matPlaceCandidate (samme funksjon klikk-for-å-plassere fra forrige runde allerede bruker,
+  // og som selve drop-et under kaller) — «ghosten skal ikke endre figur ved commit».
+  if (S.ui.dragWidth.kind === 'mat') {
+    S.ui.dropPreviewMat = _matPlaceCandidate(wp, S.ui.dragWidth.productId);
+    markDirty();
+    return;
+  }
   const cand = _stripDropCandidate(wp, S.ui.dragWidth.productId, e.altKey);
   S.ui.dropPreviewStrip = _dropPreviewFromCandidate(cand);
   // The conditional rAF loop only repaints when something marks the frame dirty.
@@ -18624,6 +18527,7 @@ canvas.addEventListener('dragover', e => {
 
 canvas.addEventListener('dragleave', () => {
   S.ui.dropPreviewStrip = null;
+  S.ui.dropPreviewMat = null;
   markDirty();
 });
 
@@ -18632,6 +18536,27 @@ canvas.addEventListener('drop', e => {
   if (!S.ui.dragWidth) return;
   const wp = _getDropPosition(e);
   const dragProdId = S.ui.dragWidth.productId;
+  // STEG-drag (Kenneth 19.08.2026, «dra inn matter fra artikkellista»): matte-gren — samme
+  // _matPlaceCandidate (magnet mot vegg/nabomatte, Regel 18) og _manualPlace-tagging som
+  // klikk-for-å-plassere fra forrige runde, bare via ekte HTML5-drag i stedet.
+  if (S.ui.dragWidth.kind === 'mat') {
+    const cand = _matPlaceCandidate(wp, dragProdId);
+    if (!cand.valid) {
+      if (typeof _showToast === 'function') _showToast('Matta får ikke plass her', 'warn');
+      S.ui.dropPreviewMat = null; S.ui.dragWidth = null; render(); return;
+    }
+    pushUndo();
+    const mat = {
+      id: S.counters.nextMatId++, roomId: S.ui.selectedRoomId, productId: dragProdId,
+      x_cm: cand.x, y_cm: cand.y, width_cm: cand.widthCm, length_cm: cand.lengthCm,
+      num_runs: 1, rotation_deg: 0, _manualPlace: true,
+    };
+    S.mats.push(mat); _invalidateMatCache();
+    S.ui.selectedMatId = mat.id;
+    S.ui.dropPreviewMat = null; S.ui.dragWidth = null;
+    renderSidebar(); updateCtxBar(); render();
+    return;
+  }
   const cand = _stripDropCandidate(wp, dragProdId, e.altKey);
   if (!cand.room) { S.ui.dropPreviewStrip = null; S.ui.dragWidth = null; return; }
   if (cand.invalid) {
@@ -28289,6 +28214,7 @@ function finishRoomWorkflow() {
   S.ui.platePlaceMode = false;
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
+  S.ui.dropPreviewMat = null;
   updateCtxBar();
   renderSidebar();
   render();
@@ -36659,11 +36585,12 @@ function _ctxBarItems() {
     // ALDRI kunne vises for automatisk utlegg, siden autoFillMatSerpentine (STEG 1+2) n\u00e5 garanterer
     // at auto-utlegg ikke har overskudd. Dukker det likevel opp, er det en regresjon \u2014 logg den i
     // stedet for \u00e5 vise den til brukeren.
-    // STEG 1 (Kenneth 19.08.2026, \u00abdra inn matter fra artikkellista\u00bb): _manualPlace (klikk-for-\u00e5-
-    // plassere fra UPC) er en EGEN flagg fra den eldre bane-listas _manualGroup \u2014 bevisst IKKE
-    // samme flagg, for _matManualApply sin egen \u00abfjern forrige _manualGroup for rommet\u00bb-linje
-    // (:8900) ville ellers slettet mine matter neste gang bane-lista brukes i samme rom. Begge
-    // betyr likevel \u00ablegitimt manuelt, ikke en regresjon\u00bb for AKKURAT denne advarselen.
+    // STEG 1 (Kenneth 19.08.2026, \u00abdra inn matter fra artikkellista\u00bb): _manualPlace (dra-og-slipp
+    // fra UPC sin nye \u00abManuell\u00bb-modus) er et EGET flagg fra _manualGroup, som den nå FJERNEDE
+    // bane-liste-funksjonen (\u00abta bort bane-liste\u00bb, samme prompt) satte. _manualGroup lever videre
+    // KUN for bakoverkompatibilitet med allerede lagrede prosjekter som har slike matter fra før —
+    // ingen kode setter den lenger. Begge betyr likevel \u00ablegitimt manuelt, ikke en regresjon\u00bb for
+    // AKKURAT denne advarselen.
     const _isManualMat = !!(mat && (mat._manualGroup || mat._manualPlace));
     const excessM = (excessCm > 10 && _isManualMat) ? (excessCm / 100).toFixed(1) : null;
     if (excessCm > 10 && !_isManualMat) {
@@ -49708,7 +49635,7 @@ function _resetProjectState() {
     selectedCableId:null, selectedMatId:null, selectedPlateId:null, selectedStairId:null,
     selectedZoneId:null, activePartId:null, selectedLabelStripId:null, selectedLabelCableId:null, selectedLabelMatId:null, selectedLabelMatRectId:null,
     drawMode:null, movingWall:false, semiAutoMode:false,
-    manualPlaceMode:false, dragWidth:null, dropPreviewStrip:null
+    manualPlaceMode:false, dragWidth:null, dropPreviewStrip:null, dropPreviewMat:null
   });
   S.bgs = {};
   S.ui.activeFloorId = null;
