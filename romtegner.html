@@ -9005,6 +9005,104 @@ function _matFreeSplitPlan(totalCm, cands) {
   }
   return null;
 }
+// DEL B STEG 0 (Kenneth 21.08.2026, «oppdelingen er ujevn — 30+26+8 der jeg ville hatt 22+22+20»):
+// engangs-diagnose, samme form som dokumenter/sjekk-1110.js. Duplisert, IKKE gjenbrukt, algoritme
+// fra _matFreeSplitPlan over — bevisst en SEPARAT, skrivebeskyttet kopi (bestAtK/spread er private
+// closures der, ikke eksponert) slik at diagnosen aldri kan endre produksjonsfunksjonens oppførsel.
+// Kall fra konsollen: `_matSplitDiagnose(mp)` for et ekte S.matPaths-objekt, eller
+// `_matSplitDiagnoseRaw(totalCm, cands)` med egne tall. Skriver ut alle 4 punktene STEG 0 ber om.
+//
+// ═══ MÅLTE TALL (ikke gjettet) — kjørt mot Kenneths EGEN, LIVE Supabase-katalog ═══════════════════
+// Hentet «EcoMat 150T» 0,5m/230V direkte fra prod-databasen (samme anon-nøkkel klienten selv bruker,
+// read-only, id 96-114): 19 rader, ALLE active:true, lengder 2,3,4,5,6,7,8,9,10,12,14,16,18,20,22,
+// 24,26,28,30 m. Databasens faktiske kolonne er `mat_length_mm` + `mat_area_m2` — IKKE
+// `mat_total_length_mm` (den finnes ikke som DB-kolonne noe sted); _matTotalLengthMm(p) løser dette
+// riktig via arealfallbacken (mat_area_m2×1e6/mat_width_mm), bekreftet å gi eksakt 20000/22000mm.
+//
+// HYPOTESE 1 (katalogen mangler 20/22) — AVKREFTET MED LIVE DATA: begge finnes, begge active.
+//
+// HYPOTESE 2/3 (totalCm feil, eller noe oppstrøms overskriver) — TESTET, IKKE BEKREFTET: kjørte
+// _matSplitDiagnoseRaw(6400, <de 19 EKTE radene>) — altså Kenneths egen rapporterte «totalt 64
+// lengdemeter» tolket bokstavelig som totalCm=6400. Resultat: K=3 er riktig stoppende K (rest=0 <
+// minste rull), 21 kombinasjoner er tiedd på maks-sum 6400cm ved K=3, og [2000,2200,2200]
+// (20+22+22, spredning 200) VINNER korrekt — ikke [800,2600,3000] (8+26+30, spredning 2200), som
+// riktignok er ÉN av de 21 tiedde kombinasjonene, men langt fra den laveste spredningen. Samme
+// resultat bekreftet gjennom HELE _matFreeCatalog-pipelinen (ikke bare _matFreeSplitPlan isolert),
+// med et ekte matPath-objekt og fam-oppløsning via mp.productId — identisk konklusjon.
+// Bredt søk (totalCm 6380-6420 i 2cm-steg, OG 6400-8000 i 2cm-steg): [800,2600,3000] vinner ALDRI
+// som bestAtK(3)-svar for NOEN totalCm i disse intervallene — heller ikke med 20m/22m FJERNET fra
+// kandidatlista for hånd (da vinner [1600,2400,2400], fortsatt lav spredning, aldri 8/26/30-mønsteret).
+//
+// KONKLUSJON: med DENNE koden (uendret siden 7428c56) og Kenneths EGEN, LIVE produktkatalog, KAN jeg
+// ikke reprodusere 30+26+8 for noen totalCm jeg har prøvd — motoren velger korrekt 20+22+22 akkurat
+// slik Regel 22 pkt. 3 sier den skal. Dette er IKKE det samme som «ingen feil finnes»: det betyr at
+// den ekte årsaken enten (a) krever Kenneths FAKTISKE, lagrede rom 1108-objekt (nøyaktig totalCm fra
+// EN EKTE tegnet bane, inkl. eventuelle hjørner/U-svinger jeg ikke har testet — kun rette baner er
+// sveipet over), eller (b) skjedde i en browser-økt med en ELDRE/hurtigbufret versjon av denne fila
+// fra FØR 7428c56, eller (c) er tre SEPARAT tegnede baner (ikke én 64m-bane splittet automatisk) som
+// Kenneth selv summerte til «totalt 64 lengdemeter» i sin egen rapportering. IKKE fikset i denne
+// rapporten — ingen kodeendring gjort i _matFreeSplitPlan. Neste steg: Kenneth kjører
+// `_matSplitDiagnose(mp)` i konsollen mot DET FAKTISKE matPath-objektet i rom 1108 (eller deler
+// prosjektet), så saken løses på MÅLTE tall fra selve symptomet, ikke en rekonstruksjon.
+function _matSplitDiagnoseRaw(totalCm, cands) {
+  const lens = [...new Set(cands.map(p => _matTotalLengthMm(p) / 10))].sort((a, b) => a - b);
+  const spread = arr => arr.length ? Math.max(...arr) - Math.min(...arr) : 0;
+  const out = { totalCm, lensCm: lens, byK: [], chosenK: null, chosenLens: null, chosenReason: null };
+  if (!lens.length) { out.chosenReason = 'ingen kandidater (tom liste)'; return out; }
+  const smallest = lens[0];
+  if (smallest > totalCm + 1e-6) { out.chosenReason = `minste rull (${smallest}cm) er lengre enn totalCm`; return out; }
+  const CAP = 8;
+
+  function allAtK(K) {
+    // ALLE kombinasjoner (ikke bare den ene vinneren) som treffer maks-summen for denne K-en —
+    // punkt 4 i STEG 0 krever eksplisitt dette, ikke bare best.lens.
+    let maxSum = -1;
+    const all = [];
+    (function rec(startIdx, chosen, sum) {
+      if (chosen.length === K) {
+        if (sum > maxSum + 1e-9) { maxSum = sum; all.length = 0; all.push({ lens: chosen.slice(), sum, spread: spread(chosen) }); }
+        else if (Math.abs(sum - maxSum) < 1e-9) { all.push({ lens: chosen.slice(), sum, spread: spread(chosen) }); }
+        return;
+      }
+      for (let i = startIdx; i < lens.length; i++) {
+        const v = lens[i];
+        if (sum + v > totalCm + 1e-6) continue;
+        chosen.push(v); rec(i, chosen, sum + v); chosen.pop();
+      }
+    })(0, [], 0);
+    all.sort((a, b) => a.spread - b.spread);
+    return { maxSum: maxSum < 0 ? null : maxSum, all };
+  }
+
+  for (let K = 1; K <= CAP; K++) {
+    if (K * smallest > totalCm + 1e-6) { out.byK.push({ K, note: 'selv K minste ruller får ikke plass — løkka stopper her' }); break; }
+    const { maxSum, all } = allAtK(K);
+    if (maxSum == null) { out.byK.push({ K, note: 'ingen gyldig kombinasjon ved denne K-en' }); continue; }
+    const best = all[0];   // laveste spread blant de som traff maks-summen
+    const stopCond = totalCm - best.sum < smallest - 1e-6;
+    out.byK.push({ K, maxSum, best: best.lens, bestSpread: best.spread,
+      allAtMaxSum: all.map(a => ({ lens: a.lens, spread: a.spread })),
+      restEtterBeste: totalCm - best.sum, stopperHer: stopCond || K === CAP,
+      begrunnelse: stopCond ? `totalCm - sum (${(totalCm - best.sum).toFixed(2)}) < minste rull (${smallest})`
+        : (K === CAP ? 'nådde CAP (8)' : 'fortsetter til neste K') });
+    if ((stopCond || K === CAP) && out.chosenK == null) {
+      out.chosenK = K; out.chosenLens = best.lens; out.chosenReason = out.byK[out.byK.length - 1].begrunnelse;
+    }
+  }
+  return out;
+}
+function _matSplitDiagnose(mp) {
+  const fam = _matFreeProdOf(mp);
+  const totalCm = _matFreeTotalCm(mp);
+  const widthMm = fam?.mat_width_mm || 500, voltage = fam?.voltage || 230;
+  const cands = HEATING_PRODUCTS.filter(p => fam && p.product_family === fam.product_family
+      && (p.mat_width_mm || 500) === widthMm && (p.voltage || 230) === voltage
+      && p.active !== false && _matTotalLengthMm(p) > 0);
+  const diag = _matSplitDiagnoseRaw(totalCm, cands);
+  console.log('_matSplitDiagnose', { mpId: mp.id, fam: fam?.product_family, widthMm, voltage,
+    candidateCount: cands.length, ...diag });
+  return diag;
+}
 function _matFreeCatalog(mp) {
   const fam = _matFreeProdOf(mp);
   const totalCm = _matFreeTotalCm(mp);
