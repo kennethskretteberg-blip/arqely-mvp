@@ -4,6 +4,1052 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Vunnet er nå sluttstasjonen — leveranse-sporing (akse B) fjernet — 2026-08-21
+
+Kenneth: å trykke «Vunnet» skal bety ferdig — ikke starte enda et sporingsløp. Fjerner
+leveranse-aksen (akse B) fra arbeidsflyten helt, ikke bare hopper den forbi et mellomsteg.
+
+- **`b8434a9` — Vunnet = ferdig, ingen leveranse-sporing.** Før aktiverte «Vunnet» automatisk
+  akse B (`klar_for_montering`/`klar_for_levering` etter rolle) med egen pille + «Start
+  montering»/«Marker levert»-knapp — brukeren måtte klikke videre, en reell dobbel operasjon.
+  `_applySalesTransition` setter nå `delivery_status=null` ubetinget i samme patch for enhver
+  statusendring (én databaseskrivning, ikke to); `_initialDeliveryStatus` fjernet (ingen kallere
+  igjen). `_deliveryCellHtml` returnerer alltid tomt — pillen/knappen vises aldri mer.
+  `_deliveryNextAction`/`_advanceDelivery` slettet. `DELIVERY_STATUSES` og dashboardets todo-kort
+  (leser `p._deliveryStatus` direkte) er urørt — de teller fortsatt riktig for eldre prosjekter
+  med data fra før denne endringen.
+- Verifisert: stubbet `_setProjectStatus`, kjørte overgangene vunnet/tapt/under_arbeid — ett
+  patch-kall per overgang (var to for vunnet), `delivery_status` alltid null. Fullt
+  regresjonsbatteri (matte/sone/frihånd/folie) upåvirket.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte-farger regresjon og splitt-diagnose — 2026-08-21
+
+To oppfølgere til DEL B (per-matte label/flytting): en fargebug forrige commit innførte, og en
+grundig — men resultatløs — diagnose av et splittavvik Kenneth rapporterte på rom 1108.
+
+- **`a1560f0` — matte-farger: fikset regresjon fra Modell A.** Rotårsak: fargegrenen i
+  `_drawMatPathObj` var betinget på `cat.segments.length > 1` («har DENNE BANEN flere ruller») —
+  etter forrige commits splitt til uavhengige objekter har hvert committet matPath alltid
+  nøyaktig ett segment, så betingelsen ble permanent usann og alt tegnet i standard blå. Riktig
+  spørsmål er «har DETTE ROMMET flere fysiske matter» (`_matPathSegColor`/
+  `_matRoomPhysicalPieces` svarte allerede på det) — betingelsen fjernet. Ny regresjonstest i
+  `_matFreeRegressionTest()` låser begge former (splittede objekter og eldre fler-segment-
+  objekter). Verifisert mot Kenneths egen live Supabase-katalog (EcoMat 150T, hentet via
+  anon-API): tre distinkte farger på en 6400cm-bane.
+- **`77ce87f` — DEL B STEG 0: kan ikke reprodusere 8+26+30.** Kenneth rapporterte splitt
+  30+26+8 der 22+22+20 var ventet. Bygget en skrivebeskyttet diagnosekopi av splitt-
+  algoritmen og testet mot Kenneths egen live katalog (19 EcoMat 150T-rader, 2–30m, hentet
+  direkte fra Supabase): 20m og 22m finnes begge i katalogen (avkrefter hypotese 1), og et
+  bredt sveip av totalCm (6380–8000cm) velger korrekt [20,22,22]-kombinasjonen i alle
+  tilfeller — [8,26,30] ble aldri reprodusert. Ingen kodeendring gjort; venter på Kenneths
+  faktiske lagrede rom 1108-tall.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matpath klikkvalg og per-matte flytting (DEL B) — 2026-08-21
+
+Kenneth (rom 1108): frihånds-matte kunne ikke velges ved klikk, og en bane med flere fysiske
+ruller hadde bare én felles label/posisjon. Tre commits løser begge, med en grundig
+STEG 0-rapport imellom.
+
+- **`a7043d1` — frihånds-matte og aluboard kan nå velges ved klikk.** Rotårsak: matpath og
+  aluboard manglet begge en egen «body click»-gren i mousedown-nedfallet (bg/strip/cable/...
+  har hver sin), så klikk falt gjennom til rommet under. Fiks uttrykt som én regel: ny
+  `CYCLE_INLINE_TYPES`-liste (typer med egen gren) — alt annet, inkl. fremtidige typer, løses
+  automatisk via `_applyCycleSelection`, i stedet for å legge til nok et hardkodet
+  spesialtilfelle.
+- **`f0832a0` — STEG 0: Modell A valgt for per-matte label/flytting.** Kartla at én matPath i
+  dag betyr én label/posisjon/drag for HELE banen, selv når 7428c56 lot den deles i flere
+  fysiske ruller. Valgte Modell A (splitt til uavhengige matPath-objekter ved commit) foran
+  Modell B (per-segment-nøkling): `_drawMatPathObj` kaller allerede label-renderen én gang per
+  objekt, så splitting gir egen label/posisjon gratis uten å røre rendering-maskineriet.
+- **`e840b73` — hver fysisk matte får egen label og flyttepil.** Ny `_matFreeSliceMoves`
+  skjærer move-sekvensen ved katalogens ruter-grenser til uavhengige matPath-objekter (én rull:
+  bit-for-bit uendret ett objekt). `_matDragging` generalisert med `_matDragKind`
+  ('mat'|'matpath') — matPath følger musa fritt under drag og validerer først ved slipp
+  (`_matPathMoveValid` = romvakt + ny `_matPathOverlapsOthers` kryss-objekt-sjekk, som ikke
+  fantes fra før). Fant og fikset en ekte pushUndo-bug underveis: `matPaths`-snapshotet klonet
+  `moves` dypt, men spredte `start` med DELT objektreferanse — angre etter en flyttet matte var
+  en stille no-op.
+- Verifisert: 55,52m-bane splittet til to uavhengige objekter (26m+28m), egen label/flytting
+  per objekt, ulovlig overlapp avvist ved slipp, angre gjenoppretter korrekt (etter
+  pushUndo-fiksen). Fullt regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte «Manuell» blir en ekte drag-inn-liste — 2026-08-21
+
+Kenneth avviste forrige økts inline «+»-knapp-løsning direkte: ville ha «Manuell» som en ekte
+draggbar liste, nøyaktig som varmefolie — ikke en bane-liste (hans ord: «forvirrende»).
+
+- **`251842a` — startMatManualPlace/renderMatManualPalette, bane-lista fjernet.** Ny
+  funksjonspar speiler varmefolies egen `startManualPlace`/`renderManualPalette`-mønster, egen
+  versjon fordi matte-feltene (`mat_width_mm`) og drop-målet (`S.mats`) er andre. Gjenbruker
+  den delte manuell-palett-widgeten og `S.ui.dragWidth` (nå `kind:'mat'`) i SAMME dragover/
+  drop-lyttere som folie — folies egen gren urørt. Slippet gjenbruker `_matPlaceCandidate`
+  (samme magnet mot vegg/nabomatte som forrige runde) med ny `drawDropPreviewMat`-ghost i
+  folies grønn/gul/rød-fargekonvensjon. Den gamle bane-liste-motoren (`_matManual*`,
+  `_matRasterCm`, `_matBaneCableM`, `_matStdSizes` m.fl.) fjernet helt — ingen gjenværende
+  kallsteder.
+- Verifisert: draggbar HTML for begge InSnow-breddene, full dragover→drop-flyt (tre matter,
+  riktig magnet-snappet), ingen gjenværende referanse til «bane-liste»-tekst eller de fjernede
+  funksjonene. Fullt regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## UPC dra inn matter og ekte Sentrer — 2026-08-21
+
+Kartla og løste tre blokkeringer i «Fyll rom automatisk»-panelet (UPC): artikkelrader tømte
+hele rommet på hvert klikk (umulig å legge flere matter manuelt), en plasseringsmodus fantes
+men var uknåelig derfra, og Sentrer slettet+kjørte auto på nytt i stedet for å flytte det som
+lå der.
+
+- **`63f4c1d` — STEG 0-rapport.** Kartla hvert inngangspunkt som legger en matte mot om det
+  tømmer rommet og nås fra UPC i dag. Bekreftet begge blokkeringer, pluss et ekstra funn
+  (utenfor scope): «Manuell (bane-liste)»-raden kalte alltid snø-varianten, aldri innendørs.
+- **`e92b528` — «+»-knapp per artikkelrad + gruppe-flytting/avstand.** Hver artikkelrad fikk en
+  egen «+»-knapp (samme to-knapps-mønster som plater) som kaller ny `_upcStartMatPlace` —
+  rører aldri rommet. Ny delt `_matPlaceCandidate(wp, productId)` (magnet mot vegg/nabomatte,
+  aldri under Regel 18) brukes av både ghost og commit. Fant og fikset i samme slag:
+  `_startMatPlacement` leste lengde fra et felt som i praksis er tomt for utendørs produkter —
+  byttet til samme kanoniske kilde `_matFreeCatalog` bruker. Sentrer/Fra vegg flytter nå
+  GRUPPEN av manuelt plasserte matter (`_matCenterGroupInRoom`) i stedet for å slette og kjøre
+  auto på nytt, gitt at minst én matte i rommet er manuelt plassert (`_manualPlace`-flagg,
+  bevisst atskilt fra den gamle bane-listas `_manualGroup`). Ny `_matSetGroupGap` for felles
+  avstand mellom manuelt plasserte matter.
+- Verifisert: fire manuelt plasserte InSnow-matter, korrekt magnet-snap, Sentrer/Fra vegg
+  flytter alle fire matematisk korrekt, gruppe-avstand klemt til Regel 18-minimum. Fullt
+  regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Frihånd matte farge, valg, verktøylinje — 2026-08-21
+
+Tre svakheter rundt en allerede verifisert-riktig frihånds-motor: flere ruller per bane
+manglet egen farge/valg, og hadde ingen flytende verktøylinje (ctx-bar).
+
+- **`1120ebf` — delt fargeindeks, segIdx-bevisst valg, ny ctxbar-gren.** Ny
+  `_matRoomPhysicalPieces(roomId)` — én ordnet liste over ALLE fysiske matter i rommet
+  (S.mats + S.matPaths, én oppføring per segment) — brukt av både `_matColor` og ny
+  `_matPathSegColor`, så fargeindeksen går på tvers av begge samlinger (samme felle som
+  «rommets produkter» tidligere). Ny `S.ui.selectedMatPathSegIdx` ved siden av
+  `selectedMatPathId` — klikk identifiserer nå riktig fysisk segment, ikke bare banen.
+  `updateCtxBar` fikk en helt ny gren for valgt matPath (produktnavn/lengde/watt,
+  avstand-chip, Sentrer, Slett) modellert på auto-mattas egen — fantes ikke fra før.
+  «Målsett»-chip bevisst utelatt (rapportert, ikke bygget — dimensjonslinjene leser kun
+  S.mats).
+- Verifisert: 55,52m tegnet gir fortsatt nøyaktig 26m+28m (uendret); to segmenter får to
+  distinkte farger, en tredje matte i rommet et tredje distinkt tall; klikk identifiserer
+  riktig segment ved skjøten. Fullt regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte sone flere matter + frihånd utenfor rom — 2026-08-20
+
+To uavhengige feilklasser, samme mønster: to allerede-låste motorer (sone-deling og
+fler-matte-søk; frihånds-klipping og polygon-vakt) hadde aldri møttes.
+
+- **`e5187e8` — DEL A: sone tar nå flere matter; DEL B: frihånd starter ikke lenger utenfor
+  rommet.** DEL A (rom 1102): `_matFillRoomSmart` kjørte fler-matte-vurdering kun for
+  rektangulære rom — sonedelte rom (Regel 20) fikk maks én matte per sone selv når sonen var
+  stor nok til flere. Ny `_matZonePlanFor` kjører samme `_matMultiSolve`-vurdering per sone.
+  Fant og fikset underveis: `_matPlaceMultiMats` returnerte `true` i stedet for de committede
+  objektene på en vellykket commit — ville trigget en falsk «ingen matter»-feil og en angre
+  som kastet vekk et vellykket utlegg. DEL B (rom 1108): `_matFreeStartFor` brukte
+  boundingboks-hjørnet som startpunkt, som for et uregelmessig rom kan ligge utenfor selve
+  polygonet — søker nå innover til en gyldig skannelinje treffes. `_matFreeClampLen` returnerte
+  urklippet lengde når startpunktet ikke fantes i noe polygon-intervall (nå: 0). En avvist
+  commit nullstilte hele frihånds-tegningen før («trykker jeg stopp, skjer det ikke stort») —
+  tegningen beholdes nå, og Backspace fjerner siste bane.
+- Verifisert: to nye regresjonstester (`_matZoneRegressionTest`, `_matFreeRegressionTest`)
+  låser rom 1102 (30,96 m² dekket, var ~15-20 m² før) og rom 1108 (alle fire feil). Fullt
+  regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Foliemotor score rangerer seg selv sist — 2026-08-20
+
+Kenneths «Rom 4»: foliemotorens egen poengscore rangerte konsekvent bak et dårligere utlegg.
+To commits — grundig reprodusert diagnose, deretter fiks.
+
+- **`a3ffaa6` — STEG 0-rapport.** Reproduserte alle fire feil mot en «Rom 4»-analog +
+  syntetisk katalog. Feil 1: et ukalibrert 3-poengsbånd i `_statsAtLeastAsGood` lot
+  dekningsprosent overstyre scoren FØR den ble konsultert — sone vant med 6 poeng bedre
+  dekning men 3× dårligere score. Feil 2: `_longStripsLayout` kunne uttrykke kun én uniform
+  bredde i hele rommet. Feil 3: sonepakkeren lar aldri en bane krysse en sonegrense. Feil 4:
+  `widthTypes` telt på produkt-id ett sted, nettobredde et annet — samme tallgrunnlag
+  divergerte tre steder.
+- **`8595889` — fjernet 3-poengsbåndet, ny adaptiv flerbredde-kandidat, watt-nyttegrense.**
+  Feil 1 fikset ved å fjerne det ukalibrerte båndet. Feil 2 (Regel 21 folie): ny kandidat
+  gjenbruker `_autoFillRoomOnce` sin allerede eksisterende adaptive flerbredde-modus, vurdert
+  med samme score. Feil 4: `widthTypes` telles nå konsekvent på nettobredde. Ny
+  `FOIL_MIN_USEFUL_WATT=15` fanger smale/korte sliver-striper. Ny `_foilRegressionTest()`
+  låser Rom 4 som fasit.
+- Verifisert: Rom 4 velger nå h-global (score 94290, høyest) i stedet for h-sone (score 40240,
+  lavest av fire). Rektangulært rom uendret. `_foilRegressionTest()` og `_matRegressionTest()`
+  begge bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte frihånd flere matter + romlista — 2026-08-19
+
+Kenneth: en 52m tegnet frihånds-bane skulle bli to matter (26+26m), ikke én 1×30m — og en
+frihånds-matte manglet helt i sidepanel/Excel.
+
+- **`976215d` — STEG 0-rapport.** Svarte fire spørsmål før koding: EcoMat-fallback-katalogen
+  har 19 lengder inkl. 26m; kaldkabel finnes ikke på matteprodukter (splitten regner uten
+  fratrekk); U-svinger er allerede del av totalCm; delepunkt kan allerede falle midt i en bane
+  (gjenbrukbart mønster).
+- **`7428c56` — DEL A: én bane kan gi flere matter; DEL B: vises overalt.** Ny
+  `_matFreeSplitPlan(totalCm, cands)` deler én tegnet lengde i færrest mulige katalogruller, så
+  like som mulig ved uavgjort (26+26 foran 24+28 foran 22+30) — verifisert mot alle Kenneths
+  egne tall. `_matFreeCatalog` returnerer nå `{segments[], coverCm, ...}` i stedet for ett
+  flatt objekt; alle sju kallesteder oppdatert (materialliste, panel, toast, tegning). DEL B:
+  sidepanelets «Varme»-seksjon manglet matPaths helt (rom med kun frihånds-matte fikk
+  `totalElements=0`, seksjonen skjult); `_exportMaterialListXLSX` hoppet over matPaths helt.
+  Ny `_assertProductSurfacesCoverAllCollections()` (kjørt automatisk i dev) fant i tillegg at
+  HTML-materiallisten manglet Aluboard — fikset i samme slag.
+- Verifisert: `_matFreeSplitPlan` gir 5200cm→[2600,2600], 3100cm→[3000+rest]. Ekte flyt: toast
+  «2 × EcoMat 0,5x26m». Rom med kun frihånds-matte viser nå «Varme (2)». Assertion fant 0
+  lekkasjer etter fiksen (7 før). `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Fyll rom automatisk bruker nå hele motoren — 2026-08-19
+
+Rom 2104 (26,3 m²) fikk kun 1×15m² med udekkede hjørner via «Fyll rom automatisk ★
+Anbefalt» — appens faktiske hovedvei.
+
+- **`c4f4429` — UPC-auto ruter nå gjennom sone-oppdeling og flermatte.** Rotårsak: UPC sin
+  'auto'-gren kalte `autoFillMatSerpentine` direkte og hoppet over BÅDE `_matPlanZones`
+  (Regel 20) og `_matMultiSolve` (Regel F/G) — begge fantes og var verifisert, men ble i
+  praksis kun nådd via et sjelden brukt eldre panel. Ny `_matFillRoomSmart(productId, opts)`
+  med `opts.skipPushUndo` — `_upcPlaceMat(...,'auto')` kaller nå denne i stedet: sone-sjekk
+  først, så flermatte, så ett-blokk som fallback. Løst med ÉN angre-ramme: tømming +
+  fyllforslag + utlegg deler ett undo-steg; «Avbryt» i forslagspanelene kaller `undo()` for å
+  gi rommet tilbake.
+- Verifisert: rom «2104»-analog (L-formet, 27,5 m²) viser nå sonepanel (2 soner, 27,5 m²
+  dekket i stedet for 15 m² i ett blokk), ett angre-steg for hele operasjonen. Stort
+  rektangulært rom viser flermatte-panel. Lite rom (plass til én matte) uendret direkte
+  utlegg. `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Rommets produkter, én kilde — 2026-08-19
+
+Kenneth: «Tøm rom» så ikke frihånds-matter. Kartleggingen fant åtte flere steder med samme
+hull.
+
+- **`05390a0` — STEG 0-rapport.** Bekreftet at `_clearRoomProducts` og seks «erstatt rommets
+  produkter»-kallsteder kun teller strips/cables/mats/plates — matPaths og aluboard mangler
+  overalt, inkl. «Slett rom». Tre ekstra hull funnet: `_listDeleteRoom` («Hurtig
+  prosjektering») kaller aldri `_cleanupRoomData` i det hele tatt; XLSX-materiallisten mangler
+  matPaths helt; `pushUndo` tar ikke snapshot av `S.matPaths` (nylig tegnet frihånds-matte kan
+  ikke angres).
+- **`d480535` — ROOM_PRODUCT_KEYS, ni kallsteder samlet.** Ny
+  `ROOM_PRODUCT_KEYS = ['strips','cables','mats','matPaths','plates','aluboard']` + to delte
+  funksjoner brukt av alle ni kallsteder. `_listDeleteRoom` bruker nå samme `_cleanupRoomData`
+  som hoved-«Slett rom» (var: egen, ufullstendig opprydding). Ved prosjektinnlasting fjernes
+  nå foreldreløse matPaths/aluboard (roomId som ikke finnes) og logges. Ny
+  `_assertRoomFullyDeleted(id)` i dev-modus fanger fremtidige lekkasjer. Bonus: `pushUndo`/
+  undo fikk `S.matPaths` (kvalitetskrav for angre-testen). Ryddet en reell TDZ-krasj underveis:
+  `ROOM_PRODUCT_KEYS` ble referert før sin egen const-linje hadde kjørt, knakk hele scriptet
+  ved første «Slett rom».
+- Verifisert: rom med kun frihånds-matte eller kun Aluboard — «Tøm rom» finner og fjerner
+  begge nå. Angre etter Tøm rom gjenoppretter matPaths. `_assertRoomFullyDeleted` fant 0
+  lekkasjer etter fiksen. `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte utendørs tak + frihånd-avslutt — 2026-08-19
+
+Et 4-matters-tak (satt for innendørs bruk) blokkerte store utendørs felt, og frihånds-tegning
+kunne ikke avsluttes med Enter.
+
+- **`58e6287` — MAX_MATS skalerer med arealet; Enter/Escape for frihånd.** «Obs Bygg» (195,3
+  m², InSnow 300T, trenger 9-10 matter) falt tilbake til én matte fordi søket ikke fant en
+  løsning innenfor det faste taket på 4. Taket er nå
+  `min(40, max(2, ceil(kapasitetsareal/største matte)))`. Fant og fikset (bekreftet med
+  Kenneth før koding — endret en tidligere låst regel): `_matMultiSolve` stoppet ved FØRSTE N
+  med noen gyldig løsning, selv om den dekket en brøkdel av arealet — søket klatrer nå N
+  oppover til target nås. Frihånd: Enter avslutter+committer, Escape avbryter uten å legge noe
+  ut (samme mønster som polygon/wbw-tegning, manglet helt for matte). Stopp-punktets treffsone
+  er nå delt kilde med ikonets tegnede radius og vokser ved utzooming.
+- Verifisert: Obs Bygg gir nå N=9, 162 m² av 174,8 m² kapasitet (var 36 m² for N=2). Regresjon
+  rom 1110/1102 uendret. Frihånd: Enter committer, Escape avbryter, begge nullstiller korrekt.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte dekning slår like bredder i variantvalget — 2026-08-19
+
+Bekreftet med Kenneth via spørsmål før koding, siden endringen svekker en låst regel
+(Regel 6).
+
+- **`f2dc648` — Regel 6 (like bredder) rykker ned til tie-break.** Rom «2102 Dusj» (12,78 m²)
+  valgte 0,5×20m (10 m², 118 W/m² BTA) fremfor 0,5×22m (11 m², ~129 W/m² BTA) selv om 22m fikk
+  plass — fordi 22m ikke gikk opp i hele 16cm-kuttenheter mens 20m gjorde, og variantvelgeren
+  prøvde nedover for å redde like bredder på bekostning av dekning. Ny prioritet: velg alltid
+  størst variant ≤ kapasitet, punktum — like bredder brukes nå kun som tie-break mellom
+  varianter med IDENTISK dekning. Går ikke valgt variant opp i like bredder, brukes
+  eksisterende fallback (N−1 like + kortere siste, forankret i skjøtenden — hele rullen legges
+  fortsatt ut eksakt).
+- Verifisert: rom 2102 velger nå 0,5×22m (5 bredder, 4×448+1×408cm, 2200cm=hele rullen).
+  Panelmelding forklarer avveiningen eksplisitt. Regresjon rom 1110/1105 (går allerede opp i
+  like bredder) uendret.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte frihånd overlapp og areal — 2026-08-19
+
+Rom «2102 Dusj» (12,70 m²) lot brukeren tegne en frihånds-matte som fysisk overstiger hele
+gulvarealet — vakten sjekket kun hver banes lengde mot rommet, aldri baner mot hverandre.
+
+- **`d1f7348` — ny areal- og overlapp-invariant, live-blokkert.** Ny delt
+  `_matUsableAreaM2(room, marginCm)` (polygonareal minus omkrets×kantmargin) og
+  `_matFreeLanesOverlap` (parvis rektangel-overlapp med 0,5cm toleranse for «inntil»-naboer).
+  Blokkerer nå LIVE (ikke bare ved commit): `_matFreeCandidate` setter `overlaps=true`+`len=0`
+  for en tentativ bane som ville overlappet, ghosten tegnes rød med forklarende etikett. Samme
+  arealsjekk lagt til i auto-veiens `_matRunsWithinRoom` — fanget en direkte konstruert
+  6-bredders matte der en tverr-posisjon havnet utenfor rommet (aldri validert av den
+  eksisterende, kun langs-akse-baserte klippingen).
+- Verifisert mot rom 2102: 5 gyldige baner ingen falsk alarm, 6. bane (side-flip på 3.)
+  korrekt avvist. Flush-naboer (0cm gap) fortsatt lovlig. Panelet viser «Brukbart areal»/
+  «Dekket areal». `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte sonedeling — Regel 20, rom 1102 — 2026-08-19
+
+Kenneths avklaring (spurt, ikke avgjort selv): et L/T-formet rom som 1102 skal deles i soner,
+med udekket felt heller mot ytterveggene enn mellom sonene — samme prinsipp folie har hatt
+siden juli, aldri løftet til matte.
+
+- **`8684bf2` — sone-oppdeling portert fra folie (`_decomposeRoomToRects`).** Rotårsak: hele
+  mattemotoren regnet på ÉN blokk med ETT ankerpunkt — i et L/T-rom bidro store deler av
+  arealet med 0 til kapasitetsestimatet (rom 1102: 32,0 m² tegnet, appen fant plass til bare
+  14 m², 66 W/m² av 150 W/m²-mål). Ny `_matPlanZones(room, prod)` gjenbruker folies
+  `_decomposeRoomToRects`; rektangulære rom (≤1 sone) beholdes uendret (hovedregresjonstest).
+  Sone-bevisst margin via `_rectEdgeIsSoneBoundary` — 0 margin på kanter mot en nabosone, full
+  margin kun på ekte vegger. Ny `_matClipSegsToZone` hindrer en bredde i å «lekke» inn i en
+  nabosone. Ny `_showMatZoneProposalPanel` viser hvilken matte i hvilken sone med ett felles
+  undo-steg.
+- Verifisert: L-formet 33,1 m²-analog gikk fra 16,16 m² dekket (73 W/m² BTA) til 21,84 m² (99
+  W/m² BTA). Rektangulære rom (1110/1105) fortsatt bit-for-bit uendret, ingen sonepanel vises.
+  `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte min_gap_mm — dobbel betydning skilt i eget felt — 2026-08-19
+
+Tredje gang samme feilklasse denne uken: ett databasefelt med to betydninger blandet sammen.
+`min_gap_mm` betyr «kabel-til-kabel-avstand» for EcoMat, men ble lest som «påkrevd mellomrom
+mellom bredder» — feilen fanget kapasitetsestimatet, ikke bare selve plasseringen.
+
+- **`6d28f31` — nytt felt `mat_required_gap_mm`, entydig betydning.** EcoMats ekte
+  Supabase-rader har `min_gap_mm=50`, men det oppfylles allerede av kant-inntrekket (2cm hver
+  kant); Regel 18 leste feilaktig dette som påkrevd bredde-mellomrom, presset maxRuns fra
+  riktig 5 til 4 på rom 1110 og gjorde gap=0 utilgjengelig for EcoMat. `_normalizeEcoMat`
+  setter nå `mat_required_gap_mm=0` for EcoMat; `_matProductMinGapCm` leser det nye feltet,
+  faller til 0 hvis usatt (aldri en gjetning fra `min_gap_mm` igjen).
+- **`290015e` — gapet kappes nå mot det som faktisk får plass.** Regel 9 håndhevet kapping kun
+  i selve plasseringssteget, ikke i kapasitetsestimatet — et ukappet gap (7cm på rom 1110) ga
+  et kunstig lavt kapasitetsestimat (1024cm mot riktige 1280cm) og fikk motoren til å velge en
+  for liten variant selv om antallet bredder var riktig. Fiks i den delte `_matAreaGeom`-
+  kjernen (gjelder enkelt- og flermatte-veien samtidig): gapCm kappes til det som faktisk går
+  opp ved maxRuns bredder FØR noe nedstrøms leser det. Ny panelvarsel «Mellomrom kappet:
+  ønsket Xcm → Ycm».
+- **`4ab4ff3` — rom 1110 og 1105 låst som regresjonstester.** Rom 1110 hadde pendlet 5→4→5→4
+  bredder over fem commits — ny `_matRegressionTest()` (kjørbar fra konsollen) låser begge rom
+  mot et syntetisk katalog bygget i samme mønster som ekte Supabase-rader.
+- Verifisert: rom 1110 med gap=7cm gir nå 5 bredder à 240cm = hele rullen (var 4 bredder / feil
+  variant). `_matRegressionTest()` bestått på begge rom.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte hindring-forhåndsbeskjæring fjernet — 2026-08-19
+
+En levning fra før per-bredde-klipping fantes: en grådig forhåndsbeskjæring krympet hele det
+brukbare rektangelet til den største hindringsfrie SIDEN — én hindring om gangen, i stedet for
+at kun den ene bredden ble kortere.
+
+- **`f28c9d9` — presis per-bredde-klipping erstatter grov forhåndsbeskjæring.** Reprodusert i
+  rom 1110 + én hindring: `alongSpan` falt fra korrekt ~262cm til 142cm. Forhåndsbeskjæringen
+  fjernet — det brukbare rektangelet er nå kun romboksen minus veggmargin; sikkerhetsnettet
+  (`_matRunsWithinRoom` + per-bredde `_matClippedSegments`) står urørt. Fant og fikset et
+  sekundært, tidligere usynlig problem i Regel H sin nedgraderingsløkke: en hindring midt i én
+  bredde skapte et shortfall løkka aldri klarte å fjerne (samme lokale klipping uansett
+  rullengde), så løkka krympet i verste fall ALLE fem breddene til 0. Løkka sporer nå det BESTE
+  forsøket (minst bortkastet materiale) i stedet for blindt det siste.
+- Verifisert: rom 1110 uten hindring uendret (Kenneths fasit). Med hindring midt i én bredde:
+  fire bredder holder full lengde, kun den rammede bredden blir kortere (ikke null, ikke hele
+  rommet). Snø-veien (samme delte kjerne) fikk samme forbedring gratis.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Én mattemotor for alle — 2026-08-19
+
+Tre parallelle mattemotorer fantes (auto innendørs, snø-auto, frihånd) — kun én fulgte det
+låste regelsettet (Regel A-J, 1, 8, 9, 13, D, E, F/G). Fjerde motor (Manuell bane-liste)
+flagget, ikke rørt.
+
+- **`9ffbdd0` — STEG 0-rapport.** Bekreftet tabellen: `_packSnowMats` (snø) og
+  `S.matPaths`/frihånd er separate motorer uten det låste regelsettet. Snø sin N-formel er en
+  LEVENDE REGRESJON — bruker nøyaktig det gap-i-formelen-mønsteret Regel 8 nettopp fjernet
+  innendørs. Kenneths svar på tre åpne spørsmål: InSnow skal legges som EcoMat (bredde-modell
+  erstatter kolonne-modell, ikke lappes), ny Regel 19 (InSnow i forbandt, EcoMat i flukt).
+- **`49d469d` — STEG 1: én delt geometri-kjerne.** Ny `_matAreaGeom(room, ctx)` erstatter to
+  nesten identiske kopier (enkelt-matte og fler-matte). Margin/gap er nå PARAMETERE, ikke lest
+  fra produktet inni kjernen — det er det som lar snø (marginCm=0) bruke samme funksjon uten
+  en if(snø)-gren.
+- **`cc97abd` — STEG 2: snø delegerer til `autoFillMatSerpentine`.** InSnow legges nå som
+  EcoMat — ett mat-objekt, klippet mot områdets ekte polygon (ikke en boundingboks) — og får
+  Regel 1/A/D/E/13 og vakten `_matRunsWithinRoom` gratis. Ny Regel 8+18: produktets PÅKREVDE
+  minsteavstand (InSnow min_gap_mm→5cm) kan aldri senkes av brukeren, ulikt Regel 9 sitt
+  ønskede gap. Ny Regel 19 (forbandt): annenhver InSnow-bredde forskyves en halv CC.
+- **`63c1e39` — STEG 3: frihåndsvakt mot regelbrudd ved commit.** Ny
+  `_matFreeRunsWithinRoom(mp)` sammenligner faktisk tegnet lengde mot samme klippefunksjon
+  tegningen selv brukte, avbryter commit ved avvik.
+- Verifisert: InSnow-felt med hindring gir samme forbedring som EcoMat (full lengde på
+  upåvirkede bredder). Rom 1110 (EcoMat) uendret. `_matRegressionTest()` bestått gjennom alle
+  fire steg.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte gap-fordeling — Regel 8+9 — 2026-08-19
+
+Kenneths rom «1110 Lærergarderobe HC» (279×272cm): ett cm mellomrom i innstillingene kostet
+en hel bredde, og dermed en hel mattestørrelse.
+
+- **`11c9a0e` — Regel 8: mellomrommet skal aldri koste en bredde.** Rotårsak: `maxRuns` ble
+  regnet som `floor((acrossSpan+gapCm)/(matWidthCm+gapCm))` — brukerens mellomrom spiste plass
+  FØR antall bredder ble bestemt. Fiks: antallet regnes nå kant-i-kant,
+  `floor(acrossSpan/matWidthCm)` — ingen gap-ledd. Rettet i tre identiske forekomster
+  (enkelt- og flermatte-veien regnet ellers ulikt antall).
+- **`936452b` — Regel 9: mellomrommet er en fordeling av slakk, ikke en reservasjon.** Ny
+  `S.varmematte.gapCm=null`-tilstand + `_matResolveGapCm`/`_matDefaultGapCm`: standardverdi =
+  CC − 2×kant-inntrekk (fysisk begrunnet, verifisert mot TPL-ECOMT-CA-2183). Gapclamp utvidet
+  0-5cm → 0-10cm (5cm rakk ikke for 60T/100T sitt 7cm-standardgap). Fant og rettet i samme
+  slag: `S.varmematte` ble lagret men ALDRI lest tilbake ved prosjektåpning (rapportert i
+  786d95a, fikset her) — gap-innstillingen nullstilte seg stille ved hver reåpning.
+- Verifisert: rom 1110 med `gapCm=null` gir standardgap 4cm, 5 bredder à 240cm = hele rullen —
+  eksakt Kenneths fasit. gap 0/2/5/null gir alltid 5 bredder. Lagre→gjenåpne overlever nå
+  (feilet før). `_matRegressionTest()` bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte-kabel i eget nett — Regel I+J — 2026-08-19
+
+Kritisk regresjon Kenneth bekreftet på nytt etter tre tidligere fikser samme uke: den røde
+kabelen tegnet fra blokkens nominelle posisjon, ikke fra samme kilde som det blå nettet.
+
+- **`5bdc0c0` — `_matCablePlan`, delt kilde for nett og kabel.** På rom «1105 Dusj» stakk
+  kabelen for én klippet bredde 35cm forbi nettets egen ende — alle 11 bredders kabel lå på en
+  fast, blokk-relativ posisjon uavhengig av nettets faktiske plassering. Vakten validerte kun
+  nettet, ikke kabelen, og besto derfor mens tegningen var feil. Låst Regel J (Kenneths egen
+  forenkling): hver bredde er uavhengig — ingen bredde er bundet til naboens ende, den fysiske
+  ~1m forbindelseskabelen som rives fri i praksis telles/tegnes ikke. Ny delt `_matCablePlan(mat,
+  prod)` brukt av BÅDE `drawMats` og en utvidet `_matRunsWithinRoom`, med ett FAST
+  verdensbasert rutenett i stedet for en «vandrende indeks» — to nabobredder flukter
+  automatisk uten sentral tilstand.
+- Verifisert: bredde 10 sin kabel nå [48,200], innenfor nettets [45,205] (var [88,240], 35cm
+  utenfor). 0 kabelpunkt utenfor rommets polygon på full end-to-end via `autoFillMatSerpentine`.
+  Regresjon (uklippet rektangel): k-sekvens bit-for-bit identisk med den gamle algoritmen.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Etasjen er vanntett — 2026-08-19
+
+Bakgrunnstegninger og målelinjer kunne lekke mellom etasjer. Kartlagt full bredde (ikke bare
+det Kenneth selv fant) før noe ble fikset.
+
+- **`786d95a` — STEG 0-rapport.** Bekreftet: `S.floatingDims` har ingen `floorId` og filtreres
+  ikke — to EKSTRA steder (klikk-hittest, `_hitDimLine`) har samme hull, ikke bare tegningen.
+  To flere hull, ikke etasje-relatert: `S.groups` mangler i lagring/gjenoppretting;
+  `S.varmematte` lagres men leses aldri tilbake.
+- **`a2365c4` — STEG 1-4: én plantegning per etasje.** Ny delt `_onActiveFloor(obj)` —
+  roomId-objekter delegerer til eksisterende logikk, floorId-objekter (floatingDims)
+  sammenlignes mot `_effectiveActiveFloorId()`; mangler objektet begge, er svaret alltid
+  «nei», aldri «vis for sikkerhets skyld» (samme antakelse som ga bb627f6 sin bug).
+  `S.bgLayers` (flere lag på samme etasje) fjernet helt — `_addBgToFloor` oppretter nå en NY
+  etasje når etasjen allerede har en bakgrunn. Flerside-PDF-import fikk «+ Ny etasje»-
+  standardvalg (tre sider gir tre etasjer). Fant og rettet i samme slag: `_activeBgLayer()`
+  (ctxbar) hadde samme «vis for sikkerhets skyld»-fallback-mønster som bb627f6, bare i en
+  kontroll i stedet for tegningen; `_resetProjectState` nullstilte ikke floatingDims/groups
+  (et nytt prosjekt kunne arve forrige prosjekts målelinjer).
+- Verifisert: floatingDims synlig og klikkbar KUN på riktig etasje. Lagre/åpne: floatingDims
+  og groups overlever nå (var 0/0 før). Flerside-import ga tre distinkte nye etasjer for tre
+  sider.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Gulvføler per oppvarmet rom + MAT_ACCESSORIES — 2026-08-19
+
+Matte fikk ingen tilbehørsliste i det hele tatt, og følerrør-tellingen for kabel dekket ikke
+matte-rom.
+
+- **`6087789` — delt `_heatedRoomIds()`, ny MAT_ACCESSORIES.** STEG 0-funn: varmefolie har
+  heller ingen følerrør-oppføring — samme forhåndseksisterende hull som matte, delvis dekket
+  (ikke løst helt) av denne fiksen. Følerrøret (CVA10526) er det eneste artikkelnummeret
+  funnet — selve følingsutstyret følger med termostatvalget, et installasjonsvalg. Ny delt
+  `_heatedRoomIds()` (union av kabel+matte+folie-rom, kun innendørs) løser dobbelttelling uten
+  spesial-logikk i render/lese-koden: strømmer gjennom den eksisterende generiske
+  qty-mekanismen. `kabel_folerror` byttet fra kun-kabel-rom til hele den delte totalen; ny
+  `mat_folerror` fyller resten når kabel-seksjonen ikke allerede dekker den.
+- Verifisert: rom med kabel+matte i samme rom telles kun én gang (sum=3 for tre distinkte
+  oppvarmede rom, ikke 6). Begge følerrør-avkrysningsbokser huket manuelt av → likevel kun ett
+  følerrør-element (matte bidrar 0). Rent matte-prosjekt: dialogen åpnes nå (var hoppet over).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## To visningsfeil: bakgrunn og matte-dimming — 2026-08-19
+
+To uavhengige, men beslektede visningsfeil: alle etasjers bakgrunn tegnet oppå hverandre ved
+åpning, og en matte i et ikke-valgt rom mistet både serpentin og label.
+
+- **`bb627f6` — FEIL 1: aktiv etasje settes ved åpning.** `activeFloorId` ble aldri satt i
+  `_restoreProject` — filteret i `drawBgImage` er kun sant når en etasje faktisk er valgt, så
+  rett etter åpning tegnet ALT uansett etasje, helt til brukeren klikket et rom. Fiks:
+  `_restoreProject` setter nå aktiv etasje til lagret verdi (ny `ui.activeFloorId` i lagringen)
+  eller delens første etasje. Samlet den driftende doble betingelsen til én delt
+  `_bgKeyOnActiveFloor` — null betyr nå «vis kun global», aldri «vis alle».
+- **`f249db7` — FEIL 2: matte og label vises nå uansett valgt rom.** `dimOther` skjulte
+  serpentin og label for enhver matte utenfor det valgte rommet og tvang fargen til default
+  blå — matte var unntaket blant varmekildetypene (drawCables/drawStrips har aldri hatt dette).
+  `isOtherRoom`/`dimOther` fjernet fullstendig fra `drawMats`; seleksjon er fortsatt synlig
+  som sterkere strek, den fjerner bare ikke lenger innhold for naboene.
+- Verifisert: to etasjer med bakgrunn — `activeFloorId` settes umiddelbart ved åpning, kun
+  riktig etasjes bakgrunn vises. To rom med matte, rom 1 valgt: label tegnes for BEGGE roomId
+  nå (var kun det valgte).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte Regel H — aldri overskudd — 2026-08-18
+
+Rom «1105 Dusj»: en bredde forankret i sømenden kunne havne utenfor romformens faktiske frie
+segment, selv når et stort fritt segment fantes et annet sted i samme rad — bredden ble da
+ikke tegnet i det hele tatt.
+
+- **`b85c30a` — fallback-forankring + nedgraderingsløkke.** STEG 1: når intet segment
+  inneholder det opprinnelige ankeret, velges nå det LENGSTE segmentet som faktisk finnes på
+  breddeposisjonen, forankret fra samme side. STEG 2: kapasitetsanslaget er et gjett mot
+  boundingboksen, ikke den innhukk-klippede formen — ny løkke (maks 5 forsøk) i
+  `autoFillMatSerpentine`: legg ut, MÅL faktisk klippet lengde, går ikke valgt rull opp (>1
+  kuttintervall til overs) → gå ned til neste mindre katalogvariant og legg om helt fra
+  begynnelsen. STEG 3: fjernet «⚠ Overskudd — kan legges løst»-toasten helt for automatisk
+  utlegg (kun manuelt utlegg beholder den).
+- Verifisert: rom 1105-analog — alle 11 bredder tegnes nå, laidCm=2400=totalLengthCm eksakt,
+  ingen overskudd. Nedgraderingstest konvergerte 24m→20m→16m→12m eksakt. Rent rektangulært rom:
+  bit-for-bit uendret.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Motor-tilkobling: robust adresseoppløsning og kaldstart-toleranse — 2026-08-18
+
+Lumelo-motorens (auto-import) tilkobling var skjør — en død lagret adresse blokkerte hele
+import-flyten, og kaldstart på Fly ga en generisk feilmelding.
+
+- **`e4df303` — 4-stegs adresserekkefølge + automatisk omprøving.** `_resolveEngineUrl`:
+  window-override → lagret adresse (kun hvis helsesjekket OK) → localhost:8000 (kun lokalt) →
+  Fly-motoren som standard overalt. `/health` pinges så tidlig som mulig ved alle
+  import-triggere, cachet 15s. Ny `_engineFetchWithRetry`: feiler import-fetchen, pinges
+  `/health` til den svarer (tak 20s), så prøves samme forespørsel på nytt ÉN gang, med
+  «Starter motoren …»-toast. Ny statuslinje + nullstillingslenke i begge import-modalene, og
+  en samlet `_engineErrorDialog` (viser prøvd adresse, feiltype, Fly/Nullstill/egen-adresse-
+  knapper) erstatter de gamle `prompt()`-dialogene.
+- Verifisert LIVE mot ekte Fly-motoren: et ekte kaldstart-oppvåkningsforsøk tok 21,7s
+  (bekrefter 20s-taket er realistisk). Fant (ikke rørt, egen repo) en feilklasse i
+  lumelo-backend: en nesten-gyldig PDF gir «Failed to fetch» uten CORS-headere ved dypere
+  parse-feil — omprøvingen håndterer den trygt, men rotårsaken ligger i backend.
+
+**Fil:** romtegner.html.
+
+---
+
+## PDF-bakgrunn: sidevalg og fordeling på etasjer i én operasjon — 2026-08-18
+
+Flerside-PDF-import manglet en sidevelger og kunne kun importere én side om gangen — Kenneths
+eget scenario («Sten Tærud Skole», flere etasjer i én PDF) krevde re-import per side.
+
+- **`9227e37` — sidevelger-modal + batch-import.** STEG 0 (fallgruve, rettet først): «samme
+  fil» ble avgjort på filnavn alene — to sider av samme PDF kunne arve hverandres kalibrering.
+  Identitet er nå fil + sidenummer. STEG 1: ny modal med én rad per side (miniatyrbilde,
+  papirformat, bokmerke-tittel når den finnes). STEG 2: én «Importer»-knapp legger ut alt
+  tildelt i ett steg, hver side kalibreres separat (ingen kjede av popup-er). STEG 3:
+  papirstørrelse regnes nå PER SIDE, ikke én gang for hele dokumentet. STEG 5: `bg.pageNumber`
+  og papirmål lagres nå i prosjekt-JSON-en (manglet helt før, også for enkeltside-import —
+  «Fast målestokk» mistet presisjon etter hver lagre/åpne-runde).
+- Verifisert (mock pdf.js-dokument): 3-siders scenario — side 2→1. etasje, side 3→2. etasje i
+  én operasjon, begge riktig papirstørrelse. Fallgruve-testen bekreftet feilet før fiksen,
+  passerer etter. Enkeltside-PDF uendret (ingen modal).
+
+**Fil:** romtegner.html.
+
+---
+
+## Matte: flere matter i samme rom — Regel F+G — 2026-08-18
+
+Store rom (som 1102, 32,0 m²) kunne kun få én matte, selv når flere ga bedre dekning.
+
+- **`72f9267` — STEG 1-4: `_matMultiSolve`-søk + geometri + panel.** STEG 0 avklart med
+  Kenneth: bruk det ekte 16cm-kuttintervallet strengt, aksepter at 15m²-matter sjelden går opp
+  eksakt (avviker bevisst fra Kenneths egne illustrasjonstall). STEG 1: uttømmende søk over
+  gyldige lengder × mattesammensetninger (like/ulike, N=2-4) — Regel F pkt. 1 («færrest mulig
+  matter») er en STRENG prioritet, søket stopper ved første N med gyldig løsning uansett hvor
+  mye bedre en høyere N ville dekket. STEG 2: `_matPlaceMultiMats` plasserer mattene i
+  sammenhengende blokker, hver klippet og vaktsjekket uavhengig — INGENTING committes før ALLE
+  validerer. Geometri-oppsettet bevisst DUPLISERT fra enkelt-matte-funksjonen (ikke delt) —
+  kompleksiteten der er allerede høy nok. STEG 3: nytt forslagspanel med like/ulike-alternativ,
+  huskes for økta. STEG 4: materialliste og labels verifisert allerede riktige for flere
+  objekter (ingen kodeendring trengtes).
+- Verifisert: rom «1102»-analog (640×500cm) — «2 like matter, 24,0 av 29,8 m²» plassert
+  kontiguøst, begge validert. Lite rom under terskelen: uendret enkelt-matte-vei.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte jevne bredder — Regel E — 2026-08-18
+
+Ved automatisk utlegg skal alle bredder på en EcoMat-type matte ha SAMME lengde, ingen kort
+siste bredde — marginen mot langveggene er justeringsvariabelen (samme prinsipp som
+trappekabelens Regel 12).
+
+- **`dc203fd` — ny `_matEqualWidthNL`, bekreftet Regel A/B allerede fikset.** Verifiserte
+  først at Regel A (posisjon fra samme klip-kilde som lengde) og Regel B (kapasitetstak)
+  allerede virket riktig fra en tidligere commit (deae659) — ingen kodeendring nødvendig der.
+  Ny `_matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm)`: finner
+  (N,L)-paret som forbruker hele rullen eksakt. Variantvelgeren prøver opp til 3 nabovarianter
+  for en gyldig (N,L); går ingen opp, faller tilbake til den gamle «N-1 like + kortere siste»-
+  modellen. Ny vakt `_matRunsMatchRule` (Regel D/E) kjøres rett før commit, hopper over sjekken
+  når romformen faktisk har klippet en bredde (et innhukk kan legitimt gjøre at summen ikke
+  matcher uniform lengde uten at noe ligger utenfor rommet).
+- Verifisert: Kenneths eget regnestykke (24m/16cm=150 enheter, N=10→L=240cm) traff eksakt. 1cm
+  knappere langspenn: riktig fallback til gammel modell, ikke et sprang til en mye mindre
+  variant.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trapp-utskrift per-sone og oppløsning — 2026-08-18
+
+Seks steg som gjør trappe-PDF-en (Regel 16-18) ryddig og lesbar: fjerner støy, viser tall per
+sone i stedet for én misvisende sammendragsrad, retter flateeffekt-formelen overalt, legger
+målsetting på selve utskriften, gir valg for antall like kabler, og løser en alvorlig
+oppløsningsbug på lange trapper.
+
+- **`6fa167a` — STEG 1: fjern støy, fiks dobbel bunntekst.** Fjernet redundant måltekst-
+  stempel og en sammendragslinje som kun talte FØRSTE trinn-serie (direkte feil for trapper med
+  blandet trinn/repos). Fjernet «Oppvarmet areal» (uinteressant for en trapp som stråler ut i
+  luft på tre kanter). Fikset dobbel bunntekst — bunnteksten ble stemplet to ganger per side,
+  viskerektangelet dekket ikke toppen av teksten.
+- **`0605f58` — STEG 2: per-sone-blokker.** Ny `_stairSoneGeometryBlocks` grupperer berørte
+  trinn i sammenhengende «trinn-serier» (ny gruppe ved endring i bredde/N/CC, eller hull i
+  rekkefølgen) — leser strengetall/CC direkte fra rutingen, regner aldri på nytt.
+- **`a1774a6` — STEG 3: flateeffekt fra CC overalt.** Fem andre steder viste fortsatt et
+  arealbasert tall (feil av samme grunn som PDF-en) — `_stairPerStepWm2` er nå eneste kilde,
+  brukt av ctx-bar, innstillingspanel og forslagsmotoren. Fant og fikset en reell krasj
+  underveis («areaM2 is not defined»).
+- **`899206e` — STEG 4: målsetting fra appen på utskriften.** Samme flate-utvalg og linje-/
+  pil-mønster som skjermens dimensjonering, med kollisjon-avverging på lange trapper (dropper
+  CC-tallet, beholder tikk-streken, når avstanden er for smal).
+- **`a87f2cf` — STEG 5: valg for antall like kabler (Regel 18).** Nytt felt «Antall kabler» +
+  «Like lengder»-avhuking. Går det ikke opp: spesifikk feilmelding i stedet for den generiske
+  «matcher ikke dimensjonene».
+- **`f13a5a1` — STEG 6: oppløsning på lange trapper.** Rotårsak: et fast 800×500-lerret ga kun
+  0,458 px/cm på en 150×1468cm-trapp — skalaen ble låst av lerretets korte side. Løsning: PNG
+  i stedet for JPEG, lerret dimensjonert mot en ønsket trykt oppløsning (150 dpi), rotasjon til
+  liggende, og deling i bånd for ekstreme forhold.
+- Verifisert: Kenneths trappe-mål (150×1468cm) gikk fra 0,458 til 2,21-2,35 px/cm per bånd
+  (~5×), tydelig lesbare trinnummer og kabel-serpentin. `node --check` bestått gjennom alle
+  seks steg.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trapp: kabelstart på nesen + valgfri snuing + mm-avrunding — 2026-08-18
+
+Regel 14-15 i spec-trapp-kabelutlegg.md: kabelen la ut fra riser-siden av trinnet i stedet for
+nesen (fremkanten), sidevisningen var speilvendt om høydeaksen, og rå flyttall lekket ut på
+tegningen.
+
+- **`e58f467` — Regel 14: kabelen starter på nesen + sidevisning speilt riktig vei.** Rotårsak
+  (bekreftet empirisk med pikselsøk i ekte rendering, ikke bare geometri-utledning):
+  `depthStart` brukte nese-margin der den skulle brukt riser-margin — run-indeksen for trinn
+  telles nå NEDOVER fra nesen mot riser-siden. Samme relabeling i sidevisningens `cumulH`-akse
+  (trinn 1 havnet øverst på skjermen i stedet for nederst — canvas har y voksende nedover).
+- **`aa20a3c` — STEG 2-4: valgfri snuing, skjøt-fargebug, byggbare mm-mål.** Ny
+  `stair.cableStartFromTop`-innstilling reverserer hele overflate-rekkefølgen. Fikset en
+  fargebug i U-svingene: strokeStyle ble satt fra sist tegnede segment (høyest x) i stedet for
+  utgangssegmentet ved høyre-til-venstre-reise. Regel 15: auto-justert sidemargin snappes nå
+  til nærmeste mm FØR den brukes i geometrien (ikke bare i visningen) — restavviket vises
+  ærlig i stedet for å late som det er borte.
+- Verifisert: K1 sin faktiske posisjon (pikselmetode) traff forventet verdi eksakt. 10-trinns
+  testtrapp (spec-ens eget eksempel) fortsatt eksakt 4553cm, 4 løp per trinn, CC 9cm — uendret
+  av speilingen. `fillText`-interception viser maks én desimal på alle 17 draw-kall.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte: klippet bredde posisjoneres riktig, rullen overskrider aldri kapasiteten — 2026-08-18
+
+Oppfølging av 1cb674e på rom «1105 Dusj»: en klippet breddes LENGDE var riktig, men den kunne
+tegnes fra feil ende, og variantvelgeren kunne velge en rull lengre enn rommet faktisk hadde
+plass til.
+
+- **`deae659` — Regel A (samme anker for lengde og posisjon) + Regel B (kapasitetstak).**
+  Regel A: hver bredde måltes fra blokkens uniforme startpunkt, mens tegningen forankret en
+  kortere bredde i sømenden — når disse to ankrene var ulike, fikk bredden riktig lengde men
+  feil posisjon. Ny `mat.runStarts[]` (parallell med `runLengths[]`) og `_matRunStartCm`, delt
+  kilde for tegning OG vakt. Regel B: variantvelgeren sjekket kapasitet mot uniformt langspenn
+  i stedet for den faktiske klippede kapasiteten (samme følgefeil 1cb674e allerede rettet i
+  utlegget selv, glemt i variantvalget) — kapasitetstaket fjernet, begge grener velger nå
+  STØRSTE variant ≤ sann kapasitet.
+- Verifisert: bredde 10 tegnet med korrekt worldY [13,181] (var [61,229], stakk inn i
+  innhukket). Kapasitet 23,3m (ukappet, klippet) → velger 24m i stedet for 26m, 0 kabelpiksler
+  utenfor noen vegg. Vakten skiller nå korrekt «riktig lengde, feil posisjon».
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trapp-kabelskjøt — kabler deles på meter, ikke flateantall — 2026-08-18
+
+Låst Regel 11 (Kenneth 18.08.2026): en kabel har fast fabrikklengde og kan verken kortes eller
+forlenges — et utlegg der én kabel har meter til overs mens en annen er for kort er ugyldig.
+Kenneths eget symptom (K1 13,8m til overs, K2 18,1m for kort) kom av at kablene ble delt etter
+ANTALL FLATER, ikke meter.
+
+- **`f54dcdb` — STEG 1+2: meter-basert fordeling + skjøt midt i et trinn.** Ny
+  `_stairAllocateCables` forbruker kabel 0 i full lengde før kabel 1 starter, osv. Fant og
+  fikset en beslektet, verre bug i samme runde: «Maks CC trinn» ble skrevet over med OPPNÅDD
+  CC hver gang et forslag ble valgt — feltet er samtidig brukerens tak for neste forslagsrunde,
+  og ble dermed low-jacket etter én anvendelse. `cableIdx` flyttet fra run-nivå til
+  segment-nivå, så et skjøt kan ligge midt i en streng/opptrinn, med tydelig sort/hvit markør.
+- **`e367c3e` — STEG 3-6: kabelsett + sidemargin løses eksakt sammen.** Kenneth korrigerte: CC
+  skal ALDRI tettes for å forbruke overskudd (strengantallet er et heltall låst av
+  ceil-formelen); sidemarginen er den kontinuerlige, presise justeringsvariabelen. Siden
+  strengantallet er uavhengig av sidemarginen, er totalbehovet en LINEÆR funksjon av den —
+  treffe en gitt kabellengde er derfor ren algebra, ikke søk. Ny `_stairSolveExactCableSet`
+  søker over multisett av 1-3 katalogkabler, velger settet med MINST mulig marginøkning.
+- **`7ecb1a0` — STEG 7: brukerstyrte soner.** Gjenbruker den eksisterende segment-listen i
+  trapp-byggeren (Kenneths eksplisitte instruks) — `stair.segments[i].zone`. Hver sone løses
+  uavhengig med samme Regel 11-13-mekanikk. Ny `showStairEditModal` gjenåpner byggeren for en
+  allerede plassert trapp (fantes ikke fra før).
+- Verifisert: 31-trinns testtrapp løste automatisk 60m+80m med kun 0,6cm marginøkning, 0cm
+  avvik mot rutingens lengde. 3-sone-testtrapp: alle tre soner løst eksakt, ingen streng
+  splittet på tvers av en sonegrense.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte-auto: kabel skal ALDRI legges utenfor rommet — 2026-08-18
+
+Låst regel (Kenneth 14.08.2026): `autoFillMatSerpentine` jobbet kun på rommets omsluttende
+rektangel, så bredder som traff et innhukk stakk forbi ytterveggen.
+
+- **`1cb674e` — STEG 0-4: per-bredde-klipping mot rommets polygon.** STEG 0 (avklart med
+  Kenneth): valgte per-bredde-lengder i nytt `mat.runLengths[]` fremfor å dele opp i flere
+  matte-objekter (materiallisten teller allerede per S.mats-objekt — flere objekter ville
+  risikert overbestilling). STEG 1: ny `_matClippedSegments` gjenbruker de samme delte
+  primitivene folie bruker (`clipStripToRoom` m.fl.) til å klippe hver bredde mot rommets EKTE
+  polygon. STEG 4: ny vakt `_matRunsWithinRoom` verifiserer hver streng mot polygonet FØR
+  utlegget committes. Fant og rettet en reell rendering-bug underveis: skjøten mellom to baner
+  («flukt») antok en fast start-/sluttindeks — med romform-klipping kan enhver bredde nå være
+  kortere, og skjøten hoppet til en fast ende og tegnet en lang, feilaktig strek forbi
+  ytterveggen.
+- Verifisert (pikselinspeksjon mot ekte w2s): repro-rommet (567×242, innhukk 60×46) — 0
+  kabelpiksler i innhukket, riktig kuttraster-snappet lengde. L-form-stress-case: 0 piksler i
+  det utsparte området. Rent rektangel: `runLengths` forblir null, bit-for-bit uendret.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Matte-label som kabel — 2026-08-18
+
+Fire steg som gir matte samme label-kvalitet og interaksjon som folie/kabel allerede har:
+verdensbasert rendering, kabel-lik linje 2, og full v2-gizmo (flytt/skaler/roter).
+
+- **`978bc8a` — STEG 1: generaliser `_drawStripLabel`.** Rektangulær matte-label hadde
+  hardkodet 13px skjermpiksel-font (skalerte ikke med zoom, feil i PDF) og skjultes helt under
+  zoom>0,38. `_drawStripLabel` (folies renderer, den eneste med riktig klamping/callout-
+  fallback) generalisert minimalt for trygt gjenbruk. Egne lagre (`_matRectLabelBounds`/
+  `Geom`) løser id-kollisjonen mellom S.mats og S.matPaths sine separate id-tellere.
+- **`1ebd6c2` — STEG 2: linje 2 = W/m² flate · BTA · CC.** Ny `matWm2` i `_computeRoomStats`.
+  Migrerte OGSÅ frihånds-matte til `_drawStripLabel` (STEG 1 sa «begge matte-systemene») —
+  dens gamle hånd-tegnede boks («Tegnet X m · rull Y m») manglet både rom-klamping og
+  callout-fallback.
+- **`2f94d53` — STEG 3: v2-håndtak for rektangulær matte.** Klikk låser labelen (ingen
+  lag-sykling), rundpil roterer (snapper til 0/90/180/270), X-håndtak skalerer, høyreklikk gir
+  «↩ Tilbakestill». Ny `S.ui.selectedLabelMatRectId` løser id-kollisjonen. Ny minimal
+  høyreklikk-meny (matte hadde ingen fra før).
+- **`9753e16` — STEG 4: delt linje-2-bygger.** Ny `_matLabelInfoLine(roomId, product)` —
+  fjernet ~10 dupliserte linjer hvert sted.
+- Verifisert med instrumentert canvas og ekte DOM-hendelser gjennom alle fire steg: rektangulær
+  og frihånds matte i samme rom viser bokstavelig identisk linje 2; kroppsdrag/roter/skaler
+  bekreftet med ekte mousedown/mousemove/mouseup.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trapp-kabelutlegg determinisme — 2026-08-17
+
+Fem steg som gjør trappekabel-beregningen deterministisk: riktig ceil-formel, geometri før
+katalog, tegning som leser motoren i stedet for å gjette, behov/dekket som to eksplisitte
+sannheter, og fjerning av et U-svingtillegg som viste seg å være dobbelttelling.
+
+- **`7268e1e` — STEG 1: riktig ceil-formel.** `floor()` i «gjerdestolpe»-formelen for antall
+  strenger kunne gi faktisk CC over maks uten varsel (Kenneths eksempel: 27cm brukbar dybde,
+  maks CC 10cm — floor ga CC 13,5cm, bryter maks; ceil gir riktig CC 9cm). Ny delt
+  `_stairRunCount(usableDepth, maxCC)` brukt av bygger, estimator og validator samtidig — kan
+  ikke lenger sprike.
+- **`8d69bb2` — STEG 2: geometri bestemmer, katalog følger etterpå.** Forslagsmotoren lot
+  POENGSUMMEN (dominert av valgt katalogkabels effekt) avgjøre strengantallet — en kosmetisk
+  sidemargin kunne dermed flytte en fysisk utleggsbeslutning. Regnes nå én geometrisk riktig
+  `runsPerStep` FØR kabelvalg. Ny egen `stair.landingMargin_cm` for repos (var feilaktig delt
+  med sidemarginen).
+- **`1c9d42a` — STEG 3: tegning viser rutingen fra motoren.** Tre tegnere (sidevisning, plan,
+  PDF) regnet posisjon og inn-/utgangsside PÅ NYTT i stedet for å lese det motoren allerede
+  hadde beregnet — 2 og 4 strenger så identiske ut i sidevisningen.
+- **`e04b324` — STEG 4: behov og dekket lengde som to sannheter.** Ny
+  `stair.coveredCableLength_cm` skilt fra `totalCableLength_cm` — panelet kunne før vise to
+  selvmotsigende tall når kabelen var for kort.
+- **`7840bce` — STEG 5: fjern U-svingtillegget.** Regel 10 (avklart av Kenneth): kabel mellom
+  strengene skal ikke telles i lengdebehovet — svingen spiser omtrent like mye av den rette
+  lengden som den legger til. Fjernet π×CC/2-tillegget i alle sju lengdeberegninger. Kenneths
+  eksempel ga nå eksakt spec-fasiten: 4553cm (var 4977,1cm med tillegget).
+- Verifisert gjennom alle fem steg mot Kenneths eget eksempel (10 trinn 120×33cm) og en sweep
+  av 231 dybde/CC-kombinasjoner — 0 brudd på maks CC.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trappebygger: ingen tapte tastetrykk, standard 1 trinn, arv fra forrige segment — 2026-08-17
+
+- **`3e6349d` — oninput i stedet for onchange, standard 1 trinn, arv til nytt segment.** Kunne
+  ikke reprodusere den beskrevne onchange/blur-racen via automatiserte museklikk, men byttet
+  likevel til `oninput` for alle 6 skjemafelt — fjerner hele klassen av «tastet verdi tapt
+  fordi du klikket videre uten å forlate feltet», uansett eksakt utløsermekanisme. Standard
+  antall trinn er nå 1 (ny konstant), for både første og nye segmenter. Et nytt trinn-segment
+  arver bredde/antall/dybde/høyde fra siste TRINN-segment i lista (et repos innimellom hoppes
+  korrekt over); nytt repos arver dybde fra forrige repos. Det nylig tilføyde segmentet får
+  aksentkant + «· nytt»-merke, scrolles inn, og Antall-feltet får fokus (ett-gangs).
+- Verifisert med direkte funksjonskall + ekte museklikk: `oninput` committer på hver
+  tastetrykk uten blur; ny trapp viser Antall 1; nytt trinn-segment arver riktig fra forrige
+  trinn-segment (ikke fra et mellomliggende repos); omvendt byggeretning viser korrekt
+  reversert indeksrekkefølge.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Fiks manuell folieplassering: magnet-first snap — 2026-08-14
+
+Manuell folie-drag kunne forsvinne stille ved overlapp med en eksisterende folie i samme
+retning — ingen feilmelding, bare vekk.
+
+- **`46ca060` — felles ghost/commit-kandidat, magnet FØR kollisjonssjekk.** Rotårsak:
+  dragover/drop kalte kollisjonsunngåelsen med tom exclude-liste FØR magnet-snapping, så
+  ethvert delvis overlapp barberte bort hele kolonnen. Ny delt `_stripDropCandidate()`
+  beregner magnetposisjon FØRST (vegg-margin eller nabofolie), kjører kollisjonsunngåelse PÅ
+  den snappede posisjonen, og returnerer én sannhet brukt av BÅDE ghost (dragover) og commit
+  (drop) — kan ikke lenger sprike. Kollisjonsløsning er nå tobent: dødsenter-slipp på én nabo
+  prøver begge sider (korn-hjørne-tiebreak); klemt mellom flere naboer prøves kun innoverside
+  per nabo (varsler «for trangt» i stedet for å teleportere). Alt-tasten hopper over magneten.
+  Toast ved reell plasshunger i stedet for stille forsvinning.
+- Verifisert: dødsenter-slipp på eksisterende folie snapper til motsatt side med eksakt gap;
+  eksakt-passende lomme mellom to naboer (1cm begge sider); for trang lomme gir invalid+toast,
+  ikke teleport. Auto-utlegget urørt (verifisert via diff).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Veggmarkering og flyttepil — seks runder til den riktige rotårsaken — 2026-08-14
+
+Vegger lot seg ofte ikke markere, og gizmoen for å flytte dem (som fantes fullt utbygd fra
+før) var derfor uoppnåelig. Seks runder med presisjonsjakt — de fem første fjernet reelle, men
+delvise bugs; den sjette fant den faktiske rotårsaken.
+
+- **`af1366b` — klikk-terskel = faktisk veggtykkelse, ett klikk velger både rom og vegg.**
+  `hitTest()` sin klikk-terskel var fast 2 skjerm-px mot veggens senterlinje, uansett hvor
+  tykk veggen faktisk tegnes (opptil 50cm) — klikk hvor som helst i det synlige veggbåndet
+  traff verken vegg eller rom. Ny `_wallHitThr(room, wl)` (terskel = faktisk veggtykkelse, 8px
+  skjermgulv). Vegg-treff kastet tidligere bort hvis veggens rom ikke allerede var valgt
+  (krevde to klikk) — velger nå begge i ett klikk.
+- **`308a447` — nærmeste vegg, ikke første i array; bredere flyttepil-treff.** `hitTest()` sin
+  vegg-løkke returnerte FØRSTE vegg innenfor terskel, ikke den geometrisk NÆRMESTE — i et rom
+  med mange korte «jog»-vegger rammet dette systematisk. Ny `_closestWallHit`. Flyttepilens
+  treffsone økt fra 3px til 12px (var strengere enn alt annet lignende i appen).
+- **`bcbd329` — crosshair-cursor + strammere presisjon.** Reversert cursor til crosshair (fra
+  pointer), tersklene strammet noe inn.
+- **`d52b8ac` — egendefinert cursor med eksplisitt hotspot.** Kenneths foto viste cursoren
+  tydelig forskjøvet fra veggens linje — OS/nettleserens innebygde crosshair-cursor har ingen
+  hotspot nettsiden styrer. Ny `WALL_CURSOR` — egendefinert SVG-cursor med eksplisitt hotspot
+  (10,10).
+- **`fd6954d` — canvas-tegnet hover-highlight erstatter cursor som primært signal.** To runder
+  med cursor-justeringer løste ikke Kenneths gjentatte, presise rapport («markering endrer seg
+  litt under veggen»). Konklusjon: cursor-hotspot-rendering er strukturelt ikke verifiserbart
+  fra JS. Ny `drawHoveredWallHighlight()` leser SAMME koordinater som selve veggstreken og
+  hitTest — strukturelt umulig for dem å divergere.
+- **`815c7ae` — den faktiske rotårsaken: canvas backing-størrelse ute av synk med CSS.**
+  `resizeCanvas()` setter canvas' backing-størrelse fra `#canvas-wrap`, men kalles kun ved
+  window.resize. `w2s`/`s2w` regner i backing-piksler, mens klikk-håndtererne matet inn
+  CSS-piksler uskalert — enhver layout-endring (kontekst-verktøylinje, sidepanel) uten et
+  resize-event ga en RETNINGSAVHENGIG skalafeil (null ved øvre/venstre kant, voksende mot
+  nedre/høyre — nøyaktig Kenneths «perfekt vertikalt, glir horisontalt»). Ny delt
+  `_evToCanvas(e)` brukt på alle ~26 steder som leste `e.clientX - rect.left` mot hovedlerretet.
+  Ny `ResizeObserver` på `#canvas-wrap` fjerner selve rotårsaken til at backing/CSS går ute av
+  synk.
+- Verifisert (samme desync aktivt UNDER testen): alle 4 vegger i et rektangel treffer
+  symmetrisk. 10-vegg sikksakk-testrom: 9/10 korrekt klikk-velgbare i alle seks runder (den ene
+  «feilen» er korrekt hjørnepunkt-prioritet, ikke en regresjon).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Trappedel startvalg-overlay legger seg ikke lenger over ferdig trapp — 2026-08-14
+
+Startvalget («Slipp tegning her»/«Tegn opp rom»/«Romliste») dukket opp over en ferdig
+trappetegning hver gang prosjektet ble åpnet, og blokkerte klikk.
+
+- **`bc29dbd` — svarteliste snudd til hviteliste.** Rotårsak: `_editorIsEmpty()` avgjorde
+  synlighet med en SVARTELISTE — kun 'list'-modulen var unntatt. Trapper ligger i `S.stairs`
+  (via `partId`, ikke `floorId`) og oppretter aldri en aktiv etasje, så en trappedel kunne
+  aldri produsere en treffende «rom på aktiv etasje», uansett hvor mye som var tegnet. Snudd
+  til HVITELISTE — overlayet vises kun når aktiv del er 'indoor' eller 'snow'. I samme slag:
+  overlay-tekstene sa «rom» også i snø-modulen — brukte eksisterende `roomWord()`-hjelper til
+  å vise «område»/«Områdeliste» der.
+- Verifisert med direkte funksjonskall: trappedel med tegnet trapp → false (var true). Indoor
+  med rom på aktiv etasje → false; ny tom etasje i samme del → true igjen (overlay kommer
+  riktig tilbake).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Auto-folie hull-regresjon — REGEL A+B+C (T-rom sonegrense) — 2026-08-13
+
+Kenneths bugrapport: auto-utlagt folie i et rom med hindring (320×198cm, 80×90
+hjørnehindring) hadde et udekket hull midt i arealet, ikke mot vegg. Fire commits sporer
+rotårsaken gjennom sonepakkingen og retter tre relaterte regler.
+
+- **`6c584ae` — Funn 1: sone-utlegg overstyrte betingelsesløst.** `showAutoFillComparison`
+  erstattet resultatet fra global (usonet) fylling med sone-resultatet UANSETT kvalitet så
+  snart rommet dekomponerte til >1 sone — sonekanten (ikke en ekte vegg) ble behandlet som
+  veggmargin, og en strimmel i én sone kunne ikke fortsette inn i naboens allerede reserverte
+  areal. Fiks: erstatt kun når sone-resultatet faktisk er MINST like bra (delt
+  `_statsAtLeastAsGood`, samme dekning-først + score-tiebreak som H-vs-V-valget allerede
+  bruker).
+- **`0add23d` — Funn 2: rom med hindring faller nå automatisk til coverage-strategi.**
+  Default-strategien 'long' hoppet over hele hindringsapparatet — bekreftet med Kenneth: rom
+  med hindring skal falle automatisk til 'coverage'. Eksplisitt brukervalg vinner fortsatt
+  uansett romform.
+- **`3ca64a0` — REGEL A: sonegrense-anker mot ekte vegg, ikke mellom soner.** Ny repro
+  (T-/kryssformet rom uten hindring): `_packZoneFullLength` ankret alltid pakkingen ved lav
+  koordinat uansett om kanten var en ekte vegg eller en sonegrense — når sonegrensen tilfeldig
+  lå på høy koordinat, endte slakken midt i arealet. Ny `_rectEdgeIsSoneBoundary` klassifiserer
+  hver sonekant, dropper veggmargin på sonegrense-kanter og pakker utover fra dem.
+- **`295ce46` — REGEL B+C: maximin bredde-kombinasjon + smaleste bredde som nødløsning.** Regel
+  B: ved lik dekning, foretrekk kombinasjonen der SMALESTE brukte bredde er BREDEST (120+60
+  foran 140+40) — ny `_maximinWidthCombo` (DP over sonens budsjett). Regel C: familiens
+  absolutt smaleste bredde er en nødløsning, ikke et førstevalg — ekskludert fra auto sitt
+  full-lengde-søk, brukt kun når den gir vesentlig dekning.
+- Verifisert mot repro-rommet og fire tilleggsromtyper (enkelt rektangel, hindring midt i rom,
+  L-rom, U-rom, T-rom) gjennom alle fire commits — 0 regelbrudd i alle tester, ingen regresjon
+  i romtyper uten hindring/sonedeling.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## InSnow frihånd: velg mattebredde 50 cm eller 100 cm — 2026-08-12
+
+Frihånds-matteverktøyet var hardkodet til 50cm selv om katalogen alltid har hatt InSnow
+300T-SKUer i begge bredder.
+
+- **`caf5680` — breddevelger + snø-bevisst frihånd.** Ny breddevelger (chips) i UPC, kun
+  synlig når familien har mer enn én bredde (EcoMat innendørs uendret). `_matFreeCatalog`
+  skrevet om fra areal×200 (antok 0,5m bredde, tvetydig på tvers av bredder) til direkte snap
+  på total lengde, filtrert på familie+bredde+spenning. Frihånd er nå snø-bevisst: `gapCm`
+  initieres til 10cm (snø-standard) i stedet for alltid 0, langkant-margin 0 for snø (pakkes
+  til kant). Tydelig toast når valgt bredde ikke får plass, i stedet for stille no-op.
+- Verifisert i konsoll mot levende katalogdata: 10m tegnet + 1000mm/230V ⇒ riktig SKU (1×10m,
+  10m², 3000W); EcoMat-regresjon (7 lengder) ga bit-identisk SKU+rollCm mot gammel formel.
+  Ikke testet: faktisk museklikk-tegning i innlogget UI.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Fix: frihånds-matte nullstilt ved nytt/lastet prosjekt (mattelekkasje) — 2026-08-12
+
+- **`1e6939d` — nullstill `_matFree` ved prosjektbytte.** Påbegynt frihånds-mattetegning ble
+  ikke ryddet ved prosjektbytte, så en gammel matte kunne dukke opp igjen i et nytt
+  prosjekt/rom — usynlig for klikk/sletting (kun `S.matPaths` hit-testes) og aldri lagret til
+  Supabase.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## Startskjerm: context-aware import-flyt + merget dropzone + auto/manuell-steg — 2026-07-16
 
 UX-omlegging av tegneverktøyets startskjerm «Hvordan vil du begynne?». Fjerner dobbelt-spørring
