@@ -4,6 +4,43 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## InSnow og EcoMat: reglene kommer nå fra databasen — 2026-08-22
+
+Kenneth hadde allerede gjort databasesiden 22.08.2026: kategorien «Varmematte utendørs» + 33
+InSnow 300T-artikler (CVA, EL, motstand, kaldkabel 15 m, CC 100, min_gap 50, veggmargin 0,
+bøyeradius 42, inntrekk 0, forbandt), fem nye kolonner (`mat_edge_inset_mm`/
+`mat_required_gap_mm`/`mat_equal_widths`/`mat_stagger_half_cc`/`mat_length_step_mm`), og EcoMat
+60T/100T/150T (57 rader) fylt med de samme regelfeltene. Oppgaven var å fjerne kode-kopiene som
+ikke lenger hadde en jobb.
+
+- **`4406e26` — slett InSnow-injektoren og EcoMat-normaliseringen, rydd `el_number` ut.** Slettet
+  `_ensureOutdoorMatProducts` (33 hardkodede CVA106xx-artikler + alle regelfeltene) og begge
+  kallsteder, og `_normalizeEcoMat` (satte `mat_equal_widths`/`mat_required_gap_mm` på hver
+  lasting). `el_number` fjernet overalt (9 forekomster) — riktig kolonnenavn er `el_no`. Ekte
+  regresjonsrisiko fanget FØR den ble et problem: `_normalizeEcoMat` sin eneste andre bruker var
+  `_ensureEcoMatProducts` sin OFFLINE fallback-gren, som satte `mat_equal_widths` direkte men IKKE
+  `mat_required_gap_mm` — å slette funksjonen blindt ville brutt offline EcoMat-utlegg (5cm gap
+  som spiser en hel bredde, samme feilklasse som FEIL 1 fra 19.08.2026). Rettet ved å sette feltet
+  direkte i fallback-pushen, samt i `_matRegressionTest`/`_matZoneRegressionTest` sine egne
+  synthetic-kataloger. STEG 4-rapport over de gjenværende injektorene (ingen fjernet denne
+  runden): `_ensureOutdoorCableProducts` er i eksakt samme situasjon som den fjernede
+  matte-injektoren (alle InSnow-kabelartikler finnes allerede live) — kandidat for samme
+  behandling senere. `_ensureFrostProtectionProducts`/`_ensurePlateTestProducts` er derimot ikke
+  fallbacker lenger — de ER produktkilden i dag (ingen av kategoriene finnes i databasen).
+  `_ensureVarmecomfortProducts` (19 rader finnes live) — Kenneth har bekreftet ikke viktig, kun
+  nevnt. STEG 5: uten Supabase finnes InSnow (Varmematte utendørs) ikke lenger i det hele tatt —
+  verken kategori eller artikler opprettes offline; EcoMat er upåvirket (fallback selvstendig
+  rettet). En bevisst, rapportert endring, ikke en oppdaget en.
+- Verifisert LIVE mot Kenneths egen Supabase (samme anon-nøkkel klienten selv bruker, read-only
+  REST): CVA10617 (0,5×22m, 3300W, el_no 1001872) og CVA10624 (0,5×24m, 3600W 400V, el_no
+  1003535) finnes med eksakt de feltverdiene injektoren tidligere hardkodet — 33 InSnow-rader og
+  57 EcoMat-rader bekreftet totalt. `_matRegressionTest()`/`_matZoneRegressionTest()` bestått, rom
+  1110/1105/1102 bit-identiske, på fersk sideinnlasting.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## Vunnet er nå sluttstasjonen — leveranse-sporing (akse B) fjernet — 2026-08-21
 
 Kenneth: å trykke «Vunnet» skal bety ferdig — ikke starte enda et sporingsløp. Fjerner
