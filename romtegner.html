@@ -15679,6 +15679,31 @@ function _skBuildPath(model, roomCornersR, CC, margin) {
   return best;
 }
 
+// BLOKKERING 2 (Kenneth 22.08.2026, «kabelen skal følge områdets egne sider»): områdets to
+// hovedretninger, avledet fra geometrien — samme prinsipp som kandidatlisten _skEngineCore
+// bygger under (én vinkel per kant, 0-180°), men her plukker vi ut den ENE LENGSTE kanten totalt
+// og lar DEN definere langsiden («Horisontal» i UI-et), kortsiden er vinkelrett på den. For et
+// akseparallelt rektangel faller dette sammen med skjermaksene (uendret oppførsel der).
+function _skPrincipalAngles(room) {
+  let bestAngle = 0, bestLen = -1;
+  for (let i = 0; i < room.length; i++) {
+    const a = room[i], b = room[(i + 1) % room.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len <= bestLen) continue;
+    bestLen = len;
+    let deg = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+    bestAngle = ((deg % 180) + 180) % 180;
+  }
+  const longAngle = Math.round(bestAngle * 10) / 10;
+  const shortAngle = Math.round((((longAngle + 90) % 180 + 180) % 180) * 10) / 10;
+  return { longAngle, shortAngle };
+}
+// 'h' (Horisontal) = langsiden, 'v' (Vertikal) = kortsiden — Kenneths regel, ikke skjermaksene.
+function _skAngleForDir(room, dir) {
+  const { longAngle, shortAngle } = _skPrincipalAngles(room);
+  return dir === 'v' ? shortAngle : longAngle;
+}
+
 // Core engine for one fixed CC. Returns world-space ordered elements or null.
 function _skEngineCore(room, holes, CC, margin, angleDeg) {
   const cand = new Set([0, 90]);
@@ -15734,8 +15759,12 @@ function _skEngineCore(room, holes, CC, margin, angleDeg) {
  *   { _engine:'skew', pathEls, start, end, angleDeg, spacing_cm, totalLength_cm,
  *     coverage, openLen, nCells, runs:[], connections:[] }
  * or null. Holes = room hindrings + forbidden zones.
+ * BLOKKERING 2 (Kenneth 22.08.2026): ny `angleDeg` — null (uendret) lar motoren selv velge beste
+ * vinkel etter dekningsscore blant ALLE kantvinkler; en tallverdi tvinger DENNE ene vinkelen
+ * (langside/kortside fra _skAngleForDir, eller en delt vinkel tvunget likt over flere soner —
+ * se _buildNCableZones).
  */
-function generateCableSkew(roomId, productId) {
+function generateCableSkew(roomId, productId, angleDeg) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -15755,7 +15784,7 @@ function generateCableSkew(roomId, productId) {
     holes.push(z.points.map(p => ({ x: p.x, y: p.y })));
 
   const _run = (sp) => {
-    const core = _skEngineCore(roomPts, holes, sp, margin, null);
+    const core = _skEngineCore(roomPts, holes, sp, margin, angleDeg != null ? angleDeg : null);
     if (!core) return null;
     return {
       _engine: 'skew',
@@ -16707,11 +16736,23 @@ function _autoFillCableImpl(roomId, productId) {
     }
     const hasHindring = S.hindrings.some(h => h.roomId === roomId && h.points && h.points.length >= 3);
     const hasForbidden = forbiddenZones.length > 0;
-    // Multi-cable zone sub-rooms (_noSkew) prefer a clean axis-aligned serpentine that fills to the
-    // walls over skew's «rare former»; accept a little uniform uncovered edge instead (Kenneths regel).
+    // _noSkew (satt av _buildNCableZones, KUN for et akseparallelt flerkabel-område — STEG 0/
+    // BLOKKERING 1, Kenneth 22.08.2026) foretrekker en ren akse-serpentin som fyller til veggene
+    // over skew's «rare former» — gjelder fortsatt for akseparallelle rom. For et ROTERT område
+    // gjør akse-serpentinen (og v6/boustrophedon) det motsatte: trappetrinn og udekkede hjørner —
+    // se STEG 0-rapporten over _buildNCableZones. _noSkew settes derfor ikke lenger ubetinget.
     const needSkew = !room._noSkew && ((!rectilinear) || hasHindring || hasForbidden);
     if (needSkew) {
-      const res = generateCableSkew(roomId, productId);
+      // BLOKKERING 2 (Kenneth 22.08.2026): «Horisontal»/«Vertikal» skal bety områdets lang-/
+      // kortside, ikke skjermens akser. _forcedSkewAngleDeg (satt av _buildNCableZones) tvinger
+      // SAMME vinkel i alle soner av et flerkabel-område; ellers — et enkelt rom med et eksplisitt
+      // brukervalg — utledes vinkelen fra DENNE romformen. Uspesifisert (ingen sonetvang, ingen
+      // eksplisitt brukervalg) → null, uendret auto-vinkel-scoring (best dekning blant alle
+      // kantvinkler) — samme oppførsel som i dag for et rotert enkelt-kabel-rom.
+      let skewAngle = room._forcedSkewAngleDeg;
+      let skewDirLabel = room._forcedSkewDir || null;   // 'v'/'h' for dirLabel — STEG 0 sidefunn
+      if (skewAngle == null && userDir) { skewAngle = _skAngleForDir(room.points, userDir); skewDirLabel = userDir; }
+      const res = generateCableSkew(roomId, productId, skewAngle != null ? skewAngle : null);
       // Accept only if it produced a corner-to-corner path with good coverage and no open jumps.
       // NB: res.coverage is a 0–1 fraction (not a percentage).
       if (res && res.pathEls && res.pathEls.length > 0 &&
@@ -16723,6 +16764,7 @@ function _autoFillCableImpl(roomId, productId) {
           pathEls: res.pathEls,
           start: res.start, end: res.end,
           angleDeg: res.angleDeg,
+          direction: skewDirLabel,   // STEG 0 sidefunn: kun kjent når tvunget/eksplisitt valgt, ellers null (ren auto)
           spacing_cm: res.spacing_cm,
           cc_mm: res.cc_mm,
           totalLength_cm: res.totalLength_cm,
@@ -17379,6 +17421,18 @@ function _buildNCableZones(room, products, dir) {
   const axis = dir === 'v' ? 'x' : 'y';   // perpendicular axis the cuts run across
   const perpVals = room.points.map(p => axis === 'x' ? p.x : p.y);
   const perpMin = Math.min(...perpVals), perpMax = Math.max(...perpVals);
+  // BLOKKERING 1 (Kenneth 22.08.2026, «kabelen skal følge områdets egne sider»): rectilinearity
+  // og tvunget skew-vinkel avledes fra det HELE, udelte området — ALDRI fra hver enkelt sone sin
+  // egen (avkuttede) delform, som kan ha en annen tilfeldig kant-vinkel per sone på et trapes.
+  // Uten dette ville hver sone valgt sin EGEN beste vinkel og fått et rotete, usammenhengende
+  // utlegg (Kenneths eget krav: «alle sonene i samme område må få samme vinkel»).
+  const _rEPS = 0.5;
+  let _roomRectilinear = true;
+  for (let i = 0; i < room.points.length && _roomRectilinear; i++) {
+    const a = room.points[i], b = room.points[(i + 1) % room.points.length];
+    if (Math.abs(b.x - a.x) > _rEPS && Math.abs(b.y - a.y) > _rEPS) _roomRectilinear = false;
+  }
+  const _forcedAngleDeg = _roomRectilinear ? null : _skAngleForDir(room.points, dir);
   const margin = _effectiveMarginCm(productId);
   const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = (prod.max_spacing_mm || 200) / 10;
   const netM2 = roomAreas(room).net / 10000;
@@ -17430,7 +17484,14 @@ function _buildNCableZones(room, products, dir) {
         shape: room.shape, wallThicknessCm: 0, points: sub, walls: [], area: compArea(sub),
         dims: [], roomType: room.roomType, targetWm2: room.targetWm2, _cableSeam: seam,
         _forcedSpacingCm: sharedCC,      // identical CC in every zone (equal W/m²)
-        _noSkew: true };                 // prefer a clean axis-aligned serpentine over skew «rare former»
+        // BLOKKERING 1 (Kenneth 22.08.2026): _noSkew kun for et akseparallelt HELE område — der er
+        // en ren akse-serpentin fortsatt riktig (fyller til veggene, Kenneths opprinnelige regel).
+        // For et ROTERT område (_forcedAngleDeg satt over) skal skew brukes også her — samme
+        // vinkel tvunget i ALLE soner (_forcedSkewAngleDeg/_forcedSkewDir) så utlegget blir
+        // sammenhengende, ikke én tilfeldig vinkel per sone sin egen avkuttede delform.
+        _noSkew: _roomRectilinear,
+        _forcedSkewAngleDeg: _forcedAngleDeg,
+        _forcedSkewDir: _forcedAngleDeg != null ? dir : null };
       S.rooms.push(tempRoom);
       let cable = null;
       try {
@@ -17538,6 +17599,126 @@ function _autoFillMixedCables(roomId, productIds, forcedDir) {
   const fam0 = _fam(products[0]), wm0 = products[0].watt_per_m;
   if (products.some(p => _fam(p) !== fam0 || p.watt_per_m !== wm0)) return null;
   return _autoFillCableZonesCore(room, products, forcedDir);
+}
+
+// STEG 1 (Kenneth 22.08.2026, «kabelen skal følge områdets egne sider, ikke skjermens akser»):
+// syntetisk testområde, eksplisitt bedt om, ved siden av _matRegressionTest/_matZoneRegressionTest/
+// _foilRegressionTest. Låser fem fasit-tilfeller (A-E) for skew-motoren mot flerkabel-soner og
+// eksplisitt lang-/kortside-valg. Bygger sitt eget isolerte katalog/rom, gjenoppretter S/
+// HEATING_PRODUCTS fullstendig etterpå (try/finally), rører ALDRI det virkelige prosjektet.
+function _cableSkewRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedHindrings = S.hindrings, savedZones = S.zones, savedCables = S.cables,
+    savedSelectedRoomId = S.ui.selectedRoomId, savedDirection = S.varmefolie && S.varmefolie.direction,
+    savedNextCableId = S.counters.nextCableId;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const rotate = (pts, deg, cx, cy) => {
+    const r = deg * Math.PI / 180;
+    return pts.map(p => { const dx = p.x - cx, dy = p.y - cy;
+      return { x: cx + dx * Math.cos(r) - dy * Math.sin(r), y: cy + dx * Math.sin(r) + dy * Math.cos(r) }; });
+  };
+  const angleClose = (a, b, tol) => {
+    const diff = Math.abs(((a - b) % 180 + 180) % 180);
+    return Math.min(diff, 180 - diff) <= tol;
+  };
+  try {
+    HEATING_PRODUCTS.length = 0;
+    // Fast-lengde InSnow 30T-analog (samme familie/felt-form som Kenneths ekte CVA10710).
+    const mkProd = (id, lenM, wattPerM) => ({ id, category_id: 9600, active: true, product_family: 'InSnow 30T',
+      name: `InSnow 30T test ${lenM}m`, article_no: 'SKEWTEST' + id, el_no: null,
+      watt_per_m: wattPerM, cable_length_m: lenM, total_effect_w: Math.round(wattPerM * lenM), voltage: 230,
+      min_spacing_mm: 60, max_spacing_mm: 200, recommended_spacing_mm: 100,
+      min_bend_radius_mm: 36, max_length_m: lenM, min_gap_mm: 10, min_wall_margin_mm: 50 });
+    const mkRoom = (id, pts) => ({ id, name: 'SKEWTEST', floorId: null, partId: null, shape: 'polygon',
+      wallThicknessCm: 0, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) });
+
+    S.hindrings = []; S.zones = []; S.cables = [];
+    S.counters.nextCableId = 1;
+
+    // ─── A — rotert rektangel 1500×400cm, rotert 12°, auto (ingen eksplisitt v/h) ───
+    {
+      const RID = 990001;
+      const raw = [{x:0,y:0},{x:1500,y:0},{x:1500,y:400},{x:0,y:400}];
+      const pts = rotate(raw, 12, 750, 200);
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(mkProd(9001, 60, 30));
+      S.rooms = [mkRoom(RID, pts)];
+      S.varmefolie.direction = null;
+      const cable = autoFillCable(RID, 9001);
+      check('A: skew-motoren brukes (rotert, auto)', 'skew', cable && cable._engine === 'skew', cable && cable._engine);
+      check('A: løpene parallelle med langsiden (12°, ±2°)', '~12°', cable && angleClose(cable.angleDeg, 12, 2), cable && cable.angleDeg);
+      check('A: god dekning, ingen trappetrinn', '≥0.85', cable && cable.coverage >= 0.85, cable && cable.coverage);
+    }
+
+    // ─── B — samme rektangel, eksplisitt «Vertikal» (kortside) ───
+    {
+      const RID = 990002;
+      const raw = [{x:0,y:0},{x:1500,y:0},{x:1500,y:400},{x:0,y:400}];
+      const pts = rotate(raw, 12, 750, 200);
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(mkProd(9002, 60, 30));
+      S.rooms = [mkRoom(RID, pts)];
+      S.varmefolie.direction = 'v';
+      const cable = autoFillCable(RID, 9002);
+      check('B: skew-motoren brukes (eksplisitt Vertikal)', 'skew', cable && cable._engine === 'skew', cable && cable._engine);
+      check('B: løpene parallelle med kortsiden (12+90=102°, ±2°)', '~102°', cable && angleClose(cable.angleDeg, 102, 2), cable && cable.angleDeg);
+      check('B: retning merket riktig for info-panelet', 'v', cable && cable.direction === 'v', cable && cable.direction);
+    }
+
+    // ─── C — trapes som Kenneths rampe: langsider 2000/1600cm, skrå kortender, auto ───
+    {
+      const RID = 990003;
+      const raw = [{x:0,y:0},{x:2000,y:0},{x:1800,y:400},{x:200,y:400}];
+      const pts = rotate(raw, 20, 1000, 200);
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(mkProd(9003, 120.1, 30));
+      S.rooms = [mkRoom(RID, pts)];
+      S.varmefolie.direction = null;
+      const cable = autoFillCable(RID, 9003);
+      check('C: skew-motoren brukes (trapes, auto)', 'skew', cable && cable._engine === 'skew', cable && cable._engine);
+      check('C: løpene parallelle med langsidene (20°, ±2°)', '~20°', cable && angleClose(cable.angleDeg, 20, 2), cable && cable.angleDeg);
+      check('C: skrå kortender klippet rent, ingen trappetrinn', '≥0.85', cable && cable.coverage >= 0.85, cable && cable.coverage);
+    }
+
+    // ─── D — akseparallelt rektangel 600×300cm: bit-identisk regresjonsvakt ───
+    {
+      const RID = 990004;
+      const pts = [{x:0,y:0},{x:600,y:0},{x:600,y:300},{x:0,y:300}];
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(mkProd(9004, 30, 30));
+      S.rooms = [mkRoom(RID, pts)];
+      S.varmefolie.direction = null;
+      const cable = autoFillCable(RID, 9004);
+      check('D: akseparallelt rom bruker IKKE skew (uendret motor)', 'ikke skew',
+        cable && cable._engine !== 'skew' && (cable.runs || []).length > 0,
+        cable && { engine: cable._engine, runs: (cable.runs || []).length });
+    }
+
+    // ─── E — rotert rektangel 1500×400cm, rotert 12°, TRE kabler: samme vinkel i alle soner ───
+    {
+      const RID = 990005;
+      const raw = [{x:0,y:0},{x:1500,y:0},{x:1500,y:400},{x:0,y:400}];
+      const pts = rotate(raw, 12, 750, 200);
+      const prod = mkProd(9005, 40, 30);
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(prod);
+      S.rooms = [mkRoom(RID, pts)];
+      S.varmefolie.direction = null;
+      const cables = _autoFillNCables(RID, 9005, 3, null);
+      check('E: alle tre soner returnert', '3', cables && cables.length === 3, cables && cables.length);
+      const allSkew = cables && cables.every(c => c._engine === 'skew');
+      check('E: alle tre soner bruker skew', 'true', allSkew, cables && cables.map(c => c._engine));
+      const angles = cables ? cables.map(c => c.angleDeg) : [];
+      const sameAngle = angles.length && angles.every(a => Math.abs(a - angles[0]) < 0.15);
+      check('E: samme vinkel i alle soner (sammenhengende utlegg)', 'identisk', sameAngle, angles);
+    }
+  } finally {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.hindrings = savedHindrings; S.zones = savedZones; S.cables = savedCables;
+    S.ui.selectedRoomId = savedSelectedRoomId;
+    if (S.varmefolie) S.varmefolie.direction = savedDirection;
+    S.counters.nextCableId = savedNextCableId;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_cableSkewRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
 }
 
 function autoFillMultiCable(roomId, productId, nCables, forcedDir, mode) {
@@ -31853,7 +32034,10 @@ function updateObjInfo() {
       const cp=HEATING_PRODUCTS.find(p=>p.id===cable.productId);
       const wattPerM=cp?.watt_per_m||0;
       const totalWatt=wattPerM ? Math.round(wattPerM * cable.totalLength_cm / 100) : null;
-      const dirLabel = cable.direction==='v' ? 'Vertikal' : 'Horisontal';
+      // STEG 0 sidefunn (Kenneth 22.08.2026): en skew-kabel uten eksplisitt/tvunget retning har
+      // cable.direction=null (ren auto-vinkel, ingen v/h-betydning) — falt FØR alltid til
+      // «Horisontal», feil for en kabel brukeren faktisk valgte «Vertikal» for. Nå tre verdier.
+      const dirLabel = cable.direction==='v' ? 'Vertikal' : (cable.direction==='h' ? 'Horisontal' : 'Auto');
       const _cv = _getCableViolation(cable.id);
       let _cvHtml = '';
       if (_cv.maxLength) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks lengde</span><span class="soi-v">${_cv.maxLength.actual.toFixed(1)} m (maks ${_cv.maxLength.max} m)</span></div>`;
