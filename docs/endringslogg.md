@@ -4,6 +4,48 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kabel på roterte områder følger nå sidene, ikke skjermens akser — 2026-08-22
+
+Kenneth (utendørs rampe, InSnow 30T 3700W 120,1m 400V × 3): kabelen la seg vannrett/loddrett i
+forhold til SKJERMEN, ikke i forhold til den skrå rampen — trappetrinn og udekkede hjørner ved de
+skrå endene.
+
+- **`d44b968` — STEG 0-rapport: målt, ikke antatt.** Bygget en syntetisk rampe (likebeint trapes,
+  20° rotert) + Kenneths eget produkt (CVA10710) og kjørte den ekte `_autoFillNCables(...,3,null)`.
+  Bekreftet: `_buildNCableZones` setter `_noSkew=true` UBETINGET på hver sone-underrom (ingen
+  if-vakt) — `needSkew` blir derfor ALLTID false for enhver flerkabel-sone, uansett rotasjon.
+  Isolert bekreftet: SAMME rampe-polygon gjennom ETT enkelt-kabel-kall (ikke sonedelt) velger
+  korrekt "skew" med angleDeg=20, dekning 97,8 % — motoren virker perfekt når den nås; `_noSkew` er
+  den ENESTE årsaken. Én korreksjon til selve prompten: motoren som faktisk PRODUSERTE Kenneths
+  utlegg var IKKE `generateCableSerpentine` (kun et siste fallback) — de faktiske vinnerne var
+  **v6** og **boustrophedon**, som begge leser retning som skjerm-akse akkurat som serpentinen.
+  Verifisert også: en ekte round-trip (skew-kabel, 39 pathEls) gjennom SAMME lagringsserialisering
+  appen bruker + fullt JSON-round-trip — byte-for-byte identisk; PDF/materialliste gjenbruker
+  allerede motor-uavhengig kode.
+- **`b7d7505` — BLOKKERING 1+2 fikset + syntetisk testområde.** `_noSkew` settes nå kun når det
+  HELE, udelte området er akseparallelt (uendret der). For et rotert område beregnes rectilinearity
+  og en TVUNGET felles vinkel fra HELE polygonet (ikke hver enkelt avkuttede sone-delform) — samme
+  vinkel presses inn i ALLE soner (`_forcedSkewAngleDeg`/`_forcedSkewDir`) så utlegget blir
+  sammenhengende. Ny `_skPrincipalAngles`/`_skAngleForDir`: den lengste kanten definerer langsiden
+  («Horisontal»), kortsiden er vinkelrett («Vertikal») — Kenneths regel, ikke skjermaksene.
+  `generateCableSkew` fikk en `angleDeg`-parameter (var alltid hardkodet `null`). Sidefunn fra
+  STEG 0 rettet i samme commit: info-panelets `dirLabel` falt til «Horisontal» for enhver
+  skew-kabel siden `.direction` aldri ble satt — viser nå faktisk retning eller «Auto».
+  Ny `_cableSkewRegressionTest()` (5 fasit-tilfeller A-E: rotert rektangel, eksplisitt kortside,
+  rampe-trapes, akseparallelt som regresjonsvakt, tre kabler med identisk vinkel) — alle 13 sjekker
+  bestått. Rotert innendørs InFloor-rom testet direkte (STEG 2): samme kodevei, samme fiks virker
+  identisk — sagt eksplisitt, ikke oppdaget senere. Kjent, ikke rørt: rotert flerkabel-sone MED
+  hindring ignorerer fortsatt hindringen (pre-eksisterende, dokumentert i egen kommentar —
+  «Sub-rooms carry no hindrings»); enkelt-kabel hindring-unngåelse er upåvirket.
+- Verifisert: Kenneths eksakte scenario — FØR v6/boustrophedon (skjerm-akse, trappetrinn), ETTER
+  alle tre soner skew, identisk angleDeg=20°, dekning 86-89 %. Akseparallelt rom (600×300, single
+  og multi): fortsatt boustrophedon, ikke skew. Full regresjonsbatteri (matte/sone/frihånd/folie +
+  ny kabel-skew-test) bestått på fersk sideinnlasting.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## InSnow og EcoMat: reglene kommer nå fra databasen — 2026-08-22
 
 Kenneth hadde allerede gjort databasesiden 22.08.2026: kategorien «Varmematte utendørs» + 33
