@@ -3845,8 +3845,17 @@ function render() {
 
 // ─── FLOOR FILTERING HELPER ─────────────────────────────────
 /** Resolve the effective active floorId for filtering (ignores the '__global__' bg sentinel). */
+// STEG 1 (Kenneth 24.08.2026, «utendørs kabel mangler i utskriften», MEKANISME 2): et rom kan ha
+// floorId=null helt bevisst («Fjern fra etasje», mvRoom(id,null)) — det hører hjemme direkte i sin
+// del, ikke i noen bestemt etasje. Bar `null`/`undefined` betyr i dag «ikke eksplisitt valgt ennå»
+// og faller derfor tilbake til «bruk første etasje» (aldri lekke MELLOM etasjer). Et etasjeløst rom
+// trenger en TREDJE, utvetydig tilstand: «ingen etasje, IKKE fall tilbake» — ellers ville det arvet
+// en helt annen etasjes (og kanskje en annen dels) filter ved en tilfeldighet. Ny sentinel
+// '__none__' (samme mønster som '__global__' allerede er for bakgrunnsvisning) uttrykker akkurat
+// det valget eksplisitt, i stedet for at det tilfeldigvis faller gjennom.
 function _effectiveActiveFloorId() {
   const af = S.ui.activeFloorId;
+  if (af === '__none__') return null;   // eksplisitt «dette rommet har ingen etasje» — aldri fallback
   if (af && af !== '__global__') return af;
   // Floors exist but none explicitly active → scope to first floor (never leak across floors)
   if (S.floors && S.floors.length) return S.floors[0].id;
@@ -41681,6 +41690,7 @@ function _renderRoomToImage(room, opts) {
   // Save state we'll modify
   const saved = {
     zoom: S.view.zoom, panX: S.view.panX, panY: S.view.panY,
+    activePartId: S.ui?.activePartId,   // STEG 1 (Kenneth 24.08.2026): halve filtertilstanden manglet her
     activeFloorId: S.ui?.activeFloorId,
     selectedRoomId: S.ui?.selectedRoomId,
     selectedStripId: S.ui?.selectedStripId,
@@ -41742,8 +41752,19 @@ function _renderRoomToImage(room, opts) {
   // and the room body. Other sub-selections are cleared to avoid stray
   // gizmos. Room/gizmo/label visuals are suppressed via _pdfMode below.
   if (S.ui) {
-    if (S.ui.activeFloorId !== undefined && room.floorId != null) {
-      S.ui.activeFloorId = room.floorId;
+    // STEG 1 (Kenneth 24.08.2026, «utendørs kabel mangler i utskriften»): _rebuildActiveFloorRoomIds
+    // filtrerer på BEGGE — activePartId OG activeFloorId. Kun å sette den ene (slik denne funksjonen
+    // gjorde før) lar den andre stå igjen på forrige rom sin del/etasje, og et rom i en ANNEN del
+    // (f.eks. et uteareal mens innendørs-delen var aktiv) blir da filtrert bort, selv om etasjen
+    // isolert sett var satt riktig — MEKANISME 1 i STEG 0-rapporten over. Sett HELE tilstanden fra
+    // rommet som faktisk skal tegnes, aldri halve.
+    if (S.ui.activePartId !== undefined) S.ui.activePartId = room.partId ?? null;
+    if (S.ui.activeFloorId !== undefined) {
+      // MEKANISME 2: et rom uten floorId (mvRoom(id,null), «Fjern fra etasje») skal IKKE arve
+      // hvilken som helst annen etasje — verken den forrige aktive eller S.floors[0]-fallbacken
+      // _effectiveActiveFloorId ellers bruker. '__none__' er det eksplisitte valget for «ingen
+      // etasje, ikke fall tilbake» (se _effectiveActiveFloorId over).
+      S.ui.activeFloorId = room.floorId != null ? room.floorId : '__none__';
     }
     S.ui.selectedRoomId = room.id;
     S.ui.selectedStripId = null;
@@ -41763,6 +41784,18 @@ function _renderRoomToImage(room, opts) {
   // box already maps 1:1 onto the canvas, so the whole canvas IS the room.
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
+  // STEG 2 (Kenneth 24.08.2026): påstand i utviklingsmodus — «samme grep som fanget seks ting i
+  // etasje-runden» (_onActiveFloor over). render() har akkurat kalt _rebuildActiveFloorRoomIds();
+  // er IKKE rommet vi ba om å tegne i settet, er activePartId/activeFloorId satt inkonsistent med
+  // rommets egen part/floorId — akkurat den klassen bug denne hele rapporten handler om. Varsler
+  // aldri i produksjon, kaster aldri — samme prinsipp som _onActiveFloor.
+  if (_IS_DEV_HOST && _activeFloorRoomIds && !_activeFloorRoomIds.has(room.id)) {
+    console.warn('_renderRoomToImage: rommet som tegnes er IKKE i _activeFloorRoomIds — activePartId/' +
+      'activeFloorId er satt inkonsistent med rommets egen partId/floorId', {
+      roomId: room.id, roomName: room.name, roomPartId: room.partId, roomFloorId: room.floorId,
+      activePartId: S.ui.activePartId, activeFloorId: S.ui.activeFloorId,
+    });
+  }
 
   // Capture the whole canvas to JPEG — no crop, no upscale. The pixels were
   // rendered at the target resolution so detail is crisp. q≈0.9 keeps detail
@@ -41788,6 +41821,7 @@ function _renderRoomToImage(room, opts) {
   S.view.panX = saved.panX;
   S.view.panY = saved.panY;
   if (S.ui) {
+    if (saved.activePartId !== undefined) S.ui.activePartId = saved.activePartId;
     if (saved.activeFloorId !== undefined) S.ui.activeFloorId = saved.activeFloorId;
     S.ui.selectedRoomId = saved.selectedRoomId;
     S.ui.selectedStripId = saved.selectedStripId;
