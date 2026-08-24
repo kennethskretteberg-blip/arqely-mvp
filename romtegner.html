@@ -17299,6 +17299,70 @@ function _pinCableSeamToCut(cable, dir, seam, loCut, hiCut, room, margin) {
   if (cable.end) { if (dir === 'v') cable.end.x += shift; else cable.end.y += shift; }
 }
 
+// ═══ STEG 0-RAPPORT (Kenneth 22.08.2026, «kabelen skal følge områdets egne sider, ikke
+// skjermens akser») — målt, ikke antatt. ══════════════════════════════════════════════════════
+//
+// PUNKT 1 — hvilken vei gikk Kenneths rampe faktisk?
+// Bygget en syntetisk rampe (likebeint trapes: langsider 2000cm/1600cm, skrå kortender, hele
+// figuren rotert 20° for å simulere en diagonalt tegnet rampe) + 3× InSnow 30T 3700W 120,1m 400V
+// (samme produkt Kenneth selv brukte, CVA10710) og kjørte den EKTE `_autoFillNCables(roomId,
+// productId, 3, null)` — samme inngang UPC bruker for «N× likt kabel».
+//   Målt: rectilinear=false, hasHindring=false, hasForbidden=false.
+//   `_noSkew` er satt UBETINGET på HVER av de 3 sone-underrommene (:17369, ingen if-vakt) — så
+//   `needSkew` blir ALLTID false for enhver sone i et flerkabel-oppsett, UANSETT om det
+//   underliggende området er rotert eller ei. Bekreftet ved å kjøre samme rammepolygon gjennom
+//   ETT enkelt-kabel-kall (`autoFillCable`, ikke via sonedeling): DER velger motoren korrekt
+//   "skew" med angleDeg=20 og coverage=97,8 % — skew-motoren i seg selv virker perfekt når den
+//   faktisk nås. `_noSkew` er dermed bekreftet den ENESTE årsaken, isolert til sonedelings-veien.
+//   Motoren som faktisk PRODUSERTE Kenneths utlegg var IKKE (som først antatt i prompten) den
+//   enkle akse-serpentinen i `generateCableSerpentine` — det er bare et SISTE fallback inni
+//   `_buildNCableZones` (:17380, kun brukt hvis `autoFillCable` returnerer ingenting i det hele
+//   tatt). De faktiske vinnerne var **v6** og **boustrophedon** — begge leser `direction`
+//   ('v'/'h') som en SKJERM-akse akkurat som serpentinen, og produserte derfor akkurat det samme
+//   symptomet (skjerm-parallelle løp, trappetrinn ved de skrå endene). Konklusjonen i BLOKKERING 1
+//   (fjern den ubetingede `_noSkew`) er uendret riktig — bare selve fallback-motoren var feil
+//   identifisert i prompten. Siden skew (når den når frem) returnerer umiddelbart ved god
+//   dekning, blir v6/boustrophedon aldri nådd for et rotert flerkabel-område etter fiksen — de
+//   trenger ingen egen endring.
+//
+// PUNKT 2 — hvor settes direction, og hvem må lære den nye betydningen?
+//   `S.varmefolie.direction` ('v'/'h') — DELT felt med varmefolie, satt av samme retningsvelger.
+//   Lest av: `_autoFillCableImpl` (userDir/primaryDir for boustrophedon/V6/serpentine-scoring),
+//   `_buildNCableZones` (axis = 'x'/'y' for selve sone-oppdelingen, og tvinges likt for alle
+//   soner via `S.varmefolie.direction = dir` i løkken), og lagres til slutt som `cable.direction`
+//   på RUN-baserte kabler. `generateCableSkew` leser den ALDRI i dag — kaller alltid
+//   `_skEngineCore(...,null)`, ren auto-vinkel-scoring, uavhengig av brukerens v/h-valg.
+//   Berørte kallesteder for den NYE betydningen (retning relativt til området, ikke skjermen):
+//   KUN skew-grenen i `_autoFillCableImpl` trenger å lære det — v6/boustrophedon/serpentine sin
+//   EKSISTERENDE skjerm-akse-tolkning er allerede KORREKT for et akseparallelt rom (der skjerm-
+//   akse OG rom-akse er samme akse), og blir uansett aldri nådd for et rotert rom etter fiksen.
+//   Ekte, liten sidevirkning funnet: info-panelets `dirLabel` (:31792) leser `cable.direction`
+//   direkte og faller til «Horisontal» når feltet er `undefined` — en skew-kabel setter ALDRI
+//   `.direction` i dag, så panelet ville vist «Horisontal» selv for en kabel Kenneth eksplisitt
+//   valgte «Vertikal» for. Rettes sammen med BLOKKERING 2 (samme commit) — settes til den
+//   FAKTISKE valgte retningen på skew-resultatet, ikke la den stå udefinert.
+//
+// PUNKT 3 — overlever pathEls lagring, reåpning og PDF?
+//   JA, verifisert med et EKTE round-trip: genererte en skew-kabel (39 pathEls-elementer,
+//   angleDeg=20, totalLength_cm≈35807cm) på rampen, kjørte den GJENNOM den faktiske lagrings-
+//   serialiseringen (`cables: S.cables.map(c=>({...c, runs:...}))`, samme kode som :32937/:39206
+//   bruker) og et fullt `JSON.stringify`→`JSON.parse`-round-trip (matcher Supabase sin JSON-
+//   kolonnelagring). Resultat: byte-for-byte identisk (`JSON.stringify(before)===JSON.stringify(
+//   after)` sann) — pathEls er rene tall/objekter (ingen klasser, ingen Set/Map, ingen sirkulære
+//   referanser), og lasting (:39400, `S.cables = data.cables || []`) er en rå tilordning uten
+//   feltfiltrering. PDF gjenbruker samme canvas-render (`_drawCableSkewPath` kalles allerede fra
+//   hovedrenderen, :19864) — ingen egen PDF-spesifikk kabeltegning å oppdatere. Materiallistens
+//   lengdetall leser `cable.totalLength_cm`, en motor-uavhengig skalar satt likt av alle motorer.
+//   Ekte, men lavrisiko funn (ikke fikset — utenfor STEG 0, ren rapport): pushUndo sitt
+//   cable-snapshot (:32937) sprer `{...c}` uten å dypklone `pathEls` — delt objektreferanse
+//   mellom snapshot og levende kabel. Siden skew-kabler er auto-fill-only i dag («drag-edit
+//   disabled i v1», :16697) og aldri muteres i plass etter generering, er dette IKKE en aktiv bug
+//   ennå (samme feilklasse pushUndo sitt matPath-felt hadde — se
+//   [[matpath-klikkvalg-og-per-matte-flytting]] — men her er det ingen mutasjon som utløser den).
+//   Nevnt for ordens skyld, ikke rettet — utenfor dette STEG 0-punktets faktiske spørsmål.
+//
+// Ingen kodeendring i denne commiten. Fikser skrives i påfølgende commits.
+//
 // Build N equal-area sub-rooms for ONE run direction and fill each with the good single-cable
 // engine. Returns { cables, score } where score = area-weighted coverage fraction (0..1), or
 // null if < 2 sub-rooms could be filled. The caller tries both directions and keeps the best
