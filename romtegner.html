@@ -6799,7 +6799,11 @@ function _matPlaceCandidate(wp, productId) {
   const empty = { valid: false };
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return empty;
-  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  // DEL B (Kenneth 25.08.2026): en aktiv manuell-drag-økt eier målrommet, ikke utvalget — uten
+  // dette ville en matte sluppet mens selectedRoomId har driftet (måling, mistreff-klikk) blitt
+  // avvist eller havnet i feil rom, selv om paletten selv nå riktig overlever driften.
+  const roomId = _manualPlaceSession ? _manualPlaceSession.roomId : S.ui.selectedRoomId;
+  const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3 || !ptInPoly(wp.x, wp.y, room.points)) return empty;
 
   const widthCm = (prod.mat_width_mm || 500) / 10;
@@ -18510,10 +18514,20 @@ document.addEventListener('mousedown', e => {
 }, true);
 
 // ─── MANUELL DRAG-PLASSERING ──────────────────────────────────
+// DEL B (Kenneth 25.08.2026, «lista over produkter... blir borte»): manuell utlegging er en ØKT,
+// ikke en paneltilstand som henger på S.ui.selectedRoomId — samme mønster som _matFree
+// (frihånds-matte, overlever til Enter/Escape) og matPlaceMode (står igjen etter en vellykket
+// plassering, e92b528). Delt av folie (startManualPlace) OG matte/snø (startMatManualPlace under)
+// siden begge viser samme #rwp-manual-palette gjennom samme showRoomWorkflowPanel()/
+// _updateVfDirVisibility()/hideRoomWorkflowPanel() — fikset ett sted, begge nyter godt av det.
+// Rommet hentes herfra så lenge økta er aktiv, IKKE fra S.ui.selectedRoomId (som måling, et
+// mistreff-klikk utenfor rommet, eller å velge en annen vegg/rom fritt kan endre underveis).
+let _manualPlaceSession = null;   // { roomId, familyName, categoryId } eller null
 function startManualPlace(familyName, categoryId) {
   S.ui.manualPlaceMode = true;
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
+  _manualPlaceSession = { roomId: S.ui.selectedRoomId, familyName, categoryId };
   renderManualPalette();
 }
 
@@ -18650,9 +18664,15 @@ function cancelManualPlace() {
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
   S.ui.dropPreviewMat = null;
+  _manualPlaceSession = null;   // DEL B — Escape er en av de tre stedene økta faktisk avsluttes
   // Hide in workflow panel
   const s = document.getElementById('rwp-manual-palette');
   if (s) s.style.display = 'none';
+  // DEL B: uten et rom valgt fra før (økta holdt det alene), er det ingenting igjen å vise —
+  // hele panelet skal da lukkes, ikke bare paletten.
+  if (!S.ui.selectedRoomId) hideRoomWorkflowPanel();
+  updateCtxBar();
+  render();
 }
 
 // ─── HALVAUTOMATISK PLASSERING ────────────────────────────────
@@ -18825,6 +18845,7 @@ function startMatManualPlace(familyName, categoryId) {
   S.ui.manualPlaceMode = true;
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
+  _manualPlaceSession = { roomId, familyName, categoryId };   // DEL B — se startManualPlace over
   renderMatManualPalette();
 }
 function renderMatManualPalette() {
@@ -19213,8 +19234,10 @@ canvas.addEventListener('drop', e => {
       S.ui.dropPreviewMat = null; S.ui.dragWidth = null; render(); return;
     }
     pushUndo();
+    // DEL B: samme øktrom som _matPlaceCandidate validerte mot rett over — ikke selectedRoomId
+    // direkte, som kan ha driftet mens paletten (nå riktig) sto åpen.
     const mat = {
-      id: S.counters.nextMatId++, roomId: S.ui.selectedRoomId, productId: dragProdId,
+      id: S.counters.nextMatId++, roomId: _manualPlaceSession ? _manualPlaceSession.roomId : S.ui.selectedRoomId, productId: dragProdId,
       x_cm: cand.x, y_cm: cand.y, width_cm: cand.widthCm, length_cm: cand.lengthCm,
       num_runs: 1, rotation_deg: 0, _manualPlace: true,
     };
@@ -28875,8 +28898,10 @@ function _showCalibWarningInCtxbar() {
 //
 // Ingen kodeendring i denne commiten.
 function _updateVfDirVisibility() {
-  // Only show RWP when product actions are active, not on every room selection
-  if (!S.ui.selectedRoomId) {
+  // Only show RWP when product actions are active, not on every room selection.
+  // DEL B (Kenneth 25.08.2026): en aktiv manuell-utleggingsøkt (_manualPlaceSession) overlever
+  // selectedRoomId-endringer — skjul kun når VERKEN et rom er valgt eller en økt er aktiv.
+  if (!S.ui.selectedRoomId && !_manualPlaceSession) {
     hideRoomWorkflowPanel();
   }
   // Panel is shown explicitly by product selection flows (showVfPlacePanel, etc.)
@@ -28930,7 +28955,9 @@ function showRoomWorkflowPanel() {
   if (_mod !== 'indoor' && _mod !== 'snow') return;
   const panel = document.getElementById('room-workflow-panel');
   if (!panel) return;
-  const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
+  // DEL B: en aktiv manuell-utleggingsøkt eier panelet sitt rom, ikke utvalget.
+  const roomId = _manualPlaceSession ? _manualPlaceSession.roomId : S.ui.selectedRoomId;
+  const room = S.rooms.find(r => r.id === roomId);
   if (!room) { hideRoomWorkflowPanel(); return; }
   const titleEl = panel.querySelector('.rwp-title');
   if (titleEl) titleEl.textContent = room.name || (_roomWord(true) + ' ' + room.id);
@@ -28962,6 +28989,7 @@ function finishRoomWorkflow() {
   S.ui.dragWidth = null;
   S.ui.dropPreviewStrip = null;
   S.ui.dropPreviewMat = null;
+  _manualPlaceSession = null;   // DEL B — FERDIG er en av de tre stedene økta faktisk avsluttes
   updateCtxBar();
   renderSidebar();
   render();
@@ -36505,6 +36533,11 @@ document.addEventListener('keydown', e=>{
     if (S.ui.wallThicknessMode) { exitWallThicknessMode(false); return; }
     if (S.ui.seedMode) { cancelSeedMode(); return; }
     if (S.ui.autoFillPending) { cancelAutoFill(); return; }
+    // DEL B (Kenneth 25.08.2026, «lista over produkter... blir borte»): manuell utlegging (folie
+    // ELLER matte/snø, delt økt — se startManualPlace) hadde ingen egen Escape-håndtering fra før
+    // og falt gjennom til den generiske rom-avvalg-fallbacken lengst nede. Egen gren nå, samme
+    // prioritetsnivå som de andre plasseringsmodusene rett over.
+    if (_manualPlaceSession) { cancelManualPlace(); return; }
     // FEIL 2 (Kenneth 19.08.2026, «frihånd kan ikke avsluttes med Enter»): Escape avbryter uten å
     // legge ut noe — _matFreeExit(false) er den eneste veien som korrekt nullstiller _matFree (den
     // generiske cancelDrawing()-fallbacken lenger ned rører aldri _matFree, ville latt den henge
