@@ -4,6 +4,299 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Bakgrunn-gizmoen var usynlig når zoomet inn — oppfølging samme dag — 2026-08-26
+
+Samme dag, ny prompt, etter forrige punkts «Flytt underlag»-fiks: Kenneth fikk fortsatt ikke opp
+gizmoen for å flytte bakgrunnen. STEG 1 og DEL C fra forrige økt var fortsatt riktige (bekreftet,
+ikke gjenbygget) — den forrige STEG 2-fiksen løste ikke hele problemet alene.
+
+- **`92dca47` — STEG 2: målt, ikke antatt, hvorfor gizmoen er usynlig.** Engangs-diagnose alene.
+  HYPOTESE 1 (gizmoen tegnes utenfor skjermen når man er zoomet inn på et rom, siden rammen
+  omslutter HELE bakgrunnsbildet) BEKREFTET empirisk — alt annet var riktig satt opp, håndtakene
+  var bare usynlige utenfor viewporten. HYPOTESE 2 (klikk-syklingen lar rommet stjele klikket)
+  MOTBEVIST empirisk med et ekte dispatchet MouseEvent — bakgrunn-gizmo-sjekken kjører allerede FØR
+  klikk-syklingen og vinner korrekt.
+- **`4ce976d` — STEG 2b: alltid-synlig reserve-markering + Flytt-underlag zoomer + Shift gir finere
+  piltast-steg.** Fast reserve-markering nederst midt på canvas, vises KUN når
+  `_bgGizmoAnyCornerVisible()` er false (ikke et konstant ekstra element — rammen er fortsatt
+  primær). `_bgStartMove()` («Flytt underlag») zoomer nå til hele tegningen via `_fitViewToBg`
+  (gjenbrukt fra forrige punkts STEG 1). Pilene for å flytte en valgt bakgrunn fantes fra før — men
+  Shift ga et STØRRE steg (25cm), motsatt av det Kenneth ba om («finere steg ved Shift»); byttet
+  hvilken av de to eksisterende verdiene (5/25) hver tast-tilstand bruker.
+- Testmetodikk-fallgruve verdt å merke seg: en headless browserfane uten innlogging får aldri et
+  ekte layout — `canvas.width` blir stående på HTML5-default (300×150), som ga et falskt negativt
+  resultat for «zoomer `_bgStartMove` til synlig?» først. Rettet ved å sette `canvas.width/height`
+  direkte i testen (1400×800), ikke via `resizeCanvas()` (som selv avhenger av et fullt rendret
+  `#app`-tre appen ikke bygger uten innlogging).
+- Verifisert: samme funksjonsnivå-metodikk som forrige punkt. Full regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Plantegninger legges nå alltid fra samme nullpunkt — 2026-08-26
+
+Kenneth: byttet bakgrunnsbilde, kalibrerte på nytt, men «tegningen la seg ikke inn samme sted» som
+forrige gang. Tre commits pluss en oppfølging (DEL C) som utvider til flere plantegninger per
+etasje, godkjent eksplisitt av Kenneth via AskUserQuestion før bygging.
+
+- **`5a6fc2e` — STEG 1: kartlagt alle `bg.originX/originY`-steder og bekreftet Y-fortegnet.**
+  Rapport alene. Rotårsak funnet: `_installBgImage`/`_installBgImageForFloor` sentrerte en ny
+  bakgrunn på `S.view.panX/panY` (der visningen tilfeldigvis stod panorert), ikke et fast punkt.
+  Fasiten fantes allerede i `_autoReadRunEngine` (auto-rom-gjenkjenningsmotoren):
+  `bg.originX=0, bg.originY=-heightCm`. Y-fortegnet BEKREFTET (ikke antatt) mot faktisk
+  `w2s()`/`drawBgImage()`-kode: verden er Y-ned, ingen flip — nedre venstre hjørne havner korrekt
+  i (0,0).
+- **`0892585` — fiks: bakgrunnsbilder plasseres nå på et fast punkt, ikke der visningen stod
+  panorert.** Begge installer-funksjonene bruker nå samme formel som `_autoReadRunEngine`.
+  Kalibrering/fast målestokk/gizmo-draget bekreftet TRYGGE og urørt (proporsjonal omskalering rundt
+  et brukervalgt referansepunkt). Ny `_fitViewToBg(bg)` (samme formel som `fitAll()`) flytter
+  visningen til den nye bakgrunnen etter import — ellers tomt lerret siden bakgrunnen nå ligger
+  fast, ikke der visningen stod. Verifisert med EKTE Image-objekter (ikke mock): to importer med
+  vilt ulik panorering, samme zoom → identisk origin OG bredde/høyde; «Bytt bilde» bekreftet
+  uendret (bevarer en manuelt flyttet posisjon).
+- **`fdb04a7` — STEG 2: «Flytt underlag» gjør opplåsingen til én synlig handling, ikke en
+  gjettelek.** Gizmoen for å flytte bakgrunnen fantes allerede, men hengelåsen (riktig standard:
+  låst etter kalibrering) skjulte veien dit. Ny «Flytt underlag» i ⋯-menyen (`_bgStartMove()`:
+  låser opp + velger + viser gizmo i én operasjon). Ctxbar viser nå eksplisitt «Ulåst — klikk
+  treffer tegningen» når valgt+ulåst, lås-knappen sier «Lås igjen». Alle tre lås-tooltips (ctxbar
+  persistent gruppe, ctxbar valgt-tilstand, sidepanel) skrevet om til å forklare hva OPPLÅSING er
+  til for, ikke bare hva låsing gjør. Auto-relås ved annet utvalg: vurdert og rapportert (kommentar
+  over `toggleBgLock`), IKKE bygget — en avveining, ikke et opplagt svar.
+- **`ef6de00` — DEL C: flere plantegninger per etasje — aktiv (én) + referanser (null eller
+  flere).** Eksplisitt godkjent av Kenneth via AskUserQuestion FØR bygging (reverserte i prinsippet
+  19.08-regelen «én plantegning per etasje» — den regelen gjelder fortsatt for AKTIV). Ny
+  `S.bgRefs[floorId]` (array, samme nøkkelkonvensjon som `S.bgs`) — referanser er strukturelt
+  identiske aktiv-bakgrunn-objekter, bare aldri registrert der kalibrering/hit-testing/PDF ser
+  etter dem (`_bgRefsOnActiveFloor` er en HELT EGEN funksjon fra `_bgsOnActiveFloor`, som
+  `_hitBgLayer` leser fra). `_addBgToFloor` degraderer nå den gamle aktive til referanse i stedet
+  for å tvinge frem en ny etasje — det ER Kenneths «gammel beholdes sammen med ny».
+  `_promoteBgRef` («Gjør til aktiv») bytter ett-trykks, aldri to aktive. `removeBgImage` forfremmer
+  automatisk nyeste referanse hvis den aktive slettes og en finnes (eksplisitt valg, dokumentert).
+  `drawBgImage` tegner referanser UNDER aktiv, ALDRI i PDF (`S.ui._pdfMode`-gate). Sidepanelet
+  viser referanser med samme avkrysning+opasitet-mønster som aktiv allerede hadde, pluss «Gjør til
+  aktiv» og slette-knapp. Lagring: delt `_serializeBgFields` (faktorert ut av eksisterende
+  bgs-serialisering, ikke duplisert). Filstørrelse: ~200–530 KB per referanse (JPEG 0.85 + base64),
+  grovt 1–2,6 MB for 5 etasjer × én gammel versjon hver. Ingen automatisk opprydding —
+  `_removeBgRef` for manuell sletting.
+- Verifisert: syntetiske rom/etasjer + EKTE Image-objekter og EKTE data-URI-er. Full flyt
+  verifisert for DEL C: import→legg-til-på-nytt→demotering→reimport→normal rendering (begge, ref
+  under aktiv)→PDF-modus (kun aktiv)→hit-test (ekskluderer ref)→promote→slett-med-ref
+  (forfremmer)→slett-uten-ref (uendret)→EKTE rundtripp gjennom
+  `_buildSaveData`/`_restoreProject` (bevarer referanse med lastet bilde). Full regresjonsbatteri
+  bestått etter hver av de fire commitene.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Tilleggsteksten i PDF-eksporten lagres nå på prosjektet — 2026-08-26
+
+Kenneth: «Hvis jeg i ettertid må endre prosjekteringen og skrive ut på nytt, er teksten jeg skrev
+inn borte.»
+
+- **`01a7774` — tilleggsteksten (`#exp-freetext`) lagres nå, som rabattene allerede gjør.**
+  Rotårsak bekreftet nøyaktig som antatt: `_runExportPDF()` leste `#exp-freetext` og kastet det;
+  rabattene (nabofeltet, tre linjer under) ble lagret til `S.project.pricing` med akkurat den
+  begrunnelsen Kenneth etterspurte — tilleggsteksten ble bare aldri tatt med i det. `_runExportPDF()`
+  lagrer nå `S.project.freeText = opts.freeText` ved siden av `S.project.pricing`, samme
+  autolagring. `_showExportDialog()` forhåndsutfyller `#exp-freetext` fra `S.project.freeText`
+  (via `_esc`) — ikke låst, kan endres/tømmes fritt. Lagring/lasting krevde ingen egen kode:
+  `S.project` spres allerede i sin helhet i `_buildSaveData`/`_restoreProject`, nøyaktig samme vei
+  `S.project.pricing` selv går. Per PROSJEKT (spurt, ikke avgjort selv), ikke per revisjon — rapportert
+  konsekvens: et prosjekt skrevet ut i rev. 1 og igjen i rev. 3 med endret innhold bruker SAMME
+  tekst i begge.
+- Verifisert: syntetisk prosjekt, `exportPDF` stubbet. Tomt før noen tekst; tekst overlever
+  eksport+gjenåpning; endring overskriver; tømt felt lagres tomt og forblir tomt; EKTE rundtripp
+  gjennom `_buildSaveData()`/`_restoreProject()`; gammelt prosjekt uten feltet åpnes uten feil.
+  Full regresjonsbatteri bestått.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Ctxbar fast toppsentrert + manuell utlegging er nå en økt — 2026-08-25
+
+Kenneth (manuell varmefolie): «Det kommer opp en flytende menybar rett over varmefolien jeg legger
+ut manuelt... veldig forstyrrende» + «Lista over produkter ved manuell blir borte når jeg gjør noe
+annet... det hender jeg må måle litt i rommet.» Branch `ui-flyt-manuell`, merget til main
+(`93cdd57`), Kenneth godkjente push+merge eksplisitt.
+
+- **`ca25f0d` — STEG 0: kartlagt ctxbar-posisjonering og hva som skjuler den manuelle paletten.**
+  Rapport alene, med én korreksjon til prompten selv: `#draw-toolbar` («BAKGRUNN…TEGN ROM…») er
+  DØD MARKUP (display:none, ingen kodesti gjør den synlig, onclick refererer en ikke-eksisterende
+  funksjon). Baren Kenneth faktisk ser ER `#ctxbar` selv i idle-tilstand — samme element som blir
+  den forstyrrende linja når et objekt velges. Full gjennomgang av alle 15 steder
+  `S.ui.selectedRoomId` nullstilles: måling og panorering rører den ALDRI; eneste reelle utløser er
+  et mistreff-klikk som bommer på enhver romspolygon, uten sjekk for `S.ui.manualPlaceMode`.
+  Matte/snø-paletten deler bokstavelig talt samme `#rwp-manual-palette` og samme
+  show/hide-funksjoner som folie — like sårbar, ikke en lignende bug.
+- **`c364cf4` — DEL A: ctxbar er nå fast toppsentrert — følger aldri lenger det valgte objektet.**
+  `_positionCtxBar()` limte linja ~40px over valgt objekt (eller UNDER hvis trangt, verre).
+  Fallback-grenen (toppsentrert) er nå eneste regel. Fjernet `_selectedObjectWorldBBox()` i sin
+  helhet (~100 linjer, ingen andre kallere) og `_positionCtxBar()`-kallet fra `render()` (kjørt
+  hver frame — unødvendig når posisjonen er fast). Ingen egen kollisjonsjustering nødvendig:
+  default CSS (top:12px inni `#canvas-wrap`, under `#topbar` sin faste 56px) ga allerede et rent
+  mellomrom.
+- **`e8ccfdd` — DEL B: manuell utlegging er nå en økt — overlever måling, ikke bare
+  selectedRoomId.** Ny delt øktvariabel `_manualPlaceSession = {roomId, familyName, categoryId}`,
+  satt av BÅDE `startManualPlace` (folie) og `startMatManualPlace` (matte/snø).
+  `_updateVfDirVisibility()`/`showRoomWorkflowPanel()` bruker nå øktas rom når en økt er aktiv, ikke
+  `selectedRoomId`. Økta avsluttes KUN av FERDIG, Escape (ny gren) eller `cancelManualPlace()`
+  selv. Følgefiks: `_matPlaceCandidate` og matte-drop-håndtereren brukte `selectedRoomId` direkte
+  for validering/plassering — rettet til å bruke øktas rom.
+- Forslag rapportert, IKKE bygget (venter på Kenneths ja): skille bakgrunnskontroller (alltid
+  relevante) fra objektkontroller (kontekstuelle) i ctxbar.
+- Verifisert: ctxbar forblir top:12px/left:50% uansett valgt objekt og drastisk panorering+zoom;
+  manuell palett overlever `selectedRoomId=null`+`updateCtxBar()` med riktig romtittel bevart;
+  `_matPlaceCandidate` validerer korrekt mot øktas rom selv med null selection; FERDIG og Escape
+  avslutter økta korrekt begge veier, for BÅDE folie- og matte-paletten. Full regresjonsbatteri
+  bestått etter hver commit og på den mergede koden.
+- Ikke testet: ekte innlogget museklikk-flyt (drag-og-slipp fra paletten, faktisk måle-klikk i en
+  ekte plantegning).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Krasj når selectedMatId/selectedPlateId pekte på et fjernet objekt — 2026-08-25
+
+Funnet ved live-testing av modul-per-rom-branchen mot Kenneths ekte innloggede «Gullhaugveien 1 -
+3»-prosjekt (ikke syntetisk): `S.ui.selectedMatId` pekte på en matte (id 1) som ikke lenger fantes
+i `S.mats` (0 matter i prosjektet — det er InFloor+InSnow, ingen varmematte).
+
+- **`8c9fd7e` — selvhelbredende vern + rotårsaksfiks i `_clearRoomProductCollections`.**
+  `_ctxBarItems()` sin matte-gren antok objektet alltid finnes og krasjet ubetinget på
+  `Math.round(mat.length_cm)`. Siden `renderSidebar()`/`updateCtxBar()` kalles fra mange steder
+  (bl.a. `createRoom` internt), kunne HVILKEN SOM HELST handling som trigget en re-render krasje
+  hele appen for Kenneth mens denne hengende referansen stod der. Rotårsak:
+  `_clearRoomProductCollections(roomId)` (kalt fra «Tøm rom», «Fyll rom automatisk», enhver
+  produktpanel-variant-endring) fjerner produkter fra strips/cables/mats/matPaths/plates/aluboard
+  uten noensinne å rydde det tilhørende `S.ui.selectedXxxId`-feltet. Samme bug-form fantes også i
+  `selectedPlateId`-grenen (samme mønster, ikke enda observert som krasj, men samme skjøre kode) —
+  fikset samtidig. To lag: (1) `_ctxBarItems` sine mat-/plate-grener sjekker nå om objektet
+  faktisk finnes; hvis ikke, ryddes UI-valget og grenen returnerer tomt i stedet for å krasje,
+  samme mønster kabel/sone/trapp-grenene allerede bruker; (2) `_clearRoomProductCollections`
+  rydder nå `S.ui.selectedXxxId` for ethvert produkt som fjernes OG faktisk var valgt (ny
+  `ROOM_PRODUCT_SELECTED_UI_KEY`-mapping) — referansen blir aldri hengende i utgangspunktet.
+- Verifisert direkte på Kenneths ekte side (bogus id → `updateCtxBar()` → ingen krasj, selvhelbredet
+  til null) og isolert med syntetiske `S.mats` (fjerning av rommets matte rydder selektert-feltet
+  KUN når det fjernede objektet faktisk var valgt, urelatert valg i annet rom urørt). Full
+  regresjonsbatteri bestått på hans ekte innloggede side.
+- Uhell underveis, rettet med eksplisitt godkjenning: en allerede planlagt autosave-timer lagret et
+  midlertidig test-duplikat-rom («Hovedinngang (kopi)») til Kenneths ekte Supabase-prosjekt.
+  Oppdaget ved en fullstendig sideoppfriskning, rettet (fjernet rommet igjen) og lagret korrekt
+  tilbake — kun etter at Kenneth eksplisitt bekreftet via AskUserQuestion at skrivingen til
+  Supabase skulle skje. Prosjektet endte med nøyaktig de samme fire rommene som før (Støp 3/Støp
+  2/Fotskraperrist/Hovedinngang), bekreftet ved fullstendig sideoppfriskning fra Supabase.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Modulen (indoor/snø) er nå en rom-egenskap, ikke en fane-egenskap — 2026-08-25
+
+Kenneth («Gullhaugveien 1 - 3»): måtte lage to «deler» (Del) og importere SAMME plantegning to
+ganger fordi innendørs varmekabel ikke var valgbar mens han stod i Ute-fanen (innkjørsel utendørs +
+hovedinngang innendørs, samme tegning). Eneste oppgaven denne økten som eksplisitt kjørte på egen
+branch (`modul-per-rom`, ikke direkte på main) — Kenneth ba om dette selv siden endringen rører
+regelsystemet («jeg må kunne git switch main og revertere mens serveren kjører»). Branchen ble
+pushet separat; Kenneth testet selv, ga deretter eksplisitt «merge og push — jeg stoler på at
+dette blir bra :)» — MERGET (`--no-ff`, `6cdc090`) og PUSHET til main. Ingen konflikter; full
+regresjonsbatteri bestått på den mergede koden før push.
+
+- **`7eb11fa` — STEG 0: kartlagt alle `_activeModuleType`/`_isSnowModule`-kall der rommet er
+  kjent.** Kartla hvert kallsted av `_activeModuleType()`/`_isSnowModule()`/`_moduleEnv()`. 13
+  bekreftede bugs (5 eksplisitt navngitt i prompten + 8 nye funn: showUnifiedProductPanel,
+  _upcPlaceMat, showCablePlacePanel×2, _updateCableSelection×4, mattetegne-løkken,
+  _renderDetailPanel, showHindringModal — disse 8 ikke fikset denne runden, kun rapportert).
+  `_filteredProductCategories()` kjøres FØR de to STEG2-navngitte linjene i samme kjedede filter —
+  en fiks av kun de navngitte linjene ville vært utilstrekkelig. `_effectiveMarginCm` har allerede
+  fasit-mønsteret (roomId som valgfri parameter) men ingen av 40+ kallesteder sender den med —
+  rapportert, ikke rørt (for stort omfang).
+- **`869eef3` — STEG 1: frihånds-matte leser nå kun rommet, ikke fanen.**
+  `_matFreeCableMarginCm`/`_matFreeStartFor`/`_matFreeStart` hadde
+  `_roomModuleType(roomId)==='snow' || _isSnowModule()` (OR — fanen kunne overstyre). Rene
+  rom-oppslag nå. Verifisert: indoor rom i en snow-del, aktiv fane=snow → margin=5 (ikke 0).
+- **`3872124` — STEG 2: produktgaten spør nå rommet, ikke fanen — dette skjulte innendørs-kabel.**
+  Ny delt helper `_uiModuleType()` (rett etter `_roomModuleType`, samme fasit-mønster som
+  `_roomTargetWm2`): rommets modul når valgt, ellers fanen. Brukt i `_upcScopeProducts`,
+  `_upcRenderTypeChips` OG `_filteredProductCategories` (sistnevnte var nødvendig). Gaten ikke
+  svekket — verifisert med syntetisk to-kategori katalog: Ute-fane+indoor rom valgt → begge
+  kategorier synlige; Inne-fane+snow rom valgt → kun utendørs; intet rom valgt → uendret i begge
+  faner.
+- **`60c70fa` — STEG 3: rommet kan nå bære sin egen modul, uavhengig av delen (GATED, STEG1+2
+  grønne).** `_roomModuleType` sjekker nå `room.moduleType` FØR delens. LÅST (Kenneth):
+  uforanderlig etter opprettelse, ingen «endre type»-funksjon, trapp IKKE per-rom.
+  Lagring/lasting/angre trengte ingen egen kode — rommet spres allerede i sin helhet i
+  `_buildSaveData`/`_restoreProject`/`pushUndo`. Verifisert: rom med `moduleType:'snow'` i en
+  indoor del → `_moduleContext().ccMaxCm`=30 (snow) mot 12 (indoor); rundtrippet korrekt gjennom
+  save OG pushUndo/undo.
+- **`26e1677` — STEG 4: dupeRoom får to grener — dette ER hvordan man «endrer type» nå.**
+  `dupeRoom(id, opts)` fikk to grener siden modulen nå er uforanderlig: A=med produkter (samme
+  modul, ROOM_PRODUCT_KEYS + zones/hindringer), B=kun rom (brukeren velger modul eksplisitt). Ny
+  meny `_showDupeRoomMenu` (gjenbruker `#produkt-menu`-dropdownen) på sidepanel-knappen;
+  kontekstmenyen fikk de tre valgene inline. Verifisert: gren A kopierer riktig antall
+  produkter/soner/hindringer med nye id-er og uavhengige objekter, én undo-ramme fjerner alt i ett
+  steg; gren B med samme modul = regresjonsvakt bestått; gren B med motsatt modul gir faktisk den
+  valgte typen.
+- Bevisst IKKE gjort denne runden (rapportert i STEG 0): Inne/Ute som filter i stedet for modus
+  (UI-endring, krever Kenneths beslutning); `S.project.type` fjernet fra Nytt prosjekt; én bakgrunn
+  delt av flere etasjer (gjøres unødvendig av STEG 3).
+- Testmetodikk: funksjonsnivå (innlogget canvas utilgjengelig), syntetiske to-delte prosjekter.
+  Full regresjonsbatteri (mat/matZone/matFree/foil/cableSkew) bestått uendret etter hver av de fem
+  commitene. node --check bestått etter hver.
+- Ikke testet: ekte innlogget klikk-flyt (Kenneths eget scenario gjennom faktisk UI).
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
+## Utskrift setter nå hele filtertilstanden, ikke halve — utendørs kabel manglet — 2026-08-24
+
+Kenneth («Gullhaugveien 1 - 3» rev. 1): «Varmekabelen på utendørs område vises ikke på utskrift.
+Kabel på innendørs vises riktig.» Side 3 «Støp 3» (uteareal, InSnow 30T×3) viste
+omriss+skravur+riktig spesifikasjon, men INGEN kabel. Side 6 «Hovedinngang» (innendørs) var
+korrekt.
+
+- **`ba33710` — STEG 0: målt Gullhaugveien — MEKANISME 1 bekreftet, MEKANISME 2 også ekte.**
+  Rapport alene. Bygget et syntetisk to-delt prosjekt (indoor «Hovedinngang» + snow «Støp 3»,
+  samme struktur som `_enterPart` sin egen 'snow'-gren). Instrumenterte `_renderRoomToImage` rett
+  før `render()` kalles — fanget en ekte felle i selve målemetoden: funksjonen kaller `render()`
+  TO ganger (midt i eksporten + for å gjenopprette skjermbildet); å lese SISTE kall i stedet for
+  FØRSTE ga et falskt resultat først, rettet før tabellen ble skrevet. Rotårsak (etasjefilteret,
+  «etasje vanntett»-regelen fra 19.08): `_rebuildActiveFloorRoomIds()` filtrerer på TO felt —
+  `S.ui.activePartId` OG `S.ui.activeFloorId`. `_renderRoomToImage` (kalt fra `exportPDF` sin
+  per-rom-løkke, og fra PDF-forhåndsvisningen) satte kun `activeFloorId` fra rommet som skulle
+  tegnes — `activePartId` ble ALDRI rørt, stod igjen på forrige aktive del. Bekreftet: for Støp 3
+  ble `activeFloorId` faktisk satt riktig, men `activePartId` stod igjen på indoor — MEKANISME 1
+  bekreftet som den faktiske årsaken. MEKANISME 2 (rom uten `floorId`) testet separat, bekreftet
+  EKTE og nåbar via «Fjern fra etasje»-menyvalget (`mvRoom(id,null)`) — ikke årsaken til Kenneths
+  konkrete sak, men reell og måtte håndteres eksplisitt likevel.
+- **`4fe75a5` — fiks + STEG 2-rapport: begge felt settes og gjenopprettes nå.**
+  `_renderRoomToImage` setter og gjenoppretter nå BEGGE (`saved.activePartId` lagt til ved siden
+  av det eksisterende `saved.activeFloorId`-mønsteret). Ny sentinel `'__none__'` på
+  `_effectiveActiveFloorId()` (samme mønster som `'__global__'` allerede er for bakgrunn) — et
+  etasjeløst rom uttrykker nå eksplisitt «ingen etasje, IKKE fall tilbake» i stedet for å
+  tilfeldig arve forrige etasje eller `S.floors[0]`-fallbacken. Filteret selv er urørt og like
+  strengt. STEG 2-rapport over 25 skrivesteder til disse to feltene: legitim innen-del-navigasjon
+  (sidebar/kontekstmeny) etterlater bevisst `activePartId` urørt siden konteksten allerede er
+  riktig; `undo()`/`_restoreProject`/`_resetProjectState` setter allerede begge korrekt.
+  `_renderRoomToImageOffscreen` er død kode (ingen kallesteder) — urørt, ikke fjernet. Ny
+  dev-mode-påstand (samme `_floorlessWarned`-mønster som `_onActiveFloor` allerede bruker): rett
+  etter `render()` inne i `_renderRoomToImage`, varsler (aldri kaster) hvis rommet som nettopp ble
+  tegnet ikke er i `_activeFloorRoomIds`.
+- Verifisert: Kenneths eksakte scenario FØR/ETTER; etasjeløst rom verifisert inkludert via
+  `'__none__'`; skew-kabel (39 pathEls, 0 runs) på rotert uteareal verifisert overlever eksport
+  uendret; tre-roms scenario (2 innendørs-etasjer + 1 uteareal) verifisert at hver runde viser
+  utelukkende sitt eget rom; påstanden bekreftet å faktisk fyre når kun etasje (ikke del) settes
+  med vilje. Full regresjonsbatteri bestått på fersk sideinnlasting.
+- Ikke testet: ekte innlogget PDF-eksport av et flerdels-prosjekt.
+
+**Fil:** romtegner.html + `docs/endringslogg.md`.
+
+---
+
 ## Kabel på roterte områder følger nå sidene, ikke skjermens akser — 2026-08-22
 
 Kenneth (utendørs rampe, InSnow 30T 3700W 120,1m 400V × 3): kabelen la seg vannrett/loddrett i
