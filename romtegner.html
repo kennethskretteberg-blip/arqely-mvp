@@ -11649,17 +11649,32 @@ function _fillZone(room, zone, sortedProds, direction, gap, margin) {
 //   A (auto, sone, 7 baner, 3 breddetyper, 13,50 m² dekket): score = 135000−7×143400×0,08−2×143400×0,12 = 20 280
 //   B (Kenneth, 3 baner, 3 breddetyper,   12,96 m² dekket): score = 129600−3×143400×0,08−2×143400×0,12 = 60 768
 //   C (Kenneth, 6 baner, 3 breddetyper,   13,58 m² dekket): score = 135800−6×143400×0,08−2×143400×0,12 = 32 552
+// Regel 4 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): «Dekning er målet. Baner og bredder er
+// KOSTNADER, ikke forbud.» De gamle vektene (0.08/0.12) var selve spec-setningen «lengde/
+// kontinuitet > full dekning» (10.06.2026) omgjort til tall — en bane kostet 3,1 m² gulv i et
+// 39 m²-rom, fire bredder kostet 14 m². Regnestykket i spec-en: et 2-baners utlegg som dekker
+// 1,4 m² av rommet rangerte HØYERE enn Kenneths 95 %-utlegg (ALT 1). Ikke en avrundingsfeil —
+// størrelsesordenen var gal.
+// Nye vekter, kalibrert mot fasit-tabellen (ALT 1: 37,25 m² dekket/≈9 baner/≈4 bredder,
+// ALT 2: 35,85 m² dekket/≈færre bredder — begge i et 39,03 m²=390 300 cm²-rom):
+//   ALT 1: 372500 − 9×390300×0,008 − 3×390300×0,015 − 17800×0,3 ≈ 321 495
+//   2-baners degenerert utlegg (≈168 000 cm² dekket): 168000 − 2×390300×0,008 − 0 − 222300×0,3
+//     ≈ 95 065 — ALT 1 vinner med ~3,4× margin, ikke en knapp seier.
+// Se commit-meldingen for det fulle regnestykket, inkl. ALT 2.
 const FOIL_SCORE_WEIGHTS = {
-  stripCostFrac: 0.08,      // hver bane (= én tilkobling) koster ~8% av rommets areal
-  widthTypeCostFrac: 0.12,  // hver EKSTRA breddetype (utover den første) koster ~12% av rommets areal
+  stripCostFrac: 0.008,        // hver bane (= én tilkobling) koster ~0,8% av rommets NETTOAREAL
+  widthTypeCostFrac: 0.015,    // hver EKSTRA breddetype (utover den første) koster ~1,5% — kapp/lagerhold, ikke gulv
+  uncoveredCostFrac: 0.3,      // EKSPLISITT straff per cm² udekket, UTOVER at det ikke telles som dekket —
+                                // uten denne er motoren likegyldig til de siste flekkene, ikke aktivt jagende dem
 };
 function _scoreFoilLayout(defs, ctx) {
   const profile = (ctx && ctx.profile) || 'select';
 
-  // 'long' profile — «lange strimler vegg-til-vegg»: maximize covered area but charge a real cost
-  // PER strip (≈8% of the room's net area) and per extra width type, so an added strip must earn
-  // its keep in coverage. Net effect: few, long, uniform strips; a little uncovered edge is fine,
-  // but it never collapses to one tiny strip when several substantial ones cover much more.
+  // 'long' profile — «lange strimler vegg-til-vegg»: maximize covered area, charge a SMALL cost per
+  // strip (≈0,8% av nettoarealet — en tilkobling, ikke gulv) og per ekstra breddetype (≈1,5% — kapp/
+  // lagerhold), PLUSS en eksplisitt straff per cm² udekket areal (Regel 4). Nettoeffekt: motoren
+  // jager dekning aktivt — en fløy som blir stående udekket er dyrere enn å legge én bane til for å
+  // dekke den — men velger fortsatt få, lange, ensartede striper når to utlegg dekker likt.
   if (profile === 'long') {
     if (!defs.length) return -Infinity;
     let coveredArea = 0; const widthSet = new Set();
@@ -11670,9 +11685,11 @@ function _scoreFoilLayout(defs, ctx) {
       widthSet.add(nc);
     }
     const netCm2 = (ctx && ctx.netCm2) || (coveredArea / 0.85);   // fallback if not supplied
+    const uncoveredCm2 = Math.max(0, netCm2 - coveredArea);
     return coveredArea
          - defs.length * netCm2 * FOIL_SCORE_WEIGHTS.stripCostFrac
-         - (widthSet.size - 1) * netCm2 * FOIL_SCORE_WEIGHTS.widthTypeCostFrac;
+         - (widthSet.size - 1) * netCm2 * FOIL_SCORE_WEIGHTS.widthTypeCostFrac
+         - uncoveredCm2 * FOIL_SCORE_WEIGHTS.uncoveredCostFrac;
   }
 
   if (profile === 'zone') {
@@ -11905,13 +11922,15 @@ function _centerStripDefs(defs, room, direction) {
 }
 
 // Etter en perp-forskyvning (sentrering) kan en strimmel ha havnet over en hindring/
-// forbudt sone og beholdt full lengde → folie i hindring. Re-klipp HVER def mot
-// hindringer/soner ved sin (forskjøvne) pos, og del/forkort den deretter. Aldri folie
-// i hindring, verken auto eller etter sentrering.
+// forbudt sone ELLER utenfor selve romveggen (Regel 1, spec-folie-auto-utlegg.md) og beholdt full
+// lengde. Re-klipp HVER def mot rom+hindringer+soner ved sin (forskjøvne) pos, og del/forkort den
+// deretter. Aldri folie utenfor rommet, aldri i hindring — verken auto eller etter sentrering.
+// BUG (Kenneth 28.08.2026, vertikal auto la en bane utenfor ytterveggen): denne kjørte FØR kun når
+// rommet hadde hindringer eller forbudte soner — men computeClippedSegments klipper UANSETT mot
+// romveggen (clipStripToRoom, ubetinget), så re-klippet trengs like mye i et hindringsfritt rom.
+// Kjøres derfor nå UBETINGET, ikke som bieffekt av «har rommet hindringer?». Et rom er like
+// uregelmessig uten hindringer som med (samme innsikt gjelder Regel 2, 6 og 7).
 function _reclipDefsAroundObstacles(defs, room, direction) {
-  const hind = (S.hindrings || []).filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
-  const fz   = (S.zones || []).filter(z => z.roomId === room.id && z.type === 'forbidden' && z.points && z.points.length >= 3);
-  if (!hind.length && !fz.length) return defs;   // ingenting å klippe mot
   const MIN_LEN = 5;
   const out = [];
   for (const d of defs) {
@@ -12281,6 +12300,13 @@ function _slantStaircaseFill(room, baseDefs, sortedProds, direction) {
 // hardkodet tall spredt i pakkeren) — juster HER, ikke i _layoutRulePenalty sin kropp.
 const FOIL_MIN_USEFUL_WATT = 15;
 
+// Regel 5 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026, ALT 2: «større avstand for å få mindre
+// bredder, men allikevel god dekning»): rommets innstilte avstand (room.foilGapCm/_roomFoilGapCm)
+// er et MINIMUM motoren søker fra, ikke en fast verdi — se _longStripsLayout. Produsentens egen
+// minsteavstand (_productMinGapCm, inni _effectiveGapCm) er fortsatt et absolutt gulv, urørt.
+// Åpen verdi — Kenneth bekrefter eller endrer (spec, Åpne punkter #1); ALT 2 selv brukte 3,0 cm.
+const FOIL_AUTO_MAX_GAP_CM = 5.0;
+
 // Straff for et utlegg som bryter regler eller er oppstykket — trekkes fra scoren så
 // «anbefalt» (★) aldri går til et regelbrytende/dårligere alternativ. Folie i hindring
 // koster ~1× romareal (dominerer) → et slikt utlegg vinner aldri.
@@ -12313,13 +12339,35 @@ function _layoutRulePenalty(defs, room) {
 // nå breddeTYPER på SAMME grunnlag scoren selv bruker (nettobredde, «nc») — ikke produkt-id. To
 // produkter med lik nettobredde (ulik effekt/rullengde) telte tidligere som 2 her men 1 i scoren;
 // samme «ett felt, to betydninger»-mønster som min_gap_mm. Panelet og scoren viser nå samme tall.
-// STEG 1: netCm2 sendes nå EKSPLISITT inn — SAMME grunnlag (Math.abs(compArea(room.points)))
-// _longStripsLayout selv brukte da den fant «best» — uten dette falt scoren her tilbake til
-// _scoreFoilLayout sin selv-refererende coveredArea/0.85, som IKKE er samme tall som søket faktisk
-// optimerte mot (et rent tilfeldig, ikke bevisst avvik — retter det i samme slag som resten).
+// Regel 10 (spec-folie-auto-utlegg.md): netCm2 er nå _roomNetAreaCm2(room) — NETTO, samme tall
+// infokortet viser — IKKE lenger Math.abs(compArea(room.points)) = BRUTTO. I et rom uten
+// hindringer er de tilfeldigvis like (Rom 2/Rom 4 i regresjonstesten); i et rom MED en hindring
+// ville motoren før optimert mot bruttoarealet mens kortet viste netto, og «anbefalt» kunne
+// pekt på et utlegg med dårligere netto-dekning enn et alternativ. Motor, panel og infokort leser
+// nå fra samme funksjon.
+// Regel 5 (spec-folie-auto-utlegg.md): «Det valgte forslaget skal vise hvilken avstand det faktisk
+// bruker.» Utleder den observerte avstanden fra RESULTATET (median mellomrom mellom nabokolonner i
+// samme retning) i stedet for å tre et avstandsvalg gjennom hvert kall i søket separat — virker
+// uansett hvilken vei et gitt defs-sett ble bygget (uniform, blandet, sone-utlegg). Median, ikke
+// gjennomsnitt eller første par — robust mot én uvanlig kant-avstand.
+function _observedGapCm(defs) {
+  if (!defs || defs.length < 2) return null;
+  const dir = defs[0].direction;
+  const cols = [...new Set(defs.filter(d => d.direction === dir).map(d => d.pos_cm))].sort((a, b) => a - b);
+  if (cols.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < cols.length; i++) {
+    const prevDef = defs.find(d => d.pos_cm === cols[i - 1] && d.direction === dir);
+    const prevP = HEATING_PRODUCTS.find(p => p.id === prevDef.productId);
+    const prevNc = prevP ? (prevP.netto_width_mm || prevP.width_mm) / 10 : 0;
+    gaps.push(cols[i] - (cols[i - 1] + prevNc));
+  }
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
 function _foilLayoutStats(defs, room, scoreProfile) {
-  const netArea = _calcNetArea(room);
-  const netCm2 = Math.abs(compArea(room.points)) || 1;
+  const netCm2 = _roomNetAreaCm2(room) || 1;
+  const netArea = netCm2 / 10000;
   let coveredArea = 0, totalW = 0; const widthSet = new Set();
   for (const d of defs) {
     const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
@@ -12335,6 +12383,7 @@ function _foilLayoutStats(defs, room, scoreProfile) {
     totalWatt: Math.round(totalW),
     wattPerM2: netArea > 0 ? Math.round(totalW / netArea) : 0,
     widthTypes: widthSet.size,
+    gapCm: _observedGapCm(defs),
     score: _scoreFoilLayout(defs, { profile: scoreProfile, netCm2 }) - _layoutRulePenalty(defs, room)
   };
 }
@@ -12343,47 +12392,77 @@ function _foilLayoutStats(defs, room, scoreProfile) {
 // the highest-scoring one. Trying widths (not just the widest) auto-picks wide foil for rectangles
 // and a narrower uniform width where wide foil would barely fit (e.g. an L/arm sone), keeping good
 // coverage with few, long, uniform strips. marginCm forwarded for layout-zone (pre-inset) fills.
+// Regel 5+8 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): returnerer nå TO kandidater, ikke én.
+// `best` = høyest scorende uansett breddeblanding («Maks dekning», ALT 1-aktig). `bestUniform` =
+// høyest scorende blant kandidatene som bruker ÉN breddetype («Færrest bredder», ALT 2-aktig) —
+// alle ett-produkt-kallene under er per definisjon uniforme; det blandede STEG 2-kallet lengst
+// ned er bevisst IKKE en bestUniform-kandidat, siden det blander bredder med vilje.
+// Regel 5: rommets minsteavstand er et GULV motoren søker OPP FRA, ikke en fast verdi — prøv
+// gulvet og et par steg mot taket (FOIL_AUTO_MAX_GAP_CM), behold det som scorer best per kandidat.
+// «Hold søket i tømme»: 3 avstander, ikke et kontinuerlig søk.
 function _longStripsLayout(room, sortedProds, direction, marginCm) {
-  const netCm2 = Math.abs(compArea(room.points)) || 1;
+  const netCm2 = _roomNetAreaCm2(room) || 1;   // Regel 10 — netto, samme tall som panel/infokort
   const score = defs => _scoreFoilLayout(defs, { profile: 'long', netCm2 });
   let best = [], bestS = -Infinity;
-  for (const prod of sortedProds) {
-    for (const fromHigh of [false, true]) {
-      const defs = _autoFillRoomOnce(room, [prod], direction, fromHigh, undefined, marginCm, true);
-      const s = score(defs);
-      if (defs.length && s > bestS) { bestS = s; best = defs; }
+  let bestUniform = [], bestUniformS = -Infinity;
+
+  const roomMinGap = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id, room.id)));
+  const gapCandidates = [...new Set([
+    roomMinGap,
+    Math.min(FOIL_AUTO_MAX_GAP_CM, (roomMinGap + FOIL_AUTO_MAX_GAP_CM) / 2),
+    Math.max(roomMinGap, FOIL_AUTO_MAX_GAP_CM),
+  ])];
+
+  for (const gapCm of gapCandidates) {
+    for (const prod of sortedProds) {
+      for (const fromHigh of [false, true]) {
+        const defs = _autoFillRoomOnce(room, [prod], direction, fromHigh, undefined, marginCm, true, gapCm);
+        const s = score(defs);
+        if (defs.length && s > bestS) { bestS = s; best = defs; }
+        if (defs.length && s > bestUniformS) { bestUniformS = s; bestUniform = defs; }
+      }
+    }
+    // STEG 2 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist» —
+    // Regel 21 for folie, samme sak vi låste for matte): den globale veien kunne KUN uttrykke én
+    // uniform bredde (løkka over sender alltid [prod], ett produkt). Kenneths egne manuelle utlegg
+    // (B: 140+80+100, C: 140/140/140+60+20) er nøyaktig «grådig fra bredest, smalere bredder fyller
+    // gapet en bredere ikke dekker» — over hele rommet, IKKE sone-fragmentert. Den maskinen finnes
+    // allerede: _autoFillRoomOnce sin longMode=false-gren (brukt av 'coverage'-strategien, se
+    // _autoFillBothDirections) plukker allerede adaptivt bredeste-som-får-plass per kolonne når den
+    // får HELE sortedProds i stedet for ett produkt. Legges inn som en EKSTRA kandidat her — vurdert
+    // med SAMME score som uniform-kandidatene over, vinner kun når den faktisk scorer bedre (ikke en
+    // ny motor, gjenbruk av en som allerede fantes for en annen strategi).
+    if (sortedProds.length > 1) {
+      for (const fromHigh of [false, true]) {
+        const defs = _autoFillRoomOnce(room, sortedProds, direction, fromHigh, undefined, marginCm, false, gapCm);
+        const s = score(defs);
+        if (defs.length && s > bestS) { bestS = s; best = defs; }
+      }
     }
   }
-  // STEG 2 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist» —
-  // Regel 21 for folie, samme sak vi låste for matte): den globale veien kunne KUN uttrykke én
-  // uniform bredde (løkka over sender alltid [prod], ett produkt). Kenneths egne manuelle utlegg
-  // (B: 140+80+100, C: 140/140/140+60+20) er nøyaktig «grådig fra bredest, smalere bredder fyller
-  // gapet en bredere ikke dekker» — over hele rommet, IKKE sone-fragmentert. Den maskinen finnes
-  // allerede: _autoFillRoomOnce sin longMode=false-gren (brukt av 'coverage'-strategien, se
-  // _autoFillBothDirections) plukker allerede adaptivt bredeste-som-får-plass per kolonne når den
-  // får HELE sortedProds i stedet for ett produkt. Legges inn som en EKSTRA kandidat her — vurdert
-  // med SAMME score som uniform-kandidatene over, vinner kun når den faktisk scorer bedre (ikke en
-  // ny motor, gjenbruk av en som allerede fantes for en annen strategi). «Hold søket i tømme»: to
-  // ekstra kall (fromHigh true/false), ikke et kombinatorisk søk.
-  if (sortedProds.length > 1) {
-    for (const fromHigh of [false, true]) {
-      const defs = _autoFillRoomOnce(room, sortedProds, direction, fromHigh, undefined, marginCm, false);
-      const s = score(defs);
-      if (defs.length && s > bestS) { bestS = s; best = defs; }
-    }
-  }
-  return best;
+  return { best, bestUniform };
 }
 
 // «Lange strimler vegg-til-vegg» (default foil strategy): few, long, uniform strips per direction.
 // Skips the coverage-maximizing strategies (beam/obstacle/gap-pack) that fragment into short bits.
+// Regel 8 (spec-folie-auto-utlegg.md): returnerer nå FIRE forslag, ikke to — «Maks dekning»
+// (${dir}Max, ALT 1-aktig) og «Færrest bredder» (${dir}Few, ALT 2-aktig) for hver retning, fra de
+// to kandidatene _longStripsLayout allerede skiller (best/bestUniform). Har rommet ikke noen
+// distinkt uniform kandidat (t.eks. for smalt for én bredde), faller Few tilbake til Max — aldri
+// tomt forslag.
 function _longStripsBothDirections(room, sortedProds) {
+  const finalize = (raw, dir) => {
+    let d = raw.length ? _centerStripDefs(raw, room, dir) : [];
+    d = _reclipDefsAroundObstacles(d, room, dir);   // aldri folie utenfor rom/i hindring etter sentrering
+    return d;
+  };
   const results = {};
   for (const dir of ['h', 'v']) {
-    let best = _longStripsLayout(room, sortedProds, dir);
-    best = best.length ? _centerStripDefs(best, room, dir) : [];
-    best = _reclipDefsAroundObstacles(best, room, dir);   // aldri folie i hindring etter sentrering
-    results[dir] = { defs: best, stats: _foilLayoutStats(best, room, 'long') };
+    const { best, bestUniform } = _longStripsLayout(room, sortedProds, dir);
+    const maxDefs = finalize(best, dir);
+    const fewDefs = finalize(bestUniform.length ? bestUniform : best, dir);
+    results[dir + 'Max'] = { defs: maxDefs, stats: _foilLayoutStats(maxDefs, room, 'long') };
+    results[dir + 'Few'] = { defs: fewDefs, stats: _foilLayoutStats(fewDefs, room, 'long') };
   }
   return results;
 }
@@ -12434,30 +12513,19 @@ function _autoFillBothDirections(room, sortedProds) {
 
     best = _reclipDefsAroundObstacles(best, room, dir);   // aldri folie i hindring etter sentrering/forskyvning
 
-    // Calculate stats
-    const netArea = _calcNetArea(room);
-    let coveredArea = 0, totalW = 0;
-    const widthSet = new Set();
-    for (const d of best) {
-      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
-      if (!p) continue;
-      const nc = (p.netto_width_mm || p.width_mm) / 10;
-      coveredArea += nc * d.length_cm / 10000;
-      totalW += (p.watt_per_m2 || 60) * nc * d.length_cm / 10000;
-      widthSet.add(p.id);
-    }
-
-    results[dir] = {
-      defs: best,
-      stats: {
-        stripCount: best.length,
-        coveragePct: netArea > 0 ? Math.round(coveredArea / netArea * 100) : 0,
-        totalWatt: Math.round(totalW),
-        wattPerM2: netArea > 0 ? Math.round(totalW / netArea) : 0,
-        widthTypes: widthSet.size,
-        score: score(best)
-      }
-    };
+    // Regel 10 (spec-folie-auto-utlegg.md): denne blokka regnet FØR sine egne tall inline —
+    // widthSet.add(p.id) telte breddeTYPER som produkt-id (to produkter med lik nettobredde men
+    // ulik effekt/rullengde talte som 2, scoren over telte dem som 1 via nc), og score:score(best)
+    // brukte rå score UTEN _layoutRulePenalty trukket fra (samme straff-fradrag select/long-veien
+    // allerede får). _foilLayoutStats er den delte fasiten for nøyaktig disse tallene — bruk den
+    // her også, i stedet for en tredje kopi av samme utregning.
+    // Regel 8: 'coverage'-strategien (legacy, kun rom MED hindringer uten et eksplisitt 'long'-
+    // valg) skiller foreløpig ikke «Maks dekning» fra «Færrest bredder» — samme resultat i begge
+    // kort. 'long'-veien (_longStripsBothDirections, standard for Kenneths hindringsfrie rom) har
+    // den reelle firedelingen.
+    const stats = _foilLayoutStats(best, room, 'select');
+    results[dir + 'Max'] = { defs: best, stats };
+    results[dir + 'Few'] = { defs: best, stats };
   }
   return results;
 }
@@ -12497,24 +12565,28 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
   // sine egne grenser, så en sonekant (ikke en ekte vegg) kan stoppe en strimmel for tidlig og
   // etterlate et hull som den globale H/V-fyllingen (uten sone-fragmentering) ikke har. Erstatt
   // derfor bare når sone-resultatet faktisk er MINST like bra som det som allerede ligger i
-  // results[dir] (samme dekning-først + score-tiebreak-regel som _statsAtLeastAsGood/_betterFoilDir
-  // under) — aldri en ubetinget overskriving. Enkle rom (≤1 sone) beholder dagens H/V-utlegg
-  // (_zonedDefsForDirection returnerer null).
+  // results[dir+'Max'] (samme dekning-først + score-tiebreak-regel som _statsAtLeastAsGood/
+  // _bestFoilOption under) — aldri en ubetinget overskriving. Enkle rom (≤1 sone) beholder dagens
+  // H/V-utlegg (_zonedDefsForDirection returnerer null). Regel 7 (spec-folie-auto-utlegg.md):
+  // dette kallet var ALLEREDE ubetinget (ikke gatet på hindringer) — sone-dekomponeringen taper
+  // ikke lenger like ofte på scoren nå som Regel 4 er rettet, og vinner her når den faktisk er
+  // bedre. Sammenlignes kun mot «Maks dekning» — sonepakking blander bredder, ikke en «Færrest
+  // bredder»-kandidat.
   try {
     for (const dir of ['h', 'v']) {
       const zd = _zonedDefsForDirection(room, prods[0].id, dir);
       if (!zd || !zd.length) continue;
       const zStats = _foilLayoutStats(zd, room, 'long');
-      if (_statsAtLeastAsGood(zStats, results[dir].stats)) results[dir] = { defs: zd, stats: zStats };
+      if (_statsAtLeastAsGood(zStats, results[dir + 'Max'].stats)) results[dir + 'Max'] = { defs: zd, stats: zStats };
     }
   } catch (e) { console.warn('Sone-utlegg feilet:', e.message); }
 
   S.ui.autoFillCompare = results;
   S.ui.autoFillCompareCategoryId = categoryId;
 
-  const better = _betterFoilDir(results);
-  _renderAutoFillComparePanel(results, better);
-  _previewAutoFillOption(better);
+  const best = _bestFoilOption(results);
+  _renderAutoFillComparePanel(results, best);
+  _previewAutoFillOption(best);
 }
 
 // STEG 1 (Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget utlegg sist»): FJERNET
@@ -12523,30 +12595,37 @@ function showAutoFillComparison(familyName, categoryId, maxWidthMm) {
 // 4-6 poeng dekningsforsprang mot B/C, selv om A scoret 3× DÅRLIGERE — scoren ble aldri konsultert).
 // _scoreFoilLayout (se FOIL_SCORE_WEIGHTS) uttrykker ALLEREDE dekning, banekostnad og breddetype-
 // kostnad i samme enhet (cm²) — én ren >= er derfor riktig, ikke en ny beregning. Samme regel
-// brukes til å velge H vs V (_betterFoilDir) OG sone- vs global-utlegg for SAMME retning
+// brukes til å velge beste av de fire (_bestFoilOption) OG sone- vs global-utlegg for SAMME retning
 // (showAutoFillComparison over) — én kilde til sannhet for «bedre».
 function _statsAtLeastAsGood(a, b) {
   return a.score >= b.score;
 }
 
-// Auto = BEST SCORE (se FOIL_SCORE_WEIGHTS/_statsAtLeastAsGood over): velg retningen med høyest
-// sammensatt score — dekning, banekostnad og breddetype-kostnad i SAMME enhet (cm²), ikke lenger
-// et separat prosentpoengs-forsprang på dekning alene. (Tidligere kommentar her beskrev et
-// dekning-først-med-3pp-tie-break-regime — det er FJERNET, se STEG 1-kommentaren over.)
-function _betterFoilDir(results) {
-  return _statsAtLeastAsGood(results.h.stats, results.v.stats) ? 'h' : 'v';
+// Regel 8 (spec-folie-auto-utlegg.md): «Ett av de fire merkes ★ anbefalt» — velg nøkkelen (hMax/
+// hFew/vMax/vFew) med høyest sammensatt score blant alle fire, samme regel som før (BEST SCORE),
+// bare utvidet fra to alternativer til fire. Erstatter _betterFoilDir (het det da valget stod
+// mellom kun h og v).
+function _bestFoilOption(results) {
+  const keys = ['hMax', 'hFew', 'vMax', 'vFew'];
+  return keys.reduce((best, k) => _statsAtLeastAsGood(results[k].stats, results[best].stats) ? k : best, keys[0]);
 }
 
-// ─── FOLIE-REGRESJONSTEST (STEG 3, «foliemotorens egen score rangerer dens eget utlegg sist»,
-// Kenneth 19.08.2026) ─────────────────────────────────────────────────────────────────────────
-// Ingen tidligere test dekket folie-motoren i det hele tatt (_matRegressionTest er mattemotor-
-// only) — «Rom 4» (samme uregelmessige rom som STEG 0-rapporten over: 550×300cm, skrå
-// venstrevegg + utstikk nede til venstre, 14,00 m²) låses her som fasit, samme try/finally-mønster
-// som _matRegressionTest. Reproduserer selve VALGET showAutoFillComparison gjør (global vs sone
-// per retning, så H vs V) uten å røre DOM-panelet, med en syntetisk 7-bredders folie-familie
-// (20/40/60/80/100/120/140cm netto). Fasiten er selve BUGEN sitt motstykke: FØR fiksen valgte
-// dette rommet h-sone (score 40240, LAVEST av de fire alternativene) — nå skal det velge
-// h-global (score ~94290, HØYEST), 2 baner, 1 breddetype, ~83 % dekning.
+// ─── FOLIE-REGRESJONSTEST (Regel 12, spec-folie-auto-utlegg.md, Kenneth 28.08.2026, «auto-folie
+// mot den nye fasiten») ───────────────────────────────────────────────────────────────────────
+// SKREVET OM, ikke bare oppdatert med nye tall. Den gamle testen LÅSTE FAST selve bugen —
+// «2 baner, 1 breddetype, ~83% dekning» som RIKTIG svar — fordi spec-en den fulgte den gangen
+// (spec-folie-lange-strimler-vegg-til-vegg.md, 10.06.2026) eksplisitt ba om «lengde/kontinuitet
+// > full dekning». Kenneth har siden sett resultatet i praksis (tre skjermbilder av et ekte rom:
+// horisontal auto lot en hel fløy stå udekket, vertikal la en bane utenfor ytterveggen) og endret
+// krav — en legitim kursendring, ikke en misforståelse. Testen er nå en KOPI av reglene i
+// spec-folie-auto-utlegg.md, ikke en kilde til dem: dekning over en terskel, ALDRI folie utenfor
+// polygonet (MÅLT geometrisk her, ikke antatt), ingen sammenhengende flate/fløy stående udekket.
+// «Rom 4» (samme syntetiske hindringsfrie rom som før: 550×300cm, skrå venstrevegg + utstikk,
+// 14,00 m²) beholdes som første tilfelle, med ny forventning. Nytt andre tilfelle: et trappeformet
+// («Rom 2»-lignende) rom — U-formet, 750×600cm med et 300×300cm hakk fjernet fra midten av
+// toppkanten, 36,00 m² — siden Kenneths ekte prosjekt-koordinater ikke er tilgjengelige her (se
+// spec sine Åpne punkter #3); et hakk i toppkanten reproduserer nøyaktig «horisontal lar en fløy
+// stå udekket»-symptomet (et horisontalt bånd gjennom hakket splittes i to atskilte flater).
 function _foilRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
   const savedRooms = S.rooms, savedStrips = S.strips, savedHindrings = S.hindrings,
@@ -12556,8 +12635,23 @@ function _foilRegressionTest() {
     savedFillTargetZoneId = S.ui.fillTargetZoneId;
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  // Regel 1 (måler, ikke antar): sampler et sett punkter langs hver def sin lengde og sjekker at
+  // ALLE ligger inni romPts — ikke bare at en toppnivåfunksjon "burde" ha klippet riktig.
+  const checkNoOutside = (defs, roomPts) => {
+    for (const d of defs) {
+      const p = HEATING_PRODUCTS.find(pp => pp.id === d.productId);
+      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
+      for (let s = 0; s <= 5; s++) {
+        const t = d.start_cm + (d.length_cm * s / 5);
+        const x = d.direction === 'v' ? d.pos_cm + nc / 2 : t;
+        const y = d.direction === 'v' ? t : d.pos_cm + nc / 2;
+        if (!ptInPoly(x, y, roomPts)) return false;
+      }
+    }
+    return true;
+  };
   try {
-    const RID = 900101, catId = 980100;
+    const catId = 980100;
     HEATING_PRODUCTS.length = 0;
     const widthsCm = [20, 40, 60, 80, 100, 120, 140];
     widthsCm.forEach((w, i) => HEATING_PRODUCTS.push({
@@ -12565,39 +12659,86 @@ function _foilRegressionTest() {
       name: `RegFoil ${w}cm`, voltage: 230, watt_per_m2: 60,
       netto_width_mm: w * 10, width_mm: w * 10 + 10,
     }));
-    const roomPts = [{ x: 150, y: 0 }, { x: 550, y: 0 }, { x: 550, y: 300 }, { x: 0, y: 300 }, { x: 0, y: 200 }, { x: 100, y: 200 }];
-    S.rooms = [{
-      id: RID, floorId: null, partId: null, shape: 'polygon', wallThicknessCm: 0,
-      points: roomPts, walls: [], dims: [], area: Math.abs(compArea(roomPts)),
-    }];
-    S.strips = []; S.hindrings = []; S.zones = [];
-    S.ui.selectedRoomId = RID;
-    S.ui.fillTargetZoneId = null;
-    S.varmefolie = S.varmefolie || {};
-    S.varmefolie.foilStrategy = 'long';
-
-    const room = S.rooms[0];
     const prods = HEATING_PRODUCTS.filter(p => p.category_id === catId && p.product_family === 'RegFoil')
       .sort((a, b) => (b.netto_width_mm || b.width_mm) - (a.netto_width_mm || a.width_mm));
-    const fillResults = _autoFillBothDirections(room, prods);
-    for (const dir of ['h', 'v']) {
-      const zd = _zonedDefsForDirection(room, prods[0].id, dir);
-      if (!zd || !zd.length) continue;
-      const zStats = _foilLayoutStats(zd, room, 'long');
-      if (_statsAtLeastAsGood(zStats, fillResults[dir].stats)) fillResults[dir] = { defs: zd, stats: zStats };
-    }
-    const chosen = _betterFoilDir(fillResults);
-    const hSt = fillResults.h.stats, vSt = fillResults.v.stats;
+    S.varmefolie = S.varmefolie || {};
+    S.varmefolie.foilStrategy = 'long';
+    S.ui.fillTargetZoneId = null;
 
-    check('Rom 4 velger H (global, ikke sone)', 'h',
-      chosen === 'h', chosen);
-    check('Rom 4 H: 2 baner, 1 breddetype, ~83% dekning', '2 baner, 1 breddetype, 83%',
-      hSt.stripCount === 2 && hSt.widthTypes === 1 && hSt.coveragePct === 83,
-      `${hSt.stripCount} baner, ${hSt.widthTypes} breddetype(r), ${hSt.coveragePct}%`);
-    check('Rom 4 H-score er høyest av H/V', 'h.score >= v.score',
-      hSt.score >= vSt.score, `h=${hSt.score}, v=${vSt.score}`);
-    check('Rom 4 H-score er positiv og troverdig (ikke sone-fallback ~40000)', '> 80000',
-      hSt.score > 80000, hSt.score);
+    const runRoom = (RID, roomPts) => {
+      S.rooms = [{ id: RID, floorId: null, partId: null, shape: 'polygon', wallThicknessCm: 0,
+        points: roomPts, walls: [], dims: [], area: Math.abs(compArea(roomPts)) }];
+      S.strips = []; S.hindrings = []; S.zones = [];
+      S.ui.selectedRoomId = RID;
+      const room = S.rooms[0];
+      const fillResults = _autoFillBothDirections(room, prods);
+      for (const dir of ['h', 'v']) {
+        const zd = _zonedDefsForDirection(room, prods[0].id, dir);
+        if (!zd || !zd.length) continue;
+        const zStats = _foilLayoutStats(zd, room, 'long');
+        if (_statsAtLeastAsGood(zStats, fillResults[dir + 'Max'].stats)) fillResults[dir + 'Max'] = { defs: zd, stats: zStats };
+      }
+      return fillResults;
+    };
+
+    // ── Rom 4: hindringsfritt, uregelmessig (LÅST FASIT ENDRET — se filhode-kommentaren) ──
+    {
+      const roomPts = [{ x: 150, y: 0 }, { x: 550, y: 0 }, { x: 550, y: 300 }, { x: 0, y: 300 }, { x: 0, y: 200 }, { x: 100, y: 200 }];
+      const fr = runRoom(900101, roomPts);
+      const bestKey = _bestFoilOption(fr);
+      const bestSt = fr[bestKey].stats;
+
+      check('Rom 4: dekning over 80% i beste forslag (var LÅST til nøyaktig 83% som et TAK i den gamle, MINST-mulig-fasiten — nå et gulv)',
+        '>= 80%', bestSt.coveragePct >= 80, `${bestKey}: ${bestSt.coveragePct}%`);
+      check('Rom 4: alle fire forslag (hMax/hFew/vMax/vFew) har minst én stripe', '>0 for alle fire',
+        ['hMax', 'hFew', 'vMax', 'vFew'].every(k => fr[k].defs.length > 0),
+        ['hMax', 'hFew', 'vMax', 'vFew'].map(k => k + ':' + fr[k].defs.length).join(', '));
+      check('Rom 4: ingen bane i noe forslag ligger utenfor polygonet (Regel 1, målt)', 'alle fire OK',
+        ['hMax', 'hFew', 'vMax', 'vFew'].every(k => checkNoOutside(fr[k].defs, roomPts)), 'sjekket alle fire');
+    }
+
+    // ── Trappeformet rom («Rom 2»-lignende, U-form med hakk — se filhode-kommentaren) ──
+    {
+      const roomPts2 = [{ x: 0, y: 0 }, { x: 225, y: 0 }, { x: 225, y: 300 }, { x: 525, y: 300 }, { x: 525, y: 0 }, { x: 750, y: 0 }, { x: 750, y: 600 }, { x: 0, y: 600 }];
+      const fr2 = runRoom(900102, roomPts2);
+
+      // Regel 3: horisontal Maks dekning skal treffe BEGGE fløyene rundt hakket, ikke bare den
+      // lengste (den gamle longMode-koden beholdt kun segs.reduce(lengst), mistet den andre helt).
+      const hBand = fr2.hMax.defs.filter(d => d.direction === 'h' && d.pos_cm < 300);
+      const leftWing = hBand.some(d => d.start_cm < 100);
+      const rightWing = hBand.some(d => d.start_cm + d.length_cm > 650);
+      check('Trapp-rom: horisontal Maks dekning treffer VENSTRE fløy av hakket (Regel 3)', 'minst én stripe med start<100', leftWing, leftWing);
+      check('Trapp-rom: horisontal Maks dekning treffer HØYRE fløy av hakket (Regel 3)', 'minst én stripe som når forbi 650', rightWing, rightWing);
+
+      check('Trapp-rom: ingen bane i noe forslag ligger utenfor polygonet (Regel 1+2, målt)', 'alle fire OK',
+        ['hMax', 'hFew', 'vMax', 'vFew'].every(k => checkNoOutside(fr2[k].defs, roomPts2)), 'sjekket alle fire');
+
+      const hMaxSt = fr2.hMax.stats, vMaxSt = fr2.vMax.stats;
+      check('Trapp-rom: dekning over 85% i beste retning (Regel 4 jager dekning aktivt, ikke likegyldig)', '>= 85%',
+        Math.max(hMaxSt.coveragePct, vMaxSt.coveragePct) >= 85, `h=${hMaxSt.coveragePct}%, v=${vMaxSt.coveragePct}%`);
+
+      check('Trapp-rom: «Færrest bredder» bruker aldri FLERE breddetyper enn «Maks dekning», noen retning (Regel 8)',
+        'Few <= Max begge retninger',
+        fr2.hFew.stats.widthTypes <= fr2.hMax.stats.widthTypes && fr2.vFew.stats.widthTypes <= fr2.vMax.stats.widthTypes,
+        `hFew=${fr2.hFew.stats.widthTypes}/hMax=${fr2.hMax.stats.widthTypes}, vFew=${fr2.vFew.stats.widthTypes}/vMax=${fr2.vMax.stats.widthTypes}`);
+    }
+
+    // ── Regel 4-regnestykket, LÅST som tall (ikke bare prinsipp) — spec sin egen fasit-tabell
+    // (Rom 2, 39,03 m² = 390 300 cm²: ALT 1 dekker 37,25 m²/≈9 baner/≈4 bredder) skal fortsatt
+    // score høyere enn en generøs degenerert 2-baners løsning (64% dekning) uansett fremtidige
+    // vekt-justeringer — ellers er selve bugen (spec-regnestykket: et 2-baners 1,4m²-utlegg
+    // rangert over Kenneths 95%-utlegg) i ferd med å snike seg tilbake.
+    {
+      const netCm2 = 390300;
+      const scoreALT1 = 372500 - 9 * netCm2 * FOIL_SCORE_WEIGHTS.stripCostFrac - 3 * netCm2 * FOIL_SCORE_WEIGHTS.widthTypeCostFrac
+        - Math.max(0, netCm2 - 372500) * FOIL_SCORE_WEIGHTS.uncoveredCostFrac;
+      const degenerateCovered = 250000;   // generøst anslag: 2 baner, 64% dekning
+      const scoreDegenerate = degenerateCovered - 2 * netCm2 * FOIL_SCORE_WEIGHTS.stripCostFrac
+        - Math.max(0, netCm2 - degenerateCovered) * FOIL_SCORE_WEIGHTS.uncoveredCostFrac;
+      check('Regel 4-regnestykket: ALT 1 (95% dekning/9 baner/4 bredder) scorer høyere enn en generøs 2-baners degenerering (64% dekning)',
+        'scoreALT1 > scoreDegenerate', scoreALT1 > scoreDegenerate,
+        `ALT1=${Math.round(scoreALT1)}, degenerert=${Math.round(scoreDegenerate)}`);
+    }
   } finally {
     HEATING_PRODUCTS.length = 0;
     HEATING_PRODUCTS.push(...savedProducts);
@@ -12612,7 +12753,13 @@ function _foilRegressionTest() {
   return { ok: allOk, results };
 }
 
-function _renderAutoFillComparePanel(results, selectedDir) {
+// Regel 8 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): «Fire forslag: to arbeidsmåter ×
+// to retninger.» Var to kort (Horisontal/Vertikal); nå fire — Maks dekning (ALT 1-aktig) og
+// Færrest bredder (ALT 2-aktig), hver i Horisontal og Vertikal. Nøklene er hMax/hFew/vMax/vFew
+// (se _longStripsBothDirections). Hvert kort viser samme tall som infokortet ALLTID viste
+// (dekning %, W/m²) PLUSS antall bredder, antall baner og — Regel 5 — avstanden forslaget faktisk
+// endte opp med å bruke, så et forslag som har økt avstanden aldri ser ut som et bug.
+function _renderAutoFillComparePanel(results, selectedKey) {
   let panel = document.getElementById('autofill-compare');
   if (!panel) {
     panel = document.createElement('div');
@@ -12622,12 +12769,10 @@ function _renderAutoFillComparePanel(results, selectedDir) {
     if (wrap) wrap.appendChild(panel);
   }
 
-  const hSt = results.h.stats, vSt = results.v.stats;
-  const hBetter = _betterFoilDir(results) === 'h';   // ★ = anbefalt retning (best dekning)
-  const hLabel = hBetter ? '★ Horisontal' : 'Horisontal';
-  const vLabel = !hBetter ? '★ Vertikal' : 'Vertikal';
+  const bestKey = _bestFoilOption(results);   // ★ = anbefalt (best score av alle fire)
+  const DIR_LABEL = { h: 'Horisontal', v: 'Vertikal' };
+  const MODE_LABEL = { Max: 'Maks dekning', Few: 'Færrest bredder' };
 
-  // Build product width summary for each option
   const _widthSummary = defs => {
     const wMap = {};
     for (const d of defs) {
@@ -12639,32 +12784,35 @@ function _renderAutoFillComparePanel(results, selectedDir) {
     return Object.entries(wMap).sort((a,b) => b[0]-a[0]).map(([w,n]) => n + '× ' + w + 'cm').join(', ');
   };
 
+  const _card = key => {
+    const dir = key.startsWith('h') ? 'h' : 'v';
+    const mode = key.endsWith('Max') ? 'Max' : 'Few';
+    const r = results[key];
+    const label = (key === bestKey ? '★ ' : '') + MODE_LABEL[mode] + ' · ' + DIR_LABEL[dir];
+    const gapMm = r.stats.gapCm != null ? Math.round(r.stats.gapCm * 10) : null;
+    return `<div class="af-option${selectedKey===key?' selected':''}" onclick="_selectAutoFillOption('${key}')" onmouseenter="_previewAutoFillOption('${key}')">
+        <div class="af-dir">${label}</div>
+        <div class="af-stat">${r.stats.stripCount} striper · ${r.stats.widthTypes} bredde${r.stats.widthTypes===1?'':'r'}</div>
+        <div class="af-stat">${r.stats.coveragePct}% dekning</div>
+        <div class="af-stat">${r.stats.totalWatt} W (${r.stats.wattPerM2} W/m²)</div>
+        ${gapMm != null ? `<div class="af-stat">Avstand striper ${(gapMm/10).toFixed(1).replace('.',',')} cm</div>` : ''}
+        <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(r.defs)}</div>
+      </div>`;
+  };
+
   panel.innerHTML = `
     <div style="font-weight:600;font-size:14px;margin-bottom:14px;text-align:center">Automatisk plassering</div>
-    <div style="display:flex;gap:10px">
-      <div class="af-option${selectedDir==='h'?' selected':''}" onclick="_selectAutoFillOption('h')" onmouseenter="_previewAutoFillOption('h')">
-        <div class="af-dir">${hLabel}</div>
-        <div class="af-stat">${hSt.stripCount} striper</div>
-        <div class="af-stat">${hSt.coveragePct}% dekning</div>
-        <div class="af-stat">${hSt.totalWatt} W (${hSt.wattPerM2} W/m²)</div>
-        <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.h.defs)}</div>
-      </div>
-      <div class="af-option${selectedDir==='v'?' selected':''}" onclick="_selectAutoFillOption('v')" onmouseenter="_previewAutoFillOption('v')">
-        <div class="af-dir">${vLabel}</div>
-        <div class="af-stat">${vSt.stripCount} striper</div>
-        <div class="af-stat">${vSt.coveragePct}% dekning</div>
-        <div class="af-stat">${vSt.totalWatt} W (${vSt.wattPerM2} W/m²)</div>
-        <div class="af-stat" style="font-size:10px;margin-top:4px">${_widthSummary(results.v.defs)}</div>
-      </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      ${_card('hMax')}${_card('vMax')}${_card('hFew')}${_card('vFew')}
     </div>
     <div style="display:flex;gap:6px;justify-content:center;margin-top:12px">
       ${(() => { const strat = (S.varmefolie && S.varmefolie.foilStrategy) || 'long';
         const chip = (id,label,tip) => `<button class="snap-chip${strat===id?' on':''}" title="${tip}" onclick="_setFoilStrategy('${id}')">${strat===id?'● ':''}${label}</button>`;
         return chip('long','Lange strimler','Få, lange, ensartede strimler vegg-til-vegg (litt udekket langs kanter er OK)')
-             + chip('coverage','Maks dekning','Tettest mulig dekning — flere/kortere strimler ved behov'); })()}
+             + chip('coverage','Maks dekning (legacy)','Tettest mulig dekning — flere/kortere strimler ved behov'); })()}
     </div>
     <div class="af-actions">
-      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedDir}')">Bruk ${selectedDir==='h'?'horisontal':'vertikal'}</button>
+      <button class="af-btn-primary" onclick="_applyAutoFillOption('${selectedKey}')">Bruk ${MODE_LABEL[selectedKey.endsWith('Max')?'Max':'Few'].toLowerCase()} · ${DIR_LABEL[selectedKey.startsWith('h')?'h':'v'].toLowerCase()}</button>
       <button class="af-btn-secondary" onclick="_closeAutoFillPanel()">Avbryt</button>
     </div>
   `;
@@ -12679,23 +12827,25 @@ function _setFoilStrategy(strat) {
   if (ctx) showAutoFillComparison(ctx.familyName, ctx.categoryId, ctx.maxWidthMm);
 }
 
-function _selectAutoFillOption(dir) {
+// key: hMax/hFew/vMax/vFew (Regel 8) — eller 'h'/'v' fra eldre kallsteder utenfor firekorts-
+// panelet (t.eks. rå 2-veis resultater); begge deler samme oppslags-form, results[key].
+function _selectAutoFillOption(key) {
   const results = S.ui.autoFillCompare;
   if (!results) return;
-  _renderAutoFillComparePanel(results, dir);
-  _previewAutoFillOption(dir);
+  _renderAutoFillComparePanel(results, key);
+  _previewAutoFillOption(key);
 }
 
-function _previewAutoFillOption(dir) {
+function _previewAutoFillOption(key) {
   const results = S.ui.autoFillCompare;
-  if (!results || !results[dir]) return;
-  S.ui.autoFillPreviewDefs = results[dir].defs;
+  if (!results || !results[key]) return;
+  S.ui.autoFillPreviewDefs = results[key].defs;
   render();
 }
 
-function _applyAutoFillOption(dir) {
+function _applyAutoFillOption(key) {
   const results = S.ui.autoFillCompare;
-  if (!results || !results[dir]) return;
+  if (!results || !results[key]) return;
   const categoryId = S.ui.autoFillCompareCategoryId;
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   if (!room) return;
@@ -12708,15 +12858,17 @@ function _applyAutoFillOption(dir) {
   });
 
   // Add new strips
-  for (const def of results[dir].defs) {
+  for (const def of results[key].defs) {
     S.strips.push({ ...def, id: S.counters.nextStripId++ });
   }
 
-  // Update direction (kun for h/v — «soner» har egen retning per strip)
-  if (dir === 'h' || dir === 'v') S.varmefolie.direction = dir;
+  // Update direction (kun for h/v — «soner» har egen retning per strip). Regel 8: nøkkelen kan
+  // være en firekorts-nøkkel (hMax/hFew/vMax/vFew) — trekk ut retningsbokstaven først.
+  const dir = key.startsWith('h') ? 'h' : (key.startsWith('v') ? 'v' : null);
+  if (dir) S.varmefolie.direction = dir;
 
   // Track product usage
-  const usedIds = new Set(results[dir].defs.map(d => d.productId));
+  const usedIds = new Set(results[key].defs.map(d => d.productId));
   usedIds.forEach(pid => _trackProductUsage(pid));
 
   _closeAutoFillPanel();
@@ -12724,7 +12876,7 @@ function _applyAutoFillOption(dir) {
   renderSidebar();
   updateObjInfo();
   render();
-  _showToast(`${results[dir].stats.stripCount} striper plassert (${results[dir].stats.coveragePct}% dekning)`, 'ok');
+  _showToast(`${results[key].stats.stripCount} striper plassert (${results[key].stats.coveragePct}% dekning)`, 'ok');
 }
 
 function _closeAutoFillPanel() {
@@ -12788,9 +12940,9 @@ function _runWidthPickerAutoFill(familyName, categoryId) {
   const results = _autoFillBothDirections(room, prods);
   S.ui.autoFillCompare = results;
   S.ui.autoFillCompareCategoryId = categoryId;
-  const better = results.h.stats.score >= results.v.stats.score ? 'h' : 'v';
-  _renderAutoFillComparePanel(results, better);
-  _previewAutoFillOption(better);
+  const best = _bestFoilOption(results);
+  _renderAutoFillComparePanel(results, best);
+  _previewAutoFillOption(best);
 }
 
 // ── Strip Rotation ────────────────────────────────────────────────
@@ -12838,14 +12990,17 @@ function _rotateSelectedStrip() {
 // longMode = «lange strimler vegg-til-vegg»: ONE uniform width for every column (no adaptive
 // down-scaling against shallow edges) and ONE strip per column (the longest continuous segment),
 // accepting a little uncovered area along irregular/step edges. Fewer, longer, uniform strips.
-function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, marginCm, longMode) {
+function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, marginCm, longMode, gapCmOverride) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   // Use strictest margin/gap among all products in this fill family. marginCm override (used by
   // layout-zone fill on a pre-inset SONE polygon) bypasses the wall margin → no double inset.
   const MARGIN = (marginCm != null) ? marginCm : Math.max(...sortedProds.map(p => _effectiveMarginCm(p.id)));
-  const GAP = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id, room.id)));
+  // Regel 5: rommets/produktenes minsteavstand er et GULV — gapCmOverride (fra _longStripsLayout
+  // sitt søk over kandidat-avstander) kan heve den, aldri senke den under gulvet.
+  const roomMinGap = Math.max(...sortedProds.map(p => _effectiveGapCm(p.id, room.id)));
+  const GAP = gapCmOverride != null ? Math.max(gapCmOverride, roomMinGap) : roomMinGap;
   const _ccsOpts = (marginCm != null) ? { marginCm } : undefined;
   const basePos = direction === 'v' ? minX : minY;
   const baseMax = direction === 'v' ? maxX : maxY;
@@ -12871,16 +13026,15 @@ function _autoFillRoomOnce(room, sortedProds, direction, fromHigh, startCursor, 
     }
     if (!primaryId) return result;
   }
-  // Push the chosen segments for one column. longMode → only the single longest segment.
+  // Regel 3 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): longMode pleide å beholde KUN det
+  // lengste segmentet når et bånd delte seg i flere flater (segs.reduce over lengde) — kaster den
+  // korteste flaten. Deler en horisontal skanlinje seg i kropp+fløy i et trappeformet rom, mistet
+  // fløyen ALL folie for hele det båndet, uansett hvor stor den var. En hel fløy er ikke en småbit
+  // (Regel 11 fanger fortsatt ekte støv — under 30cm/15W — via _layoutRulePenalty). Begge grener
+  // legger nå alle segmenter, som non-longMode allerede gjorde riktig.
   const _pushCol = (pos, chosenId) => {
     const segs = computeClippedSegments(room.id, direction, pos, chosenId, _ccsOpts);
-    if (!segs.length) return;
-    if (longMode) {
-      const b = segs.reduce((a, c) => (c.length_cm > a.length_cm ? c : a));
-      result.push({ roomId: room.id, productId: chosenId, direction, pos_cm: pos, start_cm: b.start_cm, length_cm: b.length_cm });
-    } else {
-      for (const seg of segs) result.push({ roomId: room.id, productId: chosenId, direction, pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
-    }
+    for (const seg of segs) result.push({ roomId: room.id, productId: chosenId, direction, pos_cm: pos, start_cm: seg.start_cm, length_cm: seg.length_cm });
   };
 
   if (!fromHigh) {
@@ -23422,7 +23576,7 @@ function _fillSoneFoil(zone, prods){
     // point foil-avoidance at the REAL room and exclude THIS sone's own strips (being replaced).
     const _zoneExclude = new Set(_stripsForZone(zone.id).map(s=>s.id));
     defs = _withFoilAvoid(room.id, _zoneExclude, () => {
-      if(long) return _longStripsLayout(tmp, prods, dir, 0);
+      if(long) return _longStripsLayout(tmp, prods, dir, 0).best;
       const a=_autoFillRoomOnce(tmp, prods, dir, false, undefined, 0);
       const b=_autoFillRoomOnce(tmp, prods, dir, true, undefined, 0);
       return (_scoreFoilLayout(a)>=_scoreFoilLayout(b))?a:b;
@@ -30235,11 +30389,17 @@ function setWallSide(roomId, wallId, side) {
   wall.side = side;
   renderSidebar(); render();
 }
-function _calcNetArea(room) {
-  // room.points defines the INTERIOR boundary — room.area IS the usable floor area.
-  // Wall thickness extends OUTWARD from these points, never inward.
-  // Net area = interior area minus obstacle (hindring) areas and forbidden zones.
-  if (!room.area) return '—';
+// Regel 10 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): DEN ENE fasiten for «nettoareal i
+// cm²», tallnummer, ikke en visningsstreng — brukt av infokortet, sammenligningspanelet OG
+// motorens egen målfunksjon (_scoreFoilLayout, 'long'-profilen). Før dette fantes TRE ulike
+// beregninger (infokortets egen inline-utregning i _computeRoomStats, _calcNetArea via denne
+// samme matten men som m²-streng, og motoren sin egen Math.abs(compArea(room.points)) = BRUTTO,
+// ikke netto) — i et rom uten hindringer faller de sammen tilfeldig, i et rom med en hindring
+// ville motoren optimalisert mot ett tall og kortet vist et annet. room.points er den INDRE
+// grensa (veggtykkelse går utover, aldri innover) — bruttoareal er derfor allerede rommets
+// faktiske gulvflate; netto trekker kun fra hindringer/forbudte soner.
+function _roomNetAreaCm2(room) {
+  if (!room || !room.area) return 0;
   const hindArea = S.hindrings.filter(h => h.roomId === room.id)
     .reduce((a, h) => a + (h.points && h.points.length >= 3 ? compArea(h.points) : 0), 0);
   const zoneArea = S.zones.filter(z => z.roomId === room.id && z.type === 'forbidden')
@@ -30248,7 +30408,14 @@ function _calcNetArea(room) {
       if (z.pinPos && z.sizeCm) return a + Math.PI * (z.sizeCm / 2) ** 2;
       return a;
     }, 0);
-  return (Math.max(0, room.area - hindArea - zoneArea) / 10000).toFixed(2);
+  return Math.max(0, room.area - hindArea - zoneArea);
+}
+function _calcNetArea(room) {
+  // room.points defines the INTERIOR boundary — room.area IS the usable floor area.
+  // Wall thickness extends OUTWARD from these points, never inward.
+  // Net area = interior area minus obstacle (hindring) areas and forbidden zones.
+  if (!room.area) return '—';
+  return (_roomNetAreaCm2(room) / 10000).toFixed(2);
 }
 
 // STEG 1 (Kenneth 19.08.2026, «Tøm rom ser ikke frihånds-matter»): ÉN kanonisk liste over hvilke
@@ -33107,16 +33274,34 @@ function subtractIntervalSets(base, subtract) {
   return result;
 }
 
-// Clip a strip band to the room polygon using 3 scanlines (edges + center).
-// Returns [[start, end], ...] intervals where strip fully fits inside polygon.
+// Regel 2 (spec-folie-auto-utlegg.md, Kenneth 28.08.2026): den gamle 3-scanline-samplingen (venstre
+// kant, høyre kant, senter) — SNITTET av dem — mistet en flate mellom de tre linjene, akkurat som
+// _obstacleUnionInBand sin egen kommentar allerede advarte om for hindringer («missed a narrow
+// obstacle that fell BETWEEN those lines»). Et 140cm bredt bånd over et trappetrinn: den ene
+// kantlinja traff bare venstre del, den andre traff hele bredden — snittet ble bare venstre del,
+// og høyre fløy forsvant for hele det båndet. Samme fiks som ble gjort for hindringer, aldri gjort
+// for selve romveggen — nøyaktig gjengangermønsteret spec-en peker på. Tett sampling på tvers av
+// båndet PLUSS polygonets egne hjørner, SNITTET (ikke union — vi vil ha der HELE bredden er inne
+// i rommet ved ALLE sample-posisjoner, ikke der NOE av rommet finnes et sted i båndet).
 function clipStripToRoom(pos_cm, nettoCm, direction, roomPoly, margin) {
   const sweepAxis = direction === 'v' ? 'y' : 'x';
-  const intervals1 = clipScanlineToPolygon(sweepAxis, pos_cm, roomPoly);
-  const intervals2 = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm, roomPoly);
-  const intervalsMid = clipScanlineToPolygon(sweepAxis, pos_cm + nettoCm / 2, roomPoly);
-  let merged = intersectIntervalSets(intervals1, intervals2);
-  merged = intersectIntervalSets(merged, intervalsMid);
-  merged = merged.map(([lo, hi]) => [lo + margin, hi - margin]).filter(([lo, hi]) => hi > lo);
+  const perp = p => direction === 'v' ? p.x : p.y;
+  const bandLo = pos_cm, bandHi = pos_cm + nettoCm;
+  const perpVals = roomPoly.map(perp);
+  const rMin = Math.min(...perpVals), rMax = Math.max(...perpVals);
+  const lo = Math.max(bandLo, rMin), hi = Math.min(bandHi, rMax);
+  if (hi <= lo) return [];
+  const step = Math.min(2, Math.max(0.5, nettoCm / 30));
+  const positions = new Set([lo, hi]);
+  for (let x = lo; x < hi; x += step) positions.add(x);
+  for (const v of perpVals) { if (v > lo && v < hi) positions.add(v); }
+  let merged = null;
+  for (const posn of positions) {
+    const iv = clipScanlineToPolygon(sweepAxis, posn, roomPoly);
+    merged = merged === null ? iv : intersectIntervalSets(merged, iv);
+    if (!merged.length) break;   // ingenting igjen å krympe — tidlig ut
+  }
+  merged = (merged || []).map(([a, b]) => [a + margin, b - margin]).filter(([a, b]) => b > a);
   return merged;
 }
 
@@ -39920,11 +40105,13 @@ function _calcRoughFill(room, calcType) {
     const prods=_calcFoilProds(); if(!prods.length) return;
     const results=_withFoilAvoid(room.id, new Set(), ()=>_autoFillBothDirections(room, prods));
     if(!results) return;
-    const scoreOf=o=>(o&&o.stats)?(o.stats.score!=null?o.stats.score:(o.stats.coveragePct||0)):-1;
-    const pick = scoreOf(results.h)>=scoreOf(results.v) ? results.h : results.v;
+    // Regel 8 (spec-folie-auto-utlegg.md): results har nå fire nøkler (hMax/hFew/vMax/vFew), ikke
+    // to (h/v) — samme beste-av-alle-valg som _bestFoilOption, men uten den interaktive panelet.
+    const bestKey = _bestFoilOption(results);
+    const pick = results[bestKey];
     if(pick && pick.defs && pick.defs.length){
       for(const def of pick.defs) S.strips.push({ ...def, id:S.counters.nextStripId++, _calcRough:true });
-      if(S.varmefolie) S.varmefolie.direction = (pick===results.h) ? 'h' : 'v';
+      if(S.varmefolie) S.varmefolie.direction = bestKey.startsWith('h') ? 'h' : 'v';
       _invalidateStripCache && _invalidateStripCache();
     }
   } catch(e){ console.warn('Grov autofyll feilet (rom '+room.id+'):', e.message); }
