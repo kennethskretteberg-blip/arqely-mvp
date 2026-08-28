@@ -9168,8 +9168,14 @@ function _matFreeDeriveRuns(mp) {
   return out;
 }
 function _matFreeRunLen(r) { return Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); }
-function _matFreeUTurnLen(mp) { const { NET } = _matFreeConsts(_matFreeProdOf(mp)); return Math.PI * (NET + Math.max(0, mp.gapCm || 0)) / 2; }
-function _matFreeTotalCm(mp) { let L = 0; for (const r of _matFreeDeriveRuns(mp)) { L += _matFreeRunLen(r); if (r.uturn) L += _matFreeUTurnLen(mp); } return L; }
+// Regel 23 (spec-matte-utlegg.md, Kenneth 28.08.2026): vendingen mellom to bredder spiser ikke av
+// rullens lengde — nettet kuttes mellom kabelstrengene og vendes, kabelen som går rundt er allerede
+// en del av serpentinen som ligger PÅ nettet. _matFreeTotalCm var Σ banelengder + Σ U-svingbuer
+// (halvsirkel, π×(NET+gap)/2 PER sving — en tidligere videreført antakelse, aldri en regel i denne
+// fila) — motoren belastet rullen for lengde ingenting ble tegnet for. `_matFreeUTurnLen` fantes
+// tidligere her (slettet — .uturn sin koordinat-payload leses ALDRI andre steder i filen, kun
+// sjekket for sannhetsverdi ved denne nå fjernede lengde-akkumuleringen; grep bekreftet FØR sletting).
+function _matFreeTotalCm(mp) { let L = 0; for (const r of _matFreeDeriveRuns(mp)) L += _matFreeRunLen(r); return L; }
 function _matFreeEnd(mp) { const runs = _matFreeDeriveRuns(mp); return runs.length ? runs[runs.length - 1].b : { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }; }
 
 // FEIL 2 (Kenneth 19.08.2026, «frihånd kan ikke avsluttes med Enter»): DELT kilde for STOPP-
@@ -9472,6 +9478,9 @@ function _matFreeCandidate(mp, P) {
   // #1: klamp mesh til rom-polygon + hindringer (banen kan gå til vegg, men ikke utenfor / oppå hindring).
   const tentative = _matFreeDeriveRuns({ ...mp, moves: [...(mp.moves || []), move] });
   const bane = tentative[tentative.length - 1];
+  // Regel 24 (spec-matte-utlegg.md, Kenneth 28.08.2026): var brukerens ØNSKEDE lengde FØR klamping
+  // — trengs under for å skille «rommet klippet banen kortere» fra «brukeren dro en kort avstand».
+  const wantedLen = len;
   if (bane) {
     move.len = _matFreeClampLen(mp, axis, dir, bane.a, len);
     move.rawLen = move.len;   // lengden FØR evt. avvisning under — brukt til å tegne en ugyldig ghost i riktig størrelse i stedet for at den bare forsvinner
@@ -9498,7 +9507,17 @@ function _matFreeCandidate(mp, P) {
   // motsatt av tooNarrow/overlaps over). Da treffer klikk-handlerens «tilgivende avslutning»
   // (moves.length≥1 && len≤0 → avslutt) i stedet for å legge ut en utilsiktet kort bane når
   // brukeren bommer på stopp-punktet — symptomet forsvinner ved roten, ikke bare ved presist klikk.
-  if (move.len > 0) {
+  //
+  // Regel 24 (spec-matte-utlegg.md, Kenneth 28.08.2026): denne minLenCm-terskelen (produktets
+  // SALGBARE minstelengde, typisk 100 cm) skal KUN avvise en bane brukeren selv dro kort — ikke en
+  // siste bredde rommet klippet kortere. Skillet er om _matFreeClampLen faktisk reduserte lengden
+  // (wantedLen > move.len): gjorde den det, er dette en ekte gjenstående-plass-bredde, og eneste
+  // gulv skal være ETT KUTTINTERVALL (RASTER — allerede håndhevet inni _matFreeClampLen sin egen
+  // floor-til-RASTER). Var lengden ALLEREDE kort før klamping (ingen reduksjon skjedde), er det
+  // FEIL 2 sitt opprinnelige tilfelle (utilsiktet kort dra nær stopp-punktet) — minLenCm gjelder
+  // uendret der.
+  const wasClamped = bane && wantedLen > move.len + 0.01;
+  if (move.len > 0 && !wasClamped) {
     const minLenCm = (_matFreeProdOf(mp)?.mat_min_length_mm || 1000) / 10;
     if (move.len < minLenCm) move.len = 0;
   }
@@ -9624,6 +9643,41 @@ function _matFreeRunsWithinRoom(mp) {
       return { ok: false, reason: `${overM2.toFixed(2)} m² mer matte enn rommets brukbare areal (${usableM2.toFixed(2)} m²)` };
     }
   }
+  // DEL B (Regel 23, spec-matte-utlegg.md): den ENESTE vakten her sjekket kun én vei — for MYE
+  // matte i rommet (arealsjekken over). Auto har _matRunsMatchRule («summen av bredder stemmer
+  // ikke med valgt rull») og avbryter begge veier — frihånd hadde ingen tilsvarende vakt mot at
+  // Σ breddelengder blir MINDRE enn valgt rull (nøyaktig Kenneths bug: 720 cm tegnet, 1000 cm-
+  // rullen valgt). Gjenbruker _matRunsMatchRule uendret (ikke en parallell implementasjon) — bygger
+  // en adapter i formen den allerede leser (num_runs/runLengths via _matRunLenCm).
+  // _equalWidthFallback:true hopper bevisst over Regel E («alle bredder like») — frihånd er
+  // eksplisitt unntatt der (Regel 6: «Manuelt utlegg er unntatt»), kun Regel D (summen) skal gjelde.
+  //
+  // TOLERANSE: DEL B sitt eget forslag («ett kuttintervall», auto sin egen terskel) ble VURDERT OG
+  // FORKASTET — det ville avvist fullstendig lovlige frihånds-committer. Auto sin N×L-formel garanterer
+  // ALLTID et eksakt (eller Regel 24-forklart) forbruk av HELE rullen; frihånd har intet slikt løfte —
+  // Regel 13/22 punkt 2 sier eksplisitt at resten UNDER korteste tilgjengelige rull («shortest») skal
+  // bli udekket og VISES som det, ikke avvises. _matFreeSplitPlan klatrer allerede i antall ruller helt
+  // til uncoveredCm < korteste tilgjengelige rull i familien — ETT kuttintervall er langt strengere enn
+  // det, og ville avvist en helt normal enkelt-rull-commit hver gang katalogens hull (Regel 15: 150T
+  // finnes kun i partalls-m²) legger 50-150 cm udekket igjen. Terskelen her er derfor korteste
+  // tilgjengelige rull i SAMME familie/bredde/spenning — samme grense _matFreeSplitPlan selv styrer
+  // etter. Den kan derfor aldri avvise noe _matFreeCatalog selv anser som et gyldig resultat; den
+  // fanger KUN en regresjon der Σ breddelengder og katalogvalget har kommet i utakt med hverandre
+  // (nøyaktig Kenneths bug, som _matFreeTotalCm sin egen feil ville gitt et avvik på 280 cm — langt
+  // over selv korteste rull på 200 cm).
+  const catalog = _matFreeCatalog(mp);
+  if (!catalog.tooShort && catalog.segments.length === 1) {
+    const fam = _matFreeProdOf(mp);
+    const widthMm = fam?.mat_width_mm || 500, voltage = fam?.voltage || 230;
+    const shortestCand = HEATING_PRODUCTS.filter(p => fam && p.product_family === fam.product_family
+        && (p.mat_width_mm || 500) === widthMm && (p.voltage || 230) === voltage
+        && p.active !== false && _matTotalLengthMm(p) > 0)
+      .reduce((min, p) => Math.min(min, _matTotalLengthMm(p) / 10), Infinity);
+    const runLens = _matFreeDeriveRuns(mp).map(r => _matFreeRunLen(r)).filter(l => l > 0.5);
+    const adapter = { num_runs: runLens.length, runLengths: runLens, _equalWidthFallback: true };
+    const dMatch = _matRunsMatchRule(adapter, catalog.segments[0].product, isFinite(shortestCand) ? shortestCand : 0, false);
+    if (!dMatch.ok) return { ok: false, reason: dMatch.reason };
+  }
   // STEG 1A: to baner kan hver for seg være «innenfor rommet» og likevel ligge oppå hverandre —
   // se _matFreeLanesOverlap. Sjekket etter areal (over) som forklaringsprioritet, men gjelder
   // uavhengig — en overlapp under arealgrensa (to ulike produkter/bredder) skal fortsatt avvises.
@@ -9711,13 +9765,11 @@ function _matFreeRunsWithinRoom(mp) {
 // dette automatisk siden `prev` alltid er null ved første iterasjon, uansett hvilken conn-verdi som
 // står i moves[0].
 function _matFreeSliceMoves(mp, fromCm, toCm) {
-  const uL = _matFreeUTurnLen(mp);
   const runs = _matFreeDeriveRuns(mp);
   let acc = 0, start = null, first = true;
   const moves = [];
   for (let i = 0; i < runs.length; i++) {
     const r = runs[i];
-    if (r.uturn) acc += uL;
     const rl = _matFreeRunLen(r);
     const runStartAcc = acc;
     acc += rl;
@@ -9794,7 +9846,15 @@ function _matFreeExit(commit) {
       }
       const label = Object.values(byProd).map(g => `${g.count} × ${g.name}`).join(' + ');
       const und = c.uncoveredCm > 5 ? ` · ${(c.uncoveredCm / 100).toFixed(1)} m udekket` : '';
-      _showToast(`${label || 'Matte'} — ${c.segments.reduce((s, x) => s + x.areaM2, 0)} m², ${c.totalWatt} W · tegnet ${(c.totalCm / 100).toFixed(1)} m${und}`, c.tooShort ? 'warn' : 'success');
+      // Regel 24 (spec-matte-utlegg.md): «siste bredde er kortere enn resten» — samme varsel som
+      // auto, som allerede viser dette når matLastRunLen != null. Frihånd har ingen tilsvarende
+      // «uniform L»-verdi å sammenligne mot (Regel 6 unntar manuelt utlegg helt), så varselet
+      // sammenligner i stedet siste tegnede bredde mot den nest siste — enkel, observerbar, samme
+      // ånd som auto sin.
+      const runLens = _matFreeDeriveRuns(mpNew).map(r => _matFreeRunLen(r)).filter(l => l > 0.5);
+      const lastShorter = runLens.length >= 2 && runLens[runLens.length - 1] < runLens[runLens.length - 2] - 0.5;
+      const shortWarn = lastShorter ? ' · siste bredde er kortere enn resten' : '';
+      _showToast(`${label || 'Matte'} — ${c.segments.reduce((s, x) => s + x.areaM2, 0)} m², ${c.totalWatt} W · tegnet ${(c.totalCm / 100).toFixed(1)} m${und}${shortWarn}`, (c.tooShort || lastShorter) ? 'warn' : 'success');
     }
   }
   _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
@@ -9995,10 +10055,8 @@ function _matPathAtWorld(wp) {
   for (let i = (S.matPaths || []).length - 1; i >= 0; i--) {
     const mp = S.matPaths[i]; if (!_roomIdOnActiveFloor(mp.roomId)) continue;
     const { NET } = _matFreeConsts(_matFreeProdOf(mp));
-    const uL = _matFreeUTurnLen(mp);
     let acc = 0;
     for (const r of _matFreeDeriveRuns(mp)) {
-      if (r.uturn) acc += uL;
       const rl = _matFreeRunLen(r);
       const runStartAcc = acc;
       acc += rl;
@@ -10064,9 +10122,25 @@ function _matPathPanel() {
   const segRows = Object.values(byProd).map(g =>
     row(g.count > 1 ? `${g.count} × ${esc(g.name)}` : esc(g.name), (g.areaM2 * g.count) + ' m² · rull ' + (g.lenCm / 100) + ' m')).join('');
   const title = c.segments.length > 1 ? `Frihånds-matte — ${c.segments.length} ruller` : `Frihånds-matte — ${esc(c.product?.name || 'Matte')}`;
+  // DEL D (spec-matte-utlegg.md, Kenneth 28.08.2026): «panelet skal vise Σ breddelengder» — i
+  // Kenneths egen form («4 × 1,8 m + 1 × 0,8 m = 8,0 m av 10,0 m rull»), ikke bare ett tall.
+  // «Tegnet lengde» viste totalCm — riktig TALL etter Regel 23-fiksen (ingen U-svinger lenger
+  // iberegnet), men fortsatt bare ETT tall. Ingen flate i appen viste selve breddene som summeres.
+  const _bredderLine = (() => {
+    const lens = _matFreeDeriveRuns(mp).map(r => _matFreeRunLen(r)).filter(l => l > 0.5);
+    if (!lens.length) return '—';
+    const groups = [];
+    for (const l of lens) {
+      const rl = Math.round(l * 10) / 10;
+      const g = groups.find(x => Math.abs(x.len - rl) < 0.05);
+      if (g) g.count++; else groups.push({ len: rl, count: 1 });
+    }
+    const parts = groups.map(g => `${g.count} × ${(g.len / 100).toFixed(1)} m`).join(' + ');
+    return `${parts} = ${(c.totalCm / 100).toFixed(1)} m av ${(c.coverCm / 100).toFixed(1)} m rull`;
+  })();
   section.innerHTML = `<div class="rwp-section-label">✏️ ${title}</div>
     <div style="border-top:1px solid var(--brd);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
-      ${row('Tegnet lengde', (c.totalCm / 100).toFixed(1) + ' m')}
+      ${row('Bredder', _bredderLine)}
       ${segRows}
       ${row('Dekker', (c.coverCm / 100).toFixed(1) + ' m')}
       ${row('Udekket', c.uncoveredCm > 5 ? (c.uncoveredCm / 100).toFixed(1) + ' m' : '—')}
@@ -10239,7 +10313,7 @@ function _drawMatPathCable(mp, coverCm, opts) {
   const sc = S.view.zoom * BASE_SCALE; if (sc <= 0.1) return;
   if (coverCm == null) coverCm = Infinity;
   if (opts.lastOnly) runs = runs.slice(-1);   // ghost: bare siste (nye) bane, svakt
-  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2, uL = _matFreeUTurnLen(mp), mgn = _matFreeCableMarginCm(mp);
+  const rPx = (cc / 2) * sc, im = 2.5 + cc / 2, mgn = _matFreeCableMarginCm(mp);
   ctx.save();
   ctx.strokeStyle = opts.faint ? 'rgba(224,86,63,0.40)' : _lc('rgba(200,60,30,0.5)', 'rgba(255,100,60,0.45)');
   ctx.lineWidth = Math.max(0.7, sc * 0.4); ctx.lineCap = 'round';
@@ -10250,7 +10324,6 @@ function _drawMatPathCable(mp, coverCm, opts) {
   ctx.beginPath(); let pen = null, penAcross = null;
   for (let ri = 0; ri < runs.length; ri++) {
     const r = runs[ri], rNext = runs[ri + 1] || null;
-    if (r.uturn) acc += uL;
     const rl = _matFreeRunLen(r);
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
     acc += rl;
@@ -10351,7 +10424,6 @@ function _drawMatPathObj(mp, active) {
   // Committet matte trimmes mot valgt katalog-rull (dekket vs udekket); under tegning ingen trim.
   const cat = active ? null : _matFreeCatalog(mp);
   const coverCm = cat ? cat.coverCm : Infinity;
-  const uL = _matFreeUTurnLen(mp);
   let acc = 0;
   // DEL A STEG 2 (Kenneth 19.08.2026, «frihånd: 52m skal bli to matter»): en committet bane kan nå
   // dekkes av FLERE ruller (cat.segments) — skjøtpunktene (segments[i].toCm, unntatt siste) skal
@@ -10360,7 +10432,6 @@ function _drawMatPathObj(mp, active) {
   const jointCmSet = (cat && cat.segments.length > 1) ? new Set(cat.segments.slice(0, -1).map(s => s.toCm)) : null;
   const jointPts = [];
   for (const r of runs) {
-    if (r.uturn) acc += uL;
     const rl = _matFreeRunLen(r);
     const runStartAcc = acc;
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
