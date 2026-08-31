@@ -6969,7 +6969,38 @@ function _upcStartMatPlace(productId) {
 // bredde langs X, se _clampMatToRoom) og som dekker Kenneths eget scenario (matter side ved side
 // over rommets bredde). Trenger allerede plassert rotasjon 90° for en gitt matte, roter den
 // EKSISTERENDE ctxbar-knappen (_matRotate90) etterpå — samme som i dag.
-function _matPlaceCandidate(wp, productId) {
+// DEL B2 (Kenneth 28.08.2026, «magnet-snap på InSnow-matter»): rommets BOUNDING BOX ble brukt som
+// om den var rommets FORM — i et uregelmessig område kan en matte da magnetiseres til en posisjon
+// innenfor bbox men utenfor selve polygonet. Samme bbox-feil rettet to ganger før (_matFreeStartFor
+// sin egen bbox-fallback-kommentar, _matFreeClampLen). Tett sampling av Y-tverrsnitt over den
+// GITTE Y-utstrekningen (ikke bare ett skanlinje-forsøk) + snitt av X-intervallene — samme prinsipp
+// som _matFreeClampLen/_obstacleUnionInBand, her brukt på den tverrgående (X) aksen. Delt av
+// _matPlaceCandidate (plassering) OG getMatViolations (DEL B3, samme geometri må gi samme svar
+// begge steder — ellers kan magnetens egen posisjon utløse et falskt varsel). Returnerer null for
+// et degenerert polygon (kalleren faller da tilbake til bbox, samme mønster som _matFreeStartFor).
+function _matPolyXInterval(room, yLo, yHi) {
+  const ys = room.points.map(p => p.y);
+  const yStep = Math.max(1, (yHi - yLo) / 20);
+  const yPositions = new Set([yLo, yHi]);
+  for (let y = yLo; y < yHi; y += yStep) yPositions.add(y);
+  for (const v of ys) { if (v > yLo && v < yHi) yPositions.add(v); }
+  let xIv = null;
+  for (const y of yPositions) {
+    let ivs; try { ivs = clipScanlineToPolygon('x', y, room.points); } catch (e) { ivs = null; }
+    if (!ivs || !ivs.length) return null;
+    xIv = xIv === null ? ivs : intersectIntervalSets(xIv, ivs);
+    if (!xIv.length) return null;
+  }
+  return xIv && xIv.length ? xIv.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a)) : null;
+}
+
+// DEL B3 (Kenneth 28.08.2026): excludeId — valgfri, tredje parameter. Brukt av
+// _marginWarnSnapMat() («Juster til nærmeste lovlige posisjon» for en ALLEREDE plassert, nå
+// flyttet matte) til å utelate matta fra sin egen nabo-kollisjonssjekk under — uten denne ville
+// funksjonen (designet for å PLASSERE en NY matte, som ennå ikke finnes i S.mats) sett den
+// flyttede matta som sin egen nabo og «kollidert med seg selv». Ubenyttet (null) ved ordinær
+// plassering — bit-for-bit samme oppførsel som før denne parameteren fantes.
+function _matPlaceCandidate(wp, productId, excludeId) {
   const empty = { valid: false };
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return empty;
@@ -6985,6 +7016,23 @@ function _matPlaceCandidate(wp, productId) {
   const lengthCm = totalMm ? totalMm / 10 : (prod.mat_min_length_mm || 1000) / 10;
   const marginCm = (prod.min_wall_margin_mm || 0) / 10;
   const gapReq = Math.max(0, _matProductMinGapCm(prod));   // Regel 18 — obligatorisk minsteavstand
+  // DEL B1 (Kenneth 28.08.2026, «magnet-snap... bør snappe til innstilte verdi»): gapReq er ET
+  // GULV (Regel 18), aldri et MÅL — magneten snappet før ALLTID til gapReq alene, så en innstilt
+  // «↔ 10 cm» ble ignorert ved snapping. snapGap er det brukeren faktisk ba om, aldri under
+  // gapReq (Regel 18 kan ikke svekkes av et brukerønske). «Avvises synlig» (spec) trenger ingen ny
+  // varsling her: collidesAt/perpGapAt under bruker fortsatt REN gapReq, så en posisjon tettere enn
+  // det obligatoriske minimumet forblir umulig å plassere uansett — samme synlige avvisning
+  // («Matta får ikke plass her») som allerede finnes.
+  // Kilde for «innstilt»: har rommet allerede en etablert manuell gruppe (≥2 matter), snapp til
+  // GRUPPENS EGEN nåværende avstand (samme tall openMatGroupGapPanel viser) — ikke det globale
+  // S.varmematte.gapCm, som ville rykket en etablert gruppes rytme ved hver nye matte. Uten en
+  // etablert gruppe (matte nr. 2, ingen «gruppe» ennå per _matManualGroupX) er det globale
+  // gapCm-ønsket (samme kilde som openMatGapPanel viser) alt som finnes.
+  const _placeGroupMats = _matManualGroupX(roomId);
+  const configuredGapCm = _placeGroupMats.length >= 2
+    ? _matGroupCurrentGapCm(roomId)
+    : Math.max(0, S.varmematte?.gapCm || 0);
+  const snapGap = Math.max(configuredGapCm, gapReq);
 
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
@@ -6992,13 +7040,22 @@ function _matPlaceCandidate(wp, productId) {
   if (rMaxX - rMinX - 2 * marginCm < widthCm) return empty;   // rommet er for smalt for denne bredden i det hele tatt
 
   // Fri posisjon: rå peker minus halv bredde/lengde, klemt mot romboks ⊖ margin (samme konvensjon
-  // som _stripDropCandidate sin egen freePos).
-  const freeX = Math.max(rMinX + marginCm, Math.min(wp.x - widthCm / 2, rMaxX - marginCm - widthCm));
+  // som _stripDropCandidate sin egen freePos). Y bruker fortsatt bbox — mattas RAD (dens Y-utstrekning)
+  // er det eneste som avgjør DEL B2 sitt polygon-intervall under, og den må være kjent først.
+  const freeXBbox = Math.max(rMinX + marginCm, Math.min(wp.x - widthCm / 2, rMaxX - marginCm - widthCm));
   const freeY = Math.max(rMinY + marginCm, Math.min(wp.y - lengthCm / 2, rMaxY - marginCm - lengthCm));
+
+  // DEL B2: polygon-bevisst X-intervall for MATTAS EGEN Y-utstrekning — se _matPolyXInterval.
+  const widestX = _matPolyXInterval(room, freeY, freeY + lengthCm);
+  const pMinX = widestX ? widestX[0] + marginCm : rMinX + marginCm;
+  const pMaxX = widestX ? widestX[1] - marginCm : rMaxX - marginCm;
+  if (pMaxX - pMinX < widthCm - 0.01) return empty;   // ingen gyldig X-posisjon for DENNE raden
+
+  const freeX = Math.max(pMinX, Math.min(freeXBbox, pMaxX - widthCm));
 
   // Naboer: andre matter i SAMME rom, samme rotasjon (0 — samme kryssakse X), som faktisk
   // overlapper denne mattas Y-utstrekning (kun DA er de en reell side-ved-side-nabo på X-aksen).
-  const neighbors = (S.mats || []).filter(m => m.roomId === room.id && (m.rotation_deg || 0) === 0
+  const neighbors = (S.mats || []).filter(m => m.roomId === room.id && m.id !== excludeId && (m.rotation_deg || 0) === 0
     && Math.max(freeY, m.y_cm) < Math.min(freeY + lengthCm, m.y_cm + m.length_cm) - 0.5);
   const perpGapAt = (cx, m) => { const mw = _matTotalWidthCm(m); return cx >= m.x_cm ? cx - (m.x_cm + mw) : m.x_cm - (cx + widthCm); };
   const collidesAt = cx => neighbors.some(m => perpGapAt(cx, m) < gapReq - 0.01);
@@ -7007,23 +7064,26 @@ function _matPlaceCandidate(wp, productId) {
   let candidates, unconditional;
   if (collidingNeighbors.length === 1) {
     const m = collidingNeighbors[0], mw = _matTotalWidthCm(m);
-    candidates = [{ x: m.x_cm - widthCm - gapReq }, { x: m.x_cm + mw + gapReq }];
+    candidates = [{ x: m.x_cm - widthCm - snapGap }, { x: m.x_cm + mw + snapGap }];
     unconditional = true;
   } else if (collidingNeighbors.length > 1) {
     candidates = collidingNeighbors.map(m => {
       const mw = _matTotalWidthCm(m);
       const towardLeft = (freeX + widthCm / 2) < (m.x_cm + mw / 2);
-      return { x: towardLeft ? m.x_cm - widthCm - gapReq : m.x_cm + mw + gapReq };
+      return { x: towardLeft ? m.x_cm - widthCm - snapGap : m.x_cm + mw + snapGap };
     });
     unconditional = true;
   } else {
-    const wallCands = [{ x: rMinX + marginCm }, { x: rMaxX - marginCm - widthCm }];
+    const wallCands = [{ x: pMinX }, { x: pMaxX - widthCm }];
     const neighborCands = neighbors.flatMap(m => { const mw = _matTotalWidthCm(m);
-      return [{ x: m.x_cm - widthCm - gapReq }, { x: m.x_cm + mw + gapReq }]; });
+      return [{ x: m.x_cm - widthCm - snapGap }, { x: m.x_cm + mw + snapGap }]; });
     candidates = [...wallCands, ...neighborCands];
     unconditional = false;
   }
-  candidates = candidates.filter(c => c.x >= rMinX + marginCm - 0.01 && c.x + widthCm <= rMaxX - marginCm + 0.01);
+  // DEL B2: grensa er nå polygonets EGNE X-grenser for denne raden (pMinX/pMaxX), ikke bbox — en
+  // nabo-avledet kandidat (snapGap fra en matte langt unna raden) kan fortsatt havne utenfor et
+  // innhukk selv om selve naboen var gyldig.
+  candidates = candidates.filter(c => c.x >= pMinX - 0.01 && c.x + widthCm <= pMaxX + 0.01);
   const radiusCm = 14 / (S.view.zoom * BASE_SCALE);   // 14 skjerm-px, uavhengig av zoom — samme som folie
 
   let bestX = null, bestDist = Infinity;
@@ -35651,6 +35711,7 @@ canvas.addEventListener('mousedown', e=>{
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         const mat = S.mats.find(m => m.id === _matDragId);
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        if (mat) _saveMarginSnapshot(mat, 'mat');   // DEL B3: samme varsel-mekanisme som folie ved flytting
         canvas.style.cursor = 'crosshair';
         return;
       }
@@ -35736,6 +35797,7 @@ canvas.addEventListener('mousedown', e=>{
         _matDragAxis = 'free';
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        _saveMarginSnapshot(mat, 'mat');   // DEL B3: samme varsel-mekanisme som folie ved flytting
         canvas.style.cursor = 'crosshair';
       }
       return;
@@ -36257,6 +36319,20 @@ canvas.addEventListener('mousemove', e=>{
       mat.y_cm = _matDragOrigPos.y + totalDy;
       const room = S.rooms.find(r => r.id === mat.roomId);
       if (room) _clampMatToRoom(mat, room);
+      // DEL B3 (Kenneth 28.08.2026, «magneten skal virke ved flytting, ikke bare ved plassering —
+      // det er der Kenneth merker den»): samme magnet som ved NY plassering (_matPlaceCandidate),
+      // her med excludeId slik at matta ikke kolliderer med seg selv. _matPlaceCandidate snapper
+      // allerede KUN når nær en vegg/nabo (radiusCm) eller ved ekte kollisjon (unconditional) — den
+      // samme «bare magnetiser når det er nyttig»-oppførselen brukes derfor uendret her, ingen ny
+      // avstandslogikk. Kun 0°-matter (samme modellbegrensning som _matPlaceCandidate/
+      // getMatViolations selv har). Ingen gyldig kandidat → beholder bbox-klampen over uendret;
+      // flytting fryser aldri, den slutter bare å magnetisere.
+      if (room && (mat.rotation_deg || 0) === 0) {
+        const wCm = _matTotalWidthCm(mat);
+        const centerWp = { x: mat.x_cm + wCm / 2, y: mat.y_cm + mat.length_cm / 2 };
+        const cand = _matPlaceCandidate(centerWp, mat.productId, mat.id);
+        if (cand.valid) { mat.x_cm = cand.x; mat.y_cm = cand.y; }
+      }
     }
     render(); return;
   }
@@ -37048,6 +37124,8 @@ canvas.addEventListener('mouseup', e=>{
       _matDragging = false; _matDragId = -1; _matDragAxis = 'free'; _matDragKind = 'mat'; _matDragInvalid = false;
       canvas.style.cursor = 'default'; render(); return;
     }
+    // DEL B3 (Kenneth 28.08.2026): samme varsel som folie ved flytting — se _checkMarginAfterDrag.
+    _checkMarginAfterDrag(S.mats.find(m => m.id === _matDragId), 'mat');
     _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return;
   }
   if (_plateDragging) { _plateDragging=false; _plateDragId=-1; _plateDragAxis='free'; canvas.style.cursor='default'; render(); return; }
@@ -38285,7 +38363,17 @@ function _ctxBarItems() {
          <button class="snap-chip" onclick="_matChangeRuns(1)" title="Legg til lengde"${nR >= maxPossibleRuns ? ' disabled' : ''}>+</button>`
       : '';
     const matRoom = mat ? S.rooms.find(r => r.id === mat.roomId) : null;
-    // «Sentrer / Fra vegg»-toggle (kun innendørs matte — snø pakkes annerledes).
+    // DEL A (Kenneth 28.08.2026, «ønsker en Sentrer-knapp for InSnow-mattene også»): Sentrer/
+    // Fra vegg var gatet bort for snø («snø pakkes annerledes») — sant DA det ble skrevet, siden
+    // Sentrer den gang kastet matta og kjørte autoFillMatSerpentine på nytt (helt annet utlegg for
+    // et rent snø-pakket rom). e92b528 gjorde Sentrer om til en EKTE forskyvning av matter som
+    // allerede ligger der (_matCenterGroupInRoom, kun for _manualPlace-grupper) — forutsetningen
+    // for unntaket falt bort, gaten ble stående uten grunn. Manuell-drag droppen (canvas 'drop',
+    // dragWidth.kind==='mat') setter _manualPlace:true uansett innendørs/utendørs, så
+    // _matToggleFromWall() ruter InSnow-matter til nøyaktig samme trygge gruppe-forskyvningsgren
+    // som innendørs — bekreftet ved lesing, ikke antatt. _matCenterGroupInRoom bruker allerede
+    // ren rom-polygonbredde uten noen veggmargin i det hele tatt (verken inne eller ute), så det
+    // finnes ingen innendørs-margin å ved et uhell dra med ut.
     const _matSnow = (typeof _roomModuleType === 'function' && matRoom) ? _roomModuleType(matRoom.id) === 'snow'
                    : ((typeof _isSnowModule === 'function') && _isSnowModule());
     // REGEL 9: chippen viste tidligere ALLTID Math.max(5, gapCm||10) uansett — 0 (falsy) ble vist
@@ -38293,8 +38381,7 @@ function _ctxBarItems() {
     // introdusert her), men ble mer synlig nå som innendørs matte får et ekte CC-basert standardgap
     // i stedet for 0 — rettet i samme slag siden begge leser samme S.varmematte.gapCm.
     const matGapCm = _matSnow ? Math.max(5, S.varmematte?.gapCm || 10) : Math.round(_matResolveGapCm(prod));
-    const fromWallHtml = _matSnow ? '' :
-      `<span class="tc-sep"></span>
+    const fromWallHtml = `<span class="tc-sep"></span>
        <button class="snap-chip${S.varmematte?.fromWall ? ' on' : ''}" onclick="_matToggleFromWall()" title="Sentrer matten (kaldt felt likt på begge vegger) eller legg den inntil veggen (alt kaldt felt på én side)">${S.varmematte?.fromWall ? 'Fra vegg' : 'Sentrer'}</button>`;
     // STEG 3 (Kenneth 19.08.2026, \u00abavstand for en gruppe\u00bb): en manuelt plassert matte (_manualPlace)
     // har num_runs=1 og ingen INTERN serpentin-avstand \u2014 openMatGapPanel/matGapCm sitt tall (gap
@@ -51258,6 +51345,61 @@ function getStripViolations(strip) {
   return result;
 }
 
+// DEL B3 (spec-matte-manuell-sentrer-magnet.md, Kenneth 28.08.2026, «advarsel hvis matte flyttes
+// nærmere enn tillatt»): matte-analog til getStripViolations rett over — deler SAMME dialog
+// (margin-warn-overlay/_saveMarginSnapshot/_checkMarginAfterDrag/marginWarnRevert/marginWarnSnap/
+// marginWarnKeep, alle generalisert under til å ta et kind-flagg), IKKE en parallell mat-versjon
+// av dialogen. Reglesettet er smalere enn folies (ingen hindring-sjekk — ikke bedt om denne
+// runden): kabelen ≥ produktets veggmargin (prod.min_wall_margin_mm — SAMME kilde
+// _matPlaceCandidate selv styrer etter, så plassering og varsel aldri kan sprike) og matte-til-
+// matte ≥ det STRENGESTE av de to produktenes Regel 18-minimum (samme prinsipp som folies
+// _effectiveGapCmPair — blandede bredder, Regel 21, skal aldri kunne presses tettere enn det
+// strengeste produktet krever).
+function getMatViolations(mat) {
+  const result = { hasAny: false, wallMargin: null, matGap: null };
+  if ((mat.rotation_deg || 0) !== 0) return result;   // roterte matter: samme 0°-modell _matPlaceCandidate selv forutsetter
+  const room = S.rooms.find(r => r.id === mat.roomId);
+  if (!room || !room.points || room.points.length < 3) return result;
+  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+  if (!prod) return result;
+  const widthCm = _matTotalWidthCm(mat);
+  const marginCm = (prod.min_wall_margin_mm || 0) / 10;
+
+  // --- 1. Wall margin (X polygon-bevisst via _matPolyXInterval — DEL B2, Y bbox — samme grenser
+  //         som _matPlaceCandidate selv bruker ved plassering) ---
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
+  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
+  const widestX = _matPolyXInterval(room, mat.y_cm, mat.y_cm + mat.length_cm);
+  const pMinX = widestX ? widestX[0] : rMinX, pMaxX = widestX ? widestX[1] : rMaxX;
+  const minWallDist = Math.min(
+    mat.x_cm - pMinX, pMaxX - (mat.x_cm + widthCm),
+    mat.y_cm - rMinY, rMaxY - (mat.y_cm + mat.length_cm)
+  );
+  if (minWallDist < marginCm - 0.01) {
+    result.wallMargin = { violated: true, minDist: Math.max(0, minWallDist) };
+    result.hasAny = true;
+  }
+
+  // --- 2. Mat-til-mat-avstand (Regel 18) ---
+  const neighbors = (S.mats || []).filter(m => m.id !== mat.id && m.roomId === mat.roomId && (m.rotation_deg || 0) === 0
+    && Math.max(mat.y_cm, m.y_cm) < Math.min(mat.y_cm + mat.length_cm, m.y_cm + m.length_cm) - 0.5);
+  let worstGap = Infinity, worstNeighbor = null, worstGapMin = 0;
+  for (const m of neighbors) {
+    const mw = _matTotalWidthCm(m);
+    const gap = mat.x_cm >= m.x_cm ? mat.x_cm - (m.x_cm + mw) : m.x_cm - (mat.x_cm + widthCm);
+    const nProd = HEATING_PRODUCTS.find(p => p.id === m.productId);
+    const pairMin = Math.max(Math.max(0, _matProductMinGapCm(prod)), Math.max(0, _matProductMinGapCm(nProd)));
+    if (gap < worstGap) { worstGap = gap; worstNeighbor = m.id; worstGapMin = pairMin; }
+  }
+  if (worstGap < worstGapMin - 0.01) {
+    result.matGap = { violated: true, minGap: Math.max(0, worstGap), neighborId: worstNeighbor };
+    result.hasAny = true;
+  }
+
+  return result;
+}
+
 // ─── Violation cache ──────────────────────────────────────────
 let _violationCache = new Map();
 let _violationsDirty = true;
@@ -51382,33 +51524,49 @@ function _getCableViolation(cableId) {
   return _cableViolationCache.get(cableId) || { hasAny: false };
 }
 
+// DEL B3 (Kenneth 28.08.2026, «advarsel hvis matte flyttes nærmere enn tillatt»): snapshot/sjekk/
+// dialog GENERALISERT til å ta et objekt + kind ('strip'|'mat'), ikke en parallell mat-versjon av
+// dette. kind er valgfri og default 'strip' — alle eksisterende kallesteder (uendret) fortsetter å
+// virke bit-for-bit likt.
 // Call at drag START to capture full snapshot
-function _saveMarginSnapshot(strip) {
-  _marginSnapshot = { id: strip.id, pos_cm: strip.pos_cm, start_cm: strip.start_cm, length_cm: strip.length_cm };
+function _saveMarginSnapshot(obj, kind) {
+  kind = kind || 'strip';
+  _marginSnapshot = kind === 'mat'
+    ? { kind, id: obj.id, x_cm: obj.x_cm, y_cm: obj.y_cm }
+    : { kind, id: obj.id, pos_cm: obj.pos_cm, start_cm: obj.start_cm, length_cm: obj.length_cm };
 }
 // Call at drag END — show warning if ANY rule is violated
-function _checkMarginAfterDrag(strip) {
-  if (!strip) return;
+function _checkMarginAfterDrag(obj, kind) {
+  kind = kind || 'strip';
+  if (!obj) return;
   _invalidateViolations();
-  const viol = getStripViolations(strip);
+  const viol = kind === 'mat' ? getMatViolations(obj) : getStripViolations(obj);
   if (!viol.hasAny) return;
-  if (!_marginSnapshot || _marginSnapshot.id !== strip.id) return;
+  if (!_marginSnapshot || _marginSnapshot.id !== obj.id || _marginSnapshot.kind !== kind) return;
   document.getElementById('margin-warn-overlay').classList.add('show');
 }
 function marginWarnRevert() {
   if (_marginSnapshot) {
-    const strip = S.strips.find(s => s.id === _marginSnapshot.id);
-    if (strip) {
-      strip.pos_cm    = _marginSnapshot.pos_cm;
-      strip.start_cm  = _marginSnapshot.start_cm;
-      strip.length_cm = _marginSnapshot.length_cm;
+    if (_marginSnapshot.kind === 'mat') {
+      const mat = S.mats.find(m => m.id === _marginSnapshot.id);
+      if (mat) { mat.x_cm = _marginSnapshot.x_cm; mat.y_cm = _marginSnapshot.y_cm; }
+    } else {
+      const strip = S.strips.find(s => s.id === _marginSnapshot.id);
+      if (strip) {
+        strip.pos_cm    = _marginSnapshot.pos_cm;
+        strip.start_cm  = _marginSnapshot.start_cm;
+        strip.length_cm = _marginSnapshot.length_cm;
+      }
     }
   }
   document.getElementById('margin-warn-overlay').classList.remove('show');
   _marginSnapshot = null;
+  _invalidateViolations();
+  render(); updateWip(); renderSidebar();
 }
 function marginWarnSnap() {
   if (!_marginSnapshot) { marginWarnKeep(); return; }
+  if (_marginSnapshot.kind === 'mat') { _marginWarnSnapMat(); return; }
   const strip = S.strips.find(s => s.id === _marginSnapshot.id);
   if (!strip) { marginWarnKeep(); return; }
   const b = _stripRoomBounds(strip); if (!b) { marginWarnKeep(); return; }
@@ -51457,6 +51615,31 @@ function marginWarnSnap() {
 
   document.getElementById('margin-warn-overlay').classList.remove('show');
   _marginSnapshot = null;
+  _invalidateViolations();
+  render(); updateWip(); renderSidebar();
+}
+// DEL B3: matte-varianten av «Juster til nærmeste lovlige posisjon» — bruker SAMME magnet som
+// plasseringen (_matPlaceCandidate), ikke en egen rettelogikk. excludeId (STEG B2-utvidelsen,
+// se _matPlaceCandidate) utelater matta fra sin egen nabo-kollisjonssjekk — den flyttes, ikke
+// plasseres på nytt ved siden av seg selv.
+function _marginWarnSnapMat() {
+  const mat = S.mats.find(m => m.id === _marginSnapshot.id);
+  if (!mat) { marginWarnKeep(); return; }
+  const wCm = _matTotalWidthCm(mat);
+  const centerWp = { x: mat.x_cm + wCm / 2, y: mat.y_cm + mat.length_cm / 2 };
+  const cand = _matPlaceCandidate(centerWp, mat.productId, mat.id);
+  if (!cand.valid) {
+    // Fanget mellom vegg og nabo — kan ikke oppfylle begge (samme fallback som strip).
+    marginWarnRevert();
+    return;
+  }
+  mat.x_cm = cand.x; mat.y_cm = cand.y;
+  _invalidateViolations();
+  const finalViol = getMatViolations(mat);
+  if (finalViol.hasAny) { marginWarnRevert(); return; }
+  document.getElementById('margin-warn-overlay').classList.remove('show');
+  _marginSnapshot = null;
+  _invalidateMatCache && _invalidateMatCache();
   _invalidateViolations();
   render(); updateWip(); renderSidebar();
 }
