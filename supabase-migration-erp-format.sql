@@ -18,10 +18,10 @@ DO $$ BEGIN
 END $$;
 
 -- ─── SETT CENIKAS ORG TIL 'visma_paste' ──────────────────────
--- Kjør denne linjen selv, med riktig navn/id på DERES Cenika-org — jeg har ikke tilgang til å
--- slå opp den faktiske raden, og gjetter derfor ikke på navnet.
---
--- UPDATE organizations SET erp_format = 'visma_paste' WHERE name = 'Cenika';
+-- KJØRT 01.09.2026 mot Cenika AS (id 3565ca88-b0c4-4033-97bf-0bc3aec2f763, org_type=supplier —
+-- eneste org i databasen på det tidspunktet). Linjen står igjen som dokumentasjon; idempotent å
+-- kjøre på nytt.
+UPDATE organizations SET erp_format = 'visma_paste' WHERE id = '3565ca88-b0c4-4033-97bf-0bc3aec2f763';
 
 -- ─── VERIFY ───────────────────────────────────────────────────
 SELECT id, name, org_type, erp_format FROM organizations ORDER BY name;
