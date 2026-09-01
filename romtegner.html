@@ -1767,6 +1767,7 @@ body.present-mode #render-stats{display:none !important}
       <button class="file-btn" onclick="openProject()" title="Åpne prosjekt" data-ic="folder-open"></button>
       <button class="file-btn" onclick="_showExportDialog()" title="Eksporter PDF" data-ic="file-text"></button>
       <button class="file-btn" onclick="_exportMaterialListXLSX()" title="Materialliste (Excel)" data-ic="table"></button>
+      <button class="file-btn btn-visma-paste" style="display:none" onclick="_showVismaPasteDialog()" title="Kopier til Visma" data-ic="clipboard"></button>
       <button class="tool-chip" id="chip-present" onclick="_presentEnter()" title="Vis prosjektet read-only for kunde/elektriker">▶ Presentasjon</button>
     </span>
     <!-- Product import moved to Admin panel -->
@@ -39187,6 +39188,7 @@ function renderListModule(){
     <button style="${btn}" onclick="_pdfImportStart()">Importer tegning (PDF)</button>
     <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
     <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
+    ${_userOrg && _userOrg.erp_format === 'visma_paste' ? `<button style="${btn}" onclick="_showVismaPasteDialog()">Kopier til Visma</button>` : ''}
   </div>`;
   h+= draft ? _listDraftCardHtml(draft) : '';
   h+=`<div style="font-size:13px;font-weight:700;margin:4px 0 10px;color:var(--text,#e8eaed)">Opprettede rom (${rooms.length})</div>`;
@@ -48652,16 +48654,14 @@ async function _admRenderFeedback(el) {
 }
 
 // ─── EXCEL EXPORT ───
-async function _exportMaterialListXLSX() {
-  if (!window.XLSX) { alert('XLSX-biblioteket er ikke lastet'); return; }
-  // Foil-accessories modal — same flow as PDF. Cancelled → no export.
-  const accessoryResult = await showAccessoriesModal();
-  if (!accessoryResult) return;
-  const accessoryItems = accessoryResult.items || [];
+// DEL A (spec-visma-paste.md, Kenneth 28.08.2026, «Kopier til Visma»): innsamling + aggregering
+// løftet ut av _exportMaterialListXLSX til delte funksjoner — _copyToVisma (under) og en eventuell
+// fremtidig GBAO10-fil kaller de SAMME to funksjonene, ikke en kopi. Ren innsamling, ingen
+// tilbehør-modal her (den hører til XLSX-eksportens EGEN flyt — se _exportMaterialListXLSX, som
+// henter modalens resultat FØR den kaller denne).
+// Each entry: { product, kind, roomName, floorName, qtyStr, areaM2, watt }
+function _collectMaterialItems() {
   const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes
-
-  // ── Collect raw line items shared by all three sheets ──
-  // Each entry: { product, kind, roomName, floorName, qtyStr, areaM2, watt }
   const items = [];
   rooms.forEach(room => {
     const roomName = room.name || 'Rom';
@@ -48731,19 +48731,168 @@ async function _exportMaterialListXLSX() {
       pushStair(HEATING_PRODUCTS.find(pr => pr.id === stair.cableProductId), (stair.totalCableLength_cm||0)/100);
     }
   });
-
-  // ── Sheet 1: Bestilling — 3 cols, aggregated by product ──
-  // What case-workers paste into ordering tools.
-  const order = new Map(); // productId → { product, count, totalLen }
+  return items;
+}
+// Aggregerer _collectMaterialItems() sitt resultat til én rad PER ARTIKKEL (Regel «én linje per
+// artikkel, mengder summert» — et produkt brukt i tre rom skal gi ÉN linje, ikke tre). Delt av
+// Bestilling-arket og _copyToVisma.
+function _aggregateMaterialItems(items) {
+  const order = new Map(); // productId → { product, count, totalLen, kind }
   for (const it of items) {
     const key = it.product.id;
-    const e = order.get(key) || { product: it.product, count: 0, totalLen: 0 };
+    const e = order.get(key) || { product: it.product, count: 0, totalLen: 0, kind: it.kind };
     e.count += it.count;
     e.totalLen += it.lenM || 0;
     order.set(key, e);
   }
+  return [...order.values()];
+}
+
+// ═══ KOPIER TIL VISMA (spec-visma-paste.md, Kenneth 28.08.2026) ═══════════════════════════════
+// Tabulatorseparerte artikkellinjer på utklippstavla, limt inn i et ALLEREDE ÅPENT tilbud i Visma
+// Global — Cenikas eget paste-oppsett (Bok6.xlsx). Kortere vei enn en GBAO10-fil: brukeren har
+// allerede opprettet tilbudet på riktig kunde i Visma, så kundenummer/-kobling trengs ikke i det
+// hele tatt (spørsmålet som gjorde GBAO10-sporet vanskelig, se den parkerte prompten).
+// Feltene er Vismas EGNE interne ID-er, ikke tall vi har funnet på — navngitt her så de ikke ender
+// spredt som magiske tall i koden.
+const VISMA_FIELD = { artikkelnr: 2269, artikkelnavn: 2270, antall: 2281, rabattPct: 2274 };
+
+// DEL A/B: bygger radene fra de DELTE innsamlings-/aggregeringsfunksjonene over — ingen egen kopi
+// av verken datainnsamlingen eller rabatt-oppslaget (_resolveDiscountPct, samme kilde PDF-en
+// bruker). wantDiscount er brukerens avkrysning; selve 2274-KOLONNEN tas likevel bare med når
+// minst én linje faktisk har rabatt > 0 — «valgfritt» betyr «vis når det er noe å vise», ikke «vis
+// en tom kolonne på hver linje».
+// Antall: produkter solgt LØPENDE (kappes til lengde — «totalLen>0 og ikke cable_length_m», samme
+// test Bestilling-arkets qty-tekst allerede bruker) rundes opp til hele meter; stykkevare
+// (ruller/matter/hele kabler) er allerede heltall, Math.ceil er da et no-op.
+function _vismaPasteBuild(wantDiscount) {
+  const items = _collectMaterialItems();
+  const agg = _aggregateMaterialItems(items);
+  const pricing = (S.project && S.project.pricing) || {};
+  const lines = [];
+  const missing = [];
+  for (const { product, count, totalLen, kind } of agg) {
+    // Kun folie selges løpende (kappet fra rull, bestilt i meter — count er antall TEGNEDE
+    // striper, en irrelevant størrelse for bestilling). Kabel/matte/plate er FASTE lengde-SKUer
+    // (hver rullstørrelse er sin egen article_no) — count ER antall ruller/stk å bestille.
+    // Bestilling-arkets egen «!cable_length_m»-sjekk (kun for VISNINGSTEKSTEN der) klassifiserer
+    // matter feil (mangler cable_length_m akkurat som folie) — Visma sitt Antall-felt tolererer
+    // ingen slik unøyaktighet, derfor kind (satt av _collectMaterialItems, ett sted, alltid riktig)
+    // i stedet for et nytt feltbasert gjettemønster.
+    const byLength = kind === 'Folie' && totalLen > 0;
+    const antall = Math.ceil(byLength ? totalLen : count);
+    if (antall <= 0) continue;
+    if (!product.article_no) { missing.push(product.name || ('Produkt #' + product.id)); continue; }
+    lines.push({
+      artikkelnr: product.article_no,
+      // ⚠ Tabulator/linjeskift i navnet ville forskjøvet hele raden — lav sannsynlighet, stille
+      // feil i et tilbud om det skjer. Strippet, ikke validert-og-avvist.
+      artikkelnavn: (product.name || '').replace(/[\t\r\n]+/g, ' ').trim(),
+      antall,
+      rabattPct: wantDiscount ? _resolveDiscountPct(product, pricing) : 0,
+    });
+  }
+  const hasDiscount = wantDiscount && lines.some(l => l.rabattPct > 0);
+  const cols = hasDiscount ? ['artikkelnr', 'artikkelnavn', 'antall', 'rabattPct'] : ['artikkelnr', 'artikkelnavn', 'antall'];
+  const header = cols.map(c => VISMA_FIELD[c]);
+  const rows = lines.map(l => cols.map(c => l[c]));
+  return { cols, header, rows, lines, missing, hasDiscount, totalAntall: lines.reduce((s, l) => s + l.antall, 0) };
+}
+// Tabulator mellom kolonner, \n mellom rader — det Excel legger på utklippstavla og det Visma
+// forventer (DEL D).
+function _vismaPasteText(built) {
+  return [built.header, ...built.rows].map(r => r.join('\t')).join('\n');
+}
+
+function _showVismaPasteDialog() {
+  let overlay = document.getElementById('visma-paste-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'visma-paste-overlay';
+    overlay.onclick = e => { if (e.target === overlay) _vismaPasteClose(); };
+    document.body.appendChild(overlay);
+  }
+  Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.45)' });
+  S.ui._vismaPasteDiscount = false;   // DEL B: standard AV — rabatt er kommersielt følsomt
+  _vismaPasteRender();
+}
+function _vismaPasteRender() {
+  const overlay = document.getElementById('visma-paste-overlay');
+  if (!overlay) return;
+  const wantDiscount = !!S.ui._vismaPasteDiscount;
+  const built = _vismaPasteBuild(wantDiscount);
+  const headHtml = built.header.map(h => `<th style="text-align:left;padding:4px 10px 4px 0;color:var(--muted);font-weight:600">${h}</th>`).join('');
+  const rowsHtml = built.rows.map(r => `<tr>${r.map(c => `<td style="padding:2px 10px 2px 0;white-space:nowrap">${esc(String(c))}</td>`).join('')}</tr>`).join('');
+  const missingHtml = built.missing.length
+    ? `<div style="margin-top:10px;padding:8px 10px;border:1px solid #e0563f;border-radius:6px;background:rgba(224,86,63,0.08);font-size:12px;color:#e0563f">
+        ⚠ ${built.missing.length} produkt${built.missing.length > 1 ? 'er' : ''} mangler artikkelnummer og er utelatt: ${esc(built.missing.join(', '))}<br>
+        Kopiering er sperret til dette er rettet (produktkatalog), ellers ser tilbudet komplett ut i Visma uten å være det.
+      </div>`
+    : '';
+  const html = `<div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(560px,92vw);max-height:88vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">
+    <h3 style="margin:0 0 4px;font-size:16px;color:var(--text)">📋 Kopier til Visma</h3>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Lim inn i et allerede åpent tilbud i Visma Global (Ctrl+V i varelinjene).</div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text);margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" ${wantDiscount ? 'checked' : ''} onchange="S.ui._vismaPasteDiscount=this.checked;_vismaPasteRender()"> Ta med rabatt
+    </label>
+    <div style="border:1px solid var(--brd);border-radius:8px;padding:10px 12px;max-height:280px;overflow:auto">
+      <table style="border-collapse:collapse;font-size:12px;font-family:var(--font-mono,monospace);color:var(--text)">
+        <thead><tr>${headHtml}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px">${built.lines.length} varelinje${built.lines.length === 1 ? '' : 'r'} · ${built.totalAntall} totalt antall${built.hasDiscount ? ' · rabatt inkludert' : ''}</div>
+    ${missingHtml}
+    <div id="visma-paste-fallback"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button onclick="_vismaPasteClose()" style="padding:8px 16px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:13px">Lukk</button>
+      <button onclick="_vismaPasteCopy()" style="padding:8px 16px;border-radius:6px;border:none;background:#4ea8ff;color:#fff;cursor:pointer;font-size:13px;font-weight:600" ${(built.missing.length || !built.lines.length) ? 'disabled' : ''}>📋 Kopier ${built.lines.length} linje${built.lines.length === 1 ? '' : 'r'}</button>
+    </div>
+  </div>`;
+  overlay.innerHTML = html;
+}
+function _vismaPasteClose() {
+  const overlay = document.getElementById('visma-paste-overlay');
+  if (overlay) overlay.remove();
+}
+async function _vismaPasteCopy() {
+  const built = _vismaPasteBuild(!!S.ui._vismaPasteDiscount);
+  if (built.missing.length || !built.lines.length) return;
+  const text = _vismaPasteText(built);
+  try {
+    await navigator.clipboard.writeText(text);
+    if (typeof _showToast === 'function') _showToast(`${built.lines.length} varelinjer kopiert — lim inn i tilbudet i Visma.`, 'success');
+    _vismaPasteClose();
+  } catch (e) {
+    // DEL D: fallback når clipboard-API-et feiler (annen vert over http, eller nektet
+    // tillatelse) — vis teksten markert og klar til Ctrl+C i stedet for at knappen bare
+    // gjør ingenting.
+    const fb = document.getElementById('visma-paste-fallback');
+    if (fb) {
+      fb.innerHTML = `<div style="margin-top:10px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Kunne ikke kopiere automatisk — marker teksten under (den er valgt for deg) og trykk Ctrl+C:</div>
+        <textarea readonly style="width:100%;height:100px;font-family:var(--font-mono,monospace);font-size:11px;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text)" onclick="this.select()" id="visma-paste-fallback-ta"></textarea>
+      </div>`;
+      const ta = document.getElementById('visma-paste-fallback-ta');
+      ta.value = text;
+      ta.focus(); ta.select();
+    }
+  }
+}
+
+async function _exportMaterialListXLSX() {
+  if (!window.XLSX) { alert('XLSX-biblioteket er ikke lastet'); return; }
+  // Foil-accessories modal — same flow as PDF. Cancelled → no export.
+  const accessoryResult = await showAccessoriesModal();
+  if (!accessoryResult) return;
+  const accessoryItems = accessoryResult.items || [];
+  const items = _collectMaterialItems();
+  const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes — Sheet 3 (Per rom) bruker denne selv
+
+  // ── Sheet 1: Bestilling — 3 cols, aggregated by product ──
+  // What case-workers paste into ordering tools.
   const orderRows = [['Art.nr', 'Antall', 'Produkt']];
-  for (const { product, count, totalLen } of order.values()) {
+  for (const { product, count, totalLen } of _aggregateMaterialItems(items)) {
     const qty = totalLen > 0 && (product.cable_length_m ? false : true)
       ? `${count} stk · ${totalLen.toFixed(1)} m`
       : `${count}`;
@@ -48986,19 +49135,28 @@ const _ACTIVE_ORG_KEY = 'rt_active_org_id';
 // Resolve _userOrg from _userMemberships + _activeOrgId. Falls back to the first
 // membership if the persisted id is missing/invalid. Keeps the _userOrg._role pattern.
 function _resolveActiveOrg() {
-  if (!_userMemberships.length) { _userOrg = null; _activeOrgId = null; return; }
+  if (!_userMemberships.length) { _userOrg = null; _activeOrgId = null; _updateVismaPasteButton(); return; }
   let m = _activeOrgId && _userMemberships.find(x => x.organizations && x.organizations.id === _activeOrgId);
   if (!m) m = _userMemberships[0];
   _activeOrgId = m.organizations.id;
   _userOrg = m.organizations;
   _userOrg._role = m.role;
+  _updateVismaPasteButton();
+}
+// DEL C (spec-visma-paste.md, Kenneth 28.08.2026): «denne må kun gjelde cenika-brukere» — ikke
+// hardkodet på navn, men på organizations.erp_format (samme org-felt-mønster som org_type/
+// supplier_name). Kalt fra ENESTE stedet _userOrg faktisk endres (_resolveActiveOrg, truffet både
+// ved innlasting og ved org-bytte) — ingen egen «oppdater UI etter org-bytte»-kobling å holde synkron.
+function _updateVismaPasteButton() {
+  const show = _userOrg && _userOrg.erp_format === 'visma_paste';
+  document.querySelectorAll('.btn-visma-paste').forEach(b => b.style.display = show ? '' : 'none');
 }
 
 async function _loadUserOrg() {
   if (!_db || !_currentUser) return;
   try {
     const { data: memberships } = await _db.from('organization_members')
-      .select('org_id, role, organizations(id, name, org_type, supplier_name, plan, subscription_status, trial_ends_at)')
+      .select('org_id, role, organizations(id, name, org_type, supplier_name, plan, subscription_status, trial_ends_at, erp_format)')
       .eq('user_id', _currentUser.id);
     _userMemberships = (memberships || []).filter(m => m.organizations);
     try { _activeOrgId = localStorage.getItem(_ACTIVE_ORG_KEY) || null; } catch(e) {}
