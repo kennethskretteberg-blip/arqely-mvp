@@ -42592,15 +42592,11 @@ async function exportPDF(opts) {
   }
 
   // Grupper pr type med egen overskrift; folie i meter, resten i stk.
+  // spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026): leser nå den kanoniske MATERIAL_GROUPS
+  // (delt med XLSX/Visma-pasten) i stedet for sin egen kopi — PDF-en er FASITEN for rekkefølgen,
+  // så resten av logikken her (inkl. _matRest-fallback rett under) er BEVISST urørt.
   const _matEntries = Object.entries(matList).map(([pid, info]) => ({ info, prod: HEATING_PRODUCTS.find(p => p.id === +pid) }));
-  const _matGroups = [
-    { label: 'Varmefolie',         types: ['Folie'] },
-    { label: 'Varmekabel',         types: ['Kabel'] },
-    { label: 'Varmematte',         types: ['Matte'] },
-    { label: 'Varmeplate',         types: ['Plate'] },
-    { label: 'Aluboard',           types: ['Plate (Aluboard)', 'Kabel (Aluboard)'] },
-    { label: 'Varmekabel (trapp)', types: ['Kabel (trapp)'] },
-  ];
+  const _matGroups = MATERIAL_GROUPS;
   const _matRenderEntry = (e) => {
     const isFoil = e.info.type === 'Folie';
     _matRow(e.prod ? e.prod.name : 'Ukjent',
@@ -48766,6 +48762,47 @@ function _aggregateAccessoryItems(list) {
   return [...agg.values()];
 }
 
+// spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026): kanonisk gruppeliste — fantes tidligere i
+// TRE versjoner (PDF sin _matGroups, XLSX sin flate groupsOrder, og Visma-pasten sin
+// ikke-eksisterende — ren Map-innsettingsrekkefølge). XLSX sin versjon manglet i tillegg
+// 'Plate (Aluboard)'/'Kabel (Aluboard)' OG hadde ingen fallback-gruppe — Aluboard-produkter falt
+// derfor stille ut av Materialliste-arket. Definert ÉTT sted nå; PDF (fasiten, urørt oppførsel)
+// leser _matGroups FRA denne i stedet for sin egen kopi.
+const MATERIAL_GROUPS = [
+  { label: 'Varmefolie',         types: ['Folie'] },
+  { label: 'Varmekabel',         types: ['Kabel'] },
+  { label: 'Varmematte',         types: ['Matte'] },
+  { label: 'Varmeplate',         types: ['Plate'] },
+  { label: 'Aluboard',           types: ['Plate (Aluboard)', 'Kabel (Aluboard)'] },
+  { label: 'Varmekabel (trapp)', types: ['Kabel (trapp)'] },
+];
+// Grupperer en liste .kind-baserte elementer etter MATERIAL_GROUPS, med en «Andre produkter»-
+// fallback for typer ingen gruppe dekker (en ny produkttype skal aldri kunne forsvinne stille fra
+// en materialliste igjen). Innenfor hver gruppe: stigende produkt-id — samme rekkefølge PDF-ens
+// Object.entries(matList) gir NATURLIG (heltallsnøkler i et JS-objekt itereres numerisk stigende,
+// uavhengig av innsettingsrekkefølge; _aggregateMaterialItems sin Map bevarer derimot
+// INNSETTINGSrekkefølge og må derfor sorteres eksplisitt for å matche). kindOf/idOf gjør
+// funksjonen brukbar for både rå items og aggregerte produktlinjer, uten at kalleren må normalisere
+// formen sin først. Brukt av XLSX og Visma-pasten — IKKE PDF, som beholder sin egen, urørte
+// _matRest-logikk (fasiten, skal ikke endres).
+function _groupByMaterialGroups(entries, kindOf, idOf) {
+  const shownTypes = [];
+  const groups = [];
+  for (const g of MATERIAL_GROUPS) {
+    const rows = entries.filter(e => g.types.includes(kindOf(e)));
+    if (!rows.length) continue;
+    shownTypes.push(...g.types);
+    rows.sort((a, b) => idOf(a) - idOf(b));
+    groups.push({ label: g.label, rows });
+  }
+  const rest = entries.filter(e => !shownTypes.includes(kindOf(e)));
+  if (rest.length) {
+    rest.sort((a, b) => idOf(a) - idOf(b));
+    groups.push({ label: 'Andre produkter', rows: rest });
+  }
+  return groups;
+}
+
 // ═══ KOPIER TIL VISMA (spec-visma-paste.md, Kenneth 28.08.2026) ═══════════════════════════════
 // Tabulatorseparerte artikkellinjer på utklippstavla, limt inn i et ALLEREDE ÅPENT tilbud i Visma
 // Global — Cenikas eget paste-oppsett (Bok6.xlsx). Kortere vei enn en GBAO10-fil: brukeren har
@@ -48785,7 +48822,13 @@ const VISMA_FIELD = { artikkelnr: 2269, artikkelnavn: 2270, antall: 2281, rabatt
 // (ruller/matter/hele kabler) er allerede heltall, Math.ceil er da et no-op.
 function _vismaPasteBuild(wantDiscount) {
   const items = _collectMaterialItems();
-  const agg = _aggregateMaterialItems(items);
+  // spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026, «legger seg ikke samme rekkefølge som
+  // PDF»): _aggregateMaterialItems sin Map bevarer INNSETTINGSrekkefølge — rom for rom, tilfeldig
+  // sett fra brukerens synspunkt, ikke en valgt rekkefølge. Gruppert+sortert her etter samme
+  // kanoniske MATERIAL_GROUPS PDF-en (fasiten) og XLSX nå deler, produkt-id stigende innad i
+  // hver gruppe — samme rekkefølge PDF-ens Object.entries(matList) gir naturlig.
+  const agg = _groupByMaterialGroups(_aggregateMaterialItems(items), e => e.kind, e => e.product.id)
+    .flatMap(g => g.rows);
   const pricing = (S.project && S.project.pricing) || {};
   const lines = [];
   const missing = [];
@@ -48969,23 +49012,19 @@ async function _exportMaterialListXLSX() {
   wsOrder['!cols'] = [{wch:18},{wch:18},{wch:40}];
 
   // ── Sheet 2: Materialliste — full 12-col format with module subtotals ──
-  // Group by kind, render module header + items, then subtotal per group.
+  // Group by MATERIAL_GROUPS (delt med PDF/Visma, se der), render module header + items, then
+  // subtotal per group. spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026): den forrige, flate
+  // groupsOrder-lista manglet 'Plate (Aluboard)'/'Kabel (Aluboard)' OG hadde ingen fallback for
+  // ukjente typer — Aluboard-produkter falt derfor stille ut av dette arket (rettet nå; PDF-en
+  // fanget dem hele tiden via sin egen _matRest). Aluboard-gruppa dekker to typer under ÉN
+  // overskrift/subtotal (samme som PDF), ikke to separate — group.label styrer, ikke it.kind.
   const matRows = [];
   matRows.push(['El.nummer','Lev. art.nr','Produkt','Produktgruppe','Type','Rom','Antall/lengde','Areal m²','Effekt W','W/m²','Veil.pris','Kostpris']);
-  const groupsOrder = ['Folie', 'Kabel', 'Matte', 'Plate', 'Kabel (trapp)'];
-  const byKind = new Map();
-  for (const it of items) {
-    const arr = byKind.get(it.kind) || [];
-    arr.push(it);
-    byKind.set(it.kind, arr);
-  }
   let grandW = 0, grandA = 0;
-  for (const kind of groupsOrder) {
-    const arr = byKind.get(kind);
-    if (!arr || !arr.length) continue;
-    matRows.push([`— ${kind} —`, '', '', '', '', '', '', '', '', '', '', '']);
+  for (const group of _groupByMaterialGroups(items, it => it.kind, it => it.product.id)) {
+    matRows.push([`— ${group.label} —`, '', '', '', '', '', '', '', '', '', '', '']);
     let gW = 0, gA = 0;
-    for (const it of arr) {
+    for (const it of group.rows) {
       const p = it.product;
       matRows.push([
         p.el_no || '',
@@ -49004,7 +49043,7 @@ async function _exportMaterialListXLSX() {
       gW += it.watt;
       gA += it.areaM2 || 0;
     }
-    matRows.push(['', '', '', '', '', `Sum ${kind}`, '', +gA.toFixed(2), Math.round(gW), '', '', '']);
+    matRows.push(['', '', '', '', '', `Sum ${group.label}`, '', +gA.toFixed(2), Math.round(gW), '', '', '']);
     matRows.push(['', '', '', '', '', '', '', '', '', '', '', '']);
     grandW += gW;
     grandA += gA;
