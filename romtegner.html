@@ -48655,10 +48655,14 @@ async function _admRenderFeedback(el) {
 
 // ─── EXCEL EXPORT ───
 // DEL A (spec-visma-paste.md, Kenneth 28.08.2026, «Kopier til Visma»): innsamling + aggregering
-// løftet ut av _exportMaterialListXLSX til delte funksjoner — _copyToVisma (under) og en eventuell
-// fremtidig GBAO10-fil kaller de SAMME to funksjonene, ikke en kopi. Ren innsamling, ingen
-// tilbehør-modal her (den hører til XLSX-eksportens EGEN flyt — se _exportMaterialListXLSX, som
-// henter modalens resultat FØR den kaller denne).
+// løftet ut av _exportMaterialListXLSX til delte funksjoner — _showVismaPasteDialog (under) og en
+// eventuell fremtidig GBAO10-fil kaller de SAMME to funksjonene, ikke en kopi.
+// RETTET (spec-visma-paste-tilbehor.md, Kenneth 28.08.2026): kommentaren sa tidligere at tilbehør
+// «hører til XLSX-eksportens EGEN flyt» — det var feil, og var grunnen til at Visma-pasten
+// manglet tilbehøret sitt første forsøk. Tilbehør hentes av HVER eksportvei (PDF, XLSX, Visma) via
+// den delte showAccessoriesModal() — utelatt herfra fordi det krever et MODALT BRUKERVALG (avbryt
+// er en gyldig utfall som skal stoppe hele eksporten), ikke fordi det tilhører én bestemt eksport.
+// Ren geometri-/produktinnsamling, ingen brukerinteraksjon — derfor ingen modal her.
 // Each entry: { product, kind, roomName, floorName, qtyStr, areaM2, watt }
 function _collectMaterialItems() {
   const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes
@@ -48747,6 +48751,20 @@ function _aggregateMaterialItems(items) {
   }
   return [...order.values()];
 }
+// spec-visma-paste-tilbehor.md (Kenneth 28.08.2026, «jeg får ikke med meg tilbehøret»): den
+// samme Map-aggregeringen sto tidligere KUN inline i _exportMaterialListXLSX sin _emit-closure
+// (Bestilling-arket) — nøyaktig hvordan Visma-pasten manglet tilbehøret i utgangspunktet, en
+// egen kopi hadde vært samme feilklasse på nytt. Aggregerer én liste tilbehør-elementer
+// (showAccessoriesModal sitt resultat, evt. forhåndsfiltrert på type) til én rad per id.
+function _aggregateAccessoryItems(list) {
+  const agg = new Map();
+  for (const it of list) {
+    const e = agg.get(it.id) || { name: it.name, art_no: it.art_no || '', unit: it.unit || '', qty: 0 };
+    e.qty += it.qty;
+    agg.set(it.id, e);
+  }
+  return [...agg.values()];
+}
 
 // ═══ KOPIER TIL VISMA (spec-visma-paste.md, Kenneth 28.08.2026) ═══════════════════════════════
 // Tabulatorseparerte artikkellinjer på utklippstavla, limt inn i et ALLEREDE ÅPENT tilbud i Visma
@@ -48792,6 +48810,29 @@ function _vismaPasteBuild(wantDiscount) {
       rabattPct: wantDiscount ? _resolveDiscountPct(product, pricing) : 0,
     });
   }
+  // Tilbehør ETTER produktlinjene (samme rekkefølge som Bestilling-arket, der tilbehøret
+  // kommer til slutt under sine grupper) — INGEN gruppeoverskrifter her, det ble en varelinje
+  // uten artikkelnummer limt inn i Visma. Delt aggregering med XLSX (_aggregateAccessoryItems),
+  // ikke en egen kopi av samme Map-løkke — det var nøyaktig hvordan tilbehøret manglet fra
+  // starten av. ⚠ art_no, IKKE article_no — tilbehør (showAccessoriesModal) og produkter
+  // (HEATING_PRODUCTS) navngir samme felt ulikt; slått sammen uendret ville artikkelnr blitt
+  // undefined → tom streng → en varelinje Visma ikke kjenner igjen.
+  for (const acc of _aggregateAccessoryItems(_vismaPasteAccessoryItems)) {
+    const antall = Math.ceil(acc.qty);
+    if (antall <= 0) continue;
+    if (!acc.art_no) { missing.push(acc.name || 'Tilbehør'); continue; }   // samme regel som produkter
+    lines.push({
+      artikkelnr: acc.art_no,
+      artikkelnavn: (acc.name || '').replace(/[\t\r\n]+/g, ' ').trim(),
+      antall,
+      // DEL 4 (åpent spørsmål til Kenneth): _resolveDiscountPct tar et produkt fra
+      // HEATING_PRODUCTS — et tilbehør har verken product_family, supplier eller id DER (noen
+      // finnes ikke som produkt i katalogen i det hele tatt). Å slå opp på art_no for å GJETTE en
+      // rabatt er fristende og sannsynligvis feil. 0 inntil Kenneth sier at tilbehør skal ha
+      // samme rabatt som resten av tilbudet.
+      rabattPct: 0,
+    });
+  }
   const hasDiscount = wantDiscount && lines.some(l => l.rabattPct > 0);
   const cols = hasDiscount ? ['artikkelnr', 'artikkelnavn', 'antall', 'rabattPct'] : ['artikkelnr', 'artikkelnavn', 'antall'];
   const header = cols.map(c => VISMA_FIELD[c]);
@@ -48804,7 +48845,19 @@ function _vismaPasteText(built) {
   return [built.header, ...built.rows].map(r => r.join('\t')).join('\n');
 }
 
-function _showVismaPasteDialog() {
+// spec-visma-paste-tilbehor.md (Kenneth 28.08.2026, «jeg får ikke med meg tilbehøret»):
+// tilbehøret hentes av HVER eksportvei gjennom den delte showAccessoriesModal() — ikke fordi det
+// «hører til» én bestemt eksport (se den nå rettede kommentaren over _collectMaterialItems), men
+// fordi henting av det krever et modalt brukervalg som ikke passer i en ren datainnsamlings-
+// funksjon. PDF og XLSX gjorde allerede dette kallet; Visma-pasten gjorde det aldri — derfor
+// manglet tilbehøret der og ingen andre steder. Samme kontrakt som PDF/XLSX: avbrutt modal
+// (null) avbryter HELE kopieringen (dialogen åpnes aldri), {items:[]} går videre uten
+// tilbehørslinjer.
+let _vismaPasteAccessoryItems = [];   // resolved ÉN gang per dialog-åpning, brukt av _vismaPasteBuild
+async function _showVismaPasteDialog() {
+  const accessoryResult = await showAccessoriesModal();
+  if (!accessoryResult) return;
+  _vismaPasteAccessoryItems = accessoryResult.items || [];
   let overlay = document.getElementById('visma-paste-overlay');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -48854,6 +48907,7 @@ function _vismaPasteRender() {
 function _vismaPasteClose() {
   const overlay = document.getElementById('visma-paste-overlay');
   if (overlay) overlay.remove();
+  _vismaPasteAccessoryItems = [];   // neste åpning henter alltid ferskt via showAccessoriesModal()
 }
 async function _vismaPasteCopy() {
   const built = _vismaPasteBuild(!!S.ui._vismaPasteDiscount);
@@ -48903,14 +48957,8 @@ async function _exportMaterialListXLSX() {
     const _accGroups = [{ key: 'foil', label: 'Tilbehør — Varmefolie' }, { key: 'cable', label: 'Tilbehør — Varmekabel' }];
     const _emit = (label, list) => {
       if (!list.length) return;
-      const accAgg = new Map();
-      for (const it of list) {
-        const e = accAgg.get(it.id) || { name: it.name, art_no: it.art_no || '', unit: it.unit || '', qty: 0 };
-        e.qty += it.qty;
-        accAgg.set(it.id, e);
-      }
       orderRows.push(['', '', `— ${label} —`]);
-      for (const { name, art_no, unit, qty } of accAgg.values()) {
+      for (const { name, art_no, unit, qty } of _aggregateAccessoryItems(list)) {
         orderRows.push([art_no, `${qty} ${unit || ''}`.trim(), name]);
       }
     };
