@@ -23696,6 +23696,85 @@ function _performZoneSplit(roomId, rawA, rawB){
   return true;
 }
 
+// spec-soner-kabel-per-sone-og-N-deling.md DEL C: "del rommet opp i x antall soner, velg
+// horisontal eller vertikal deling" - EKTE, navngitte S.zones-oppforinger (samme som
+// _performZoneSplit lager over), IKKE _buildNCableZones sin flyktige geometri (den brukes
+// fortsatt av "Flere kabler" og er urort denne runden - se kallesteder rapportert i commit-
+// meldingen). Gjenbruker _equalAreaBandBounds (samme eksakte equal-area-kutt uten vertex-
+// snapping som kabel-N-delingen allerede stoler pa) + _clipPolygonToSlab for a bygge hvert
+// bands polygon. Horisontalt -> kutt-akse y, Vertikalt -> kutt-akse x (samme kartlegging
+// _buildNCableZones bruker: axis = dir==='v' ? 'x' : 'y').
+// Erstatter rommets EKSISTERENDE soner (med deres folie/kabel) - en hel-rom-operasjon, ikke en
+// tilfoyelse. Ikke eksplisitt spurt om i spec-en; en rimelig, angrebar (pushUndo) standard.
+function _autoSplitRoomIntoZones(roomId, nZones, direction){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return false;
+  nZones=Math.max(2, Math.min(6, Math.floor(nZones)||2));
+  const axis=direction==='v'?'x':'y';
+  const bounds=_equalAreaBandBounds(room, direction, nZones);
+  if(!bounds){ _showToast('Klarte ikke å dele rommet i like store soner','warn'); return false; }
+  const polys=[];
+  for(let i=0;i<nZones;i++){
+    const poly=_clipPolygonToSlab(room.points, axis, bounds[i], bounds[i+1]);
+    polys.push((poly && poly.length>=3 && Math.abs(compArea(poly))>=50) ? poly : null);
+  }
+  if(polys.filter(Boolean).length<2){ _showToast('Rommet er for lite/uregelmessig for denne delingen','warn'); return false; }
+  pushUndo();
+  // Hard honorering (spec-krav): kun den valgte retningen bygges, ingen "prov begge og velg selv".
+  const existingIds=new Set(_sonesForRoom(roomId).map(z=>z.id));
+  S.zones=S.zones.filter(z=>!existingIds.has(z.id));
+  S.strips=S.strips.filter(s=>!existingIds.has(s.zoneId));
+  S.cables=S.cables.filter(c=>!existingIds.has(c.zoneId));
+  let base=_nextSoneBaseNum(roomId);
+  const created=[];
+  for(const poly of polys){
+    if(!poly) continue;
+    const z={ id:S.counters.nextZoneId++, roomId, type:'sone', name:'Sone '+(base++),
+      points:poly.map(p=>({x:p.x,y:p.y})), direction, startCorner:'bl' };
+    S.zones.push(z); created.push(z);
+  }
+  if(typeof _invalidateStripCache==='function') _invalidateStripCache();
+  if(typeof _invalidateCableCache==='function') _invalidateCableCache();
+  selectZone(created[0].id);
+  renderSidebar();
+  return true;
+}
+
+let _autoZoneSplitN=3, _autoZoneSplitDir='v', _autoZoneSplitRoomId=null;
+function _autoZoneSplitSetN(n){ _autoZoneSplitN=Math.max(2, Math.min(6, n)); _autoZoneSplitRender(); }
+function _autoZoneSplitSetDir(d){ _autoZoneSplitDir=d; _autoZoneSplitRender(); }
+function _autoZoneSplitRender(){
+  const box=document.getElementById('auto-zone-split-box'); if(!box) return;
+  const dirChip=(k,label,tip)=>{ const on=_autoZoneSplitDir===k;
+    return `<button class="floor-choice-btn" title="${tip}" onclick="_autoZoneSplitSetDir('${k}')" style="flex:1;padding:6px 8px;font-size:12px;background:${on?'var(--accent)':'var(--surface2)'};color:${on?'#0d0e10':'var(--text)'};font-weight:${on?'700':'500'}">${label}</button>`; };
+  box.innerHTML = `<div style="font-weight:600;margin-bottom:12px;font-size:14px">Del i like soner</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+      <span style="font-size:12px;color:var(--dim)">Antall soner</span>
+      <button class="floor-choice-btn" style="padding:2px 10px" onclick="_autoZoneSplitSetN(_autoZoneSplitN-1)">−</button>
+      <span style="min-width:20px;text-align:center;font-weight:600">${_autoZoneSplitN}</span>
+      <button class="floor-choice-btn" style="padding:2px 10px" onclick="_autoZoneSplitSetN(_autoZoneSplitN+1)">+</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:16px">
+      ${dirChip('h','Horisontalt','Soner stablet over/under')}
+      ${dirChip('v','Vertikalt','Soner side om side')}
+    </div>
+    <button class="snap-chip primary" style="width:100%;padding:8px;justify-content:center" onclick="document.getElementById('auto-zone-split-modal').remove(); _autoSplitRoomIntoZones(_autoZoneSplitRoomId, _autoZoneSplitN, _autoZoneSplitDir)">Del i ${_autoZoneSplitN} soner</button>
+    <button style="margin-top:8px;width:100%;padding:6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--dim);font-size:12px;cursor:pointer" onclick="document.getElementById('auto-zone-split-modal').remove()">Avbryt</button>`;
+}
+function showAutoZoneSplitPicker(roomId){
+  let modal=document.getElementById('auto-zone-split-modal'); if(modal) modal.remove();
+  modal=document.createElement('div');
+  modal.id='auto-zone-split-modal';
+  modal.style.cssText='position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.3)';
+  const box=document.createElement('div');
+  box.id='auto-zone-split-box';
+  box.style.cssText='background:var(--surface);border-radius:12px;padding:20px;min-width:260px;box-shadow:0 8px 32px rgba(0,0,0,0.3)';
+  modal.appendChild(box);
+  modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
+  document.body.appendChild(modal);
+  _autoZoneSplitRoomId=roomId;
+  _autoZoneSplitRender();
+}
+
 function renameSone(zoneId){
   const z=S.zones.find(z=>z.id===zoneId); if(!z||z.type!=='sone') return;
   const nv=prompt('Sonenavn:', z.name||'Sone'); if(nv==null) return;
@@ -23834,7 +23913,6 @@ function _fillSoneFoil(zone, prods){
   _showToast(`${defs.length} striper i ${zone.name} (${_soneCoveragePct(zone)}% dekning)`, 'ok');
 }
 
-// «+ Produkt» from a sone ctxbar → open the product picker targeting this sone.
 function _cablesForZone(zoneId){ return S.cables.filter(c=>c.zoneId===zoneId); }
 
 // spec-soner-kabel-per-sone-og-N-deling.md DEL B: felles CC pa tvers av soner i SAMME rom - ellers
@@ -23901,6 +23979,7 @@ function _fillSoneCable(zone, prod){
   _showToast(`Kabel lagt i ${zone.name}`, 'ok');
 }
 
+// «+ Produkt» from a sone ctxbar → open the product picker targeting this sone.
 function _openSoneProdukt(e, zoneId){
   const z=S.zones.find(z=>z.id===zoneId); if(!z) return;
   S.ui.fillTargetZoneId=zoneId;
@@ -38624,6 +38703,7 @@ function _ctxBarItems() {
       <button class="snap-chip" onclick="showZoneTypePicker(${ui.selectedRoomId})" title="Tegn sone (forbudt/foretrukket) i rommet">+ Sone</button>
       <button class="snap-chip" onclick="autoSplitRoom(${ui.selectedRoomId})" title="Automatisk oppdeling i soner basert på hindringer">${IC('grid4',14)} Auto-soner</button>
       <button class="snap-chip" onclick="startZoneSplit(${ui.selectedRoomId})" title="Del rommet i utleggingssoner ved å tegne delelinjer (vegg til vegg)">${IC('grid4',14)} Del i soner</button>
+      <button class="snap-chip" onclick="showAutoZoneSplitPicker(${ui.selectedRoomId})" title="Del rommet automatisk i N like store soner, horisontalt eller vertikalt">${IC('grid4',14)} Del i N soner</button>
       <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje"><span class="snap-dot"></span>Mål</button>
       <span class="tc-sep"></span>
       <button class="snap-chip more" onclick="_showCtxMore(event,'room')" title="Flere handlinger (sentrer, tøm, dokumentasjon, mål, slett …)">⋯ Mer</button>`;
