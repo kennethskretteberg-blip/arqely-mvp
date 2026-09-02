@@ -10880,13 +10880,14 @@ function _autoFillPlates(productId) {
 }
 
 function showCablePlacePanel(familyName, categoryId) {
-  S.ui.fillTargetZoneId = null;   // sone fill is foil-only; don't carry the flag into cable
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
   hideProduktMenu();
 
-  // Snow module: consolidated into the unified product panel (same flow as indoor).
+  // Snow module: consolidated into the unified product panel (same flow as indoor). Sone-fill
+  // (DEL B) is an innendors rom-begrep, ikke uteomrade — flagget skal ikke overleve hit.
   if (_isSnowModule()) {
+    S.ui.fillTargetZoneId = null;
     showUnifiedProductPanel();
     return;
   }
@@ -10897,6 +10898,23 @@ function showCablePlacePanel(familyName, categoryId) {
 
   const roomId = S.ui.selectedRoomId;
   const room = S.rooms.find(r => r.id === roomId);
+
+  // spec-soner-kabel-per-sone-og-N-deling.md DEL B, Krav 4: et rom delt i soner skal ikke kunne fa
+  // kabel "over hele rommet" ved et uhell (Kenneths rapporterte feil). fillTargetZoneId satt betyr
+  // brukeren KOM via en sone sitt eget "+ Produkt" (_openSoneProdukt) - det er fortsatt lov. Bare
+  // rom-nivaets flyt (ingen sone valgt, men rommet HAR soner) blokkeres, med en forklaring i stedet
+  // for den normale produktlista.
+  if (S.ui.fillTargetZoneId == null && room && _sonesForRoom(roomId).length > 0) {
+    section.innerHTML = `
+      <div class="rwp-section-label"><svg class="ic ic-plug" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/></svg> ${esc(familyName)}</div>
+      <div style="font-size:12px;color:var(--warn,#e0a030);padding:8px 4px;line-height:1.5">
+        Rommet er delt i soner. Velg en sone og bruk «+ Produkt» derfra for å legge kabel i den.
+      </div>`;
+    section.style.display = 'block';
+    showRoomWorkflowPanel();
+    return;
+  }
+
   const areas = room ? roomAreas(room) : null;
   const nettoM2 = areas ? (areas.net / 10000) : 0;
   const isSnow = _isSnowModule();
@@ -11376,6 +11394,16 @@ function _updateSnowSettingsPanel() {
 function _placeCableProduct(productId, familyName, categoryId) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) return;
+  // spec-soner-kabel-per-sone-og-N-deling.md DEL B, Krav 2/3: en sone-malrettet klikk (satt av
+  // _openSoneProdukt, overlevd gjennom showCablePlacePanel) fylles ALDRI som et vanlig romkabel-
+  // kall - den ma ga via _fillSoneCable (egen temp-rom + zoneId-stempling), ellers er dette
+  // nettopp feilen Kenneth meldte (kabel legger seg over hele rommet, ikke bare sonen).
+  if (S.ui.fillTargetZoneId != null) {
+    const zone = S.zones.find(z => z.id === S.ui.fillTargetZoneId && z.type === 'sone');
+    S.ui.fillTargetZoneId = null;
+    const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+    if (zone && prod) { _fillSoneCable(zone, prod); return; }
+  }
   pushUndo();
   const cable = autoFillCable(roomId, productId);
   if (!cable) { console.warn('_placeCableProduct: could not generate cable layout'); return; }
@@ -11389,6 +11417,10 @@ function _placeCableProduct(productId, familyName, categoryId) {
 function _placeMultiCableProduct(productId, familyName, categoryId, nCables) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) return;
+  // "Flere kabler" (autoFillMultiCable/_buildNCableZones) er UTENFOR DEL B sitt omfang denne
+  // runden (spec-en er eksplisitt: ikke rør den, rapporter kallesteder). Rydder likevel bort et
+  // eventuelt sone-mal-flagg her sa det aldri lekker inn i en senere, urelatert plassering.
+  S.ui.fillTargetZoneId = null;
   pushUndo();
   const cables = autoFillMultiCable(roomId, productId, nCables);
   if (!cables || cables.length < 2) {
@@ -23350,10 +23382,12 @@ function _toggleZoneType() {
 function deleteZone(id) {
   pushUndo();
   const z = S.zones.find(z => z.id === id);
-  // A layout-zone (sone) owns its foil → remove its strips too.
+  // A layout-zone (sone) owns its foil AND its cable (DEL B: zoneId stempling) → remove both.
   if (z && z.type === 'sone') {
     S.strips = S.strips.filter(s => s.zoneId !== id);
     if (typeof _invalidateStripCache === 'function') _invalidateStripCache();
+    S.cables = S.cables.filter(c => c.zoneId !== id);
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
   }
   S.zones = S.zones.filter(z => z.id !== id);
   if (S.ui.selectedZoneId === id) S.ui.selectedZoneId = null;
@@ -23673,6 +23707,8 @@ function toggleSoneDirection(zoneId){
   if(typeof _invalidateStripCache==='function') _invalidateStripCache();
   // Re-fill the sone in the new direction if it already has foil.
   if(_stripsForZone(z.id).length){ const pid=_stripsForZone(z.id)[0].productId; const prod=HEATING_PRODUCTS.find(p=>p.id===pid); if(prod) _fillSoneFoil(z, _soneFamilyProds(prod)); }
+  // DEL B: samme for kabel.
+  if(_cablesForZone(z.id).length){ const pid=_cablesForZone(z.id)[0].productId; const prod=HEATING_PRODUCTS.find(p=>p.id===pid); if(prod) _fillSoneCable(z, prod); }
   updateCtxBar(); render();
 }
 
@@ -23738,9 +23774,31 @@ function _soneStats(zone){
   for(const s of strips){ const p=HEATING_PRODUCTS.find(pp=>pp.id===s.productId); if(!p)continue;
     const nc=(p.netto_width_mm||p.width_mm)/10, aM2=nc*s.length_cm/10000;
     cov+=aM2; watt+=(p.watt_per_m2||60)*aM2; }
+  // DEL B: kabel bidrar ogsa til sonens tall (bane x CC som en grov dekket-areal-tilnaerming,
+  // samme prinsipp _cableCoverageFrac allerede bruker andre steder).
+  const cables=_cablesForZone(zone.id);
+  for(const c of cables){ const p=HEATING_PRODUCTS.find(pp=>pp.id===c.productId); if(!p)continue;
+    const lenM=(c.totalLength_cm||0)/100;
+    watt+=p.watt_per_m?lenM*p.watt_per_m:0;
+    if(c.spacing_cm) cov+=lenM*(c.spacing_cm/100); }
   const areaM2=Math.abs(compArea(zone.points))/10000;
   return { areaM2, coveredM2:cov, powerW:Math.round(watt), wattPerM2:areaM2>0?Math.round(watt/areaM2):0,
-    coveragePct:areaM2>0?Math.round(cov/areaM2*100):0, nStrips:strips.length };
+    coveragePct:areaM2>0?Math.round(cov/areaM2*100):0, nStrips:strips.length, nCables:cables.length };
+}
+
+// spec-soner-kabel-per-sone-og-N-deling.md DEL B, Krav 1: bygger et midlertidig rom formet som
+// sonens INNSKUTTE polygon (_zoneFillablePolygon under: full veggmargin mot yttervegg, halv gap mot
+// nabosone, per kant). Motoren (folie ELLER kabel) trenger ikke vite hva en sone er, den fyller et
+// rom, som for. Kaller ma selv legge tmp til/fjerne fra S.rooms rundt kallet sitt (samme
+// try/finally-monster begge fyll-funksjonene bruker) - denne bygger kun objektet. Returnerer null
+// hvis sonen er for liten.
+function _soneTempRoom(zone, room, productId) {
+  const insetPoly = _zoneFillablePolygon(zone, room, productId);
+  if (!insetPoly || insetPoly.length < 3 || Math.abs(compArea(insetPoly)) < 50) return null;
+  const TID = -(900000 + zone.id);
+  return { id: TID, name: zone.name, floorId: room.floorId, partId: room.partId, shape: 'polygon',
+    wallThicknessCm: 0, roomType: room.roomType, targetWm2: room.targetWm2,
+    points: insetPoly.map(p => ({x:p.x, y:p.y})), walls: [], area: Math.abs(compArea(insetPoly)), dims: [] };
 }
 
 // Fill foil inside a sone, scoped to its per-edge-inset polygon, in the sone's own direction.
@@ -23748,13 +23806,9 @@ function _fillSoneFoil(zone, prods){
   if(!zone || zone.type!=='sone' || !prods || !prods.length) return;
   const room=S.rooms.find(r=>r.id===zone.roomId); if(!room) return;
   const pid=prods[0].id;
-  const insetPoly=_zoneFillablePolygon(zone, room, pid);
-  if(!insetPoly || insetPoly.length<3 || Math.abs(compArea(insetPoly))<50){ _showToast('Sonen er for liten for folie','warn'); return; }
-  // Temp room scoped to the inset polygon → fill with margin 0 (per-edge margin already baked in).
-  const TID=-(900000+zone.id);
-  const tmp={ id:TID, name:zone.name, floorId:room.floorId, partId:room.partId, shape:'polygon',
-    wallThicknessCm:0, roomType:room.roomType, targetWm2:room.targetWm2,
-    points:insetPoly.map(p=>({x:p.x,y:p.y})), walls:[], area:Math.abs(compArea(insetPoly)), dims:[] };
+  const tmp=_soneTempRoom(zone, room, pid);
+  if(!tmp){ _showToast('Sonen er for liten for folie','warn'); return; }
+  const TID=tmp.id;
   S.rooms=S.rooms.filter(r=>r.id!==TID); S.rooms.push(tmp);
   let defs=[];
   try{
@@ -23781,6 +23835,72 @@ function _fillSoneFoil(zone, prods){
 }
 
 // «+ Produkt» from a sone ctxbar → open the product picker targeting this sone.
+function _cablesForZone(zoneId){ return S.cables.filter(c=>c.zoneId===zoneId); }
+
+// spec-soner-kabel-per-sone-og-N-deling.md DEL B: felles CC pa tvers av soner i SAMME rom - ellers
+// mister man "identisk W/m2 i hele rommet" (samme prinsipp _buildNCableZones sin sharedCC allerede
+// handhever for auto-N-delingen, se der). Forste sone i et rom som far kabel SETTER CC-en (fra
+// ROMMETS totale netto areal, ikke bare sonens egen - "rommets samlede behov" per spec-en); alle
+// senere soner i samme rom ARVER den, uansett hvilket produkt de selv fylles med.
+function _soneSharedCCForRoom(room, prod){
+  const roomZoneIds = new Set(_sonesForRoom(room.id).map(z=>z.id));
+  const existing = S.cables.find(c => c.zoneId!=null && roomZoneIds.has(c.zoneId) && c.spacing_cm);
+  if (existing) return existing.spacing_cm;
+  const minSp=(prod.min_spacing_mm||50)/10, maxSp=(prod.max_spacing_mm||200)/10;
+  if (!prod.cable_length_m) return Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm||100)/10));
+  const netM2 = roomAreas(room).net/10000;
+  return Math.max(minSp, Math.min(maxSp, (netM2/prod.cable_length_m)*100));
+}
+
+// Fill cable inside a sone, scoped to its per-edge-inset polygon, in the sone's own direction.
+// Speiler _fillSoneFoil noye (samme _soneTempRoom, samme try/finally, samme zoneId-stempling) -
+// Kenneths rapporterte feil var nettopp at autoFillCable aldri fikk vite at rommet var delt, og
+// derfor la kabelen ut over HELE rommet i stedet for a holde seg innenfor sonen. Denne funksjonen
+// er fiksen: samme motor (autoFillCable), men mot et midlertidig rom formet som sonen.
+function _fillSoneCable(zone, prod){
+  if(!zone || zone.type!=='sone' || !prod) return;
+  const room=S.rooms.find(r=>r.id===zone.roomId); if(!room) return;
+  const tmp=_soneTempRoom(zone, room, prod.id);
+  if(!tmp){ _showToast('Sonen er for liten for kabel','warn'); return; }
+  const TID=tmp.id;
+  // _forcedSpacingCm: samme mekanisme _buildNCableZones bruker for a tvinge inn en delt CC -
+  // generateCableV6/-Boustrophedon/-Skew leser den selv fra room-objektet (roomId-oppslag), se
+  // kommentarene ved _buildNCableZones for hvor dette allerede er bevist a virke.
+  const sharedCC=_soneSharedCCForRoom(room, prod);
+  tmp._forcedSpacingCm=sharedCC;
+  S.rooms=S.rooms.filter(r=>r.id!==TID); S.rooms.push(tmp);
+  let cable=null;
+  const dir=zone.direction||'h';
+  const _savedDir=S.varmefolie.direction;
+  try{
+    S.varmefolie.direction=dir;   // sonen barer sin egen retning, samme som _buildNCableZones tvinger per sone
+    cable=autoFillCable(TID, prod.id);
+    // Samme sikkerhetsnett som _buildNCableZones: generateCableSerpentine er den ENESTE motoren som
+    // ikke leser _forcedSpacingCm selv (den tar spacing som eksplisitt parameter) - fall tilbake dit
+    // direkte hvis ingen av de andre motorene traff.
+    if(!_cableHasGeom(cable)){
+      const raw=generateCableSerpentine(TID, prod.id, dir, sharedCC, zone.startCorner||'bl', null);
+      if(raw && raw.runs && raw.runs.length){
+        cable={ id:S.counters.nextCableId++, roomId:room.id, productId:prod.id, direction:dir,
+          spacing_cm:sharedCC, startCorner:zone.startCorner||'bl', runs:raw.runs,
+          totalLength_cm:raw.totalLength_cm||(prod.cable_length_m?prod.cable_length_m*100:0),
+          lockedEnd:!!prod.cable_length_m, _engine:'serpentine-fallback' };
+      }
+    }
+  } finally { S.varmefolie.direction=_savedDir; S.rooms=S.rooms.filter(r=>r.id!==TID); }
+  if(!_cableHasGeom(cable)){ _showToast('Fikk ikke lagt kabel i sonen','warn'); return; }
+  pushUndo();
+  S.cables=S.cables.filter(c=>c.zoneId!==zone.id);   // replace this sone's cable
+  cable.roomId=room.id;   // re-key from the temp room to the real one
+  cable.zoneId=zone.id;
+  S.cables.push(cable);
+  if(typeof _invalidateCableCache==='function') _invalidateCableCache();
+  if(typeof _trackProductUsage==='function') _trackProductUsage(prod.id);
+  S.ui.selectedCableId=cable.id;
+  renderSidebar(); updateCtxBar(); render();
+  _showToast(`Kabel lagt i ${zone.name}`, 'ok');
+}
+
 function _openSoneProdukt(e, zoneId){
   const z=S.zones.find(z=>z.id===zoneId); if(!z) return;
   S.ui.fillTargetZoneId=zoneId;
@@ -38251,7 +38371,7 @@ function _ctxBarItems() {
       const arrow = _sz.direction === 'v' ? '↕' : '↔';
       return `<span class="ctxbar-lbl">${IC('grid4',14)} Sone</span>
         <button class="snap-chip" onclick="renameSone(${_sz.id})" title="Endre sonenavn">${esc(_sz.name || 'Sone')}</button>
-        <span style="font-size:12px;color:var(--dim);padding:0 4px">${_st.areaM2.toFixed(1)} m²${_st.nStrips?` · ${_st.powerW} W · ${_st.coveragePct}%`:''}</span>
+        <span style="font-size:12px;color:var(--dim);padding:0 4px">${_st.areaM2.toFixed(1)} m²${(_st.nStrips||_st.nCables)?` · ${_st.powerW} W · ${_st.coveragePct}%`:''}</span>
         <span class="tc-sep"></span>
         <button class="snap-chip primary" onclick="_openSoneProdukt(event, ${_sz.id})" title="Legg folie i denne sonen">+ Produkt</button>
         <button class="snap-chip" onclick="toggleSoneDirection(${_sz.id})" title="Bytt utleggingsretning for sonen">${arrow} ${dir}</button>
