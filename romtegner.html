@@ -3391,9 +3391,20 @@ _paintStaticIcons();
 // STEG 1-fiksen: én delt _roomProductCollectionNames()-liste (strips/cables/mats/plates/matPaths/
 // aluboard) som _clearRoomProducts, Slett rom og hasProducts (kontekstmeny) alle leser fra — se der.
 
+// spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B: en delt fabrikk for et tomt
+// S.project, brukt her OG av _resetProjectState() lenger ned. De var tidligere to avvikende
+// literaler — reset-versjonen manglet address/projectNo/revision/lastExportedAt, og exportPDF
+// matte derfor gjenopprette revision selv ved hver eksport (den koden er na overflodig, se der).
+// projectNo er null (ikke tom streng) inntil DEL B sin trigger i databasen tildeler et ekte tall
+// ved forste lagring — S.project.id er en evig "1"-literal og ma ALDRI forveksles med prosjektnr.
+function _newProjectState() {
+  return { id:1, name:'', description:'', customer:'', address:'', projectNo:null, type:'indoor',
+    status:'planned', responsible:'', createdAt:Date.now(), revision:0, lastExportedAt:null, parts:[] };
+}
+
 // ─── STATE ───────────────────────────────────────────────────
 const S = {
-  project  : { id:1, name:'', description:'', customer:'', address:'', projectNo:'', type:'indoor', status:'planned', responsible:'', createdAt:Date.now(), revision:0, lastExportedAt:null, parts:[] },
+  project  : _newProjectState(),
   floors   : [],
   rooms    : [],
   hindrings: [],
@@ -49807,7 +49818,12 @@ async function _fetchProjectList() {
     // room geometry / background image blob). Each successive candidate drops a
     // column/feature that may not exist on this DB (status, deleted_at, JSON-path
     // select) so the list still loads on older schemas/PostgREST versions.
+    // spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B, Krav 7: project_no lagt til
+    // i de ØVERSTE variantene (den dedikerte kolonnen, ikke JSON-blobbens egen — se mappingen
+    // under), øvrige rungs uendret slik at lista fortsatt laster for et skjema uten migrasjonen.
     const candidates = [
+      'id, name, description, created_at, updated_at, status, deleted_at, sales_status, delivery_status, lost_reason, status_changed_at, project_no, proj:data->project',
+      'id, name, description, created_at, updated_at, status, deleted_at, project_no, proj:data->project',
       'id, name, description, created_at, updated_at, status, deleted_at, sales_status, delivery_status, lost_reason, status_changed_at, proj:data->project',
       'id, name, description, created_at, updated_at, status, deleted_at, proj:data->project',
       'id, name, description, created_at, updated_at, deleted_at, proj:data->project',
@@ -49837,7 +49853,11 @@ async function _fetchProjectList() {
         _lostReason: p.lost_reason || null,
         _statusChangedAt: p.status_changed_at || null,   // P2: tilbud-alder
         _responsible: proj.responsible || '',
-        _projectNo: proj.projectNo || '',   // STEG 4: searchable order/project number
+        // DEL B: den dedikerte project_no-kolonnen (p.project_no) er fasiten når den er hentet —
+        // JSON-blobbens egen kopi (proj.projectNo) er kun et speil av den og kan være midlertidig
+        // ute av synk (fersk Dupliser, se _duplicateProject) eller helt fraværende på et skjema
+        // uten migrasjonen (candidates uten project_no over) — falt tilbake til da, aldri omvendt.
+        _projectNo: (p.project_no != null ? p.project_no : (proj.projectNo != null ? proj.projectNo : '')),
         _prog: proj._prog || null,   // STEG 3: stamped workflow-progress summary
         _deletedAt: p.deleted_at || null,
         // "Oppdatert"-datoen vises/sorteres på savedAt (stemplet ved ekte
@@ -49881,16 +49901,38 @@ async function _saveToSupabase() {
         const res2 = await _db.from('romtegner_projects').update(row).eq('id', _supabaseProjectId);
         if (res2.error) throw res2.error;
       } else if (error) throw error;
+      // DEL B: prosjektnr endres ALDRI ved oppdatering (row inneholder den aldri) — dette henter
+      // KUN et allerede-tildelt nummer inn i minnet for et prosjekt som ble åpnet FØR migrasjonen/
+      // backfillen kjørte på serveren (sjeldent, engangs per gammelt prosjekt). Ingen ekstra
+      // rundtur når nummeret allerede er kjent.
+      if (S.project.projectNo == null) {
+        try {
+          const { data: noRow } = await _db.from('romtegner_projects').select('project_no').eq('id', _supabaseProjectId).single();
+          if (noRow && noRow.project_no != null) S.project.projectNo = noRow.project_no;
+        } catch(_) {}
+      }
     } else {
-      let { data, error } = await _db.from('romtegner_projects').insert(row).select('id').single();
+      // spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B, Krav 1: prosjektnr
+      // tildeles av en DATABASE-TRIGGER ved INSERT (romtegner_assign_project_no, se
+      // supabase-migration-prosjektnr.sql) — klienten sender det aldri selv, kun leser resultatet
+      // tilbake her (S.project.projectNo). En manglende project_no-kolonne (migrasjonen ikke
+      // kjørt på dette skjemaet) gir samme «column …»-feil PostgREST allerede returnerer for
+      // status/last_autosave_at over — samme _isColMissing-mønster, men et eget siste
+      // fallback-trinn siden prosjektnr er en SELECT-kolonne, ikke en INSERT-kolonne (row
+      // inneholder den aldri i utgangspunktet).
+      let { data, error } = await _db.from('romtegner_projects').insert(row).select('id, project_no').single();
       if (_isColMissing(error)) {
         _dbHasStatusCol = false;
         delete row.status; delete row.last_autosave_at;
-        const res2 = await _db.from('romtegner_projects').insert(row).select('id').single();
+        let res2 = await _db.from('romtegner_projects').insert(row).select('id, project_no').single();
+        if (_isColMissing(res2.error)) {
+          res2 = await _db.from('romtegner_projects').insert(row).select('id').single();
+        }
         if (res2.error) throw res2.error;
         data = res2.data;
       } else if (error) throw error;
       _supabaseProjectId = data.id;
+      if (data && data.project_no != null) S.project.projectNo = data.project_no;
     }
     // Clean up IndexedDB entry after successful cloud save
     if (_supabaseProjectId) {
@@ -50890,6 +50932,13 @@ async function _renderProjectList() {
     // oppløsning her og der, ikke to kopier som kan drifte fra hverandre.
     const custName = _projectCustName(p);
     const responsible = esc(p._responsible || '') || '<span style="color:var(--dim)">—</span>';
+    // spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B, Krav 6: uten dette kan
+    // Kenneth ikke finne et prosjekts nummer uten å eksportere en PDF — og da kan han heller ikke
+    // søke på det. Slått sammen med Ansvarlig i SAMME undertekst-linje (ikke en egen), for å
+    // beholde radhøyden fra tidligere runders tuning av denne tabellen (se DEL C/D-kommentarene
+    // rett under) — en ny linje her ville økt hver rad.
+    const projNoTag = (p._projectNo != null && p._projectNo !== '') ? '#' + String(p._projectNo).padStart(4, '0') : '';
+    const subLine = [esc(p._responsible || ''), projNoTag].filter(Boolean).join(' · ');
     const checked = _selectedProjectIds.has(p.id) ? ' checked' : '';
     // DEL C (Kenneth 26.08.2026, «firma sammen med prosjektnavn»): firma FØRST, prosjektnavn etter
     // DEL D (Kenneth 28.08.2026, «egen kolonne for Firmanavn... så egen for prosjektnavn»):
@@ -50903,7 +50952,7 @@ async function _renderProjectList() {
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
       <td class="pl-td pl-td-firma" title="${esc(custName)}">${firmaCell}</td>
-      <td class="pl-td pl-td-proj" title="${esc(p.name)}"><span class="pl-proj-name pl-proj-name-project">${esc(p.name)}</span>${p._responsible ? '<span class="pl-td-sub">'+esc(p._responsible)+'</span>' : ''}</td>
+      <td class="pl-td pl-td-proj" title="${esc(p.name)}"><span class="pl-proj-name pl-proj-name-project">${esc(p.name)}</span>${subLine ? '<span class="pl-td-sub">'+subLine+'</span>' : ''}</td>
       <td class="pl-td pl-td-type"><span class="pl-type-ico">${IC(_MOD_ICON[type]||'home',14)}</span>${typeObj.label}</td>
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${SALES_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select>${_prosjekteringBridgeHtml(p) || _deliveryCellHtml(p)}</td>
       <td class="pl-td pl-td-date">${date}</td>
@@ -51282,6 +51331,12 @@ async function _openCloudProject(id) {
   _projectFileHandle = null;
   document.getElementById('project-list-screen').style.display = 'none';
   _restoreProject(row.data);
+  // spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B: den DEDIKERTE project_no-
+  // kolonnen er alltid fasiten, JSON-blobbens egen kopi (data.project.projectNo, gjenopprettet av
+  // _restoreProject rett over) er bare et speil av den — synk her selvhelbreder et prosjekt der
+  // blobben ikke rakk å bli oppdatert enda (f.eks. en fersk Dupliser, se _duplicateProject).
+  // _loadFromSupabase bruker select('*') og har derfor allerede kolonnen med, uten en ekstra spørring.
+  if (row.project_no != null) S.project.projectNo = row.project_no;
 }
 
 let _pendingDeleteId = null;
@@ -51373,6 +51428,13 @@ async function _duplicateProject(id) {
   const newData = JSON.parse(JSON.stringify(row.data));
   const origName = newData.project?.name || row.name || 'Uten navn';
   newData.project.name = origName + ' (kopi)';
+  // spec-pdf-forside-prosjektnr-og-romoversikt-rekkefolge.md DEL B, Krav 3: uten dette arver
+  // kopien originalens prosjektnr i JSON-blobben (deep-kopiert rett over) — «unik» brutt ved
+  // første Dupliser. Den DEDIKERTE project_no-kolonnen på den nye raden får sitt eget tall fra
+  // databasetriggeren uansett (INSERT-en under sender aldri projectNo selv); denne linja sørger
+  // for at BLOBBENS kopi ikke lyver til neste åpning før _openCloudProject rekker å synke den
+  // ekte kolonnen inn igjen.
+  if (newData.project) newData.project.projectNo = null;
   // Insert as new project — include user_id and org_id for RLS
   try {
     const ins = { name: newData.project.name, description: newData.project.description || '', data: newData };
@@ -52382,7 +52444,7 @@ function _resetToNpScreen() {
 }
 function _resetProjectState() {
   _projectDirty = false;
-  S.project  = { id:1, name:'', description:'', customer:'', type:'indoor', status:'planned', responsible:'', createdAt:Date.now(), parts:[] };
+  S.project  = _newProjectState();
   S.floors   = [];
   S.rooms    = []; S.walls = []; S.strips = []; S.hindrings = []; S.zones = []; _invalidateStripCache();
   S.cables   = []; S.mats = []; S.plates = []; S.stairs = [];
