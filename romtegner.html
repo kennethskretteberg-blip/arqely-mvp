@@ -7506,6 +7506,25 @@ function _matRunStartCm(mat, i) {
 // mellom en flush og en forskjøvet nabo blir naturlig usann (ks[0] treffer nesten aldri
 // prevEndK når rutenettene er halv-CC fra hverandre) — ingen egen if-gren trengs i flukt-sjekken.
 const _matCableGapWarned = new Set();   // STEG 2: logg «nett uten kabelplass» kun ÉN gang per matte+bredde
+
+// spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md DEL A, Krav 1: delt av BEGGE kabelmotorene
+// (auto/_matCablePlan under OG frihand/_drawMatPathCable) - hvilken side (pa kryssaksen INNAD i
+// en bredde/bane) streng nummer 0 skal starte pa (hi0), og om SISTE streng ma droppes for at
+// telling-pariteten naturlig lander pa riktig side mot naboen (Regel I: sving fra bredde til
+// bredde, ALDRI en strek tvers over ei matte). Logikken fantes fra for i _drawMatPathCable,
+// LOFTET HIT uendret (samme formel, ikke en ny) - se der for hvordan frihand selv beregner
+// entryHi/exitHi (verdensposisjon mot naboens faktiske plassering, siden en frihandsbane kan ga i
+// vilkarlig retning). entryHi/exitHi er null nar det ikke finnes en nabo pa den siden (forste/
+// siste bredde/bane) - arver da den andre sidens motsetning, eller false hvis INGEN nabo finnes.
+function _matCableEntrySide(entryHi, exitHi, N) {
+  if (entryHi == null) entryHi = (exitHi == null) ? false : !exitHi;
+  if (exitHi == null) exitHi = !entryHi;
+  const hi0 = entryHi ? 1 : 0;
+  let Nuse = N;
+  if (N >= 2 && (((hi0 + N - 1) % 2 === 0) !== exitHi)) Nuse = N - 1;
+  return { hi0, Nuse };
+}
+
 function _matCablePlan(mat, prod) {
   const numRuns = mat.num_runs || 1;
   const ccCm = (prod?.mat_cc_mm || 80) / 10;
@@ -7541,14 +7560,39 @@ function _matCablePlan(mat, prod) {
     let kHi = Math.floor((hiBound - anchorCm) / ccCm + 1e-6);
     kLo = Math.max(0, kLo); kHi = Math.min(nCableRuns - 1, kHi);
     if (kLo > kHi) { runs.push(null); prevEndY = null; continue; }
-    const descending = (r % 2 === 0);
+    // DEL A (spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md): descending velges na FORST for
+    // a proeve a treffe naboens faktiske avslutning pa SAMME rutenett-posisjon (ekte flukt), og
+    // faller KUN tilbake til den gamle r%2-vekslingen nar ingen av retningene treffer (forste
+    // bredde, ELLER et uregelmessig rom/forskjovet produkt der k-omradene ikke deler samme
+    // rutenett-posisjon). Fluktkriteriet (Regel J) er UENDRET - fortsatt sammenlignet pa
+    // verdensposisjon under, bit-identisk for det uforskjovne, rektangulaere standardtilfellet
+    // (samme valg som r%2 alltid ga der, bekreftet ved utledning).
+    let descending = (r % 2 === 0);
+    if (prevEndY != null) {
+      const yIfDesc0 = anchorCm + kHi * ccCm, yIfAsc0 = anchorCm + kLo * ccCm;
+      if (Math.abs(yIfDesc0 - prevEndY) < 1e-6) descending = true;
+      else if (Math.abs(yIfAsc0 - prevEndY) < 1e-6) descending = false;
+    }
     const ks = [];
     if (descending) for (let k = kHi; k >= kLo; k--) ks.push(k);
     else for (let k = kLo; k <= kHi; k++) ks.push(k);
     const yWorld = ks.map(k => anchorCm + k * ccCm);
     const flukt = prevEndY != null && Math.abs(yWorld[0] - prevEndY) < 1e-6;   // Regel J: kun EKTE, felles verdensposisjon flukter
-    runs.push({ r, netStart, netEnd, ks, yWorld, flukt });
-    prevEndY = yWorld[yWorld.length - 1];
+    // DEL A, Krav 1+2: kryssaksen (hvilken side HVER streng starter pa INNAD i bredden) via
+    // samme delte helper frihand allerede bruker (_matCableEntrySide). Autos utlegg er alltid
+    // venstre->hoyre i stigende r (fast layout, ikke brukertegnet som frihand) - entry er derfor
+    // alltid mot forrige (lav side) og exit alltid mot neste (hoy side), faste konstanter i
+    // stedet for utledet fra naboens posisjon. Nuse (dropp siste streng ved uheldig paritet) er
+    // SAMME mekanisme uansett - dette er selve fiksen for Kenneths rapporterte feil (annenhver
+    // skjot landet pa feil side fordi antall strenger pr bredde varierer med klippingen).
+    // Krav 3: Nuse-justeringen trunkerer ks/yWorld I PLANEN her (ikke bare i tegneloekka) - samme
+    // plan som _matRunsWithinRoom (vakten) leser, sa de to aldri kan divergere. Rapportert i
+    // commit-meldingen: ks-lengden brukes IKKE til lengdeberegning noe sted (kun til vakten og
+    // selve tegningen, begge steder trygt a trunkere) - _matCablePlan har bare disse to kallerne.
+    const { hi0, Nuse } = _matCableEntrySide(false, true, ks.length);
+    if (Nuse < ks.length) { ks.length = Nuse; yWorld.length = Nuse; }
+    runs.push({ r, netStart, netEnd, ks, yWorld, flukt, startHi0: hi0 });
+    prevEndY = yWorld.length ? yWorld[yWorld.length - 1] : null;
   }
   return { runs, ccCm, minLenMgn, edgeMgn, nCableRuns };
 }
@@ -10475,13 +10519,10 @@ function _drawMatPathCable(mp, coverCm, opts) {
     let entryHi = null, exitHi = null;
     if (prevExitW) entryHi = (horiz ? prevExitW.y : prevExitW.x) > wCtr;                 // mot forrige
     if (rNext) { const nc = horiz ? ((rNext.a.y + rNext.b.y) / 2) : ((rNext.a.x + rNext.b.x) / 2); exitHi = nc > rCross; }  // mot neste
-    if (entryHi === null) entryHi = (exitHi === null) ? false : !exitHi;
-    if (exitHi === null) exitHi = !entryHi;
-    const hi0 = entryHi ? 1 : 0;                           // 1. streng starter på entry-siden
-    // Paritet: eA(siste)=wHi ⟺ (hi0+n-1) partall. Juster KUTT-lengden ±1×CC (dropp siste streng)
-    // hvis pariteten ikke gir utgang på exit-siden → alltid flush ved skjøten.
-    let Nuse = N;
-    if (N >= 2 && (((hi0 + N - 1) % 2 === 0) !== exitHi)) Nuse = N - 1;
+    // DEL A (spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md): logikken herfra (hi0/Nuse) er
+    // løftet ut til _matCableEntrySide, delt med auto/_matCablePlan — samme formel, kalt herfra
+    // uendret i stedet for kopiert.
+    const { hi0, Nuse } = _matCableEntrySide(entryHi, exitHi, N);
     let lastEndW = null;
     for (let j = 0; j < Nuse; j++, si++) {
       const along = positions[j], hi = ((hi0 + j) % 2 === 1);
@@ -21300,7 +21341,10 @@ function drawMats() {
         const loX = cxr - hw + insetPx, hiX = cxr + hw - insetPx;      // strengens tverr-endepunkter
         for (let jj = 0; jj < run.ks.length; jj++) {
           const y = localY(run.yWorld[jj]);
-          const startHi = (jj % 2 === 1);                              // første streng starter VENSTRE → første sving på HØYRE
+          // DEL A: leser startHi0 fra PLANEN (_matCablePlan/_matCableEntrySide) i stedet for å
+          // anta jj===0 alltid starter lavt — samme knutepunkt som Nuse-trunkeringen (run.ks er
+          // allerede tilpasset der), tegneløkka gjør ingen egen beslutning lenger.
+          const startHi = ((run.startHi0 + jj) % 2 === 1);
           const ax = startHi ? hiX : loX;                             // strengens start-x
           const bx = startHi ? loX : hiX;                             // strengens slutt-x
           if (pen === null) {
