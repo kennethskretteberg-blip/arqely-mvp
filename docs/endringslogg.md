@@ -4,6 +4,133 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Matte: kabelskjøt følger naboen, halv-CC-forbandt, jevne bredder — 2026-09-02
+
+Kenneth: «kabel ligger feil der matten kappes og vendes. svingene må naturlig gå fra en bredde til
+neste bredde.» Fire commits, siste bygget etter en oppfølgende bekreftelse samme dag.
+
+- **`d6a4e86` — DEL A: auto-matte sin kabel følger nå naboen i skjøten.** Rotårsak: `drawMats`
+  startet HVER bredde sin første streng på venstre kant uansett hvor forrige bredde sluttet —
+  antall strenger per bredde varierer med klippingen mot rommet, så annenhver skjøt landet feil.
+  Frihånd hadde allerede løst nøyaktig dette (`entryHi`/`exitHi`/`hi0`/`Nuse`) — løftet UENDRET til
+  en delt `_matCableEntrySide()`, brukt av begge motorene nå. Beslutningen flyttet inn i
+  `_matCablePlan` (samme kilde vakten `_matRunsWithinRoom` leser).
+- **`142a40d` — DEL B: selve skjøten er nå en sving, ikke en strek eller et opphold.** Halvsirkel
+  (`_matArcHalf`, samme delte hjelper U-svingene innad i en bredde bruker) mellom breddene, radius
+  fra faktisk avstand (ikke `cc/2`, som er LÅST for U-svingene). Frihånd bevisst IKKE rørt — egen
+  test krevde at den forblir uendret.
+- **`c783da8` — DEL D: «Sentrer» jevner nå ut breddelengder, ikke bare posisjon.** Ny søster til
+  LÅST Regel E (`_matNearEqualWidthNL`) som godtar en kort siste bredde, men minimerer
+  differansen. Egen bug funnet og rettet underveis: første forsøk rundet lengden NED, som
+  matematisk gjorde det umulig for siste bredde å noensinne bli kort — rettet til avrunding.
+  `mp._lenBeforeCenter` lagrer original-lengdene så «Sentrer AV» kan gjenopprette dem.
+- **`c8d416a` — DEL C: EcoMat legges nå i forbandt, Regel 19 revidert.** Forrige runde målte at
+  verken U-sving- eller hjørne-tilkobling i frihånd produserer noen deterministisk halv-CC-
+  forskyvning — rapportert, ikke bygget. Kenneth bekreftet deretter med ord («ja, jeg vil ha
+  forbandt for ecomat også»). `mat_stagger_half_cc` satt til `true` på alle 57 EcoMat-produktrader
+  i Supabase (samme felt `_matCablePlan` allerede leste for InSnow). Frihånd leste feltet ALDRI —
+  utvidet til å gjøre det, med samme paritetsprinsipp (`laneIdx%2`) som auto sin `r%2`.
+- Testmetodikk: full regresjonsbatteri (mat/matZone/matFree/cableSkew/foil) grønn etter hver
+  commit. DEL A/B/C verifisert med ekte canvas-screenshot i tett zoom, ikke bare tallsjekk.
+
+**Fil:** romtegner.html, `supabase-migration-ecomat-forbandt.sql`.
+
+---
+
+## PDF-eksport: nytt filnavn med prosjektnr — 2026-09-02
+
+Kenneth: «endre filnavn på eksport pdf til følgende format:
+Varmeplan_P:xxxxx_Prosjektnavn_01.01.2026_rev1».
+
+- **`c0ecbb8` — `Varmeplan_P0142_Navn_dd.mm.åååå_revN.pdf`.** Kolon droppet (ulovlig i filnavn på
+  Windows, tolkes som sti-skille i Finder på macOS) — `P0142` uten skilletegn. Fire siffer, delt
+  med forsiden/prosjektlista via ny `_fmtProjectNo()`. Dato bygget som bestilt (dd.mm.åååå, ikke
+  ISO) — trade-off nevnt: bryter kronologisk mappesortering. Ny delt `_exportFileName()` bytter
+  ALLE understreker i prosjektnavnet til bindestrek (understrek er nå feltskillet i filnavnet).
+  Uten prosjektnr utelates hele P-feltet — aldri en oppdiktet `P0000`. Excel-eksporten urørt.
+
+**Fil:** romtegner.html.
+
+---
+
+## PDF-forside, prosjektnr og Romoversikt i riktig rekkefølge — 2026-09-02
+
+Kenneth ba om fire ting på én gang: ny forside, et ekte prosjektnummer, Prosjektoversikt uhaket som
+standard, og Romoversikten flyttet til riktig sted i utskriften. Bygget i rekkefølgen C → D → A → B,
+committet hver for seg.
+
+- **`f2d45ea` — DEL C: «Prosjektoversikt» uhaket som standard.** Én linje.
+- **`e264250` — DEL D: Romoversikt/Trappeoversikt flyttet til rett før Materiallista.** Kenneth
+  hadde rett i at rekkefølgen var feil — eksportdialogens eget grensesnitt viste allerede riktig
+  gruppering, det var byggeren som var uenig med sitt eget grensesnitt.
+- **`64cffb0` — DEL A: Adresse fjernet, Kontaktperson lagt til.** Adresse-raden skrev bokstavelig
+  «[object Object]» (feltet var aldri en streng). Kontaktperson fantes allerede i state, bare
+  aldri lest av forsiden. Ny delt `_pdfCoverMetaRows()` — forsiden og HTML-forhåndsvisningen
+  bygger nå radene ett sted.
+- **`f724886` — DEL B: ekte, unik prosjektnr-indeks PER FIRMA.** Kenneth valgte per-firma fremfor
+  global sekvens etter et eksplisitt spørsmål. Database-trigger (atomisk `INSERT ... ON CONFLICT
+  ... RETURNING`, kollisjonsfri også ved samtidige lagringer) + migrasjon kjørt: 271 eksisterende
+  prosjekter backfylt, hvert firma sin egen 1..N-serie, eldste = nr. 1.
+
+**Fil:** romtegner.html, `supabase-migration-prosjektnr.sql`.
+
+---
+
+## FERDIG-knapp etter utlegg, og en glemt forhåndsvisning — 2026-09-02
+
+Kenneth: «jeg ønsker også en "FERDIG" knapp etter jeg har lagt ut varmekabler i rom og godkjent
+forhåndsvisning. Nå må trykke ut i canvas, for å få opp romlisten.»
+
+- **`b1f0290` — DEL A+C: én FERDIG i panelheaderen dekker alle produktveier.** Fantes fra før, men
+  kun i den manuelle paletten. Ny knapp i `#room-workflow-panel` sin header dekker auto-forslag
+  (kabel/matte/plate/snø) også, uten å limes inn i fem ulike visningsfunksjoner. Skjules når den
+  manuelle paletten (egen FERDIG) er synlig.
+- **`eba8711` — DEL B: FERDIG rydder nå opp i en ventende forhåndsvisning.** Ekte feil funnet
+  underveis: ingen vei ut av panelet (tomt-canvas-klikk, Escape) tømte en ventende kabel-/matte-
+  forhåndsvisning — den kunne bli stille slettet neste gang noe forhåndsvistes i samme rom. FERDIG
+  deaktiveres nå mens noe venter (ikke auto-godkjenner), Escape avbryter en ventende
+  forhåndsvisning. Åpent funn rapportert, ikke fikset: en forhåndsvisning kan i prinsippet
+  overleve et lagre/last siden `_buildSaveData()` sprer hele romobjektet.
+
+**Fil:** romtegner.html.
+
+---
+
+## Soner: kabel per sone og automatisk N-deling — 2026-09-02
+
+Kenneth: «Det som er feil nå, er at jeg ikke får lagt en kabel innenfor hver sin sone, den legger
+seg ut over sonene som at rommet fortsatt er en hel sone.»
+
+- **`c2bf0cf` — DEL A: delelinjen låses til vannrett/loddrett.** `getWorldPos()` fikk en ny
+  `zoneSplitMode`-gren som gjenbruker samme `angleSnap()` rom-polygontegning allerede bruker.
+- **`dc99d4a` — DEL B: kabel legges nå per sone, ikke over hele rommet.** Rotårsak: `autoFillCable`
+  tar en roomId og har aldri sett en sone — `showCablePlacePanel()` nullstilte til og med
+  sone-flagget eksplisitt før kabelpanelet åpnet. Ny `_fillSoneCable()` (speiler `_fillSoneFoil`,
+  delt `_soneTempRoom()`), delt CC på tvers av kabelsoner i samme rom, gate mot rom-nivå kabelvalg
+  når rommet har soner.
+- **`fc4da08` — DEL C: automatisk deling i N like store soner.** Ny knapp «Del i N soner» ved
+  siden av «Del i soner» — bygger EKTE, navngitte `S.zones`-oppføringer (ikke kabelmotorens egen
+  flyktige geometri), gjenbruker `_equalAreaBandBounds`.
+
+**Fil:** romtegner.html.
+
+---
+
+## «Kopier til Visma»: tomme rader i stedet for fritekst, to kolonner — 2026-09-02
+
+Kenneth testet fritekstlinjer («VARMEFOLIE» som en varelinje med tomt artikkelnummer) direkte mot
+Visma Global: det virker ikke.
+
+- **`676dcde` — utklippet er nå kun `2269`+`2281` (artikkelnr+antall).** Rabatt-avkryssingen
+  fjernet helt fra dialogen. Tomme rader (bokstavelig `"\t"`, ikke en tom streng) erstatter
+  fritekst-overskrifter — én mellom materialgrupper, to foran tilbehøret. Ny
+  `dokumenter/visma-global-tilbudsimport-format.md` dokumenterer at fritekstlinjer er testet og
+  IKKE virker, så neste person slipper å teste det på nytt.
+
+**Fil:** romtegner.html, `dokumenter/visma-global-tilbudsimport-format.md`.
+
+---
+
 ## «Kopier til Visma»: artikkellinjer, delt tilbehør og PDF-rekkefølge — 2026-09-01
 
 Kenneth fant ut at man kan lime artikler rett inn i et ALLEREDE ÅPENT tilbud i Visma Global — mye
