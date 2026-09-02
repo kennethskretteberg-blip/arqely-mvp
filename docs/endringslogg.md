@@ -4,6 +4,75 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Kopier til Visma»: artikkellinjer, delt tilbehør og PDF-rekkefølge — 2026-09-01
+
+Kenneth fant ut at man kan lime artikler rett inn i et ALLEREDE ÅPENT tilbud i Visma Global — mye
+kortere vei enn den parkerte GBAO10-tilbudseksporten (ikke slettet), siden kundenummer/-kobling
+(den vanskelige delen der) ikke trengs i det hele tatt. Fem commits samme dag: ny funksjon, ekte
+bug funnet og fikset i produksjon samme dag, en migrasjon kjørt mot Supabase, og en oppfølgende
+prompt som rettet rekkefølge og fjernet dobbeltarbeid med tilbehørsvalg.
+
+- **`a405a75` — «Kopier til Visma»: tabulatorseparerte artikkellinjer på utklippstavla.**
+  Cenikas eget paste-format (felt-ID 2269/2270/2281/2274). `_collectMaterialItems()`/
+  `_aggregateMaterialItems(items)` løftet ut og delt med XLSX-eksporten (bekreftet Excel uendret).
+  Rabatt gjenbruker `_resolveDiscountPct` (samme kilde som PDF-en), kolonne 2274 tas kun med når
+  minst én linje faktisk har rabatt > 0. **Ekte bug funnet og fikset underveis:** Antall-feltet
+  brukte en heuristikk laget for Bestilling-arkets tekststreng til mennesker (`!cable_length_m`),
+  som feilklassifiserte MATTER som «solgt løpende» — ga antall=10 (meter) for én enkelt EcoMat-
+  rull i stedet for 1 (stk), en stille tidoblet bestilling i Visma. Rettet med `kind==='Folie'`
+  (satt autoritativt i `_collectMaterialItems`) som eneste «solgt løpende»-signal. Forhåndsvisning
+  viser nøyaktig det som limes inn; manglende `article_no` navngir produktet og sperrer
+  Kopier-knappen; `navigator.clipboard.writeText()` med ekte fallback (markert, fokusert
+  `<textarea>`), verifisert begge veier.
+- **`014ffe9` — ny `organizations.erp_format`-kolonne, kjørt mot Supabase.**
+  [supabase-migration-erp-format.sql](../supabase-migration-erp-format.sql) — fri streng, ikke
+  boolsk, slik at en annen grossist kan få sin egen verdi uten kodeendring. Kjørt via Supabase CLI
+  (`supabase link` + `supabase db query --linked`, allerede autentisert). Cenika AS (eneste org i
+  databasen på det tidspunktet) satt til `erp_format='visma_paste'`. `erp_format` lagt til
+  `_loadUserOrg` sin select-liste (manglet — uten det ville feltet alltid vært `undefined`).
+  Knappen er live for Cenikas brukere.
+- **`84f86a5` — fiks: «Kopier til Visma» manglet manuelt tastet tilbehør.** Rotårsak: kommentaren
+  over `_collectMaterialItems` (skrevet i SAMME commit som opprettet Visma-pasten) sa eksplisitt at
+  tilbehør «hører til XLSX-eksportens EGEN flyt» — feil fra øyeblikket den ble skrevet, siden
+  `showAccessoriesModal()` allerede var delt mellom PDF og XLSX. `_showVismaPasteDialog()` ble
+  `async` og kaller `showAccessoriesModal()` FØR noe annet, samme kontrakt som PDF/XLSX (avbrutt
+  modal avbryter hele kopieringen). Ny delt `_aggregateAccessoryItems(list)`, løftet ut av XLSX sin
+  egen `_emit`-closure — samme duplikasjon (samme løkke to steder) var nøyaktig hvordan tilbehøret
+  manglet fra starten. Produkter først, tilbehør etter — ingen gruppeoverskrifter (en fritekstrad
+  limt inn i Visma ville blitt en varelinje uten artikkelnummer). Åpent spørsmål, ikke avgjort:
+  skal tilbehør ha samme rabatt som resten av tilbudet (står som 0 i dag)?
+- **`de5990b` — DEL A: én kanonisk materialgruppe-rekkefølge for PDF/XLSX/Visma.** Kenneth: «den
+  legger seg ikke i samme rekkefølge som materiallisten i PDF-eksporten.» Ny delt
+  `MATERIAL_GROUPS`-konstant + `_groupByMaterialGroups()`. PDF er fasiten (`_matGroups =
+  MATERIAL_GROUPS`, null atferdsendring). **Ekte bug funnet og fikset i XLSX:** Materialliste-
+  arkets flate `groupsOrder` manglet Aluboard-typene helt og hadde ingen fallback-gruppe —
+  Aluboard-produkter forsvant stille fra arket, ikke bare feil rekkefølge. Visma-pasten fikk
+  eksplisitt sortering (var ren Map-innsettingsrekkefølge før). Sortering internt i hver gruppe:
+  stigende produkt-id, matcher hvordan `Object.entries()` på heltalls-nøklede objekter naturlig
+  oppfører seg i PDF-en (Map gjør IKKE dette, derfor eksplisitt `.sort()`).
+- **`4019649` — DEL C: gjenbruk tilbehør fra PDF/XLSX i stedet for ny modal i Visma-pasten.**
+  Kenneth: «i praksis lager jeg først PDF for å sende underlag til kunde, og så må jeg kopiere til
+  Visma — da blir valg av tilbehør en jobb som må gjøres dobbelt.» `showAccessoriesModal()` lagrer
+  nå det bekreftede resultatet på `S.project.accessories` (samme spre-mønster som pricing/freeText
+  via `_buildSaveData`) og forhåndsutfyller hver rad derfra — inkludert RKK-kabel og stålnett, som
+  har egen UI utenfor den generiske `data-acc-id`-mekanismen. Visma-pasten bruker lagret valg
+  direkte uten å spørre på nytt; ny «Endre tilbehør»-knapp åpner modalen forhåndsutfylt. PDF/XLSX
+  lagrer «gratis» siden de allerede kaller samme modal uendret — rekkefølgen (PDF-først eller
+  Visma-først) spiller ingen rolle. `_FOIL_ACC_LS_KEY`-preferansene (brukerdefault på tvers av
+  prosjekter) er bevisst IKKE blandet med `S.project.accessories` (prosjektets eget valg). Lagrede
+  antall leses rått, aldri regnet på nytt. **DEL B (seksjonsoverskrifter «VARMEFOLIE»/«TILBEHØR» +
+  blank rad mellom seksjoner i Visma-pasten) er bevisst IKKE bygget** — uklart om Visma Global
+  tolererer en pastet linje uten artikkelnummer (kan enten lage en fritekstlinje korrekt, eller
+  avbryte/forkaste hele limingen midtveis). Kenneth tester selv med
+  `dokumenter/visma-test-fritekstlinje.xlsx` før dette bygges.
+- Testmetodikk gjennomgående: live i nettleser mot Kenneths egne Bok6.xlsx-eksempler og/eller ekte
+  produktkatalog fra Supabase (ikke mock), full regresjonsbatteri
+  (mat/matZone/matFree/cableSkew/foil) bestått uendret etter hver commit.
+
+**Fil:** romtegner.html, `supabase-migration-erp-format.sql`, `docs/endringslogg.md`.
+
+---
+
 ## Bakgrunn-gizmoen var usynlig når zoomet inn — oppfølging samme dag — 2026-08-26
 
 Samme dag, ny prompt, etter forrige punkts «Flytt underlag»-fiks: Kenneth fikk fortsatt ikke opp
