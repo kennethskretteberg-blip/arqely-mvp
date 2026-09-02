@@ -7737,6 +7737,39 @@ function _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) 
   return best;
 }
 
+// spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md DEL D, Krav 1: SØSTERFUNKSJON til
+// _matEqualWidthNL (Regel E, LÅST, kun automatisk utlegg — IKKE endret her). Brukes KUN av
+// frihånds «Sentrer»-jevning: godtar en kort SISTE bredde (Regel E krever EKSAKT N×L===total —
+// frihånd har ingen slik rull-eksakthet å beskytte, brukeren kan alltid tegne banen om). For hver
+// N: full-CC-lengde L = høyeste hele kuttintervall som får plass, resten blir siste bredde sin
+// lengde. Velger N som MINIMERER differansen L−lastL (nærmest like), tie-break: flest bredder
+// (samme begrunnelse Regel E selv bruker — jevnere varme). Regel E sin EKSAKTE deling er alltid
+// best når den finnes — kalleren (_matFreeEqualizeWidths) prøver den FØRST, denne er fallback.
+const MAT_NEAR_EQUAL_MIN_LAST_FRAC = 0.60;   // DEL D, Krav 2: siste bredde skal være ≥ 60 % av de andre — ellers forkastes det N-et. Kenneths eget tall vinner hvis han sier noe annet.
+function _matNearEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) {
+  if (!(totalLengthCm > 0) || !(cutCm > 0) || maxRuns < 1) return null;
+  let best = null;
+  for (let N = 1; N <= maxRuns; N++) {
+    // AVRUNDET til nærmeste kuttintervall, IKKE nedrundet — med floor kan resten (lastL) aldri
+    // bli kortere enn L (matematisk umulig, verifisert), som ville gjort krav 2 sin nedre grense
+    // død kode. Avrunding lar lastL legitimt bli KORTERE (når L rundes OPP) — det er nettopp den
+    // situasjonen Kenneths «kort siste bredde» beskriver, og terskelen under fanger den.
+    const L = Math.round((totalLengthCm / N) / cutCm) * cutCm;
+    if (L <= 0) continue;
+    if (L > alongSpanCm + 0.01) continue;
+    if (L < minLenCm - 0.01) continue;
+    const lastL = totalLengthCm - (N - 1) * L;
+    if (lastL <= 0) continue;
+    if (lastL > alongSpanCm + 0.01) continue;   // siste bredde må også få plass
+    if (lastL / L < MAT_NEAR_EQUAL_MIN_LAST_FRAC) continue;   // Krav 2: for kort siste — forkast dette N-et
+    const diff = Math.abs(L - lastL);
+    if (!best || diff < best.diff - 0.01 || (Math.abs(diff - best.diff) <= 0.01 && N > best.N)) {
+      best = { N, L, lastL, diff };
+    }
+  }
+  return best;
+}
+
 // LÅST REGEL 9 (spec-matte-utlegg.md, Kenneth 19.08.2026): mellomrommet mellom bredder er en
 // FORDELING av slakk (etter at Regel 8 har fastsatt antallet bredder), aldri en reservasjon som
 // spiser plass før antallet regnes (Regel 8, se autoFillMatSerpentine/_matRoomGeomForFill).
@@ -10165,8 +10198,60 @@ function _matFreeRegressionTest() {
 // ── Del 4: justering (avstand mellom baner + Sentrer) + valg/slett ──
 // Sentrer: midtstill mattas bounding-box i ROMMETS bbox → i størst mulig grad like store
 // udekkede felt mot ALLE vegger. Behold tegnet form (like løp; katalog-trimmet siste kortere).
+// spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md DEL D, Krav 4: spennet må være det FAKTISKE,
+// klippede spennet — ikke banens tegnede lengde. Regner ut, for HVER eksisterende bredde, hvor
+// langt DEN kunne blitt fra sitt eget (uendrede) startpunkt gitt rommets grenser + hindringer
+// (samme _matFreeClampLen alt annet i frihånd bruker), og bruker den STRENGESTE (minste) som én
+// felles takhøyde — _matEqualWidthNL/_matNearEqualWidthNL tar uansett bare ÉTT tak (samme design
+// som Regel E for auto, som også krever like bredder på tvers av alle).
+function _matFreeAlongSpanCm(mp) {
+  const runs = _matFreeDeriveRuns(mp);
+  let minSpan = Infinity;
+  for (const r of runs) {
+    const span = _matFreeClampLen(mp, r.axis, r.dir, r.a, 100000);
+    if (span > 0) minSpan = Math.min(minSpan, span);
+  }
+  return minSpan === Infinity ? 0 : minSpan;
+}
+
+// DEL D, Krav 1-3: jevner ut mp.moves[].len (kun LENGDENE — antall bredder holdes FAST likt
+// antallet som allerede finnes i banen; å fjerne/legge til en sving er å tegne banen på nytt, ikke
+// å jevne den ut, og utenfor denne rundens omfang). Regel E (eksakt) forsøkes først — finnes en
+// eksakt N×L-deling for NØYAKTIG denne N-en, vinner den alltid. Ellers _matNearEqualWidthNL
+// (nærmest like, med en nedre grense på siste bredde). Lagrer originallengdene FØR de skrives om
+// (mp._lenBeforeCenter) — kun første gang, ikke ved en senere re-jevning mens fortsatt sentrert —
+// slik at «Sentrer AV» kan gjenopprette den opprinnelige banen (_matPathToggleCenter under).
+function _matFreeEqualizeWidths(mp) {
+  const lenMoves = (mp.moves || []).filter(m => m.len > 0);
+  const N = lenMoves.length;
+  if (N < 2) return;   // ingenting å jevne ut
+  const totalCm = lenMoves.reduce((s, m) => s + m.len, 0);
+  const prod = _matFreeProdOf(mp);
+  const cutCm = ((prod && prod.mat_cut_interval_mm) || 0) / 10 || 1;   // fallback 1 cm uten kuttintervall oppgitt
+  const spanCm = _matFreeAlongSpanCm(mp);
+  if (!(spanCm > 0)) return;
+  const minLenCm = 2 * cutCm;
+  let L = null, lastL = null;
+  const totalUnits = Math.round(totalCm / cutCm);
+  if (Math.abs(totalUnits * cutCm - totalCm) < 0.05 && totalUnits % N === 0) {
+    const exactL = (totalUnits / N) * cutCm;
+    if (exactL <= spanCm + 0.01 && exactL >= minLenCm - 0.01) { L = exactL; lastL = exactL; }
+  }
+  if (L == null) {
+    const near = _matNearEqualWidthNL(totalCm, cutCm, N, spanCm, minLenCm);
+    if (near && near.N === N) { L = near.L; lastL = near.lastL; }
+  }
+  if (L == null) return;   // ingen gyldig deling innenfor spennet for akkurat denne N-en — la banen stå urørt
+  if (!mp._lenBeforeCenter) mp._lenBeforeCenter = lenMoves.map(m => m.len);
+  for (let i = 0; i < N; i++) lenMoves[i].len = (i === N - 1) ? lastL : L;
+}
+
 function _matFreeCenter(mp) {
   const room = S.rooms.find(r => r.id === mp.roomId); if (!room || !room.points || room.points.length < 3) return;
+  // DEL D (Kenneth 02.09.2026, «prøv å gjøre alle bredder like lange … slipper å sitte igjen med
+  // en kort til slutt»): jevner ut LENGDENE før selve sentreringen — sentreringen under bruker
+  // uansett den (evt. nå oppdaterte) bounding-boxen, så rekkefølgen gir riktig resultat i ett steg.
+  _matFreeEqualizeWidths(mp);
   const { NET } = _matFreeConsts(_matFreeProdOf(mp));
   const runs = _matFreeDeriveRuns({ ...mp, offX: 0, offY: 0 }); if (!runs.length) return;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -10232,7 +10317,18 @@ function _matPathSetGap(id, v) {
 function _matPathToggleCenter(id) {
   const mp = (S.matPaths || []).find(m => m.id === id); if (!mp) return;
   pushUndo(); mp.centered = !mp.centered;
-  if (mp.centered) _matFreeCenter(mp); else { mp.offX = 0; mp.offY = 0; }
+  if (mp.centered) _matFreeCenter(mp);
+  else {
+    mp.offX = 0; mp.offY = 0;
+    // DEL D, Krav 3: Sentrer kan ha skrevet om moves[].len (bredde-utjevning) — offX/offY=0 alene
+    // gjenoppretter ikke lenger HELE banen slik den gjorde før denne runden. Legg de opprinnelige
+    // lengdene tilbake direkte (ikke stol på undo() — brukeren kan ha gjort andre ting i mellomtiden).
+    if (mp._lenBeforeCenter) {
+      const lenMoves = (mp.moves || []).filter(m => m.len > 0);
+      for (let i = 0; i < lenMoves.length && i < mp._lenBeforeCenter.length; i++) lenMoves[i].len = mp._lenBeforeCenter[i];
+      mp._lenBeforeCenter = null;
+    }
+  }
   _invalidateMatCache && _invalidateMatCache(); _matPathPanel(); render();
 }
 function _matPathDelete(id) {
