@@ -6706,11 +6706,8 @@ function _upcPlaceMat(productId, mode) {
   if (_isSnowModule()) {
     const sessionStart = !(room && room._matPreviewIds && room._matPreviewIds.length);
     if (sessionStart) {
-      pushUndo(); // one undo step for the whole preview→commit session
-      // Rettelsen: øyeblikksbilde FØR ryddingen, så ✕ Avbryt kan gjenopprette det som faktisk lå
-      // her — ikke bare forhåndsvisningens egne matter (se _cancelMatPreview).
-      if (room) room._preSwapSnapshot = _snapshotRoomProducts(roomId, ROOM_PRODUCT_KEYS);
-      _clearRoomProductCollections(roomId);
+      // DEL B: delt øktstart-mekanisme, rydder kun «mats» — folie/kabel i samme område forblir.
+      _beginProductSwapSession(roomId, ['mats']);
     } else {
       _removeMatPreview(); // swap: drop the previous preview mats
     }
@@ -11478,7 +11475,10 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
   const room = S.rooms.find(r => r.id === roomId); if (!room) return;
   if (splitDir === undefined) splitDir = _cableSplitDir;   // honour the «Del i soner»-toggle
   const sessionStart = !(room._cablePreviewIds && room._cablePreviewIds.length);
-  if (sessionStart) pushUndo();          // one undo step for the whole preview→commit
+  // DEL B (spec-varmeplan-bytt-produkt.md, Funn 2): kabel ryddet FØR ingenting ved øktstart (kun
+  // pushUndo()) — velger man et nytt produkt i et rom som allerede har en kabel, fikk man to.
+  // Samme delte mekanisme snø-matte bruker, rydder kun «cables».
+  if (sessionStart) _beginProductSwapSession(roomId, ['cables']);
   _removeCablePreview();
   const newIds = [];
   if (nCables > 1) {
@@ -11497,15 +11497,23 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
 function _confirmCablePreview(familyName, categoryId) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   const n = room && room._cablePreviewIds ? room._cablePreviewIds.length : 0;
-  if (room) { room._cablePreviewIds = []; room._cablePreviewMeta = null; }
+  // Byttet er endelig — øyeblikksbildet fra øktstart forkastes (krav 4).
+  if (room) { room._cablePreviewIds = []; room._cablePreviewMeta = null; room._preSwapSnapshot = null; }
   if (typeof _showToast === 'function') _showToast(n > 1 ? n + ' kabler plassert' : 'Kabel plassert', 'ok');
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);    // footer gone, committed result stays
 }
 function _cancelCablePreview(familyName, categoryId) {
-  _removeCablePreview();
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (room) room._cablePreviewMeta = null;
+  // Rettelsen/DEL B: fantes et øyeblikksbilde fra øktstart, gjenopprett DET (den gamle kabelen
+  // som lå der før byttet) — ikke bare fjern forhåndsvisningens egne kabler.
+  if (room && room._preSwapSnapshot) {
+    _restoreRoomProductSnapshot(room.id, room._preSwapSnapshot);
+    room._preSwapSnapshot = null;
+  } else {
+    _removeCablePreview();
+  }
+  if (room) { room._cablePreviewMeta = null; room._cablePreviewIds = []; }
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);
 }
@@ -31199,8 +31207,10 @@ function _roomProductCount(roomId) {
 // vern (rydder + returnerer tomt i stedet for å krasje) — dette retter selve KILDEN, så referansen
 // aldri blir hengende i utgangspunktet.
 const ROOM_PRODUCT_SELECTED_UI_KEY = { strips:'selectedStripId', cables:'selectedCableId', mats:'selectedMatId', matPaths:'selectedMatPathId', plates:'selectedPlateId', aluboard:'selectedAluboardId' };
-function _clearRoomProductCollections(roomId) {
-  for (const key of ROOM_PRODUCT_KEYS) {
+// `keys` narrower enn ROOM_PRODUCT_KEYS brukes av DEL B (_beginProductSwapSession) — «Tøm rommet
+// for produkter» og alle andre eksisterende kallere lar `keys` stå tom og rydder ALT, som før.
+function _clearRoomProductCollections(roomId, keys) {
+  for (const key of (keys || ROOM_PRODUCT_KEYS)) {
     const uiKey = ROOM_PRODUCT_SELECTED_UI_KEY[key];
     if (uiKey && S.ui[uiKey] != null && (S[key] || []).some(x => x.id === S.ui[uiKey] && x.roomId === roomId)) {
       S.ui[uiKey] = null;
@@ -31241,6 +31251,22 @@ function _restoreRoomProductSnapshot(roomId, snap) {
     if (uiKey && S.ui[uiKey] != null && !S[key].some(x => x.id === S.ui[uiKey])) S.ui[uiKey] = null;
   }
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
+}
+
+// spec-varmeplan-bytt-produkt.md DEL B (Kenneth 02.09.2026): øktstart-ryddingen løftet ut av
+// _upcPlaceMat (snø-matte hadde den riktige oppførselen — snapshot+rydd ved øktstart, ellers kun
+// bytt forhåndsvisningen — allerede) til HER, delt av matte OG kabel. Kabel gjorde FØR ingen
+// rydding ved øktstart i det hele tatt (kun pushUndo()) — derfor fikk Kenneth to kabler ved bytte.
+// Krav 2: `keys` er ALDRI hele ROOM_PRODUCT_KEYS her — kun det produktet som faktisk byttes
+// («cables» for kabel, «mats» for snø-matte), slik at andre produkter i samme rom (f.eks. folie)
+// blir stående. Dette er en INNSNEVRING også for snø-matte (tømte FØR alt via
+// _clearRoomProductCollections(roomId) uten keys) — skrevet i commit-meldingen, ikke en stille
+// regresjon: snøområder har sjelden blandede produkter, konsekvensen er liten i praksis.
+function _beginProductSwapSession(roomId, keys) {
+  pushUndo();   // ett angre-steg for hele forhåndsvis→bekreft-økta, som før
+  const room = S.rooms.find(r => r.id === roomId);
+  if (room) room._preSwapSnapshot = _snapshotRoomProducts(roomId, keys);
+  _clearRoomProductCollections(roomId, keys);
 }
 
 // STEG 4 (Kenneth 19.08.2026, «samme påstand som sist, utvidet»): d480535 fanget om en samling
