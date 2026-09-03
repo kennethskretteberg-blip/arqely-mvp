@@ -6707,6 +6707,9 @@ function _upcPlaceMat(productId, mode) {
     const sessionStart = !(room && room._matPreviewIds && room._matPreviewIds.length);
     if (sessionStart) {
       pushUndo(); // one undo step for the whole preview→commit session
+      // Rettelsen: øyeblikksbilde FØR ryddingen, så ✕ Avbryt kan gjenopprette det som faktisk lå
+      // her — ikke bare forhåndsvisningens egne matter (se _cancelMatPreview).
+      if (room) room._preSwapSnapshot = _snapshotRoomProducts(roomId, ROOM_PRODUCT_KEYS);
       _clearRoomProductCollections(roomId);
     } else {
       _removeMatPreview(); // swap: drop the previous preview mats
@@ -11579,15 +11582,23 @@ function _removeMatPreview() {
 function _confirmMatPreview() {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
   const n = room && room._matPreviewIds ? room._matPreviewIds.length : 0;
-  if (room) { room._matPreviewIds = []; room._matPreviewMeta = null; }
+  // Byttet er endelig — øyeblikksbildet fra øktstart forkastes (Rettelsen).
+  if (room) { room._matPreviewIds = []; room._matPreviewMeta = null; room._preSwapSnapshot = null; }
   if (typeof _showToast === 'function') _showToast(n + ' matter plassert', 'ok');
   renderSidebar(); updateCtxBar(); render();
   if (typeof _upcRefreshResults === 'function') _upcRefreshResults();
 }
 function _cancelMatPreview() {
-  _removeMatPreview();
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (room) room._matPreviewMeta = null;
+  // Rettelsen: fantes et øyeblikksbilde fra øktstart, gjenopprett DET (ikke bare fjern
+  // forhåndsvisningens egne matter) — ellers står rommet tomt etter Avbryt (se _upcPlaceMat).
+  if (room && room._preSwapSnapshot) {
+    _restoreRoomProductSnapshot(room.id, room._preSwapSnapshot);
+    room._preSwapSnapshot = null;
+  } else {
+    _removeMatPreview();
+  }
+  if (room) { room._matPreviewMeta = null; room._matPreviewIds = []; }
   renderSidebar(); updateCtxBar(); render();
   if (typeof _upcRefreshResults === 'function') _upcRefreshResults();
 }
@@ -22175,7 +22186,7 @@ function deletePlate(id) {
   S.ui.selectedPlateId = null;
   if (roomId) {
     S.ui.selectedRoomId = roomId;
-    _showPostDeleteActions(roomId, prod);
+    _openProductPanelForRoom(roomId, prod);
   }
   renderSidebar(); updateCtxBar(); render();
 }
@@ -23711,7 +23722,7 @@ function deleteMat(id) {
   S.ui.selectedMatId = null;
   if (roomId) {
     S.ui.selectedRoomId = roomId;
-    _showPostDeleteActions(roomId, prod);
+    _openProductPanelForRoom(roomId, prod);
   }
   renderSidebar(); updateCtxBar(); render();
 }
@@ -26238,7 +26249,7 @@ function deleteMultiStrips() {
   // Select the room and show placement options
   if (roomId) {
     S.ui.selectedRoomId = roomId;
-    _showPostDeleteActions(roomId, prod);
+    _openProductPanelForRoom(roomId, prod);
   }
   renderSidebar(); updateCtxBar(); render();
 }
@@ -26390,12 +26401,17 @@ function deleteStrip(id) {
   // Select the room and show placement options
   if (roomId) {
     S.ui.selectedRoomId = roomId;
-    _showPostDeleteActions(roomId, prod);
+    _openProductPanelForRoom(roomId, prod);
   }
   renderSidebar(); updateCtxBar(); render();
 }
 
-function _showPostDeleteActions(roomId, deletedProd) {
+// spec-varmeplan-bytt-produkt.md (Kenneth 02.09.2026): omdøpt fra _showPostDeleteActions — samme
+// kropp, samme fem kallere (sletting). Navnet «PostDelete» var selve grunnen til at funksjonen
+// bare var nåbar via sletting: den ER allerede «kom tilbake til menyen hvor jeg velger produkter
+// og antall», bare aldri kalt fra noe annet enn en sletting. DEL A kaller den direkte, uten å
+// slette noe først.
+function _openProductPanelForRoom(roomId, deletedProd) {
   if (!deletedProd) return;
   // Extract family name from product (e.g. "FlexFoil" from "FlexFoil B=140cm")
   const familyName = deletedProd.name.split(' ')[0];
@@ -26423,7 +26439,7 @@ function deleteCable(id) {
   S.ui.selectedCableId = null;
   if (roomId) {
     S.ui.selectedRoomId = roomId;
-    _showPostDeleteActions(roomId, prod);
+    _openProductPanelForRoom(roomId, prod);
   }
   renderSidebar(); updateCtxBar(); render();
 }
@@ -31190,6 +31206,39 @@ function _clearRoomProductCollections(roomId) {
       S.ui[uiKey] = null;
     }
     S[key] = (S[key] || []).filter(x => x.roomId !== roomId);
+  }
+  _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
+}
+
+// spec-varmeplan-bytt-produkt.md, Rettelsen (Kenneth 02.09.2026): «Bytt mattetype i et snøområde
+// som allerede har matter, trykk ✕ Avbryt → området står tomt.» Rotårsak: snø-mattes øktstart
+// (_upcPlaceMat) tømmer rommet FØR forhåndsvisningen legges ut, men _cancelMatPreview fjernet kun
+// forhåndsvisningens EGNE matter — det som ble ryddet ved øktstart kom aldri tilbake. Krav 2:
+// IKKE undo() — angre-stakken er global, brukeren kan ha gjort noe annet mellom øktstart og
+// avbryt, og undo() ville rullet tilbake feil handling. Øyeblikksbildet lagres derfor PÅ ROMMET
+// (room._preSwapSnapshot), ikke på den globale stakken. Klone-oppskriften per samling er den
+// SAMME pushUndo() allerede bruker (cables.runs/segments og matPaths.start/moves trenger dypere
+// kloning enn resten — se pushUndo()) — ikke en ny, potensielt avvikende kloneregel.
+// Delt av matte (denne rettelsen) OG kabel (DEL B, når kabel også begynner å rydde ved øktstart —
+// bygges IKKE om for matte alene, denne mekanismen er allerede den delte).
+function _cloneRoomProductItem(key, item) {
+  if (key === 'cables') return { ...item, runs: (item.runs || []).map(r => ({ ...r, segments: (r.segments || []).map(s => ({ ...s })) })) };
+  if (key === 'matPaths') return { ...item, start: item.start ? { ...item.start } : item.start, moves: (item.moves || []).map(m => ({ ...m })) };
+  return { ...item };
+}
+function _snapshotRoomProducts(roomId, keys) {
+  const snap = {};
+  for (const key of (keys || ROOM_PRODUCT_KEYS)) {
+    snap[key] = (S[key] || []).filter(x => x.roomId === roomId).map(x => _cloneRoomProductItem(key, x));
+  }
+  return snap;
+}
+function _restoreRoomProductSnapshot(roomId, snap) {
+  if (!snap) return;
+  for (const key of Object.keys(snap)) {
+    S[key] = (S[key] || []).filter(x => x.roomId !== roomId).concat(snap[key]);
+    const uiKey = ROOM_PRODUCT_SELECTED_UI_KEY[key];
+    if (uiKey && S.ui[uiKey] != null && !S[key].some(x => x.id === S.ui[uiKey])) S.ui[uiKey] = null;
   }
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
 }
