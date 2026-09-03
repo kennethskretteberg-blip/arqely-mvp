@@ -17772,9 +17772,20 @@ function _generateMixedCombos(familyProducts, desiredW, netM2, tol) {
 }
 
 /**
- * Select multi-cable configuration when single cable cannot cover the room.
- * Strategy: 2× identical cable, each covering half the room.
- * Returns { strategy: '1x'|'2x', cables: [{ product, cc_cm, wm2, productW, zoneBounds }], desiredW, nettoM2 }
+ * Select multi-cable configuration for a room/area. N=2..MAX_CABLES is ALWAYS evaluated now
+ * (spec-varmekabel-fasebalanse-3-6.md DEL A, Kenneth 02.09.2026: a 35m² snow area got exactly
+ * ONE proposal because an early return skipped this loop entirely whenever a single cable
+ * covered ≥90% of the target — the loop's own data, `byN`, simply never existed for that room).
+ * The decision that picks `strategy` ('1x' vs 'multi') is UNCHANGED — same SINGLE_OK_COVERAGE
+ * cutoff as before, just evaluated AFTER the loop instead of short-circuiting before it. First
+ * attempt replaced this cutoff with a unified deviation-based ranking (N=1 competing directly
+ * against N=2..16) — reverted after an A/B test against 864 synthetic indoor rooms showed a 37%
+ * strategy-flip rate, nowhere near "★ Anbefalt har ikke flyttet seg" (see spec DEL A/test #13).
+ * `byN` (N=2..16, raw, unsorted-by-N) is returned in ALL THREE branches now ('1x'/'multi'/'none')
+ * — DEL B's snow-specific «minimum antall»/«fasebalansert» suggestions are built on this directly,
+ * independent of which `strategy` wins here.
+ * Returns { strategy: '1x'|'multi'|'none', cables, cableCount, desiredW, nettoM2, singleResult,
+ *   byN, bestMulti/mixedCombos/direction/zoneSplit (kun satt når strategy==='multi', som FØR) }
  */
 function selectMultiCables(roomId, familyProducts, targetWm2) {
   const room = S.rooms.find(r => r.id === roomId);
@@ -17784,26 +17795,17 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
   if (nettoM2 <= 0) return null;
   const desiredW = nettoM2 * targetWm2;
 
-  // Check single cable first. Only commit to a single-cable solution when it
-  // actually covers most of the requested power — otherwise a CC-valid but
-  // undersized cable (e.g. 3400 W in a 5070 W room) would skip the 2× eval.
   const singleResult = selectCableByPower(roomId, familyProducts, targetWm2);
-  const SINGLE_OK_COVERAGE = 0.90;
-  if (singleResult && singleResult.closest && singleResult.closest.valid) {
-    const coverage = singleResult.closest.productW / desiredW;
-    if (coverage >= SINGLE_OK_COVERAGE) {
-      return { strategy: '1x', cables: [singleResult.closest], desiredW, nettoM2, singleResult };
-    }
-    // Single is CC-valid but under target — fall through to multi-cable eval
-    // so the UI can offer the 2× option alongside the existing single picks.
-  }
 
   // N× identical cable (N ≥ 2). For EACH cable count N, pick the product whose N cables
   // best match the desired power with a valid CC — one candidate per N. The catalog
   // usually has long cables too, so e.g. a 72 m² room can be 3× big OR 7× small.
+  // DEL A: this loop now ALWAYS runs — it used to be skipped entirely whenever a single
+  // cable already covered ≥90% of the target, so byN (and everything built on it) simply
+  // never existed for that room/area, no matter how the result was later used.
   const MAX_CABLES = 16;        // sane upper bound (still effectively "unlimited")
   const TOL = 0.12;            // ±12% power tolerance — "good enough" power match
-  const byN = [];              // best candidate per cable count N
+  const byN = [];              // best candidate per cable count N, N=2..16 — ALWAYS computed now
   for (let N = 2; N <= MAX_CABLES; N++) {
     let bestForN = null;
     for (const prod of familyProducts) {
@@ -17829,8 +17831,20 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
     if (bestForN) byN.push(bestForN);
   }
 
+  // Samme beslutningsregel som FØR (SINGLE_OK_COVERAGE) — nå en beslutning ETTER at løkka har
+  // kjørt, ikke et tidlig avbrudd som hindret den i å kjøre i det hele tatt. `strategy: '1x'`
+  // er fortsatt en rangeringsutgang («én kabel er riktig»), ikke en snarvei rundt N-evalueringen
+  // — bare med UENDRET regel for hva «riktig» betyr, verifisert bit-for-bit mot forrige versjon.
+  const SINGLE_OK_COVERAGE = 0.90;
+  const singleCoversWell = !!(singleResult && singleResult.closest && singleResult.closest.valid
+    && (singleResult.closest.productW / desiredW) >= SINGLE_OK_COVERAGE);
+
+  if (singleCoversWell) {
+    return { strategy: '1x', cables: [singleResult.closest], desiredW, nettoM2, singleResult, byN };
+  }
+
   if (byN.length === 0) {
-    return { strategy: 'none', cables: [], desiredW, nettoM2, singleResult };
+    return { strategy: 'none', cables: [], desiredW, nettoM2, singleResult, byN };
   }
 
   // Rank: FEWEST cables wins (fewer joints/thermostats = simpler install) as long as the
@@ -17838,7 +17852,6 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
   // rank after those within. This makes "3× large" beat "7× small" at the same total W.
   const _within = c => c.deviation <= TOL * desiredW ? 0 : 1;
   byN.sort((a, b) => _within(a) - _within(b) || a.cableCount - b.cableCount || a.deviation - b.deviation);
-
   const best = byN[0];
   const dir = _suggestDirection(room);
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -17856,6 +17869,7 @@ function selectMultiCables(roomId, familyProducts, targetWm2) {
     cables: byN.slice(0, 5),
     bestMulti: best,
     mixedCombos,
+    byN,
     zoneSplit: { perpMin, perpMax }
   };
 }
