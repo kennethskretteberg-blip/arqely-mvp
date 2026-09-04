@@ -50089,8 +50089,92 @@ function _gbao10ToggleEl(key, checked) {
   if (checked) _gbao10ElChoices.add(key); else _gbao10ElChoices.delete(key);
   _gbao10RenderDialog();
 }
-let _gbao10Type = 'tilbud';   // DEL E: styrer kun hvilket mappehåndtak det skrives til
+let _gbao10Type = 'tilbud';   // styrer KUN hvilket mappehåndtak det skrives til, aldri filinnholdet
 function _gbao10SetType(t) { _gbao10Type = (t === 'ordre') ? 'ordre' : 'tilbud'; _gbao10RenderDialog(); }
+
+// spec-visma-eksporter-gbao10-del-a-f.md DEL E (Kenneth 04.09.2026): «Vi slipper denne inn på
+// R:\Tilbud / R:\Ordre. Så skal den forsvinne etter hvert og dukke opp i tilbudet hos kunden.»
+// To lagrede mappehåndtak (ett per type) — FileSystemDirectoryHandle er strukturert-klonbar og
+// kan lagres direkte i IndexedDB, samme mønster exportProjectFile() bruker for filhåndtaket sitt
+// (_projectFileHandle), bare persistert på tvers av økter i stedet for kun i minnet.
+const _GBAO10_DB = 'arqely_gbao10', _GBAO10_STORE = 'handles';
+function _gbao10OpenDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(_GBAO10_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(_GBAO10_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function _gbao10SaveHandle(type, handle) {
+  const db = await _gbao10OpenDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(_GBAO10_STORE, 'readwrite');
+    tx.objectStore(_GBAO10_STORE).put(handle, type);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function _gbao10LoadHandle(type) {
+  const db = await _gbao10OpenDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(_GBAO10_STORE, 'readonly');
+    const req = tx.objectStore(_GBAO10_STORE).get(type);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+let _gbao10FolderHandles = { tilbud: null, ordre: null };
+async function _gbao10ChooseFolder() {
+  // ⚠ Bare Chrome/Edge har showDirectoryPicker — Firefox/Safari faller tilbake til nedlasting
+  // i _gbao10Export() uten at brukeren noensinne ser en død «Velg mappe»-knapp henge igjen her.
+  if (!('showDirectoryPicker' in window)) { alert('Nettleseren støtter ikke mappevalg (kun Chrome/Edge) — eksport laster ned fila i stedet.'); return; }
+  try {
+    const handle = await window.showDirectoryPicker({ id: 'gbao10-' + _gbao10Type, mode: 'readwrite' });
+    await _gbao10SaveHandle(_gbao10Type, handle);
+    _gbao10FolderHandles[_gbao10Type] = handle;
+    _gbao10RenderDialog();
+  } catch (err) {
+    if (err.name !== 'AbortError') alert('Kunne ikke velge mappe: ' + err.message);
+  }
+}
+// Tillatelsen sjekkes HVER økt (kravet i browseren) og MÅ kalles fra en brukerhandling —
+// _gbao10Export() er selve klikket på Eksporter-knappen, ikke en oppstartsrutine.
+async function _gbao10EnsureWritePermission(handle) {
+  const opts = { mode: 'readwrite' };
+  if ((await handle.queryPermission(opts)) === 'granted') return true;
+  if ((await handle.requestPermission(opts)) === 'granted') return true;
+  return false;
+}
+// Ikke overskriv i stillhet — en delt tilbudsmappe på en server tåler ikke en tapt revisjon.
+async function _gbao10WriteToFolder(dirHandle, filename, text) {
+  let exists = false;
+  try { await dirHandle.getFileHandle(filename); exists = true; } catch (e) { exists = false; }
+  if (exists && !confirm(`Filen «${filename}» finnes allerede i mappa. Overskrive?`)) return false;
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(text);
+  await writable.close();
+  return true;
+}
+// ⚠ Filnavnet må inneholde prosjektnummer OG tidsstempel — flere personer skriver til samme
+// mappe, og fila blir liggende til den plukkes opp. To like filnavn før innlesing betyr at ett
+// tilbud forsvinner uten spor. Samme saniterings-mønster som _exportFileName (PDF), men MED
+// klokkeslett og BEVISST forskjellig fra PDF-filnavnet (spec: dette er Vismas inngang og skal se
+// ut som de andre filene i mappa, ikke Kenneths eget arkivformat).
+function _gbao10FileName(type, projectNo, merking) {
+  const safeMerking = String(merking || 'eksport')
+    .replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g, '_')
+    .replace(/_/g, '-')
+    .trim()
+    .replace(/\s+/g, '-');
+  const noStr = _fmtProjectNo(projectNo);
+  const noPart = noStr ? `P${noStr}_` : '';
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  return `${type}_${noPart}${safeMerking}_${ts}.txt`;
+}
 async function _showGbao10ExportDialog() {
   if (!S.project) return;
   // Samme delte tilbehørsvalg som PDF/XLSX/paste (S.project.accessories) — kun ÉN NY modal om
@@ -50104,6 +50188,10 @@ async function _showGbao10ExportDialog() {
     _gbao10AccessoryItems = accessoryResult.items || [];
   }
   _gbao10ElChoices = new Set();
+  try {
+    _gbao10FolderHandles.tilbud = await _gbao10LoadHandle('tilbud');
+    _gbao10FolderHandles.ordre = await _gbao10LoadHandle('ordre');
+  } catch (e) { /* IndexedDB utilgjengelig — fila lastes ned i stedet, se _gbao10Export */ }
   let overlay = document.getElementById('gbao10-export-overlay');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -50147,6 +50235,14 @@ function _gbao10RenderDialog() {
       <label>Merking</label>
       <input id="gbao10-merking" class="dash-create-input" value="${esc(built.merking)}" onchange="_gbao10SaveMerking()">
     </div>
+    <div class="dash-create-field" style="margin-bottom:10px">
+      <label>Mappe</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <div style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:${_gbao10FolderHandles[_gbao10Type] ? 'var(--text)' : 'var(--dim)'};font-size:13px">${_gbao10FolderHandles[_gbao10Type] ? esc(_gbao10FolderHandles[_gbao10Type].name) : ('showDirectoryPicker' in window ? 'Ingen mappe valgt — laster ned i stedet' : 'Nettleseren støtter ikke mappevalg — laster ned i stedet')}</div>
+        ${('showDirectoryPicker' in window) ? `<button class="npc-btn-ghost" onclick="_gbao10ChooseFolder()">Velg mappe</button>` : ''}
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Filnavn: ${esc(_gbao10FileName(_gbao10Type, S.project.projectNo, built.merking))}</div>
     ${built.missing.length ? `<div style="margin-bottom:10px">
       <div style="font-size:12px;color:var(--warn);margin-bottom:4px">Mangler artikkelnummer, blokkerer eksport:</div>
       ${built.missing.map(m => `<div style="font-size:12px;padding:3px 0">
@@ -50189,21 +50285,40 @@ function _gbao10BuildFileText({ kundenr, kontaktperson, merking, items }) {
   const lines = items.map(it => ({ kundenr, kontaktperson, merking, artikkelnr: it.artikkelnr, antall: it.antall }));
   return _gbao10FileText(lines);
 }
-// Nedlasting her (DEL E bytter dette ut med skriving til et lagret mappehåndtak — «Type»-valget
-// over avgjør da KUN hvilket av de to håndtakene, aldri filinnholdet).
+// spec-visma-eksporter-gbao10-del-a-f.md DEL E (Kenneth 04.09.2026): skriver til det lagrede
+// mappehåndtaket for gjeldende Type i stedet for å laste ned — «Type»-valget styrer KUN hvilket
+// håndtak, aldri filinnholdet (_gbao10BuildFileText/_gbao10Type er totalt uavhengige av
+// hverandre). Faller tilbake til nedlasting (Firefox/Safari, eller ingen mappe valgt ennå) —
+// ALDRI en død knapp. Tillatelsen sjekkes her, i selve klikket (brukerhandlingen den krever).
 async function _gbao10Export() {
   const built = _gbao10Build();
   if (!built.kundenr || built.missing.length || !built.lines.length) return;
   const text = _gbao10BuildFileText({ kundenr: built.kundenr, kontaktperson: built.kontaktperson, merking: built.merking, items: built.lines });
+  const filename = _gbao10FileName(_gbao10Type, S.project.projectNo, built.merking);
+  const msg = document.getElementById('gbao10-export-msg');
+  const handle = _gbao10FolderHandles[_gbao10Type];
+  if (handle && 'showDirectoryPicker' in window) {
+    const ok = await _gbao10EnsureWritePermission(handle);
+    if (!ok) { if (msg) { msg.textContent = '✕ Ingen tilgang til mappa — velg den på nytt.'; msg.style.color = '#ef4444'; } return; }
+    try {
+      const wrote = await _gbao10WriteToFolder(handle, filename, text);
+      if (!wrote) { if (msg) msg.textContent = 'Avbrutt.'; return; }   // brukeren avslo overskriving
+    } catch (err) {
+      if (msg) { msg.textContent = '✕ ' + err.message; msg.style.color = '#ef4444'; }
+      return;
+    }
+    if (typeof _showToast === 'function') _showToast(`${built.lines.length} varelinjer skrevet til ${filename}`, 'success');
+    if (msg) { msg.textContent = '✓ Skrevet til ' + (_gbao10Type === 'ordre' ? 'Ordre' : 'Tilbud') + '-mappa'; msg.style.color = '#22c55e'; }
+    return;
+  }
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'tilbud_' + (built.merking || 'export').replace(/[\\/:*?"<>|]/g, '_') + '.txt';
+  a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
-  if (typeof _showToast === 'function') _showToast(`${built.lines.length} varelinjer eksportert.`, 'success');
-  const msg = document.getElementById('gbao10-export-msg');
-  if (msg) msg.textContent = '✓ Eksportert';
+  if (typeof _showToast === 'function') _showToast(`${built.lines.length} varelinjer lastet ned (${filename}).`, 'success');
+  if (msg) { msg.textContent = '✓ Lastet ned'; msg.style.color = '#22c55e'; }
 }
 
 async function _exportMaterialListXLSX() {
