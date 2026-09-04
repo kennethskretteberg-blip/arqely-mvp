@@ -47920,90 +47920,104 @@ function _custNoParseFile(file) {
         rows.push({ kundenr, kundenavn });
       }
       if (!rows.length) { alert('Ingen rader med både kundenr og kundenavn funnet.'); return; }
-      _custNoOpenReview(rows);
+      _custNoOpenSyncReview(rows);
     } catch (err) { alert('Kunne ikke lese filen: ' + err.message); }
   };
   if (isCsv) reader.readAsText(file); else reader.readAsBinaryString(file);
 }
-async function _custNoOpenReview(importRows) {
-  const customers = await _loadCustomers();
-  const sikre = [], usikre = [], ingen = [];
+// ── B2: synkroniser mot erp_customers — en DIFF, ikke en engangsimport (Kenneth: «at ny og
+// eksisterende kundeliste sammenlignes og kun endrer det som er nytt, slettet og endret»). ──
+let _custNoSyncData = null;
+async function _custNoOpenSyncReview(importRows) {
+  const existing = await _erpCustomersForOrg(true);   // ferskt — diffen må se nåværende tilstand
+  const existingByNo = new Map(existing.map(r => [r.erp_no, r]));
+  const fileNos = new Set(importRows.map(r => r.kundenr));
+
+  const nye = [], endretNavn = [], uendret = [];
   for (const row of importRows) {
-    const norm = _custNoNormalize(row.kundenavn);
-    let match = customers.find(c => _custNoNormalize(c.name) === norm);
-    if (match) { sikre.push({ row, match }); continue; }
-    match = customers.find(c => {
-      const cn = _custNoNormalize(c.name);
-      return cn && norm && (cn.includes(norm) || norm.includes(cn));
-    });
-    if (match) { usikre.push({ row, match }); continue; }
-    ingen.push({ row });
+    const ex = existingByNo.get(row.kundenr);
+    if (!ex) { nye.push(row); continue; }
+    if (ex.name !== row.kundenavn) { endretNavn.push({ row, oldName: ex.name }); continue; }
+    uendret.push(row);
   }
-  _custNoReviewData = { sikre, usikre, ingen };
-  _custNoRenderReview();
+  // «Borte»: aktiv i registeret, IKKE i den nye fila. Slettes ALDRI — kun active=false (krav:
+  // historikken er poenget, et gammelt tilbud skal fortsatt kunne forklare hvor nummeret kom fra).
+  const borteRows = existing.filter(r => r.active && !fileNos.has(r.erp_no));
+  const vpCustomers = await _loadCustomers();
+  const borte = borteRows.map(r => ({ ...r, inUseBy: vpCustomers.filter(c => c.erp_customer_no === r.erp_no) }));
+
+  // Sikring mot et ufullstendig uttrekk: fila har >20% færre rader enn forrige register.
+  const prevCount = existing.length;
+  const dropPct = prevCount > 0 ? 1 - (importRows.length / prevCount) : 0;
+  const dropWarning = prevCount > 0 && dropPct > 0.2;
+
+  _custNoSyncData = { importRows, nye, endretNavn, uendret, borte, prevCount, dropPct, dropWarning, confirmedDrop: false };
+  _custNoRenderSyncReview();
 }
-let _custNoReviewData = null;
-function _custNoRenderReview() {
-  const d = _custNoReviewData;
-  let overlay = document.getElementById('custno-review-overlay');
-  if (!overlay) { overlay = document.createElement('div'); overlay.id = 'custno-review-overlay'; overlay.className = 'cust-overlay'; overlay.onclick = e => { if (e.target === overlay) overlay.remove(); }; document.body.appendChild(overlay); }
-  const rowHtml = (entry, i, bucket, checkedDefault) => {
-    const existing = entry.match.erp_customer_no;
-    const checked = checkedDefault && !existing;
-    return `<div class="soi-row" style="display:flex;align-items:center;gap:8px;padding:4px 0">
-      <input type="checkbox" id="custno-chk-${bucket}-${i}"${checked ? ' checked' : ''}>
-      <span style="flex:1;font-size:12px">${esc(entry.row.kundenavn)} <span style="color:var(--dim)">→</span> ${esc(entry.match.name)}${existing ? ` <span style="color:var(--warn);font-size:10px">(har allerede ${esc(existing)} — overskrives kun hvis huket av)</span>` : ''}</span>
-      <span style="font-size:12px;font-weight:600">${esc(entry.row.kundenr)}</span>
-    </div>`;
-  };
-  const section = (title, entries, bucket, checkedDefault) => entries.length ? `
-    <div style="margin-bottom:14px">
-      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">${title} (${entries.length})</div>
-      ${entries.map((e, i) => rowHtml(e, i, bucket, checkedDefault)).join('')}
-    </div>` : '';
-  const ingenHtml = d.ingen.length ? `
-    <div style="margin-bottom:14px">
-      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Ingen treff (${d.ingen.length})</div>
-      <div style="font-size:12px;color:var(--dim)">${d.ingen.map(e => esc(e.row.kundenavn) + ' (' + esc(e.row.kundenr) + ')').join(', ')}</div>
-    </div>` : '';
-  overlay.innerHTML = `<div class="cust-card" style="width:620px;max-height:80vh;overflow-y:auto">
+function _custNoToggleEndretList() {
+  const el = document.getElementById('custno-endret-list');
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+function _custNoSyncDropConfirm(checked) {
+  if (_custNoSyncData) _custNoSyncData.confirmedDrop = checked;
+  _custNoRenderSyncReview();
+}
+function _custNoRenderSyncReview() {
+  const d = _custNoSyncData;
+  let overlay = document.getElementById('custno-sync-overlay');
+  if (!overlay) { overlay = document.createElement('div'); overlay.id = 'custno-sync-overlay'; overlay.className = 'cust-overlay'; overlay.onclick = e => { if (e.target === overlay) overlay.remove(); }; document.body.appendChild(overlay); }
+  const inUseWarn = d.borte.filter(b => b.inUseBy.length > 0);
+  const blocked = d.dropWarning && !d.confirmedDrop;
+  overlay.innerHTML = `<div class="cust-card" style="width:560px;max-height:80vh;overflow-y:auto">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h3 style="font-size:16px;font-weight:700;color:var(--text);margin:0">Importer kundenumre</h3>
-      <button onclick="document.getElementById('custno-review-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">&times;</button>
+      <h3 style="font-size:16px;font-weight:700;color:var(--text);margin:0">Synk mot Visma-kundeliste</h3>
+      <button onclick="document.getElementById('custno-sync-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">&times;</button>
     </div>
-    <div style="font-size:12px;color:var(--dim);margin-bottom:12px">${d.sikre.length + d.usikre.length} av ${d.sikre.length + d.usikre.length + d.ingen.length} rader matchet mot en eksisterende kunde. Ingenting skrives før du trykker Bekreft.</div>
-    ${section('Sikre treff', d.sikre, 'sikre', true)}
-    ${section('Usikre treff', d.usikre, 'usikre', false)}
-    ${ingenHtml}
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button onclick="_custNoConfirmImport()" style="padding:8px 20px;border-radius:6px;border:none;background:var(--accent);color:#0d0e10;font-size:13px;font-weight:600;cursor:pointer">Bekreft</button>
-      <button onclick="document.getElementById('custno-review-overlay').remove()" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Avbryt</button>
-      <span id="custno-confirm-msg" style="font-size:12px;color:var(--dim);align-self:center"></span>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px">${d.importRows.length} rader i fila · forrige register: ${d.prevCount}</div>
+    ${d.dropWarning ? `<div style="font-size:12px;color:var(--warn);background:rgba(239,68,68,.1);border:1px solid var(--warn);border-radius:6px;padding:8px;margin-bottom:12px">
+      ⚠ Fila har ${d.importRows.length} rader, forrige register hadde ${d.prevCount} — et fall på ${Math.round(d.dropPct * 100)}%. Er dette et komplett uttrekk?
+      <label style="display:block;margin-top:6px;cursor:pointer;font-weight:400"><input type="checkbox" onchange="_custNoSyncDropConfirm(this.checked)"${d.confirmedDrop ? ' checked' : ''}> Ja, dette er riktig — fortsett likevel</label>
+    </div>` : ''}
+    <div style="font-size:13px;line-height:2">
+      <div style="overflow:auto"><span>Nye</span><b style="float:right">${d.nye.length}</b></div>
+      <div style="overflow:auto"><span>Endret navn</span><b style="float:right">${d.endretNavn.length}</b>${d.endretNavn.length ? ` <a href="#" onclick="event.preventDefault();_custNoToggleEndretList()" style="font-size:11px;color:var(--accent);float:right;margin-right:8px">[ vis ]</a>` : ''}</div>
+      <div id="custno-endret-list" style="display:none;font-size:11px;color:var(--dim);margin:0 0 6px">${d.endretNavn.map(e => esc(e.oldName) + ' → ' + esc(e.row.kundenavn) + ' (' + esc(e.row.kundenr) + ')').join('<br>')}</div>
+      <div style="overflow:auto"><span>Uendret</span><b style="float:right">${d.uendret.length}</b></div>
+      <div style="overflow:auto"><span>Borte</span><b style="float:right">${d.borte.length}</b></div>
+      <div style="font-size:11px;color:var(--dim)">→ merkes inaktive, ingen slettes</div>
+      ${inUseWarn.length ? `<div style="font-size:11px;color:var(--warn);margin-top:4px">⚠ ${inUseWarn.length} av dem er i bruk på: ${inUseWarn.map(b => esc(b.inUseBy.map(c => c.name).join(', '))).join('; ')}</div>` : ''}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button${blocked ? ' disabled style="opacity:.5;cursor:not-allowed"' : ''} onclick="_custNoConfirmSync()" style="padding:8px 20px;border-radius:6px;border:none;background:var(--accent);color:#0d0e10;font-size:13px;font-weight:600;cursor:pointer">Utfør synk</button>
+      <button onclick="document.getElementById('custno-sync-overlay').remove()" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Avbryt</button>
+      <span id="custno-sync-msg" style="font-size:12px;color:var(--dim);align-self:center"></span>
     </div>
   </div>`;
   overlay.style.display = 'flex';
 }
-async function _custNoConfirmImport() {
-  const d = _custNoReviewData;
-  const msg = document.getElementById('custno-confirm-msg');
-  const toWrite = [];
-  for (const bucket of ['sikre', 'usikre']) {
-    d[bucket].forEach((entry, i) => {
-      const chk = document.getElementById(`custno-chk-${bucket}-${i}`);
-      if (chk && chk.checked) toWrite.push(entry);
-    });
+async function _custNoConfirmSync() {
+  const d = _custNoSyncData;
+  if (!d || (d.dropWarning && !d.confirmedDrop)) return;
+  const msg = document.getElementById('custno-sync-msg');
+  if (msg) msg.textContent = 'Synkroniserer…';
+  const now = new Date().toISOString();
+  const upserts = [...d.nye, ...d.endretNavn.map(e => e.row), ...d.uendret].map(row => ({
+    org_id: _userOrg.id, erp_no: row.kundenr, name: row.kundenavn,
+    name_norm: _custNoNormalize(row.kundenavn), active: true, last_seen_at: now,
+  }));
+  const BATCH = 500;
+  for (let i = 0; i < upserts.length; i += BATCH) {
+    const { error } = await _db.from('erp_customers').upsert(upserts.slice(i, i + BATCH), { onConflict: 'org_id,erp_no' });
+    if (error) { if (msg) { msg.textContent = '✕ ' + error.message; msg.style.color = '#ef4444'; } return; }
   }
-  if (!toWrite.length) { if (msg) msg.textContent = 'Ingen rader haket av.'; return; }
-  if (msg) msg.textContent = `Lagrer ${toWrite.length}…`;
-  let ok = 0, fail = 0;
-  for (const entry of toWrite) {
-    const { error } = await _db.from('customers').update({ erp_customer_no: entry.row.kundenr }).eq('id', entry.match.id);
-    if (error) fail++; else ok++;
+  if (d.borte.length) {
+    const { error } = await _db.from('erp_customers').update({ active: false }).eq('org_id', _userOrg.id).in('erp_no', d.borte.map(b => b.erp_no));
+    if (error) { if (msg) { msg.textContent = '✕ ' + error.message; msg.style.color = '#ef4444'; } return; }
   }
-  _cachedCustomers = null;
-  if (msg) msg.textContent = fail ? `${ok} lagret, ${fail} feilet` : `✓ ${ok} kundenumre lagret`;
-  _renderCustomerTable();
-  setTimeout(() => { const o = document.getElementById('custno-review-overlay'); if (o) o.remove(); }, fail ? 3000 : 1200);
+  _cachedErpCustomers = null;
+  if (msg) { msg.textContent = '✓ Synkronisert'; msg.style.color = '#22c55e'; }
+  if (typeof _showToast === 'function') _showToast(`Synk fullført: ${d.nye.length} nye, ${d.endretNavn.length} endret, ${d.borte.length} borte.`, 'success');
+  setTimeout(() => { const o = document.getElementById('custno-sync-overlay'); if (o) o.remove(); _custNoOpenSuggestions(); }, 900);
 }
 
 // ─── Kundekort: kontaktpersoner (CRM) — deler contacts-tabellen + _contactsCache
