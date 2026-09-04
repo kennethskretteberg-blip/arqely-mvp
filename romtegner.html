@@ -1429,6 +1429,7 @@ body.present-mode #render-stats{display:none !important}
             <option value="business">Bedrift</option>
             <option value="private">Privat</option>
           </select>
+          <button class="dash-create-btn btn-gbao10" style="white-space:nowrap;display:none" onclick="_openCustNoImport()">Importer kundenumre</button>
           <button class="dash-create-btn" onclick="_showNewCustomerPopup()" style="white-space:nowrap">＋ Ny kunde</button>
         </div>
         <div class="pl-table-wrap">
@@ -47718,6 +47719,7 @@ function _openCustomerCard(customerId) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kundenavn *</label>${_f('cc-name',c.name)}</div>
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Org.nr</label>${_f('cc-orgno',c.org_number)}</div>
+      <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kundenr. i Visma</label>${_f('cc-erpno',c.erp_customer_no)}</div>
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kategori</label>
         <select id="cc-cat" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px">
           <option value="business"${cat==='business'?' selected':''}>Bedrift</option>
@@ -47764,6 +47766,7 @@ async function _saveCustomerCard(customerId) {
   const updates = {
     name: document.getElementById('cc-name')?.value?.trim() || '',
     org_number: document.getElementById('cc-orgno')?.value?.trim() || '',
+    erp_customer_no: document.getElementById('cc-erpno')?.value?.trim() || '',
     // contact_person bevares uendret i DB — kontakter redigeres na via contacts-seksjonen.
     category: document.getElementById('cc-cat')?.value || 'business',
     phone: document.getElementById('cc-phone')?.value?.trim() || '',
@@ -47783,6 +47786,153 @@ async function _saveCustomerCard(customerId) {
     if (msg) { msg.textContent = '✓ Lagret'; msg.style.color = '#22c55e'; setTimeout(() => { if (msg) msg.textContent = ''; }, 2000); }
     _renderCustomerTable();
   } catch(e) { if (msg) { msg.textContent = '✕ ' + e.message; msg.style.color = '#ef4444'; } }
+}
+
+// spec-visma-eksporter-gbao10-del-a-f.md DEL B (Kenneth 04.09.2026): import av kundenumre fra et
+// Visma-uttrekk (to kolonner: kundenr, kundenavn), Kenneths egen tidsbesparelse i stedet for å
+// taste 271 kunder manuelt. Navnematching skriver ALDRI blindt — «Kiwi Søvik AS» mot «Kiwi Søvik»
+// er en reell forskjell («AS»/«ASA»/«ANS», punktum, dobbeltmellomrom fjernes før sammenligning),
+// men er ikke det samme som å garantere riktig kunde. Tre bøtter (sikre/usikre/ingen), avkryssing
+// per rad, INGENTING skrives før eksplisitt bekreftelse — og et rad med et EKSISTERENDE
+// erp_customer_no er ALDRI forhåndshuket, uansett hvor sikkert treffet er.
+function _custNoNormalize(s) {
+  return String(s || '').toLowerCase()
+    .replace(/\b(as|asa|ans|da|ba)\b/g, ' ')
+    .replace(/[.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function _openCustNoImport() {
+  let inp = document.getElementById('custno-import-inp');
+  if (!inp) {
+    inp = document.createElement('input');
+    inp.type = 'file'; inp.id = 'custno-import-inp'; inp.accept = '.csv,.xlsx,.xls';
+    inp.style.display = 'none';
+    inp.onchange = e => { const f = e.target.files[0]; if (f) _custNoParseFile(f); inp.value = ''; };
+    document.body.appendChild(inp);
+  }
+  inp.click();
+}
+// Fleksibel kolonne-gjenkjenning — Kenneths Visma-uttrekk har ikke nødvendigvis nøyaktig
+// «kundenr»/«kundenavn» som overskrift.
+function _custNoMapHeader(h) {
+  const k = String(h || '').toLowerCase().trim();
+  if (/kundenr|kunde\s*nr|customer\s*no|erp/i.test(k)) return 'kundenr';
+  if (/kundenavn|kunde\s*navn|customer\s*name|^navn$/i.test(k)) return 'kundenavn';
+  return null;
+}
+function _custNoParseFile(file) {
+  const isCsv = /\.csv$/i.test(file.name);
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      let raw;
+      if (isCsv) {
+        const delim = ev.target.result.includes(';') ? ';' : ',';
+        raw = ev.target.result.split(/\r?\n/).filter(l => l.trim()).map(l => l.split(delim).map(c => c.trim().replace(/^"|"$/g, '')));
+      } else {
+        const wb = XLSX.read(ev.target.result, { type: 'binary' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      }
+      if (raw.length < 2) { alert('Filen ser tom ut.'); return; }
+      const headerRow = raw[0].map(h => h != null ? h.toString() : '');
+      const fieldMap = headerRow.map(_custNoMapHeader);
+      const kIdx = fieldMap.indexOf('kundenr'), nIdx = fieldMap.indexOf('kundenavn');
+      if (kIdx === -1 || nIdx === -1) { alert('Fant ikke kolonnene «kundenr» og «kundenavn» i fila.'); return; }
+      const rows = [];
+      for (let r = 1; r < raw.length; r++) {
+        const row = raw[r];
+        const kundenr = row[kIdx] != null ? String(row[kIdx]).trim() : '';
+        const kundenavn = row[nIdx] != null ? String(row[nIdx]).trim() : '';
+        if (!kundenr || !kundenavn) continue;
+        rows.push({ kundenr, kundenavn });
+      }
+      if (!rows.length) { alert('Ingen rader med både kundenr og kundenavn funnet.'); return; }
+      _custNoOpenReview(rows);
+    } catch (err) { alert('Kunne ikke lese filen: ' + err.message); }
+  };
+  if (isCsv) reader.readAsText(file); else reader.readAsBinaryString(file);
+}
+async function _custNoOpenReview(importRows) {
+  const customers = await _loadCustomers();
+  const sikre = [], usikre = [], ingen = [];
+  for (const row of importRows) {
+    const norm = _custNoNormalize(row.kundenavn);
+    let match = customers.find(c => _custNoNormalize(c.name) === norm);
+    if (match) { sikre.push({ row, match }); continue; }
+    match = customers.find(c => {
+      const cn = _custNoNormalize(c.name);
+      return cn && norm && (cn.includes(norm) || norm.includes(cn));
+    });
+    if (match) { usikre.push({ row, match }); continue; }
+    ingen.push({ row });
+  }
+  _custNoReviewData = { sikre, usikre, ingen };
+  _custNoRenderReview();
+}
+let _custNoReviewData = null;
+function _custNoRenderReview() {
+  const d = _custNoReviewData;
+  let overlay = document.getElementById('custno-review-overlay');
+  if (!overlay) { overlay = document.createElement('div'); overlay.id = 'custno-review-overlay'; overlay.className = 'cust-overlay'; overlay.onclick = e => { if (e.target === overlay) overlay.remove(); }; document.body.appendChild(overlay); }
+  const rowHtml = (entry, i, bucket, checkedDefault) => {
+    const existing = entry.match.erp_customer_no;
+    const checked = checkedDefault && !existing;
+    return `<div class="soi-row" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      <input type="checkbox" id="custno-chk-${bucket}-${i}"${checked ? ' checked' : ''}>
+      <span style="flex:1;font-size:12px">${esc(entry.row.kundenavn)} <span style="color:var(--dim)">→</span> ${esc(entry.match.name)}${existing ? ` <span style="color:var(--warn);font-size:10px">(har allerede ${esc(existing)} — overskrives kun hvis huket av)</span>` : ''}</span>
+      <span style="font-size:12px;font-weight:600">${esc(entry.row.kundenr)}</span>
+    </div>`;
+  };
+  const section = (title, entries, bucket, checkedDefault) => entries.length ? `
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">${title} (${entries.length})</div>
+      ${entries.map((e, i) => rowHtml(e, i, bucket, checkedDefault)).join('')}
+    </div>` : '';
+  const ingenHtml = d.ingen.length ? `
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Ingen treff (${d.ingen.length})</div>
+      <div style="font-size:12px;color:var(--dim)">${d.ingen.map(e => esc(e.row.kundenavn) + ' (' + esc(e.row.kundenr) + ')').join(', ')}</div>
+    </div>` : '';
+  overlay.innerHTML = `<div class="cust-card" style="width:620px;max-height:80vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 style="font-size:16px;font-weight:700;color:var(--text);margin:0">Importer kundenumre</h3>
+      <button onclick="document.getElementById('custno-review-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:12px">${d.sikre.length + d.usikre.length} av ${d.sikre.length + d.usikre.length + d.ingen.length} rader matchet mot en eksisterende kunde. Ingenting skrives før du trykker Bekreft.</div>
+    ${section('Sikre treff', d.sikre, 'sikre', true)}
+    ${section('Usikre treff', d.usikre, 'usikre', false)}
+    ${ingenHtml}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button onclick="_custNoConfirmImport()" style="padding:8px 20px;border-radius:6px;border:none;background:var(--accent);color:#0d0e10;font-size:13px;font-weight:600;cursor:pointer">Bekreft</button>
+      <button onclick="document.getElementById('custno-review-overlay').remove()" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Avbryt</button>
+      <span id="custno-confirm-msg" style="font-size:12px;color:var(--dim);align-self:center"></span>
+    </div>
+  </div>`;
+  overlay.style.display = 'flex';
+}
+async function _custNoConfirmImport() {
+  const d = _custNoReviewData;
+  const msg = document.getElementById('custno-confirm-msg');
+  const toWrite = [];
+  for (const bucket of ['sikre', 'usikre']) {
+    d[bucket].forEach((entry, i) => {
+      const chk = document.getElementById(`custno-chk-${bucket}-${i}`);
+      if (chk && chk.checked) toWrite.push(entry);
+    });
+  }
+  if (!toWrite.length) { if (msg) msg.textContent = 'Ingen rader haket av.'; return; }
+  if (msg) msg.textContent = `Lagrer ${toWrite.length}…`;
+  let ok = 0, fail = 0;
+  for (const entry of toWrite) {
+    const { error } = await _db.from('customers').update({ erp_customer_no: entry.row.kundenr }).eq('id', entry.match.id);
+    if (error) fail++; else ok++;
+  }
+  _cachedCustomers = null;
+  if (msg) msg.textContent = fail ? `${ok} lagret, ${fail} feilet` : `✓ ${ok} kundenumre lagret`;
+  _renderCustomerTable();
+  setTimeout(() => { const o = document.getElementById('custno-review-overlay'); if (o) o.remove(); }, fail ? 3000 : 1200);
 }
 
 // ─── Kundekort: kontaktpersoner (CRM) — deler contacts-tabellen + _contactsCache
@@ -50145,6 +50295,10 @@ function _orgHasErpFormat(name) {
 function _updateVismaPasteButton() {
   const show = _orgHasErpFormat('visma_paste');
   document.querySelectorAll('.btn-visma-paste').forEach(b => b.style.display = show ? '' : 'none');
+  // DEL B (spec-visma-eksporter-gbao10-del-a-f.md): samme sentrale bryter — «Importer
+  // kundenumre» (og GBAO10-eksportknappen i DEL C) er kun nyttig for org-er med gbao10-formatet.
+  const showGbao = _orgHasErpFormat('gbao10');
+  document.querySelectorAll('.btn-gbao10').forEach(b => b.style.display = showGbao ? '' : 'none');
 }
 
 async function _loadUserOrg() {
