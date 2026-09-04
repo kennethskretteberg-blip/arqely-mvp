@@ -39874,6 +39874,7 @@ function renderListModule(){
     <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
     <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
     ${_orgHasErpFormat('visma_paste') ? `<button style="${btn}" onclick="_showVismaPasteDialog()">Kopier til Visma</button>` : ''}
+    ${_orgHasErpFormat('gbao10') ? `<button style="${btn}" onclick="_showGbao10ExportDialog()">Eksporter fil til Visma</button>` : ''}
   </div>`;
   h+= draft ? _listDraftCardHtml(draft) : '';
   h+=`<div style="font-size:13px;font-weight:700;margin:4px 0 10px;color:var(--text,#e8eaed)">Opprettede rom (${rooms.length})</div>`;
@@ -50022,6 +50023,130 @@ async function _vismaPasteCopy() {
       ta.focus(); ta.select();
     }
   }
+}
+
+// ═══ EKSPORTER FIL TIL VISMA — GBAO10 (spec-visma-eksporter-gbao10-del-a-f.md, DEL C) ═════════
+// Adskilt fra «Kopier til Visma» over (REGEL 1 — paste-koden er urørt). Denne veien OPPRETTER
+// tilbudet i Visma (paste limes inn i et allerede åpent), så kundenummeret må være med i fila —
+// derfor kundenr/kontaktperson vises som LESEFELT (redigeres der de faktisk hører hjemme:
+// kunden sitt eget kort, prosjektets Kunde & prosjektinfo-modal), ikke tastes på nytt her.
+// _gbaoClean/_gbao10Line/_gbao10FileText (DEL G, over) er urørt — denne bygger BARE dataene som
+// mates inn i dem. DEL F legger til tilbehør + REGEL 2 sitt eksplisitte EL-nummer-per-linje-valg;
+// DEL E bytter nedlastingen under ut med skriving til et lagret mappehåndtak.
+function _gbao10DefaultMerking() {
+  const proj = S.project || {};
+  const noStr = _fmtProjectNo(proj.projectNo);
+  const nextRev = (proj.revision || 0) + 1;
+  return [noStr ? 'P' + noStr : '', proj.name || '', 'REV ' + nextRev].filter(Boolean).join(' ');
+}
+// Krav 4/5: kundenr påkrevd, manglende artikkelnummer blokkerer eksport (samme regel som
+// missing-lista i paste-dialogen, 84f86a5) — DEL F legger til et unntak for EL-nummer per linje.
+function _gbao10Build() {
+  const proj = S.project || {};
+  const cust = proj.customer_id ? (_cachedCustomers || []).find(c => c.id === proj.customer_id) : null;
+  const kundenr = (cust && cust.erp_customer_no) || '';
+  const kontaktperson = proj.contact_name || '';
+  const merking = proj.gbao10Merking != null ? proj.gbao10Merking : _gbao10DefaultMerking();
+  const items = _collectMaterialItems();
+  const groups = _groupByMaterialGroups(_aggregateMaterialItems(items), e => e.kind, e => e.product.id);
+  const missing = [];
+  const lines = [];
+  for (const g of groups) {
+    for (const { product, count, totalLen, kind } of g.rows) {
+      // Samme regel som _vismaPasteBuild: kun folie selges løpende (meter), resten er stk.
+      const byLength = kind === 'Folie' && totalLen > 0;
+      const antall = Math.ceil(byLength ? totalLen : count);
+      if (antall <= 0) continue;
+      if (!product.article_no) { missing.push(product.name || ('Produkt #' + product.id)); continue; }
+      lines.push({ artikkelnr: product.article_no, antall });
+    }
+  }
+  return { kundenr, kontaktperson, merking, custName: proj.customer || '', lines, missing, totalAntall: lines.reduce((s, l) => s + l.antall, 0) };
+}
+let _gbao10Type = 'tilbud';   // DEL E: styrer kun hvilket mappehåndtak det skrives til
+function _gbao10SetType(t) { _gbao10Type = (t === 'ordre') ? 'ordre' : 'tilbud'; _gbao10RenderDialog(); }
+function _showGbao10ExportDialog() {
+  if (!S.project) return;
+  let overlay = document.getElementById('gbao10-export-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'gbao10-export-overlay';
+    overlay.className = 'cust-overlay';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    document.body.appendChild(overlay);
+  }
+  _gbao10RenderDialog();
+  overlay.style.display = 'flex';
+}
+function _gbao10RenderDialog() {
+  const overlay = document.getElementById('gbao10-export-overlay');
+  if (!overlay) return;
+  const built = _gbao10Build();
+  const blocked = !built.kundenr || built.missing.length > 0 || !built.lines.length;
+  overlay.innerHTML = `<div class="cust-card" style="width:520px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 style="font-size:16px;font-weight:700;color:var(--text);margin:0">Eksporter fil til Visma</h3>
+      <button onclick="document.getElementById('gbao10-export-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    <div style="display:flex;gap:14px;margin-bottom:14px;font-size:13px">
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="radio" name="gbao10-type"${_gbao10Type === 'tilbud' ? ' checked' : ''} onchange="_gbao10SetType('tilbud')"> Tilbud</label>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="radio" name="gbao10-type"${_gbao10Type === 'ordre' ? ' checked' : ''} onchange="_gbao10SetType('ordre')"> Ordre</label>
+    </div>
+    <div class="dash-create-field" style="margin-bottom:10px">
+      <label>Kundenr. (Visma)</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <div style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:${built.kundenr ? 'var(--text)' : 'var(--warn)'};font-size:13px">${built.kundenr ? esc(built.kundenr) : 'Mangler — ' + esc(built.custName || 'ingen kunde valgt')}</div>
+        <button class="npc-btn-ghost" onclick="_gbao10EditCustomer()"${built.custName ? '' : ' disabled style="opacity:.5;cursor:not-allowed"'}>Rediger kunde</button>
+      </div>
+    </div>
+    <div class="dash-create-field" style="margin-bottom:10px">
+      <label>Kontaktperson</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <div style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px">${built.kontaktperson ? esc(built.kontaktperson) : '—'}</div>
+        <button class="npc-btn-ghost" onclick="document.getElementById('gbao10-export-overlay').remove();_wfKundeModal()">Rediger prosjekt</button>
+      </div>
+    </div>
+    <div class="dash-create-field" style="margin-bottom:14px">
+      <label>Merking</label>
+      <input id="gbao10-merking" class="dash-create-input" value="${esc(built.merking)}" onchange="_gbao10SaveMerking()">
+    </div>
+    ${built.missing.length ? `<div style="font-size:12px;color:var(--warn);margin-bottom:10px">Mangler artikkelnummer, blokkerer eksport: ${built.missing.map(esc).join(', ')}</div>` : ''}
+    <div style="font-size:12px;color:var(--dim);margin-bottom:14px">${built.lines.length} varelinjer · ${built.totalAntall} stk</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="dash-create-btn"${blocked ? ' disabled style="opacity:.5;cursor:not-allowed"' : ''} onclick="_gbao10Export()">Eksporter</button>
+      <button class="npc-btn-ghost" onclick="document.getElementById('gbao10-export-overlay').remove()">Avbryt</button>
+      <span id="gbao10-export-msg" style="font-size:12px;color:var(--dim)"></span>
+    </div>
+  </div>`;
+}
+function _gbao10SaveMerking() {
+  if (!S.project) return;
+  S.project.gbao10Merking = document.getElementById('gbao10-merking')?.value || '';
+  if (typeof _markProjectDirty === 'function') _markProjectDirty();
+  if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
+}
+function _gbao10EditCustomer() {
+  const proj = S.project || {};
+  if (!proj.customer_id) return;
+  document.getElementById('gbao10-export-overlay').remove();
+  _openCustomerCard(proj.customer_id);
+}
+// Nedlasting her (DEL E bytter dette ut med skriving til et lagret mappehåndtak — «Type»-valget
+// over avgjør da KUN hvilket av de to håndtakene, aldri filinnholdet).
+async function _gbao10Export() {
+  const built = _gbao10Build();
+  if (!built.kundenr || built.missing.length || !built.lines.length) return;
+  const gbaoLines = built.lines.map(l => ({ kundenr: built.kundenr, kontaktperson: built.kontaktperson, merking: built.merking, artikkelnr: l.artikkelnr, antall: l.antall }));
+  const text = _gbao10FileText(gbaoLines);
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'tilbud_' + (built.merking || 'export').replace(/[\\/:*?"<>|]/g, '_') + '.txt';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  if (typeof _showToast === 'function') _showToast(`${built.lines.length} varelinjer eksportert.`, 'success');
+  const msg = document.getElementById('gbao10-export-msg');
+  if (msg) msg.textContent = '✓ Eksportert';
 }
 
 async function _exportMaterialListXLSX() {
