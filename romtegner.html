@@ -48019,6 +48019,107 @@ async function _custNoConfirmSync() {
   if (typeof _showToast === 'function') _showToast(`Synk fullført: ${d.nye.length} nye, ${d.endretNavn.length} endret, ${d.borte.length} borte.`, 'success');
   setTimeout(() => { const o = document.getElementById('custno-sync-overlay'); if (o) o.remove(); _custNoOpenSuggestions(); }, 900);
 }
+// ── B3: forslag til Varmeplan-kunder uten nummer, ETTER at registeret er synket. Fire bøtter —
+// «flere treff» (kjedetilfellet: Bravida/Elektroimportøren) får ALDRI et forvalg, kun en nedtrekk
+// brukeren selv må velge i. ──
+let _custNoSuggestData = null;
+async function _custNoOpenSuggestions() {
+  const vpCustomers = await _loadCustomers();
+  const missing = vpCustomers.filter(c => !c.erp_customer_no);
+  if (!missing.length) return;
+  const reg = (await _erpCustomersForOrg(true)).filter(r => r.active);
+
+  // Egen bug funnet under testing: en tidligere versjon skilte «eksakt treff, flere» fra «delvis
+  // treff, ett» i to separate steg — «Bravida Norge» (3 avdelinger, INGEN av dem eksakt normalisert
+  // likt «bravida norge») landet da i Usikkert i stedet for Flere treff, stikk i strid med spec sitt
+  // eget kjedetilfelle. Spec sitt skille er ANTALL kandidater (1 vs. 2+), ikke treffpresisjon — én
+  // felles kandidat-pool per kunde, deretter bøtte etter telling.
+  const sikker = [], flere = [], usikker = [], ingen = [];
+  for (const c of missing) {
+    const norm = _custNoNormalize(c.name);
+    if (!norm) { ingen.push({ customer: c }); continue; }
+    const tokens = norm.split(' ').filter(Boolean);
+    const candidates = reg.filter(r => r.name_norm === norm || r.name_norm.includes(norm) || norm.includes(r.name_norm) || tokens.every(t => r.name_norm.includes(t)));
+    if (candidates.length === 0) { ingen.push({ customer: c }); continue; }
+    if (candidates.length >= 2) { flere.push({ customer: c, candidates: candidates.slice(0, 15) }); continue; }
+    if (candidates[0].name_norm === norm) { sikker.push({ customer: c, match: candidates[0] }); }
+    else { usikker.push({ customer: c, candidates }); }
+  }
+  if (!sikker.length && !flere.length && !usikker.length) return;   // ingenting å foreslå — stille
+  _custNoSuggestData = { sikker, flere, usikker, ingen };
+  _custNoRenderSuggestions();
+}
+function _custNoRenderSuggestions() {
+  const d = _custNoSuggestData;
+  let overlay = document.getElementById('custno-suggest-overlay');
+  if (!overlay) { overlay = document.createElement('div'); overlay.id = 'custno-suggest-overlay'; overlay.className = 'cust-overlay'; overlay.onclick = e => { if (e.target === overlay) overlay.remove(); }; document.body.appendChild(overlay); }
+  const sikkerHtml = d.sikker.length ? `<div style="margin-bottom:14px">
+    <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Ett sikkert treff (${d.sikker.length})</div>
+    ${d.sikker.map((e, i) => `<div class="soi-row" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      <input type="checkbox" id="custno-sg-sikker-${i}" checked>
+      <span style="flex:1;font-size:12px">${esc(e.customer.name)} <span style="color:var(--dim)">→</span> ${esc(e.match.erp_no)} ${esc(e.match.name)}</span>
+    </div>`).join('')}
+  </div>` : '';
+  const flereHtml = d.flere.length ? `<div style="margin-bottom:14px">
+    <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Flere treff (${d.flere.length}) — velg riktig avdeling</div>
+    ${d.flere.map((e, i) => `<div class="soi-row" style="padding:4px 0">
+      <div style="font-size:12px;margin-bottom:2px">${esc(e.customer.name)}</div>
+      <select id="custno-sg-flere-${i}" style="width:100%;padding:4px 6px;border:1px solid var(--border);border-radius:5px;background:var(--surface2);color:var(--text);font-size:12px">
+        <option value="">— velg —</option>
+        ${e.candidates.map(c => `<option value="${esc(c.erp_no)}">${esc(c.erp_no)} ${esc(c.name)}</option>`).join('')}
+      </select>
+    </div>`).join('')}
+  </div>` : '';
+  const usikkerHtml = d.usikker.length ? `<div style="margin-bottom:14px">
+    <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Usikkert (${d.usikker.length})</div>
+    ${d.usikker.map((e, i) => `<div class="soi-row" style="padding:4px 0">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="custno-sg-usikker-${i}">
+        <span>${esc(e.customer.name)} <span style="color:var(--dim)">→</span> ${esc(e.candidates[0].erp_no)} ${esc(e.candidates[0].name)}${e.candidates.length > 1 ? ` (+${e.candidates.length - 1} til)` : ''}</span>
+      </label>
+    </div>`).join('')}
+  </div>` : '';
+  const ingenHtml = d.ingen.length ? `<div style="margin-bottom:10px">
+    <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Ingen treff (${d.ingen.length}) — søk manuelt på kundekortet</div>
+    <div style="font-size:12px;color:var(--dim)">${d.ingen.map(e => esc(e.customer.name)).join(', ')}</div>
+  </div>` : '';
+  overlay.innerHTML = `<div class="cust-card" style="width:560px;max-height:80vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3 style="font-size:16px;font-weight:700;color:var(--text);margin:0">Forslag til kundenumre</h3>
+      <button onclick="document.getElementById('custno-suggest-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">&times;</button>
+    </div>
+    ${sikkerHtml}${flereHtml}${usikkerHtml}${ingenHtml}
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button onclick="_custNoConfirmSuggestions()" style="padding:8px 20px;border-radius:6px;border:none;background:var(--accent);color:#0d0e10;font-size:13px;font-weight:600;cursor:pointer">Bekreft</button>
+      <button onclick="document.getElementById('custno-suggest-overlay').remove()" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Avbryt</button>
+      <span id="custno-suggest-msg" style="font-size:12px;color:var(--dim);align-self:center"></span>
+    </div>
+  </div>`;
+  overlay.style.display = 'flex';
+}
+async function _custNoConfirmSuggestions() {
+  const d = _custNoSuggestData;
+  const msg = document.getElementById('custno-suggest-msg');
+  const toWrite = [];
+  d.sikker.forEach((e, i) => { const chk = document.getElementById(`custno-sg-sikker-${i}`); if (chk && chk.checked) toWrite.push({ customer: e.customer, erpNo: e.match.erp_no }); });
+  d.flere.forEach((e, i) => { const sel = document.getElementById(`custno-sg-flere-${i}`); if (sel && sel.value) toWrite.push({ customer: e.customer, erpNo: sel.value }); });
+  d.usikker.forEach((e, i) => { const chk = document.getElementById(`custno-sg-usikker-${i}`); if (chk && chk.checked) toWrite.push({ customer: e.customer, erpNo: e.candidates[0].erp_no }); });
+  if (!toWrite.length) { if (msg) msg.textContent = 'Ingen rader valgt.'; return; }
+  if (msg) msg.textContent = `Lagrer ${toWrite.length}…`;
+  let ok = 0, fail = 0;
+  for (const t of toWrite) {
+    // Krav: overskriv aldri et erp_customer_no som allerede står der uten eksplisitt avkryssing.
+    // Disse kundene manglet nummer FRA START (_custNoOpenSuggestions), men en annen fane kan i
+    // mellomtiden ha satt et — sjekk på nytt rett før skriving, ikke stol på det gamle utvalget.
+    if (t.customer.erp_customer_no) continue;
+    const { error } = await _db.from('customers').update({ erp_customer_no: t.erpNo }).eq('id', t.customer.id);
+    if (error) fail++; else ok++;
+  }
+  _cachedCustomers = null;
+  if (msg) msg.textContent = fail ? `${ok} lagret, ${fail} feilet` : `✓ ${ok} kundenumre lagret`;
+  _renderCustomerTable();
+  setTimeout(() => { const o = document.getElementById('custno-suggest-overlay'); if (o) o.remove(); }, fail ? 3000 : 1000);
+}
 
 // ─── Kundekort: kontaktpersoner (CRM) — deler contacts-tabellen + _contactsCache
 //     med opprett-prosjekt-comboboxen (samme kilde begge veier). ───
