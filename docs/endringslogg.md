@@ -4,6 +4,88 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Bytt produkt» uten å tømme rommet først — 2026-09-03
+
+Kenneth: «jeg ønsker … å endre produkt og komme tilbake til menyen … slik det er nå, må jeg velge
+rom og tømme rommet for produkter for så å legge inn på nytt.» Funksjonen for «kom tilbake til
+menyen» fantes allerede, men het `_showPostDeleteActions` og var derfor kun nåbar via en sletting —
+navnet var selve grunnen til at ingen tenkte på å kalle den fra noe annet. Fem commits, rekkefølgen
+Kenneth ba om (Rettelsen → B → A → C), pluss én oppfølging samme dag.
+
+- **`0628740` — Rettelsen: snø-matte «✕ Avbryt» gjenoppretter nå rommet.** Eksisterende feil funnet
+  FØR resten kunne bygges trygt: øktstart tømmer rommet før forhåndsvisningen legges ut, men Avbryt
+  fjernet kun forhåndsvisningens EGNE matter — det som ble ryddet ved øktstart kom aldri tilbake,
+  området sto tomt. Ny delt snapshot/gjenopprett-mekanisme, lagret PÅ ROMMET (ikke den globale
+  angre-stakken) — verifisert live at en annen handling midt i økta overlever avbrytet uendret. Fant
+  også en ikke-relatert kvirk (dobbel `pushUndo()` i `autoFillMatSerpentine`) — rapportert, ikke
+  rettet.
+- **`c18c9f3` — DEL B: nytt produkt ERSTATTER nå, legger ikke til.** Kabel ryddet FØR ingenting ved
+  øktstart — velger man et nytt kabelprodukt i et rom som allerede har en kabel, fikk man to. Ny
+  delt øktstart-mekanisme rydder nå kun PRODUKTET som byttes, ikke hele rommet (folie i samme rom
+  blir stående) — en bevisst innsnevring også for snø-matte, som før tømte alt.
+- **`6d24f66` — DEL A: tre nye inngangspunkter, ingen sletting nødvendig.** Omdøpt
+  `_showPostDeleteActions` → `_openProductPanelForRoom` (samme kropp, samme fem kallere). Ny
+  «⇄ Bytt produkt»-chip i ctxbaren og objekt-info-panelet for valgt stripe/kabel/matte/plate, samt i
+  rommets kontekstmeny.
+- **`5c98d23` — DEL C: fant og rettet — panelet viste «Ingen produkter funnet».** Under verifisering
+  av at Kenneth faktisk fikk det han ba om, dukket en ekte, allerede eksisterende feil opp:
+  familyName ble avledet fra KUN FØRSTE ORD i produktnavnet, mens produktfilteret matcher det
+  faktiske `product_family`-feltet (nesten alltid flere ord). Panelet viste derfor «Ingen produkter»
+  for praktisk talt hele katalogen — rammet også de fem ORIGINALE sletting→panel-veiene, ikke bare
+  de nye knappene.
+- **Oppfølging samme dag — kan nå bytte MODUL også.** Kenneth bekreftet eksplisitt spec-ens åpne
+  punkt («kan bytte modul også»). Alle tre knappene åpner nå den samlede produktvelgeren i stedet
+  for ett families eget panel — forhåndsvelger fortsatt riktig type, men har en «Produkttype»-chip
+  for å bytte til en helt annen modul (f.eks. kabel→folie).
+
+**Fil:** romtegner.html.
+
+---
+
+## Snøkabel: fasebalanserte forslag og ekte tall i forhåndsvisningen — 2026-09-03
+
+Kenneth: «hvis man velger 2 store kabler … får L1 mye mer belastning enn L2 og L3» — ønsket forslag
+på 3 eller 6 like kabler for snøanlegg, og at et 35 m² snøområde ikke lenger skulle gi kun ETT
+kabelforslag. Tre commits, rekkefølgen A → C → B.
+
+- **`4f8aa87` — DEL A: N-løkka i `selectMultiCables` kjører nå alltid.** Rotårsak til at et 35 m²
+  snøområde ga kun ett forslag: et tidlig `return` hoppet over hele N=2..16-evalueringen når én
+  kabel dekket ≥90 % av behovet. Et første forsøk lot N=1 konkurrere direkte i samme rangering som
+  N=2..16 — en A/B-test mot 864 syntetiske innendørs-rom viste 37 % avviksrate, reversert til en
+  konservativ variant som er bit-for-bit identisk med forrige versjon for innendørs (4400 rom, 0
+  avvik), men gjør N-løkkas data alltid tilgjengelig.
+- **`ff5ebc4` — DEL C: forhåndsvisning viser nå faktiske tall, snø forhåndsviser.** Snøens
+  enkeltkabelforslag plasserte FØR direkte og lukket panelet — ingen «✓ Bruk»/«✕ Avbryt», ingen
+  angring uten undo. Forhåndsvisnings-footeren viste kun «● Forhåndsvises», ingen tall — leser nå
+  faktiske W/m²/CC/meter fra canvas (ikke forslagets prediksjon; verifisert reelt avvik 121 vs 154
+  W/m² på samme forslag i test).
+- **`537c4b3` — DEL B: nye «minimum antall»/«fasebalansert»-forslag i snømodulen.** 2 kabler kan
+  ALDRI fordeles jevnt over 3 faser (L1-L2 + L3-L1 belaster L1 dobbelt), 3 og 6 kan. Fasebalansert
+  (minste multiplum av 3 som når ønsket effekt) er ny ★ Anbefalt i snømodulen; gjelder IKKE
+  innendørs (Kenneth bekreftet eksplisitt).
+
+**Fil:** romtegner.html.
+
+---
+
+## Visma GBAO10-eksport: generator-kjerne og portvakt-test — 2026-09-03
+
+Ny fileksport til Visma Global (33-felters GBAO10-format), adskilt fra den eksisterende «Kopier til
+Visma»-pasten (UTTRYKKELIG uendret). Spec-en krever en portvakt-test FØR resten bygges: godtar
+Vismas import CVA-serien (Cenika Varme-produkter), eller kun CV-serien (Cenika)?
+
+- **`afc528e` — DEL G: generator-kjerne, IKKE koblet til UI.** `_gbaoClean`/`_gbao10Line`/
+  `_gbao10FileText` bygget og verifisert (ingen BOM, CRLF på hver linje inkl. siste, 33 felter). To
+  testfiler generert utenfor appen (kundenr 38693/Kenneth Skretteberg) og sendt til Kenneth for
+  import i et ekte Visma-testtilbud — én med 4 CVA-artikler, én med 16 blandede artikler (CV/CVA/
+  el-nummer, merket TEST2) etter ønske fra Cenikas admin. Kenneth bekreftet at testfilen fungerte i
+  Visma. DEL A–F (org-bryter, kundenummer, dialog, gjenbruk av materiallista, mappe-skriving) er
+  ikke påbegynt.
+
+**Fil:** romtegner.html.
+
+---
+
 ## Matte: kabelskjøt følger naboen, halv-CC-forbandt, jevne bredder — 2026-09-02
 
 Kenneth: «kabel ligger feil der matten kappes og vendes. svingene må naturlig gå fra en bredde til
