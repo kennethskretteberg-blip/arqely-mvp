@@ -47297,6 +47297,21 @@ async function _loadCustomers() {
   } catch(e) { return []; }
 }
 
+// spec-visma-eksporter-gbao10-del-b-revidert.md (Kenneth 04.09.2026): erp_customers er Vismas
+// KUNDELISTE speilet inn org-scopet (3130 rader hos Cenika) — et OPPSLAGSREGISTER, adskilt fra
+// customers (Varmeplans egne kunder, et par hundre). B1 sitt søkefelt og B3 sine forslag leser
+// begge herfra, ALDRI direkte fra en opplastet fil (den går via B2 sin synk først).
+let _cachedErpCustomers = null;
+async function _erpCustomersForOrg(forceRefresh) {
+  if (_cachedErpCustomers && !forceRefresh) return _cachedErpCustomers;
+  if (!_db || !_userOrg) return [];
+  try {
+    const { data } = await _db.from('erp_customers').select('*').eq('org_id', _userOrg.id);
+    _cachedErpCustomers = data || [];
+    return _cachedErpCustomers;
+  } catch (e) { return _cachedErpCustomers || []; }
+}
+
 // P6: resolve a customer's CURRENT name from the loaded customer cache.
 // Returns the name if the row exists, null if the cache is loaded but the row is
 // gone (deleted), or undefined if the cache isn't available yet (caller keeps the
@@ -47721,7 +47736,12 @@ function _openCustomerCard(customerId) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kundenavn *</label>${_f('cc-name',c.name)}</div>
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Org.nr</label>${_f('cc-orgno',c.org_number)}</div>
-      <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kundenr. i Visma</label>${_f('cc-erpno',c.erp_customer_no)}</div>
+      <div style="position:relative">
+        <label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kundenr. i Visma</label>
+        <input id="cc-erpno" value="${_esc(c.erp_customer_no||'')}" autocomplete="off" oninput="_ccErpSearch()" onfocus="_ccErpSearch()" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px;box-sizing:border-box">
+        <div id="cc-erpno-results" class="cust-search-results" style="display:none"></div>
+        <div id="cc-erpno-match" style="font-size:11px;color:var(--dim);margin-top:2px">…</div>
+      </div>
       <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase">Kategori</label>
         <select id="cc-cat" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px">
           <option value="business"${cat==='business'?' selected':''}>Bedrift</option>
@@ -47761,6 +47781,54 @@ function _openCustomerCard(customerId) {
   overlay.style.display = 'flex';
   _renderCardContacts(customerId);
   _renderCustomerCardProjects(customerId);
+  _ccErpInitMatch(c.erp_customer_no);
+}
+
+// spec-visma-eksporter-gbao10-del-b-revidert.md DEL B1 (Kenneth 04.09.2026): «Kundenr. i Visma»
+// er IKKE et blankt tekstfelt — 3130 numre og avdelingsvis nummerering («Bravida Norge AS avd
+// Ålesund» vs. «avd Molde») gjør et søkefelt hele forskjellen. Fritekst er fortsatt lov (nyopprettet
+// Visma-kunde, ikke synkronisert ennå) — søket blokkerer aldri, kun foreslår.
+async function _ccErpInitMatch(erpNo) {
+  const el = document.getElementById('cc-erpno-match');
+  if (!el) return;
+  if (!erpNo) { el.textContent = ''; return; }
+  const reg = await _erpCustomersForOrg();
+  const hit = reg.find(r => r.erp_no === erpNo);
+  el.textContent = hit ? hit.name : 'Ikke funnet i registeret — fritekst, blokkerer ikke';
+}
+async function _ccErpSearch() {
+  const inp = document.getElementById('cc-erpno');
+  const results = document.getElementById('cc-erpno-results');
+  if (!inp || !results) return;
+  const raw = (inp.value || '').trim();
+  if (!raw) { results.style.display = 'none'; return; }
+  const reg = (await _erpCustomersForOrg()).filter(r => r.active);
+  const qNorm = _custNoNormalize(raw);
+  const qLower = raw.toLowerCase();
+  // Treffer på BÅDE nummer og navn, og på delstrenger — «bravida ålesund», «31114» og
+  // «ålesund» skal alle finne raden (krav 1). «bravida ålesund» er IKKE en sammenhengende
+  // delstreng av «bravida norge avd ålesund» — egen bug funnet under testing: et rent
+  // .includes()-sammenligning bommet nettopp på spec sitt eget eksempel. Ordene i søket må derfor
+  // finnes NOEN steder i navnet, i hvilken som helst rekkefølge — ikke som én sammenhengende bit.
+  const qTokens = qNorm.split(' ').filter(Boolean);
+  const matches = reg.filter(r => r.erp_no.toLowerCase().includes(qLower) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))).slice(0, 30);
+  if (!matches.length) {
+    results.innerHTML = `<div style="padding:6px 10px;color:var(--dim);font-size:12px">Ingen treff i registeret — fritekst godtas</div>`;
+    results.style.display = 'block';
+    return;
+  }
+  const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  results.innerHTML = matches.map(r => `<div onclick="_ccErpPick(${sq(r.erp_no)},${sq(r.name)})" style="padding:6px 10px;cursor:pointer;font-size:12px;border-radius:6px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''"><b>${_esc(r.erp_no)}</b> ${_esc(r.name)}</div>`).join('')
+    + (matches.length >= 30 ? `<div style="padding:6px 10px;color:var(--dim);font-size:11px">… flere treff — skriv mer for å avgrense</div>` : '');
+  results.style.display = 'block';
+}
+function _ccErpPick(erpNo, name) {
+  const inp = document.getElementById('cc-erpno');
+  if (inp) inp.value = erpNo;
+  const results = document.getElementById('cc-erpno-results');
+  if (results) results.style.display = 'none';
+  const match = document.getElementById('cc-erpno-match');
+  if (match) match.textContent = name;   // krav 4: vis valgt Visma-navn UNDER feltet med én gang
 }
 
 async function _saveCustomerCard(customerId) {
@@ -47790,16 +47858,17 @@ async function _saveCustomerCard(customerId) {
   } catch(e) { if (msg) { msg.textContent = '✕ ' + e.message; msg.style.color = '#ef4444'; } }
 }
 
-// spec-visma-eksporter-gbao10-del-a-f.md DEL B (Kenneth 04.09.2026): import av kundenumre fra et
-// Visma-uttrekk (to kolonner: kundenr, kundenavn), Kenneths egen tidsbesparelse i stedet for å
-// taste 271 kunder manuelt. Navnematching skriver ALDRI blindt — «Kiwi Søvik AS» mot «Kiwi Søvik»
-// er en reell forskjell («AS»/«ASA»/«ANS», punktum, dobbeltmellomrom fjernes før sammenligning),
-// men er ikke det samme som å garantere riktig kunde. Tre bøtter (sikre/usikre/ingen), avkryssing
-// per rad, INGENTING skrives før eksplisitt bekreftelse — og et rad med et EKSISTERENDE
-// erp_customer_no er ALDRI forhåndshuket, uansett hvor sikkert treffet er.
+// spec-visma-eksporter-gbao10-del-b-revidert.md (Kenneth 04.09.2026): DEL B revidert etter at det
+// virkelige tallet kom fram — Cenikas kundeliste i Visma er 3130 numre, mange avdelinger per kjede
+// (Bravida/Elektroimportøren har titalls hver). Varmeplan skal ALDRI få 3130 kunderader — dette er
+// nå en SYNKRONISERING mot et eget oppslagsregister (erp_customers), ikke en direkte import mot
+// Varmeplans egne kunder (den forrige, enklere DEL B-varianten). Navnematching skriver ALDRI
+// blindt — «Kiwi Søvik AS» mot «Kiwi Søvik» er en reell forskjell («AS»/«ASA»/«ANS»/«AB», punktum,
+// dobbeltmellomrom fjernes FØR sammenligning; avdelingsord som «avd Ålesund» beholdes med vilje —
+// en normalisering som strøk dem ville gjort 40 Bravida-rader identiske).
 function _custNoNormalize(s) {
   return String(s || '').toLowerCase()
-    .replace(/\b(as|asa|ans|da|ba)\b/g, ' ')
+    .replace(/\b(as|asa|ans|ab|da|ba)\b/g, ' ')
     .replace(/[.,]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
