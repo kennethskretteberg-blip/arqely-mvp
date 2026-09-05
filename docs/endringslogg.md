@@ -4,6 +4,189 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## KRITISK: PostgREST sitt 1000-raders-tak gjorde 2130 av 3130 registerrader usynlige — 2026-09-05
+
+Kenneth: «Det er mange kunder som ikke kommer opp fra Visma-uttrekket. Når jeg skriver krøderen, så
+kommer det kun opp Krøderen Elektro AS, Ringerike.» Diagnosen målt mot Kenneths eget uttrekk, ikke
+gjettet: PostgREST returnerer maks 1000 rader uten en `Range`-header, og `_erpCustomersForOrg`
+hadde ingen paginering. Alle ni radene han savnet lå etter rad 1000 i fila (radnr.
+858/2552/2648/2659-2662/2911/2962) — **2130 av 3130 rader var usynlige for hele appen** siden
+04.09, uten feilmelding. Verre: spørringen manglet `.order()`, så det ikke engang var stabilt
+hvilke 1000 som kom med — samme søk kunne gi treff i dag og null i morgen.
+
+- **`4834f5f`.** Ny delt `_selectAll(build)` paginerer med `.range()` til dataene tar slutt, brukt
+  på alle seks spørringer i kodebasen som kan vokse forbi tusen — ikke bare den ene som var
+  ødelagt nå: `erp_customers` (kritisk), `customers`, `contacts` (helt ufiltrert), prosjektlista
+  (`_fetchProjectList`, kandidat-fallbacken beholdt, men et vellykket forsøk henter nå alle
+  sidene), prosjekttelling per kunde (Kunder-fanen) og prosjekttelling per org (adminpanelets
+  support-fane). Hver paginerer på en stabil unik kolonne (`erp_no`/`id`, sekundærnøkkel der den
+  forretningsmessige sorteringen ikke selv er unik).
+- `_erpCustomersForOrg` kaster nå videre på feil i stedet for å gjøre en nettverksfeil om til
+  «tomt register». Alle ni kallestedene gjennomgått og viser nå en tydelig feilmelding i stedet
+  for en stille tom trefflise — kundekortets søkefelt, opprett-prosjekt-flyten,
+  «Ny kunde»-dialogen, Kunder-fanen, synk-reviewen, B3-forslagene.
+- Egen bug funnet i samme runde: «flere treff»-tekstene i to søkefelt telte det avkortede
+  antallet (etter `.slice()`), ikke det faktiske. Rettet til å telle før avkorting.
+
+**Testmetodikk:** live mot et syntetisk 3130-rads register bygget etter Kenneths egen
+radnummer-tabell, med en `_db`-mock som faktisk implementerer `.range()`-paginering — verifiserte
+4 kall (1000+1000+1000+130) for å hente alle 3130. Alle tre søkefeltene fant deretter alle sju
+Krøderen-avdelingene, Arro og Ask. En synk av 3130 identiske rader mot det nå fullstendige
+registeret ga **Nye 0 · Endret 0 · Uendret 3130 · Borte 0**. Nettverksfeil simulert og bekreftet
+vist som feilmelding, ikke tom seksjon. Full regresjonsbatteri grønt.
+
+**Fil:** romtegner.html.
+
+---
+
+## Visma-registeret: opprett kunde direkte fra søket, tre steder — 2026-09-05
+
+Kenneth: «Bør jeg ikke kunne søke på en kunde i Varmeplan som blir hentet fra registeret og legge
+kunden hurtig inn i Varmeplan?» Registeret (`erp_customers`, 3130 rader hos Cenika) hadde alt
+navn/org.nr/postnr/poststed/kundenr, men ble kun brukt til å fylle ett felt på en kunde som
+allerede fantes — den raskeste veien inn i appen (`_inlineCreateCustomer`, kun navn) produserte
+dermed den kunden som var minst klar for GBAO10-eksport.
+
+- **`fdd01b2` — opprett-prosjekt-flyten.** `_searchCustomers` fikk en andre seksjon «I
+  Visma-registeret — opprettes ved klikk» under Varmeplan-seksjonen (som alltid vises først), kun
+  for org-er med `gbao10`. Skjuler registerrader hvis nummeret allerede er i bruk. Ny
+  `_createCustomerFromErp(erpNo)` oppretter kunden med Vismas egen skrivemåte, kundenr, org.nr,
+  postnr, sted — velger den med en gang. Samme registersøk lagt i «Ny kunde»-dialogens navnefelt
+  (`_ncpErpSearch`/`_ncpErpPick`), som i stedet FYLLER skjemaet uten å lagre, gjennom en ny delt
+  `_fillNewCustomerForm(fields)` en kommende Brreg-autofyll-sak kan gjenbruke. Egen bug funnet:
+  Varmeplan-seksjonens eget navnesøk brukte fortsatt ren `.includes()` — samme «bravida ålesund»
+  mot «Bravida AS Ålesund»-bug som ble fikset i registersøket i `5574198`, bare aldri oppdaget der
+  før en nyopprettet kundes navn ble søkt på rett etter opprettelse. `erp_customers` fikk
+  `postal_code`+`city` (additiv migrasjon).
+- **`0c5f439` — Kunder-fanen.** Kenneth, dagen etter: «Når jeg går inn på kunder og gjør et søk på
+  fritekst, feks Krøderen Elektro AS, så kommer det ikke opp noen forslag. Jeg vet at denne kunden
+  ligger i listen vi har importert.» `_renderCustomerTable`/`cust-search` filtrerte kun
+  Varmeplans egne kunder — riktig kode, feil brukerforventning. Ny seksjon under tabellen
+  (`_renderCustomerErpSection`), med én «+ Legg til»-knapp PER RAD (bevisst annerledes enn
+  opprett-prosjekt-flyten, der ett klikk velger ett nummer) — en kjede som Krøderen Elektro (sju
+  avdelinger) kan trenge flere opprettet samtidig, ikke ett valg av flere. Innsettingslogikken
+  skilt ut i delt `_insertCustomerFromErpRow`, gjenbrukt av begge stedene.
+
+**Testmetodikk:** live i nettleser mot mocket register/kundeliste/`_db` (Bravida Ålesund- og
+Krøderen Elektro-radene fra spec, inkl. ekte org.nr), alle nummererte tester i begge spec fra
+Kenneth kjørt og bekreftet, inkl. 8- og 12-takene med «flere treff», org uten `gbao10` → ingen
+seksjon, tomt register → ingen seksjon/feil. Full regresjonsbatteri grønt.
+
+**Fil:** romtegner.html, ny migrasjon `erp_customers.postal_code`/`city`.
+
+---
+
+## Visma kundeliste-synk mot Cenikas ekte 3130-rads uttrekk — 2026-09-05
+
+DEL B1/B2/B3 (under) var bygget mot en beskrevet fil. Kenneth ga den ekte fila
+(aldri lagt inn i git-repoet, brukt direkte fra sin Cowork-mappe).
+
+- **`3010338` — Rettelsen, blokkerende bug.** Fila er tabulatorseparert, null semikolon i hele
+  fila. Den gamle gjettingen («finnes et semikolon noen steder?») falt derfor alltid tilbake til
+  komma — og et komma inni et kundenavn (236 forekomster) kunne i tillegg forskjøvet kolonnene.
+  Import var reelt umulig. Ny `_custNoDetectDelimiter()` gjetter på hyppighet i overskriftslinja
+  alene. Egen oppdagelse fikset samtidig: 3115 av 3130 navn bruker U+00A0 (hardt mellomrom), aldri
+  vanlig mellomrom — `_custNoNormalize` overlevde dette før kun ved et lykketreff, gjort eksplisitt.
+- **`57697fc` — org.nr-matching og utgått/sperret.** Ny `erp_customers.org_number` — B3 prøver det
+  FØR navn: ett org.nr-treff er sikkert uansett navn, flere (alle avdelinger av samme firma deler
+  ett org.nr — 126 Bravida-rader på ett nummer) havner riktig i Flere treff. `&Utgått/
+  sperret`-kolonnen setter en rad inaktiv med en gang ved synk, adskilt fra «borte».
+
+**Testmetodikk:** live mot den ekte fila (ikke syntetisk) — hele parse-pipelinen kjørt gjennom
+`_custNoParseFile` med et ekte `File`-objekt, alle 3130 rader, spec sine egne søkeeksempler
+bekreftet mot det ekte registeret.
+
+**Fil:** romtegner.html, ny migrasjon `erp_customers.org_number`.
+
+---
+
+## Visma GBAO10 DEL B revidert: synkronisert kunderegister (B1–B3) — 2026-09-04
+
+Den opprinnelige, enkle DEL B (`3462d0b`: `customers.erp_customer_no`-felt + direkte
+navnematching-import) ble pushet, men Kenneth sendte samme dag en utvidet spec etter at det
+virkelige tallet kom fram: Cenikas kundeliste i Visma er 3130 numre, og én kjede kan ha 5–40
+kundenumre — ett per avdeling. Varmeplan skal aldri få 3130 kunderader; DEL B ble bygget om til en
+synkronisert to-lags modell.
+
+- **`5574198` — DEL B1.** Ny `erp_customers`-tabell (org-scopet oppslagsregister, RLS speilet fra
+  `customers`). «Kundenr. i Visma» på kundekortet er nå et søkefelt mot registeret (nummer og
+  navn, delstrenger i vilkårlig rekkefølge) i stedet for et blankt tekstfelt. Egen bug funnet: en
+  ren `.includes()`-sammenligning bommet på spec sitt eget eksempel («bravida ålesund» er ikke en
+  sammenhengende delstreng av «bravida norge avd ålesund») — rettet til tokenbasert matching.
+- **`d9ca6eb` — DEL B2.** Ekte synk/diff, ikke en engangsimport. Fire kategorier vist FØR noe
+  skrives (nye/endret navn/uendret/borte). «Borte» settes aldri slettet, kun `active=false`.
+  Sikring mot et ufullstendig uttrekk: >20 % fall i radantall blokkerer til brukeren bekrefter.
+- **`255efed` — DEL B3.** Forslag til Varmeplan-kunder uten nummer, automatisk etter synk. Fire
+  bøtter — «flere treff» får aldri et forvalg. Egen bug funnet: et første forsøk skilte «eksakt
+  treff» fra «delvis treff» i to steg, så en kjede uten noe eksakt normalisert treff landet i
+  Usikkert i stedet for Flere treff — spec sitt faktiske skille er antall kandidater, ikke
+  treffpresisjon.
+
+**Testmetodikk:** alt testet med mocket `_db` (aldri skrevet til produksjonsdata). Committet i tre
+deler via git-stash-og-reprise-teknikken (full løsning bygget og testet samlet, deretter delt opp
+for ren historikk).
+
+**Fil:** romtegner.html, ny tabell `erp_customers`.
+
+---
+
+## Visma GBAO10-eksport: DEL A–F, kundenummerfelt, mappe-skriving — 2026-09-04
+
+Ny fileksport til Visma Global (33-felters GBAO10-format), adskilt fra «Kopier til Visma»-pasten
+(uttrykkelig uendret — REGEL 1, verifisert byte-for-byte). DEL G (generator-kjerne, portvakt) var
+allerede bygget og godkjent i en tidligere økt (`afc528e`).
+
+- **`cf905fd` — DEL A.** `erp_format` var en likhetssjekk mot ÉN verdi to steder — kolonnen
+  beholdt som `text`, verdien er nå en kommaseparert liste lest av ny `_orgHasErpFormat(name)`.
+- **`3462d0b` — DEL B (opprinnelig).** `customers.erp_customer_no`-felt + direkte
+  navnematching-import (revidert til et helt annet design samme dag, se over).
+- **`a0efc90` — DEL C.** Ny eksportdialog, helt adskilt fra paste-dialogen. Kundenr/Kontaktperson
+  er lesefelt med lenker til der de faktisk redigeres. Mangler kundenummer eller artikkelnummer →
+  Eksporter deaktivert.
+- **`3b8dee0` — DEL D.** Ny, ren `_gbao10BuildFileText()` uten referanse til `S` — skal kunne
+  løftes rett ut i en fremtidig Tilbudsbygger-app uten omskriving.
+- **`846cd3e` — DEL F.** Tilbehør via samme kontrakt som PDF/XLSX/paste. REGEL 2: EL-nummer i
+  felt 17 kommer inn som Vismas plassholderartikkel `100099` (rød rad) — standard er å blokkere,
+  men et produkt med et el-nummer får et eksplisitt per-linje-valg i dialogen, aldri automatisk.
+- **`69cc3c4` — DEL E.** To lagrede mappehåndtak (Tilbud/Ordre), IndexedDB-persistert. Bare
+  Chrome/Edge har `showDirectoryPicker` — Firefox/Safari faller tilbake til nedlasting. Ikke
+  overskriv i stillhet — finnes filnavnet fra før, spør.
+- **`ad44d30` — verktøylinje-rettelse.** DEL C la eksportknappen kun i dashboardets
+  prosjektliste-rad — Kenneth brukte i praksis hovedverktøylinjen inne i prosjektet og fant den
+  ikke der. Ny `.btn-gbao10`-knapp lagt til der «Kopier til Visma» faktisk står.
+
+**Testmetodikk:** full regresjonsbatteri grønt etter hver commit. DEL E testet med et mocket
+`FileSystemDirectoryHandle` (ekte `showDirectoryPicker` krever en brukerhandling, kan ikke
+trigges headless) — Kenneth bør teste ekte mappevalg mot den faktiske R:-stasjonen selv.
+
+**Fil:** romtegner.html, ny kolonne `customers.erp_customer_no`.
+
+---
+
+## Prosjektert av: redigerbar felt + egen kolonne i prosjektlista — 2026-09-04
+
+Kenneth: «hvor endrer jeg prosjektert av? kan jeg få opp det i egen tabell i prosjektvisningen
+også?» `S.project.responsible` ble skrevet ETT eneste sted i hele kodebasen —
+`_createProjectInline` ved opprettelse. Etter det fantes ingen vei til feltet. Tre commits i
+rekkefølgen Kenneth ba om (C → A → B).
+
+- **`e857c6a` — DEL C.** Feltet het fortsatt «Ansvarlig» i «Nytt prosjekt»-skjemaet, mens
+  PDF-forsiden har sagt «Prosjektert av» siden `64cffb0` — ren etikettendring, selve datafeltet
+  urørt.
+- **`f6652e8` — DEL A.** Fjerde felt i den eksisterende «Kunde & prosjektinfo»-modalen, etter
+  Kunde/Kontaktperson/Adresse. Lagres med `responsible` sin egen konvensjon (tom streng, ikke
+  `null`).
+- **`fa214a6` — DEL B.** Egen kolonne mellom «Prosjekt» og «Type» i prosjektlista — reverserer
+  Kenneths eget valg fra 28.08 om å fjerne den, bevisst og på ny forespørsel.
+
+**Funn under bredde-kontroll (rapportert, ikke rettet):** `.pl-table-wrap` krymper ikke på smal
+skjerm eller tablet og klippes av `overflow-x:hidden` — bekreftet EKSISTERENDE (samme klipping
+uten den nye kolonnen), krever en egen CSS-arkitekturendring utenfor denne oppgavens omfang.
+
+**Fil:** romtegner.html.
+
+---
+
 ## «Bytt produkt» uten å tømme rommet først — 2026-09-03
 
 Kenneth: «jeg ønsker … å endre produkt og komme tilbake til menyen … slik det er nå, må jeg velge
