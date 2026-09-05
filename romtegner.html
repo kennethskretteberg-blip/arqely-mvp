@@ -1449,6 +1449,7 @@ body.present-mode #render-stats{display:none !important}
           </table>
         </div>
         <div id="cust-empty" class="pl-empty" style="display:none">Ingen kunder ennå. Klikk "＋ Ny kunde" for å komme i gang.</div>
+        <div id="cust-erp-section" style="display:none"></div>
       </div>
     </div><!-- /dash-tab-content-customers -->
 
@@ -47404,33 +47405,40 @@ async function _searchCustomers(query) {
   results.innerHTML = vpSection + regSection + addRow;
 }
 
-// Oppretter en kunde direkte fra Visma-registeret (ett klikk, ingen dialog) og velger den —
-// samme videre-flyt som _inlineCreateCustomer, men med fem felt fra registerraden i stedet for
-// bare navnet. Krav: navnet er VISMAS skrivemate, ikke det brukeren tastet i sokefeltet — da
-// matcher Varmeplan og Visma på navn også, ikke bare på nummer, og en senere synk kjenner raden.
-async function _createCustomerFromErp(erpNo) {
-  const results = document.getElementById('dash-customer-results');
-  if (!_userOrg || !_userOrg.id) {
-    if (results) results.innerHTML = `<div style="padding:8px 12px;font-size:12px;color:#f87171">Du er ikke knyttet til en organisasjon. Kontakt administrator.</div>`;
-    return;
-  }
+// spec-visma-opprett-kunde-fra-register-sted1.md (Kenneth 06.09.2026): DELT innsettingslogikk —
+// STED 2 (opprett-prosjekt, under) og STED 1 (Kunder-fanen, _addCustomerFromErpRow) oppretter
+// begge en kunde med de samme fem feltene fra samme registerrad, bare med ULIK videre-flyt
+// (velg-i-skjema vs. bli-stående-i-lista). Kaster ved feil — hvert kallsted håndterer visningen selv.
+async function _insertCustomerFromErpRow(erpNo) {
+  if (!_userOrg || !_userOrg.id) throw new Error('Du er ikke knyttet til en organisasjon. Kontakt administrator.');
   const reg = await _erpCustomersForOrg();
   const r = reg.find(x => x.erp_no === erpNo);
-  if (!r) return;
+  if (!r) throw new Error('Fant ikke raden i registeret.');
+  // Krav: navnet er VISMAS skrivemåte, ikke det brukeren tastet i søkefeltet — da matcher
+  // Varmeplan og Visma på navn også, ikke bare på nummer, og en senere synk kjenner raden.
+  const row = {
+    org_id: _userOrg.id,
+    name: r.name,
+    erp_customer_no: r.erp_no,
+    org_number: r.org_number || null,
+    postal_code: r.postal_code || null,
+    city: r.city || null,
+    category: 'business',
+  };
+  const { data, error } = await _db.from('customers').insert(row).select().single();
+  if (error) throw error;
+  _cachedCustomers = (_cachedCustomers || []).concat([data]);
+  _customerProjectCounts = null;
+  return data;
+}
+
+// Oppretter en kunde direkte fra Visma-registeret (ett klikk, ingen dialog) og velger den —
+// samme videre-flyt som _inlineCreateCustomer, men med fem felt fra registerraden i stedet for
+// bare navnet.
+async function _createCustomerFromErp(erpNo) {
+  const results = document.getElementById('dash-customer-results');
   try {
-    const row = {
-      org_id: _userOrg.id,
-      name: r.name,
-      erp_customer_no: r.erp_no,
-      org_number: r.org_number || null,
-      postal_code: r.postal_code || null,
-      city: r.city || null,
-      category: 'business',
-    };
-    const { data, error } = await _db.from('customers').insert(row).select().single();
-    if (error) throw error;
-    _cachedCustomers = (_cachedCustomers || []).concat([data]);
-    _customerProjectCounts = null;
+    const data = await _insertCustomerFromErpRow(erpNo);
     _selectCustomer(data.id, data.name);
     if (document.getElementById('dash-tab-content-customers')?.style.display !== 'none') { try { _renderCustomerTable(); } catch(e) {} }
   } catch(e) {
@@ -49861,6 +49869,7 @@ async function _renderCustomerTable() {
   if (!filtered.length) {
     tbody.innerHTML = '';
     if (empty) { empty.style.display = ''; empty.textContent = search ? 'Ingen kunder matcher søket.' : 'Ingen kunder ennå. Klikk "＋ Ny kunde" for å komme i gang.'; }
+    await _renderCustomerErpSection(search, customers);
     return;
   }
   if (empty) empty.style.display = 'none';
@@ -49883,6 +49892,64 @@ async function _renderCustomerTable() {
       </div></td>
     </tr>`;
   }).join('');
+  await _renderCustomerErpSection(search, customers);
+}
+
+// STED 1 (spec-visma-opprett-kunde-fra-register-sted1.md, Kenneth 06.09.2026): Kenneth søkte
+// «Krøderen Elektro AS» på Kunder-fanen og fikk ingenting, selv om han visste kunden lå i det
+// importerte registeret — _renderCustomerTable filtrerte kun _loadCustomers() (Varmeplans EGNE
+// kunder), registeret var aldri involvert. Riktig oppførsel etter koden, feil etter det brukeren
+// med rimelighet forventer. Egen seksjon UNDER tabellen, ikke blandet inn i den (ser ellers ut som
+// kundene alt er opprettet) — én «+ Legg til»-knapp PER RAD, ikke ett valg av flere: Krøderen
+// Elektro har sju avdelinger, og flere av dem kan trenge egne Varmeplan-kunder samtidig.
+async function _renderCustomerErpSection(search, customers) {
+  const box = document.getElementById('cust-erp-section');
+  if (!box) return;
+  // Krav 4: ingen seksjon når søket er tomt — 3130 rader skal aldri stå og henge under lista.
+  // Krav 5: ingen seksjon uten gbao10 — samme sentrale sjekk som eksportknappen (_orgHasErpFormat).
+  if (!search || !_orgHasErpFormat('gbao10')) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const reg = await _erpCustomersForOrg();
+  if (!reg.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  // Skjul rader hvis nummer allerede er i bruk på en Varmeplan-kunde — samme regel som i
+  // opprett-prosjekt-flyten (_searchCustomers).
+  const usedNos = new Set((customers || []).map(c => c.erp_customer_no).filter(Boolean));
+  // Krav 7+8: samme tokensøk som _ccErpSearch/_searchCustomers, i den allerede cachede
+  // _erpCustomersForOrg()-lista — ikke et nytt kall per tastetrykk, ikke en tredje søkeimplementasjon.
+  const qNorm = _custNoNormalize(search);
+  const qTokens = qNorm.split(' ').filter(Boolean);
+  const matches = reg.filter(r => r.active && !usedNos.has(r.erp_no) &&
+    (r.erp_no.toLowerCase().includes(search) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))));
+  if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  // Krav 6: maks 12 rader — «elektro» alene gir hundrevis.
+  const rows = matches.slice(0, 12).map(r => `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px">
+    <div style="min-width:0">
+      <div style="font-weight:500;color:var(--text)"><span style="color:var(--dim);font-weight:400">${_esc(r.erp_no)}</span> &nbsp; ${_esc(r.name)}</div>
+      ${(r.postal_code || r.city) ? `<div style="font-size:11px;color:var(--muted)">${_esc(r.postal_code||'')} ${_esc(r.city||'')}</div>` : ''}
+    </div>
+    <button onclick="_addCustomerFromErpRow(${sq(r.erp_no)}, this)" style="padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;flex:0 0 auto">+ Legg til</button>
+  </div>`).join('');
+  const more = matches.length > 12 ? `<div style="padding:6px 2px;font-size:11px;color:var(--dim)">… flere treff — skriv mer for å avgrense</div>` : '';
+  box.style.display = 'block';
+  box.innerHTML = `<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+    <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">I Visma-registeret — ${matches.length} treff, ikke i Varmeplan ennå</div>
+    <div style="display:flex;flex-direction:column;gap:6px">${rows}</div>
+    ${more}
+  </div>`;
+}
+
+// Krav 3: raden forsvinner etter hvert som den legges til, uten at søket må kjøres på nytt —
+// en full _renderCustomerTable() bygger tabellen OG registerseksjonen på nytt, og den nye kunden
+// havner da naturlig i usedNos over og forsvinner fra registerlista av seg selv.
+async function _addCustomerFromErpRow(erpNo, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    await _insertCustomerFromErpRow(erpNo);
+    await _renderCustomerTable();
+  } catch(e) {
+    alert('Kunne ikke opprette kunde: ' + (e.message || e));
+    if (btn) { btn.disabled = false; btn.textContent = '+ Legg til'; }
+  }
 }
 
 async function _editCustomerInline(customerId) {
