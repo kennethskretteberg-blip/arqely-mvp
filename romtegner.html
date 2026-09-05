@@ -47891,12 +47891,23 @@ function _openCustNoImport() {
   inp.click();
 }
 // Fleksibel kolonne-gjenkjenning — Kenneths Visma-uttrekk har ikke nødvendigvis nøyaktig
-// «kundenr»/«kundenavn» som overskrift.
+// «kundenr»/«kundenavn» som overskrift. Org.nr er VALGFRI (69 av 3130 rader i den ekte fila
+// mangler den — utenlandske firma, privatpersoner) og «&Utgått/sperret» likeså.
 function _custNoMapHeader(h) {
   const k = String(h || '').toLowerCase().trim();
   if (/kundenr|kunde\s*nr|customer\s*no|erp/i.test(k)) return 'kundenr';
   if (/kundenavn|kunde\s*navn|customer\s*name|^navn$/i.test(k)) return 'kundenavn';
+  if (/org\.?\s*nr|orgnr|organisasjonsnummer/i.test(k)) return 'orgnr';
+  if (/utg.tt|sperret|inaktiv|^aktiv$/i.test(k)) return 'utgatt';
   return null;
+}
+// spec-visma-kundeliste-synk-ekte-fil.md (Kenneth 05.09.2026): organisasjonsnummer er identitet,
+// navnematching er gjetting. Strippet til rene sifre — Cenikas felt kan ha mellomrom
+// («987 654 321»). Kun godtatt som 9 sifre (norsk org.nr-format); alt annet regnes som «mangler»,
+// ikke som et uverifisert tall en feilaktig kan matches mot.
+function _custNoNormalizeOrgNo(s) {
+  const digits = String(s || '').replace(/\D/g, '');
+  return digits.length === 9 ? digits : '';
 }
 // spec-visma-kundeliste-synk-ekte-fil.md (Kenneth 05.09.2026): Cenikas EKTE uttrekk er
 // tabulatorseparert, null semikolon i hele fila — den gamle gjettingen («finnes et semikolon
@@ -47927,6 +47938,7 @@ function _custNoParseFile(file) {
       const headerRow = raw[0].map(h => h != null ? h.toString() : '');
       const fieldMap = headerRow.map(_custNoMapHeader);
       const kIdx = fieldMap.indexOf('kundenr'), nIdx = fieldMap.indexOf('kundenavn');
+      const oIdx = fieldMap.indexOf('orgnr'), uIdx = fieldMap.indexOf('utgatt');   // begge valgfrie
       if (kIdx === -1 || nIdx === -1) {
         // Krav 3: en feilmelding som ikke viser hva den faktisk leste sender brukeren til å
         // lete i feil ende — spesielt når begge kolonnene faktisk står der, bare uoppdaget.
@@ -47939,7 +47951,12 @@ function _custNoParseFile(file) {
         const kundenr = row[kIdx] != null ? String(row[kIdx]).trim() : '';
         const kundenavn = row[nIdx] != null ? String(row[nIdx]).trim() : '';
         if (!kundenr || !kundenavn) continue;
-        rows.push({ kundenr, kundenavn });
+        const orgnr = oIdx > -1 ? _custNoNormalizeOrgNo(row[oIdx]) : '';
+        // «&Utgått/sperret»: 0/tom = aktiv, alt annet = utgått/sperret i Visma. Målt i den ekte
+        // fila: kolonnen finnes og er «0» på samtlige 3130 rader i akkurat DETTE uttrekket — men
+        // koden skal ikke anta det for fremtidige uttrekk.
+        const utgatt = uIdx > -1 && row[uIdx] != null && String(row[uIdx]).trim() !== '' && String(row[uIdx]).trim() !== '0';
+        rows.push({ kundenr, kundenavn, orgnr, utgatt });
       }
       if (!rows.length) { alert('Ingen rader med både kundenr og kundenavn funnet.'); return; }
       _custNoOpenSyncReview(rows);
@@ -47973,7 +47990,13 @@ async function _custNoOpenSyncReview(importRows) {
   const dropPct = prevCount > 0 ? 1 - (importRows.length / prevCount) : 0;
   const dropWarning = prevCount > 0 && dropPct > 0.2;
 
-  _custNoSyncData = { importRows, nye, endretNavn, uendret, borte, prevCount, dropPct, dropWarning, confirmedDrop: false };
+  // «&Utgått/sperret»: en ANNEN sak enn «borte fra fila» (krav: ikke bland dem) — raden ER i
+  // fila, men Visma har flagget den selv. Settes inaktiv MED EN GANG i _custNoConfirmSync sin
+  // upsert, ikke først når den forsvinner helt fra et senere uttrekk. 20%-sikringen over står
+  // uendret — et halvt uttrekk har ingen utgått-markering på radene som mangler helt.
+  const utgattRows = importRows.filter(r => r.utgatt);
+
+  _custNoSyncData = { importRows, nye, endretNavn, uendret, borte, utgattRows, prevCount, dropPct, dropWarning, confirmedDrop: false };
   _custNoRenderSyncReview();
 }
 function _custNoToggleEndretList() {
@@ -48008,6 +48031,7 @@ function _custNoRenderSyncReview() {
       <div style="overflow:auto"><span>Borte</span><b style="float:right">${d.borte.length}</b></div>
       <div style="font-size:11px;color:var(--dim)">→ merkes inaktive, ingen slettes</div>
       ${inUseWarn.length ? `<div style="font-size:11px;color:var(--warn);margin-top:4px">⚠ ${inUseWarn.length} av dem er i bruk på: ${inUseWarn.map(b => esc(b.inUseBy.map(c => c.name).join(', '))).join('; ')}</div>` : ''}
+      ${d.utgattRows.length ? `<div style="font-size:11px;color:var(--dim);margin-top:4px;clear:both">${d.utgattRows.length} rader er merket utgått/sperret i Visma → settes inaktive.</div>` : ''}
     </div>
     <div style="display:flex;gap:8px;margin-top:14px">
       <button${blocked ? ' disabled style="opacity:.5;cursor:not-allowed"' : ''} onclick="_custNoConfirmSync()" style="padding:8px 20px;border-radius:6px;border:none;background:var(--accent);color:#0d0e10;font-size:13px;font-weight:600;cursor:pointer">Utfør synk</button>
@@ -48025,7 +48049,10 @@ async function _custNoConfirmSync() {
   const now = new Date().toISOString();
   const upserts = [...d.nye, ...d.endretNavn.map(e => e.row), ...d.uendret].map(row => ({
     org_id: _userOrg.id, erp_no: row.kundenr, name: row.kundenavn,
-    name_norm: _custNoNormalize(row.kundenavn), active: true, last_seen_at: now,
+    name_norm: _custNoNormalize(row.kundenavn), org_number: row.orgnr || null,
+    // Krav: «&Utgått/sperret» ≠ 0/tom settes inaktiv MED EN GANG her — ikke først når raden
+    // forsvinner fra et senere uttrekk (det er «borte», en annen sak, under).
+    active: !row.utgatt, last_seen_at: now,
   }));
   const BATCH = 500;
   for (let i = 0; i < upserts.length; i += BATCH) {
@@ -48050,6 +48077,16 @@ async function _custNoOpenSuggestions() {
   const missing = vpCustomers.filter(c => !c.erp_customer_no);
   if (!missing.length) return;
   const reg = (await _erpCustomersForOrg(true)).filter(r => r.active);
+  // spec-visma-kundeliste-synk-ekte-fil.md (Kenneth 05.09.2026): org.nr er identitet, navn er
+  // gjetting — prøves FØRST. Ett org.nr-treff er sikkert uansett hva navnet sier; flere org.nr-
+  // treff (alle avdelinger AV SAMME firma deler ett org.nr, f.eks. 126 Bravida-rader på
+  // 987582561) er nøyaktig kjedetilfellet «Flere treff» — firmaet er entydig, avdelingen er ikke.
+  const regByOrgNo = new Map();
+  for (const r of reg) {
+    const on = _custNoNormalizeOrgNo(r.org_number);
+    if (!on) continue;
+    const arr = regByOrgNo.get(on) || []; arr.push(r); regByOrgNo.set(on, arr);
+  }
 
   // Egen bug funnet under testing: en tidligere versjon skilte «eksakt treff, flere» fra «delvis
   // treff, ett» i to separate steg — «Bravida Norge» (3 avdelinger, INGEN av dem eksakt normalisert
@@ -48058,6 +48095,15 @@ async function _custNoOpenSuggestions() {
   // felles kandidat-pool per kunde, deretter bøtte etter telling.
   const sikker = [], flere = [], usikker = [], ingen = [];
   for (const c of missing) {
+    const custOrgNo = _custNoNormalizeOrgNo(c.org_number);
+    if (custOrgNo && regByOrgNo.has(custOrgNo)) {
+      const orgCandidates = regByOrgNo.get(custOrgNo);
+      if (orgCandidates.length === 1) { sikker.push({ customer: c, match: orgCandidates[0], via: 'orgnr' }); }
+      else { flere.push({ customer: c, candidates: orgCandidates.slice(0, 15), via: 'orgnr' }); }
+      continue;
+    }
+    // Faller tilbake til navnematching når org.nr mangler på en av sidene (69 rader i den ekte
+    // fila, pluss enhver Varmeplan-kunde uten registrert org.nr).
     const norm = _custNoNormalize(c.name);
     if (!norm) { ingen.push({ customer: c }); continue; }
     const tokens = norm.split(' ').filter(Boolean);
