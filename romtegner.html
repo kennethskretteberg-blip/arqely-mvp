@@ -46235,7 +46235,9 @@ async function _admRenderSupport(el) {
   // Load projects count per org
   let orgProjectCounts = {};
   try {
-    const { data } = await _db.from('romtegner_projects').select('org_id');
+    // spec-1000-raders-taket.md: teller prosjekter PÅ TVERS AV ALLE org-er (superadmin-visning) —
+    // ingen org-filter, kan reelt vokse forbi tusen selv om ingen enkelt org gjør det alene.
+    const data = await _selectAll(() => _db.from('romtegner_projects').select('org_id').order('id'));
     (data || []).forEach(p => { if (p.org_id) orgProjectCounts[p.org_id] = (orgProjectCounts[p.org_id]||0) + 1; });
   } catch(e) {}
 
@@ -47283,14 +47285,39 @@ async function _admApproveOrg(orgId) {
 
 // ─── CALCULATION RESULTS PANEL ───
 
+// spec-1000-raders-taket.md (Kenneth 06.09.2026): PostgREST returnerer maks 1000 rader uten en
+// Range-header. Cenikas erp_customers-register har 3130 — 2130 av dem var usynlige for HELE
+// appen fra 04.09 til 06.09.2026, uten feilmelding, og uten `.order()` var det heller ikke stabilt
+// HVILKE 1000 som kom med (samme søk kunne gi treff i dag og null treff i morgen). Enhver
+// spørring som kan vokse forbi tusen MÅ gå gjennom denne — se spørringstabellen i spec-teksten.
+const _SELECT_ALL_PAGE = 1000;
+async function _selectAll(build) {
+  const out = [];
+  for (let from = 0; ; from += _SELECT_ALL_PAGE) {
+    // Krav 1: build() returnerer en FERSK spørring hver gang — en gjenbrukt PostgREST-builder er
+    // ikke idempotent, .range() to ganger på samme objekt gir ikke to sider.
+    const { data, error } = await build().range(from, from + _SELECT_ALL_PAGE - 1);
+    // Krav 3: feilen kastes videre — en fanget nettverksfeil skal ALDRI stille bli et tomt
+    // resultat som ser ut som «finnes ikke». Kalleren avgjør hvordan brukeren varsles.
+    if (error) throw error;
+    if (!data || !data.length) break;
+    out.push(...data);
+    if (data.length < _SELECT_ALL_PAGE) break;
+    if (out.length > 100000) { console.warn('_selectAll: over 100k rader, avbryter'); break; }
+  }
+  return out;
+}
+
 // ─── CRM / CUSTOMERS ───
 let _cachedCustomers = null;
 
 async function _loadCustomers() {
   if (!_db || !_userOrg) return [];
   try {
-    const { data } = await _db.from('customers').select('*').eq('org_id', _userOrg.id).order('name');
-    _cachedCustomers = data || [];
+    // Krav 2: .order('name') alene er ikke unikt (to kunder kan hete likt) — .order('id') som
+    // sekundærnøkkel gjør pagineringen deterministisk uansett navnelikhet.
+    const data = await _selectAll(() => _db.from('customers').select('*').eq('org_id', _userOrg.id).order('name').order('id'));
+    _cachedCustomers = data;
     // P6: the cache may have loaded AFTER a project was opened — re-sync the open
     // project's customer name now that the source-of-truth rows are available.
     _syncProjectCustomerName();
@@ -47306,11 +47333,14 @@ let _cachedErpCustomers = null;
 async function _erpCustomersForOrg(forceRefresh) {
   if (_cachedErpCustomers && !forceRefresh) return _cachedErpCustomers;
   if (!_db || !_userOrg) return [];
-  try {
-    const { data } = await _db.from('erp_customers').select('*').eq('org_id', _userOrg.id);
-    _cachedErpCustomers = data || [];
-    return _cachedErpCustomers;
-  } catch (e) { return _cachedErpCustomers || []; }
+  // spec-1000-raders-taket.md DEL A/C: feilen kastes videre til kalleren (ikke lenger fanget om
+  // til «tomt register» her) — og en vellykket henting logges med faktisk antall, slik at et
+  // fremtidig register som passerer tusen igjen (en NY tabell, en ny grense) synes i konsollen
+  // i stedet for å gjenta akkurat denne feilen i stillhet.
+  const data = await _selectAll(() => _db.from('erp_customers').select('*').eq('org_id', _userOrg.id).order('erp_no'));
+  _cachedErpCustomers = data;
+  console.log('erp_customers: ' + data.length + ' rader lastet');
+  return _cachedErpCustomers;
 }
 
 // P6: resolve a customer's CURRENT name from the loaded customer cache.
@@ -47374,24 +47404,31 @@ async function _searchCustomers(query) {
   // Varmeplan-seksjonen over kommer ALLTID forst uansett — registeret er sekunder, aldri primaer.
   let regSection = '';
   if (_orgHasErpFormat('gbao10')) {
-    const reg = await _erpCustomersForOrg();
-    // Krav 2: en kunde som allerede har dette kundenummeret finnes jo — skjul raden, den
-    // treffer i seksjonen over i stedet. Sjekkes mot ALLE Varmeplan-kunder, ikke bare treffene.
-    const usedNos = new Set((_cachedCustomers || []).map(c => c.erp_customer_no).filter(Boolean));
-    // Krav 3: samme tokensøk som _ccErpSearch (:47799/5574198) — .includes() bommer på
-    // «bravida ålesund» mot «bravida norge avd ålesund», se kommentaren der. qNorm/qTokens
-    // er allerede beregnet over, delt med Varmeplan-seksjonen.
-    const regMatches = reg.filter(r => r.active && !usedNos.has(r.erp_no) &&
-      (r.erp_no.toLowerCase().includes(q) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))));
-    if (regMatches.length) {
-      const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
-      const regHeader = `<div style="padding:5px 12px;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px">I Visma-registeret — opprettes ved klikk</div>`;
-      const regRows = regMatches.slice(0, 8).map(r => `<div data-ac="1" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmouseover="this.style.background='var(--surface2)'" onmouseout="if(this.dataset.acActive!=='1')this.style.background=''" onclick="_createCustomerFromErp(${sq(r.erp_no)})">
-        <div style="font-weight:500;color:var(--text)"><span style="color:var(--dim);font-weight:400">${_esc(r.erp_no)}</span> &nbsp; ${_esc(r.name)}</div>
-        ${(r.postal_code || r.city) ? `<div style="font-size:11px;color:var(--muted)">${_esc(r.postal_code||'')} ${_esc(r.city||'')}</div>` : ''}
-      </div>`).join('');
-      const regMore = regMatches.length > 8 ? `<div style="padding:6px 12px;font-size:11px;color:var(--dim)">… flere treff — skriv mer for å avgrense</div>` : '';
-      regSection = regHeader + regRows + regMore;
+    try {
+      const reg = await _erpCustomersForOrg();
+      // Krav 2: en kunde som allerede har dette kundenummeret finnes jo — skjul raden, den
+      // treffer i seksjonen over i stedet. Sjekkes mot ALLE Varmeplan-kunder, ikke bare treffene.
+      const usedNos = new Set((_cachedCustomers || []).map(c => c.erp_customer_no).filter(Boolean));
+      // Krav 3: samme tokensøk som _ccErpSearch (:47799/5574198) — .includes() bommer på
+      // «bravida ålesund» mot «bravida norge avd ålesund», se kommentaren der. qNorm/qTokens
+      // er allerede beregnet over, delt med Varmeplan-seksjonen.
+      const regMatches = reg.filter(r => r.active && !usedNos.has(r.erp_no) &&
+        (r.erp_no.toLowerCase().includes(q) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))));
+      if (regMatches.length) {
+        const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+        const regHeader = `<div style="padding:5px 12px;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px">I Visma-registeret — opprettes ved klikk</div>`;
+        const regRows = regMatches.slice(0, 8).map(r => `<div data-ac="1" style="padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)" onmouseover="this.style.background='var(--surface2)'" onmouseout="if(this.dataset.acActive!=='1')this.style.background=''" onclick="_createCustomerFromErp(${sq(r.erp_no)})">
+          <div style="font-weight:500;color:var(--text)"><span style="color:var(--dim);font-weight:400">${_esc(r.erp_no)}</span> &nbsp; ${_esc(r.name)}</div>
+          ${(r.postal_code || r.city) ? `<div style="font-size:11px;color:var(--muted)">${_esc(r.postal_code||'')} ${_esc(r.city||'')}</div>` : ''}
+        </div>`).join('');
+        // Krav DEL C: teksten sier hvor mange treff det FAKTISK var, ikke bare at det er flere.
+        const regMore = regMatches.length > 8 ? `<div style="padding:6px 12px;font-size:11px;color:var(--dim)">… ${regMatches.length - 8} flere treff — skriv mer for å avgrense</div>` : '';
+        regSection = regHeader + regRows + regMore;
+      }
+    } catch(e) {
+      // spec-1000-raders-taket.md DEL A Krav 3: en feilet henting skal ALDRI se ut som «ingen
+      // kunder i registeret» — vis at lesingen feilet, ikke en stille tom seksjon.
+      regSection = `<div style="padding:6px 12px;font-size:11px;color:#f87171">Kunne ikke laste Visma-registeret: ${_esc(e.message||e)}</div>`;
     }
   }
 
@@ -47514,7 +47551,9 @@ let _allContactsLoaded = false;
 async function _loadAllContacts(force) {
   if (_allContactsLoaded && !force) return;
   try {
-    const { data } = await _db.from('contacts').select('*');
+    // spec-1000-raders-taket.md: helt uten org-filter (RLS scoper), og dermed den nærmeste
+    // kandidaten til å ramme det samme taket som erp_customers — paginert på samme måte.
+    const data = await _selectAll(() => _db.from('contacts').select('*').order('id'));
     const byCust = {};
     for (const ct of (data || [])) (byCust[ct.customer_id] = byCust[ct.customer_id] || []).push(ct);
     for (const cid in byCust) _contactsCache[cid] = byCust[cid];
@@ -47793,7 +47832,9 @@ async function _ncpErpSearch() {
   if (!inp || !results || !_orgHasErpFormat('gbao10')) { if (results) results.style.display = 'none'; return; }
   const raw = (inp.value || '').trim();
   if (!raw) { results.style.display = 'none'; results.innerHTML = ''; return; }
-  const reg = (await _erpCustomersForOrg()).filter(r => r.active);
+  let reg;
+  try { reg = (await _erpCustomersForOrg()).filter(r => r.active); }
+  catch(e) { results.style.display = 'block'; results.innerHTML = `<div style="padding:6px 10px;color:#f87171;font-size:12px">Kunne ikke laste Visma-registeret: ${_esc(e.message||e)}</div>`; return; }
   const qNorm = _custNoNormalize(raw);
   const qTokens = qNorm.split(' ').filter(Boolean);
   const qLower = raw.toLowerCase();
@@ -47806,10 +47847,12 @@ async function _ncpErpSearch() {
   results.style.display = 'block';
 }
 async function _ncpErpPick(erpNo) {
-  const reg = await _erpCustomersForOrg();
-  const r = reg.find(x => x.erp_no === erpNo);
-  if (r) _fillNewCustomerForm({ name: r.name, org_number: r.org_number, erp_customer_no: r.erp_no, postal_code: r.postal_code, city: r.city });
   const results = document.getElementById('ncp-erp-results');
+  try {
+    const reg = await _erpCustomersForOrg();
+    const r = reg.find(x => x.erp_no === erpNo);
+    if (r) _fillNewCustomerForm({ name: r.name, org_number: r.org_number, erp_customer_no: r.erp_no, postal_code: r.postal_code, city: r.city });
+  } catch(e) { /* registeret er allerede vist i søket over — feilen er allerede meldt der */ }
   if (results) { results.style.display = 'none'; results.innerHTML = ''; }
 }
 
@@ -47921,9 +47964,11 @@ async function _ccErpInitMatch(erpNo) {
   const el = document.getElementById('cc-erpno-match');
   if (!el) return;
   if (!erpNo) { el.textContent = ''; return; }
-  const reg = await _erpCustomersForOrg();
-  const hit = reg.find(r => r.erp_no === erpNo);
-  el.textContent = hit ? hit.name : 'Ikke funnet i registeret — fritekst, blokkerer ikke';
+  try {
+    const reg = await _erpCustomersForOrg();
+    const hit = reg.find(r => r.erp_no === erpNo);
+    el.textContent = hit ? hit.name : 'Ikke funnet i registeret — fritekst, blokkerer ikke';
+  } catch(e) { el.textContent = 'Kunne ikke laste registeret — ' + (e.message||e); }
 }
 async function _ccErpSearch() {
   const inp = document.getElementById('cc-erpno');
@@ -47931,7 +47976,13 @@ async function _ccErpSearch() {
   if (!inp || !results) return;
   const raw = (inp.value || '').trim();
   if (!raw) { results.style.display = 'none'; return; }
-  const reg = (await _erpCustomersForOrg()).filter(r => r.active);
+  let reg;
+  try { reg = (await _erpCustomersForOrg()).filter(r => r.active); }
+  catch(e) {
+    results.innerHTML = `<div style="padding:6px 10px;color:#f87171;font-size:12px">Kunne ikke laste Visma-registeret: ${_esc(e.message||e)}</div>`;
+    results.style.display = 'block';
+    return;
+  }
   const qNorm = _custNoNormalize(raw);
   const qLower = raw.toLowerCase();
   // Treffer på BÅDE nummer og navn, og på delstrenger — «bravida ålesund», «31114» og
@@ -47940,15 +47991,19 @@ async function _ccErpSearch() {
   // .includes()-sammenligning bommet nettopp på spec sitt eget eksempel. Ordene i søket må derfor
   // finnes NOEN steder i navnet, i hvilken som helst rekkefølge — ikke som én sammenhengende bit.
   const qTokens = qNorm.split(' ').filter(Boolean);
-  const matches = reg.filter(r => r.erp_no.toLowerCase().includes(qLower) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))).slice(0, 30);
-  if (!matches.length) {
+  // Krav DEL C: totaltallet må telles FØR .slice() — ellers vet ikke «flere treff»-teksten
+  // hvor mange den faktisk avkortet (den gamle koden slicet til 30 for så å sjekke
+  // matches.length >= 30, som alltid var sant etter at treffene alt var kastet vekk).
+  const allMatches = reg.filter(r => r.erp_no.toLowerCase().includes(qLower) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t))));
+  if (!allMatches.length) {
     results.innerHTML = `<div style="padding:6px 10px;color:var(--dim);font-size:12px">Ingen treff i registeret — fritekst godtas</div>`;
     results.style.display = 'block';
     return;
   }
   const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  const matches = allMatches.slice(0, 30);
   results.innerHTML = matches.map(r => `<div onclick="_ccErpPick(${sq(r.erp_no)},${sq(r.name)})" style="padding:6px 10px;cursor:pointer;font-size:12px;border-radius:6px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''"><b>${_esc(r.erp_no)}</b> ${_esc(r.name)}</div>`).join('')
-    + (matches.length >= 30 ? `<div style="padding:6px 10px;color:var(--dim);font-size:11px">… flere treff — skriv mer for å avgrense</div>` : '');
+    + (allMatches.length > 30 ? `<div style="padding:6px 10px;color:var(--dim);font-size:11px">… ${allMatches.length - 30} flere treff — skriv mer for å avgrense</div>` : '');
   results.style.display = 'block';
 }
 function _ccErpPick(erpNo, name) {
@@ -48103,7 +48158,15 @@ function _custNoParseFile(file) {
 // eksisterende kundeliste sammenlignes og kun endrer det som er nytt, slettet og endret»). ──
 let _custNoSyncData = null;
 async function _custNoOpenSyncReview(importRows) {
-  const existing = await _erpCustomersForOrg(true);   // ferskt — diffen må se nåværende tilstand
+  let existing;
+  try {
+    existing = await _erpCustomersForOrg(true);   // ferskt — diffen må se nåværende tilstand
+  } catch(e) {
+    // spec-1000-raders-taket.md DEL B: en feilet lesing her ville ellers telle HELE eksisterende
+    // register som «nye» (eksisterende=[]) — den STILLE feilen som var verre enn et rødt varsel.
+    alert('Kunne ikke lese det eksisterende registeret — synk avbrutt: ' + (e.message || e));
+    return;
+  }
   const existingByNo = new Map(existing.map(r => [r.erp_no, r]));
   const fileNos = new Set(importRows.map(r => r.kundenr));
 
@@ -48214,7 +48277,9 @@ async function _custNoOpenSuggestions() {
   const vpCustomers = await _loadCustomers();
   const missing = vpCustomers.filter(c => !c.erp_customer_no);
   if (!missing.length) return;
-  const reg = (await _erpCustomersForOrg(true)).filter(r => r.active);
+  let reg;
+  try { reg = (await _erpCustomersForOrg(true)).filter(r => r.active); }
+  catch(e) { if (typeof _showToast === 'function') _showToast('Kunne ikke laste registeret for forslag: ' + (e.message||e), 'error'); return; }
   // spec-visma-kundeliste-synk-ekte-fil.md (Kenneth 05.09.2026): org.nr er identitet, navn er
   // gjetting — prøves FØRST. Ett org.nr-treff er sikkert uansett hva navnet sier; flere org.nr-
   // treff (alle avdelinger AV SAMME firma deler ett org.nr, f.eks. 126 Bravida-rader på
@@ -49839,7 +49904,9 @@ async function _renderCustomerTable() {
   // Load project counts per customer (cached)
   if (!_customerProjectCounts) {
     try {
-      const { data } = await _db.from('romtegner_projects').select('customer_id').not('customer_id', 'is', null);
+      // spec-1000-raders-taket.md: 271 prosjekter i dag, ingen feil ennå — men samme klasse av
+      // spørring som erp_customers, og skal ikke stille begynne å telle feil den dagen den vokser.
+      const data = await _selectAll(() => _db.from('romtegner_projects').select('customer_id').not('customer_id', 'is', null).order('id'));
       _customerProjectCounts = {};
       if (data) for (const p of data) { _customerProjectCounts[p.customer_id] = (_customerProjectCounts[p.customer_id] || 0) + 1; }
     } catch(e) { _customerProjectCounts = {}; }
@@ -49908,7 +49975,15 @@ async function _renderCustomerErpSection(search, customers) {
   // Krav 4: ingen seksjon når søket er tomt — 3130 rader skal aldri stå og henge under lista.
   // Krav 5: ingen seksjon uten gbao10 — samme sentrale sjekk som eksportknappen (_orgHasErpFormat).
   if (!search || !_orgHasErpFormat('gbao10')) { box.style.display = 'none'; box.innerHTML = ''; return; }
-  const reg = await _erpCustomersForOrg();
+  let reg;
+  try { reg = await _erpCustomersForOrg(); }
+  catch(e) {
+    // spec-1000-raders-taket.md DEL A Krav 3: en feilet lesing skal ALDRI se ut som «tomt
+    // register» (skjult seksjon) — vis at lesingen feilet.
+    box.style.display = 'block';
+    box.innerHTML = `<div style="margin-top:16px;padding:8px 10px;font-size:12px;color:#f87171">Kunne ikke laste Visma-registeret: ${_esc(e.message||e)}</div>`;
+    return;
+  }
   if (!reg.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
   // Skjul rader hvis nummer allerede er i bruk på en Varmeplan-kunde — samme regel som i
   // opprett-prosjekt-flyten (_searchCustomers).
@@ -49929,7 +50004,7 @@ async function _renderCustomerErpSection(search, customers) {
     </div>
     <button onclick="_addCustomerFromErpRow(${sq(r.erp_no)}, this)" style="padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;flex:0 0 auto">+ Legg til</button>
   </div>`).join('');
-  const more = matches.length > 12 ? `<div style="padding:6px 2px;font-size:11px;color:var(--dim)">… flere treff — skriv mer for å avgrense</div>` : '';
+  const more = matches.length > 12 ? `<div style="padding:6px 2px;font-size:11px;color:var(--dim)">… ${matches.length - 12} flere treff — skriv mer for å avgrense</div>` : '';
   box.style.display = 'block';
   box.innerHTML = `<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
     <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">I Visma-registeret — ${matches.length} treff, ikke i Varmeplan ennå</div>
@@ -51188,7 +51263,6 @@ initSupabase();
 async function _fetchProjectList() {
   if (!_db) return [];
   try {
-    const _run = (cols) => _db.from('romtegner_projects').select(cols).order('updated_at', { ascending: false });
     // Prefer the lean data->project select (list metadata only, not the heavy
     // room geometry / background image blob). Each successive candidate drops a
     // column/feature that may not exist on this DB (status, deleted_at, JSON-path
@@ -51208,12 +51282,23 @@ async function _fetchProjectList() {
       'id, name, description, created_at, updated_at, status, data',
       'id, name, description, created_at, updated_at, data',
     ];
-    let res = null;
-    for (const cols of candidates) { res = await _run(cols); if (!res.error) break; }
+    // spec-1000-raders-taket.md: 271 prosjekter i dag, «updated_at desc» alene er ikke en unik
+    // nøkkel (to prosjekter kan dele tidsstempel) — .order('id') som sekundærnøkkel gjør
+    // sideinndelingen deterministisk uten å endre den forretningsmessige rekkefølgen i lista.
+    // Kandidat-fallbacken er nå PER SIDE-HENTING (via _selectAll): feiler kolonnesettet på
+    // aller første side, kastes det videre og neste kandidat forsøkes — samme fallback som før,
+    // bare at et vellykket forsøk nå henter ALLE sidene, ikke bare de første tusen.
+    let data = null, lastErrMsg = null;
+    for (const cols of candidates) {
+      try {
+        data = await _selectAll(() => _db.from('romtegner_projects').select(cols).order('updated_at', { ascending: false }).order('id'));
+        break;
+      } catch (e) { lastErrMsg = e.message; data = null; }
+    }
     // Return null (not []) on error so the caller can keep showing the last good
     // list instead of blanking it out.
-    if (res.error) { console.warn('Fetch projects failed:', res.error.message); return null; }
-    return (res.data || []).map(p => {
+    if (data === null) { console.warn('Fetch projects failed:', lastErrMsg); return null; }
+    return data.map(p => {
       const proj = p.proj || p.data?.project || {};
       return {
         ...p,
