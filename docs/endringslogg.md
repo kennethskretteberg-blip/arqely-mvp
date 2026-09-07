@@ -4,6 +4,41 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Appen skal ligge på /, ikke /romtegner.html — 2026-09-07
+
+`varmeplan.no` var oppe med gyldig HTTPS, men rotadressen svarte 404 — appen lå kun på
+`/romtegner.html`, et filnavn Kenneth eksplisitt ikke vil ha noe sted («jeg ønsker ikke at appen
+skal hete noe med romtegner eller arqely i det hele tatt»). Filnavnet står i adressefeltet,
+bokmerker og hver invitasjonslenke som er sendt ut. Bygger på `4282510` (`isTrustedOrigin` godtar
+`varmeplan.no` i feilklassifiseringen — udokumentert til nå, egen liten fiks samme dag).
+
+- **`bec7efd`.** `git mv romtegner.html index.html` (historikken følger med) og
+  `serve-romtegner.js` → `serve-varmeplan.js` (FILE-sti og konsoll-linje oppdatert, PORT 4000
+  uendret). Ny `vercel.json` viderekobler `/romtegner.html` → `/` (permanent), slik at allerede
+  utsendte invitasjonslenker og bokmerker fortsetter å virke. Synlige tekster rettet: tre
+  filvelger-dialogers «Romtegner-prosjekt» → «Varmeplan-prosjekt», invitasjonsmailens
+  fallback-orgnavn, og `admin.html` sine 7 forekomster (tittel, to `<h1>`, logo, tilbake-lenke +
+  href, og selve URL-en admin-panelet bygger for nye invitasjoner). Åtte `console.log('Romtegner:
+  …')` → `'Varmeplan: …'`. `romtegner_projects` (Supabase-tabellen) og de fire `arqely_*`-nøklene
+  i nettleserlagringen bevisst IKKE omdøpt — hver fikk en kommentar som forklarer hvorfor (ingen
+  bruker ser dem, omdøping er en migrasjon med reell risiko for eksisterende data).
+
+**Testmetodikk:** full regresjonsbatteri grønt lokalt, deretter LIVE på selve produksjonsdomenet
+etter push — ikke bare antatt. Første forsøk på å verifisere at spørrestrengen (`?invite=token`)
+overlevde viderekoblingen så ut til å feile (`window._inviteToken` var alltid `undefined`) — falsk
+alarm, ikke en ekte bug: `_inviteToken` er en topp-nivå `let`, som (i motsetning til `var`) ALDRI
+blir en `window`-egenskap i en klassisk (ikke-modul) `<script>`. Bekreftet ekte ved å lese den
+bare identifikatoren `_inviteToken` direkte i samme kjøremiljø — tokenet var der hele tiden.
+Bekreftet på selve domenet: `varmeplan.no/` laster appen (ikke 404), `varmeplan.no/romtegner.html
+?invite=xxx` viderekobler til `/` med tokenet korrekt lest, `arqely.com/` og
+`arqely.com/romtegner.html` virker begge fortsatt (`arqely.com/` fikk faktisk samme fiks på kjøpet
+— den hadde heller ingen `index.html` fra før).
+
+**Fil:** index.html (omdøpt fra romtegner.html), serve-varmeplan.js (omdøpt fra
+serve-romtegner.js), ny vercel.json, admin.html, CLAUDE.md + backup.
+
+---
+
 ## KRITISK: PostgREST sitt 1000-raders-tak gjorde 2130 av 3130 registerrader usynlige — 2026-09-05
 
 Kenneth: «Det er mange kunder som ikke kommer opp fra Visma-uttrekket. Når jeg skriver krøderen, så
