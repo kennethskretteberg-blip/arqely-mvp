@@ -2,7 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const FILE = path.join(__dirname, 'romtegner.html');
+const FILE = path.join(__dirname, 'index.html');
 const PORT = 4000;
 
 const MIME = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.css': 'text/css' };
@@ -33,4 +33,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0' });
     res.end(data);
   });
-}).listen(PORT, () => console.log(`Romtegner → http://localhost:${PORT}`));
+}).listen(PORT, () => console.log(`Varmeplan → http://localhost:${PORT}`));

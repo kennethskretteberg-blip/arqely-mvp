@@ -1,4 +1,4 @@
-# Project: Romtegner (Room Designer)
+# Project: Varmeplan (Room Designer)
 
 A browser-based engineering tool for designing electric heating systems in buildings.
 Built for electricians and heating professionals.
@@ -16,11 +16,11 @@ Built for electricians and heating professionals.
 # Current Codebase
 
 The entire application lives in a single HTML file:
-- **App:** `romtegner.html` (HTML + CSS + JS, all-in-one)
-- **Server:** `serve-romtegner.js` (minimal Node.js static server, port 4000)
+- **App:** `index.html` (HTML + CSS + JS, all-in-one) — renamed from `romtegner.html` 07.09.2026.
+- **Server:** `serve-varmeplan.js` (minimal Node.js static server, port 4000)
 - **Backend:** Supabase (product catalog, project storage)
 - **No build step.** No npm, no bundler. Pure HTML/JS/CSS.
-- **Launch config:** `.claude/launch.json` — start with preview server name `romtegner`
+- **Launch config:** `.claude/launch.json` — start with preview server name `varmeplan`
 - **Backup:** Claude config files are backed up in `docs/claude/` in the repo.
 
 When modifying code, respect that this is a single-file architecture.
