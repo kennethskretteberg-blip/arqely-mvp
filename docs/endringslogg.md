@@ -4,6 +4,42 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Avstandskrav per hindring, ikke per produkt — 2026-09-10
+
+Kenneth: «jeg får ikke plassert 100cm varmefolie i en passasje med 109 ca avstand mellom to
+hindringer. Det er en kjøkkenøy som står 109 cm fra kjøkkenbenk.» `computeClippedSegments` ga ALLE
+hindringer produktets veggmargin uansett type — en pipe og en kjøkkenøy-sokkel ble utvidet likt. I
+en 109cm passasje ga 5cm produktmargin en fri bredde på 99cm; 100cm folie bommet med én centimeter.
+Kenneth: «I praksis så legges det nok litt varmefolie under en kjøkkenbenk-sokkel... men andre
+hindringer må vi absolutt ikke gjøre det.»
+
+- **`795171c`.** Nytt `clearance`-felt på hindringer (`'wall'`|`'none'`), foreslått av
+  `HINDRING_TYPES` sin nye `defaultClearance` (kjøkkenøy/skap → none, pipe/vegg/annet → wall —
+  samme mønster som `ZONE_TYPES.default`). Avkryssingsboks i tegnedialogen, oppdateres live når
+  typen byttes, og redigerbar etterpå på en allerede tegnet hindring. Alle fem opprettelsesstedene
+  (dimensjon/polygon/vegg-til-vegg/fri-tegning/DWG-import) setter feltet; duplisering arver det.
+  Manglende felt (eldre prosjekter) leses som `'wall'` — ingen tegning endrer seg av seg selv.
+  Ny delt `_splitHindringsByClearance()` brukt av BÅDE folie- og mattemotoren for selve klippingen
+  — kabelmotoren går IKKE gjennom denne (bruker rom-splitting, en helt annen tilnærming) og er
+  derfor rapportert som ikke dekket denne runden, ikke fikset. Det manuelle bruddvarselet
+  (`getStripViolations`) leser nå samme per-hindring clearance som automatikken, og bygger
+  meldingen dynamisk («Ligger 1,2 cm for nær Kjøkkenøy (krever 2,5 cm)») i stedet for en statisk
+  «25mm fra vegg/hindring»-tekst som løy når produktets faktiske margin var noe annet.
+  `min_obstacle_distance_mm` sin døde 50mm-standardsetting fjernet i stedet for koblet inn — feltet
+  ble aldri lest noe sted, og 50mm er strengere enn dagens 25mm-standard; å bruke det ville gjort
+  akkurat Kenneths passasje verre.
+
+**Testmetodikk:** rekonstruerte spec sin egen 109cm-passasje-aritmetikk direkte —
+fikk eksakt 104cm fri bredde ved 2,5cm margin og eksakt 99cm ved 5cm margin, samme tall som spec
+selv oppgir. Bekreftet checkbox-forslag for alle fem hindringstyper, full opprettelse→redigering→
+duplisering-runde, manuelt bruddvarsel med riktig navn og avstand for «wall» og null varsel for
+«none» uansett overlapp, gammel hindring uten feltet leses som «wall», mattemotoren respekterer
+samme klipping som folie. Full regresjonsbatteri grønt.
+
+**Fil:** index.html.
+
+---
+
 ## Appen skal ligge på /, ikke /romtegner.html — 2026-09-07
 
 `varmeplan.no` var oppe med gyldig HTTPS, men rotadressen svarte 404 — appen lå kun på
