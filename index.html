@@ -407,6 +407,10 @@ input,textarea{font-family:var(--font-ui);color:var(--text)}
 .af-btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
 .af-btn-secondary:hover{border-color:var(--dim)}
 body.light-theme .autofill-compare{background:rgba(255,255,255,0.97);border-color:rgba(0,0,0,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.15)}
+/* spec-romnavn-ved-opprettelse.md (Kenneth 10.09.2026): samme z-index-begrunnelse som
+   .autofill-compare — over canvas/ctxbar, under enhver bekreftelsesdialog. */
+.room-name-prompt{position:fixed;display:none;background:rgba(20,22,28,0.96);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:14px 16px;z-index:900;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+body.light-theme .room-name-prompt{background:rgba(255,255,255,0.97);border-color:rgba(0,0,0,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.15)}
 .ctxbar-lbl{font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.09em;padding-right:10px;border-right:1px solid var(--border);margin-right:2px;white-space:nowrap;flex-shrink:0}
 
 /* ── CONTENT ── */
@@ -3527,6 +3531,7 @@ const S = {
     widgetMinimapPosX: null, widgetMinimapPosY: null,
     bgPanelPosX: null, bgPanelPosY: null,
     showStripLabels: true,       // show product name inside each strip
+    promptRoomNameOnCreate: true, // spec-romnavn-ved-opprettelse.md (Kenneth 10.09.2026): DEL D — vis navnefelt rett etter et rom er tegnet interaktivt; av/på i Snap-widgeten, lagret i arqely_prefs
     semiAutoMode: false,         // halvautomatisk placement active
     semiAutoRoomId: null,
     semiAutoCursor: 0,           // world pos filled up to
@@ -3774,7 +3779,8 @@ function _savePrefs() {
       snap:        { ...S.snap },
       gapCm:       S.varmefolie.gapCm,
       matGapCm:    S.varmematte.gapCm,
-      showLabels:  S.ui.showStripLabels
+      showLabels:  S.ui.showStripLabels,
+      promptRoomName: S.ui.promptRoomNameOnCreate
     };
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch(e) { /* quota or private browsing */ }
@@ -3786,6 +3792,7 @@ function _applyPrefs() {
   if (p.gapCm != null) S.varmefolie.gapCm = p.gapCm;
   if (p.matGapCm != null) S.varmematte.gapCm = p.matGapCm;
   if (p.showLabels != null) S.ui.showStripLabels = p.showLabels;
+  if (p.promptRoomName != null) S.ui.promptRoomNameOnCreate = p.promptRoomName;
 }
 _applyPrefs();
 
@@ -27303,7 +27310,12 @@ function renderSnapWidget() {
   body.innerHTML =
     tb(s.grid, '⊞ Snap (50 cm)', "toggleSnap('grid')") +
     tb(s.a90,  '∟ 90° vinkelsnap',    "toggleSnap('a90')") +
-    tb(s.a45,  '◿ 45° vinkelsnap',    "toggleSnap('a45')");
+    tb(s.a45,  '◿ 45° vinkelsnap',    "toggleSnap('a45')") +
+    // DEL D (spec-romnavn-ved-opprettelse.md, Kenneth 10.09.2026): eneste eksisterende
+    // «innstillinger»-flate for tegneadferd — ikke en egen ny innstillingsdialog for ett valg.
+    `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:4px 2px;font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox"${S.ui.promptRoomNameOnCreate?' checked':''} onchange="togglePromptRoomName(this.checked)"> Spør om romnavn når et rom opprettes
+    </label>`;
 }
 
 // ─── SCALE WIDGET ─────────────────────────────────────────────
@@ -29822,7 +29834,12 @@ function clampHindringToRoom(h,room) {
     h.points=h.points.map(p=>({x:p.x-best.d*best.nx,y:p.y-best.d*best.ny}));
 }
 
-function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=null) {
+// spec-romnavn-ved-opprettelse.md DEL B (Kenneth 10.09.2026): promptName er en EKSPLISITT flagg,
+// satt kun av de interaktive tegnemodusene (se kallestedene) — ikke en heuristikk som gjetter hvor
+// kallet kom fra. Standard false: import (S.rooms.push direkte i dag, men ville også kalt createRoom
+// uten dette flagget), duplisering, romliste-utkast, prosjekt-gjenoppretting og regresjonstestene
+// ser ALDRI navneboksen med mindre de eksplisitt ber om den.
+function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=null, promptName=false) {
   if (!pts || pts.length < 3) return null;
   pushUndo();
   // Auto-assign to first floor if none specified
@@ -29888,7 +29905,87 @@ function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=n
   if (_isSnowModule()) {
     setTimeout(() => showUnifiedProductPanel(), 100);
   }
+  // spec-romnavn-ved-opprettelse.md DEL A/C (Kenneth 10.09.2026): navneboksen vises SYNKRONT, FØR
+  // snømodulens setTimeout(...,100) rekker å åpne produktpanelet og stjele fokus — boksen sin
+  // egen focus()/select() under vinner alltid det kappløpet. Krav DEL D: kan slås av (arqely_prefs).
+  if (promptName && S.ui.promptRoomNameOnCreate) _showRoomNamePrompt(room);
   return room;
+}
+
+// ─── ROOM NAME PROMPT (spec-romnavn-ved-opprettelse.md, Kenneth 10.09.2026) ───────────────
+// «Kan man få opp en boks med en gang et rom er opprettet hvor man bare kan begynne å skrive
+// inn med en gang og trykke enter... Hvis man ikke ønsker å skrive romnavn, så kan man trykke
+// enter, så vil det lagre seg som rom 1 osv.» room.name er ALLEREDE riktig når vi kommer hit —
+// createRoom sin egen `name || _roomWord(true)+' '+id`-fallback (og hvert kallsteds egen
+// forhåndsutfylling fra #ctxbar-room-name/#room-name-inp FØR tegning) har allerede løst «Enter på
+// tomt felt gir Rom N» og «forhåndsutfylt fra det brukeren skrev før han tegnet» — ingen ny
+// navnelogikk her, boksen leser bare room.name som den står.
+let _roomNamePromptId = null;
+function _showRoomNamePrompt(room) {
+  let box = document.getElementById('room-name-prompt');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'room-name-prompt';
+    box.className = 'room-name-prompt';
+    document.body.appendChild(box);
+  }
+  _roomNamePromptId = room.id;
+  box.innerHTML = `
+    <div style="font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Navn på rommet</div>
+    <input id="room-name-prompt-inp" type="text" value="${_esc(room.name)}" style="width:220px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:14px;box-sizing:border-box">
+    <div style="font-size:10px;color:var(--dim);margin-top:6px">Enter for å lagre · Esc for å lukke</div>
+  `;
+  box.style.display = 'block';
+  _positionRoomNamePrompt(room, box);
+  const inp = document.getElementById('room-name-prompt-inp');
+  inp.focus();
+  inp.select();
+  inp.onkeydown = _roomNamePromptKeydown;
+}
+// Nær rommets øvre høyre hjørne (verden→skjerm via w2s, deretter canvas-backing-px→CSS-px via
+// canvas sin egen bounding rect — samme omregning som _evToCanvas gjør motsatt vei) — «nær det nye
+// rommet, aldri oppå rommet selv» (Krav 5). Klemmes innenfor vinduet, samme prinsipp som
+// _showManualPaletteBox/_positionAutoFillPanel.
+function _positionRoomNamePrompt(room, box) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const s = w2s(Math.max(...xs), Math.min(...ys));
+  const rect = canvas.getBoundingClientRect();
+  const kx = canvas.width  ? rect.width  / canvas.width  : 1;
+  const ky = canvas.height ? rect.height / canvas.height : 1;
+  let nx = rect.left + s.x * kx + 16;
+  let ny = rect.top  + s.y * ky + 16;
+  box.style.left = nx + 'px';
+  box.style.top  = ny + 'px';
+  const br = box.getBoundingClientRect();
+  if (br.width > 0) {
+    nx = Math.max(4, Math.min(nx, window.innerWidth  - br.width  - 4));
+    ny = Math.max(4, Math.min(ny, window.innerHeight - br.height - 4));
+    box.style.left = nx + 'px';
+    box.style.top  = ny + 'px';
+  }
+}
+function _roomNamePromptKeydown(e) {
+  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); _confirmRoomNamePrompt(); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); _closeRoomNamePrompt(); }
+}
+// Enter: tomt felt beholder standardnavnet som allerede står på rommet (ikke en tom streng).
+function _confirmRoomNamePrompt() {
+  const room = S.rooms.find(r => r.id === _roomNamePromptId);
+  const inp = document.getElementById('room-name-prompt-inp');
+  if (room && inp) {
+    const v = inp.value.trim();
+    if (v) room.name = v;
+  }
+  _closeRoomNamePrompt();
+  renderSidebar();
+  render();
+}
+// Esc: lukk uten å endre NAVNET. Rommet selv (allerede tegnet, allerede i S.rooms med standard-
+// navn) røres IKKE — Escape gjelder kun navningen, aldri selve rommet (Krav DEL A).
+function _closeRoomNamePrompt() {
+  const box = document.getElementById('room-name-prompt');
+  if (box) box.style.display = 'none';
+  _roomNamePromptId = null;
 }
 
 // ─── OUTER-WALL: finish closing polygon and apply per-wall configs ───
@@ -29900,7 +29997,7 @@ function _finishOuterWallClosing() {
   const prev = S.drawing.outerWallPrev || { side:'out', thicknessCm:20 };
   configs.push({ side: prev.side, thicknessCm: prev.thicknessCm });
   const closePts = pts.map(p => ({ ...p }));
-  createRoom(closePts, 'outer-wall', S.ui.pendingRoomName, S.ui.pendingFloorId, true, configs);
+  createRoom(closePts, 'outer-wall', S.ui.pendingRoomName, S.ui.pendingFloorId, true, configs, true);
 }
 
 // Variable for "Samme" button hitbox (screen coords)
@@ -33010,7 +33107,7 @@ function confirmRectForm() {
   if (!w||!h||w<10||h<10) return;
   closeModal();
   const pts=[{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}];
-  createRoom(pts,'rect',S.ui.pendingRoomName,_pendingFloorId);
+  createRoom(pts,'rect',S.ui.pendingRoomName,_pendingFloorId, false, null, true);
 }
 function confirmDdpRect() {
   const w = parseFloat(document.getElementById('ddp-w').value);
@@ -33018,7 +33115,7 @@ function confirmDdpRect() {
   if (!w || !h || w < 10 || h < 10) return;
   exitDrawing();
   const pts = [{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}];
-  createRoom(pts, 'rect', S.ui.pendingRoomName, S.ui.pendingFloorId);
+  createRoom(pts, 'rect', S.ui.pendingRoomName, S.ui.pendingFloorId, false, null, true);
 }
 function addPolySegmentFromLen() {
   if (S.ui.drawMode !== 'polygon') return;
@@ -33113,7 +33210,7 @@ function confirmLShapeForm() {
   else if (_lshapeVariant===2) pts=[{x:cW,y:0},{x:W,y:0},{x:W,y:H},{x:0,y:H},{x:0,y:cH},{x:cW,y:cH}];
   else if (_lshapeVariant===3) pts=[{x:0,y:0},{x:W,y:0},{x:W,y:H-cH},{x:W-cW,y:H-cH},{x:W-cW,y:H},{x:0,y:H}];
   else                         pts=[{x:0,y:0},{x:W,y:0},{x:W,y:H},{x:cW,y:H},{x:cW,y:H-cH},{x:0,y:H-cH}];
-  createRoom(pts,'lshape',S.ui.pendingRoomName,_pendingFloorId);
+  createRoom(pts,'lshape',S.ui.pendingRoomName,_pendingFloorId, false, null, true);
 }
 function _createFloor() {
   const n=document.getElementById('floor-name-inp').value.trim(); if(!n) return null;
@@ -33687,7 +33784,7 @@ function finishWbwRoom() {
   // Remove closing duplicate if last point equals start
   const last=pts[pts.length-1];
   if (Math.hypot(last.x-wbw.startPoint.x, last.y-wbw.startPoint.y)<1) pts=pts.slice(0,-1);
-  createRoom(pts,'wbw',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+  createRoom(pts,'wbw',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
 }
 function updWbw() {
   const wbw=S.drawing.wbw;
@@ -35564,7 +35661,7 @@ canvas.addEventListener('mousedown', e=>{
     S.drawing.points.push({x:wp.x,y:wp.y});
     if (S.drawing.points.length===3) {
       const [p1,p2,p3]=S.drawing.points;
-      createRoom(computeLShape(p1,p2,p3),'lshape',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+      createRoom(computeLShape(p1,p2,p3),'lshape',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
     }
   } else if (mode==='rect2') {
     if (!S.drawing.rectStart) {
@@ -35583,7 +35680,7 @@ canvas.addEventListener('mousedown', e=>{
           {x:Math.min(rs.x,wp.x),y:Math.max(rs.y,wp.y)}
         ];
         exitDrawing();
-        createRoom(pts,'rect',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+        createRoom(pts,'rect',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
       }
     }
   } else if (mode==='outer-wall') {
@@ -35640,14 +35737,14 @@ canvas.addEventListener('mousedown', e=>{
       const _closePts = [...S.drawing.points];
       if (Math.hypot(wp.x - p0.x, wp.y - p0.y) < 1) {
         exitDrawing();
-        createRoom(_closePts,'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+        createRoom(_closePts,'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
         return;
       }
       const sp0 = w2s(p0.x, p0.y);
       const evc0 = _evToCanvas(e);
       if (Math.hypot(evc0.x-sp0.x, evc0.y-sp0.y) < 18) {
         exitDrawing();
-        createRoom(_closePts,'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+        createRoom(_closePts,'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
         return;
       }
     }
@@ -37970,7 +38067,7 @@ canvas.addEventListener('mouseup', e=>{
           clearance:S.ui.hindringClearance||'wall'});
         exitDrawing();
       } else {
-        createRoom(pts,'rect',S.ui.pendingRoomName,S.ui.pendingFloorId,true);
+        createRoom(pts,'rect',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
       }
     } else {
       _dragging=false; S.drawing.active=false; S.drawing.rectStart=null;
@@ -38368,7 +38465,7 @@ document.addEventListener('keydown', e=>{
     _finishOuterWallClosing(); return;
   }
   if (e.key==='Enter'&&S.ui.drawMode==='polygon'&&S.drawing.points.length>=3) {
-    createRoom(S.drawing.points.map(p=>({...p})),'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true); return;
+    createRoom(S.drawing.points.map(p=>({...p})),'polygon',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true); return;
   }
   if (e.key==='Enter'&&S.ui.drawMode==='hindring-polygon'&&S.drawing.points.length>=3) {
     pushUndo(); createHindringFromPolygon([...S.drawing.points]); return;
@@ -38583,6 +38680,11 @@ function toggleStripLabels() {
   _savePrefs();
   updateCtxBar();
   render();
+}
+
+function togglePromptRoomName(on) {
+  S.ui.promptRoomNameOnCreate = !!on;
+  _savePrefs();
 }
 
 function toggleStripDimSnap() {
