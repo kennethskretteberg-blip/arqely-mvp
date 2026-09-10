@@ -4,6 +4,88 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Hindringsavstand: alltid 25mm-regel som standard, valget til høyreklikk — 2026-09-10
+
+Kenneth, dagen etter forrige runde: «kan vi gå tilbake til at alle hindringer i utgangspunktet har
+regel om 25mm avstand slik som mot vegger? Også ønsker jeg heller å kunne velge hindring etter den
+er laget, høyreklikk og velge regel 'på/av'.» Klippemekanikken fra forrige runde (`clearance`:
+'wall'/'none', `_splitHindringsByClearance`) er urørt — det som endres er hvem som bestemmer og når.
+
+- **`22fbe9e`** — DEL A: typebaserte standardvalg (`defaultClearance`) fjernet fra
+  `HINDRING_TYPES`. Avstandskravet er en fagvurdering per situasjon, ikke en egenskap ved
+  møbeltypen. DEL B: avkryssingsboksen i tegnedialogen fjernet helt — alle fem
+  opprettelsesstedene setter nå `clearance:'wall'` direkte. DEL C: to valg i høyreklikk-menyen
+  (samme funksjon for tegning og sidebar-rad), aktivt valg merket. Ny delt `_hindringWallLabel()`
+  leser den faktiske effektive marginen fra produktene i rommet — ett tall når det er
+  entydig, «Avstand som vegg» uten tall når det ikke er det. DEL D: objektinfo-panelet bruker
+  samme etikett-funksjon som menyen.
+- **`d0c60fd`** — DEL E (kjørt etter eksplisitt bekreftelse): alle eksisterende `clearance:'none'`
+  nullstilt til `'wall'` ved prosjekt-innlasting (`_restoreProject`) — ingen av dem var et bevisst
+  valg, bare en konsekvens av at kjøkkenøy/skap tilfeldigvis fikk `'none'` som type-forslag i det
+  ene døgnet forrige runde levde.
+
+**Testmetodikk:** Kenneths 109cm-passasje re-kjørt gjennom den nye høyreklikk-flyten (samme
+resultat som forrige runde). Etikett bekreftet med ekte 25mm/50mm-produkter og med to produkter
+med ulik margin (ingen tall). En simulert «prosjekt fra i går» med en `'none'`-kjøkkenøy normalisert
+korrekt ved innlasting. Full regresjonsbatteri grønt.
+
+**Fil:** index.html.
+
+---
+
+## Spør om romnavn rett etter et rom er tegnet — 2026-09-10
+
+Kenneth: «en annen ting jeg gjør mye, er å gi rommene navn. Kan man få opp en boks med en gang et
+rom er opprettet hvor man bare kan begynne å skrive inn med en gang og trykke enter... Hvis man
+ikke ønsker å skrive romnavn, så kan man trykke enter, så vil det lagre seg som rom 1 osv.»
+
+- **`b31dc64`.** `createRoom` er allerede eneste vei inn for alle interaktive tegnemoduser, og
+  standardnavnet («Rom N») fantes allerede der — ingen ny navnelogikk, bare en ny boks
+  (`_showRoomNamePrompt`) som viser det rommet faktisk fikk, forhåndsutfylt og markert, fokusert
+  med én gang. Enter lagrer (tomt felt beholder standardnavnet), Escape lukker uten å røre navnet
+  eller rommet. Ny `promptName`-parameter på `createRoom`, satt av **elleve** interaktive
+  kallesteder (flere enn spec sine «seks moduser» antok — hver modus har flere inngangsveier).
+  Standard false — duplisering, PDF/DWG-import (som faktisk GÅR gjennom `createRoom`, motsatt av
+  hva som var antatt), regresjonstester og enhver fremtidig kaller ser aldri boksen uoppfordret.
+  Ny innstilling («Spør om romnavn når et rom opprettes», på som standard) i Snap-widgeten, lagret
+  i `arqely_prefs`.
+
+**Testmetodikk:** verifisert direkte at snømodulens `setTimeout(...,100)`-produktpanel (som ikke
+kaller `focus()` noe sted) aldri stjeler fokus fra navnefeltet, med den ekte funksjonen, ikke en
+mock. Alle fire hovedmodusene testet gjennom sine faktiske fullføringsfunksjoner. Full
+regresjonsbatteri grønt, ingen hang.
+
+**Fil:** index.html.
+
+---
+
+## Auto-folie-boksen kan nå flyttes, åpner i øvre høyre hjørne — 2026-09-10
+
+Kenneth: «den boksen ønsker jeg å kunne flytte rundt på, slik det er nå, så skygger den over
+tegningen slik at jeg ikke ser resultatet når jeg holder musen over de forskjellige valgene.»
+
+- **`2f9af08`.** `#autofill-compare` byttet fra sentrert `position:absolute` til `position:fixed`
+  uten transform. Gjenbruker `_initPaletteDrag` (samme mekanikk som den manuelle paletten) — ingen
+  ny drag-implementasjon. Overskriften er nå håndtaket. Standardplassering: øvre høyre hjørne av
+  `#canvas-wrap`, husket i nye `S.ui.afPosX/afPosY` og klemt innenfor vinduet på hver visning.
+
+**Fil:** index.html.
+
+---
+
+## Escape i målemodus dreper ikke lenger artikkellista, ny hurtigtast D — 2026-09-10
+
+Kenneth: «når jeg trykker ESC for å få bort målefunksjonen, så blir artikkellista borte... Hvis
+jeg høyreklikker når jeg er i mål-modus, så går alt greit.»
+
+- **`931c0cb`.** Målemodus fikk sin egen gren helt øverst i Escape-kjeden (før
+  `_manualPlaceSession`), slik at Escape avslutter kun målingen, ikke hele den manuelle
+  utleggingsøkta. Ny hurtigtast **D** («Dimensjon») for Mål-verktøyet, samme sted som V/H.
+
+**Fil:** index.html.
+
+---
+
 ## Avstandskrav per hindring, ikke per produkt — 2026-09-10
 
 Kenneth: «jeg får ikke plassert 100cm varmefolie i en passasje med 109 ca avstand mellom to
