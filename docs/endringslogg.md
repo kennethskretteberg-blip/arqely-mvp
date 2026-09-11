@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Snøsmelting: del sone så matta går opp, kile i trapp (DEL A-C) — 2026-09-11
+
+Kenneth, med Fjeldseth-tegningen (håndtegnet fasit) som mål: «for utendørs ønsker man gjerne å
+legge ut matter som starter og slutter naturlig... Her har jeg på en måte delt opp en sone hvor jeg
+vet jeg får plass til en matte tur/retur.» + «egen sone, men med 50 cm brede matter... slik som
+varmefolie gjør mot skråvegger.»
+
+- **`41b3d3f`** — DEL A: ny «Del så matta går opp»-knapp på en sone/rom kjører Regel E
+  (`_matEqualWidthNL`) BAKLENGS — ny `_matWholeBandPlan` finner hvor høyt ett bånd må være for at
+  N mattebredder dekker det uten rest, og hvor mange slike bånd som får plass i sonens tverr-
+  utstrekning. Panel med forslag, «Vis andre matter» og stiplet forhåndsvisning; godtas det,
+  splittes sonen via `_performZoneSplit` (fikk `opts.skipPushUndo/skipSelect/silentFail`, ingen ny
+  sonetype) og hvert bånd fylles med `autoFillMatSerpentine(...,{zoneRect,exact:true})` — samme vei
+  sone-fyll allerede bruker. Underveis rettet et feil tie-break i N-valget (forsøkte først å
+  gjenbruke Regel E sitt EGET forward-kriterium — riktig når tverr-høyden er fast, feil her siden N
+  DEFINERER høyden) — riktig kriterium: mest dekket areal, ved likt MINST N (Kenneths «matte
+  tur/retur»-prinsipp). Verifisert eksakt mot alle tre Fjeldseth-felt (638×459→2×200cm, 405×316→
+  300cm, 156×400→150cm).
+- Samme commit — to pre-eksisterende motorfeil funnet og rettet (blokkerte DEL A direkte): (1)
+  `clipStripToRoom` ga tomt resultat ved skanning eksakt på en romveggs egen yttergrense (klassisk
+  ray-casting-kvirk, rammet ethvert utendørs produkt med 0 margin flush mot kanten); (2)
+  `min_wall_margin_mm || 50` fire steder behandlet en eksplisitt `0` (alle utendørs mattprodukter)
+  som «ikke satt» — rettet til `?? 50`.
+- DEL B: levende avlesning ved markøren mens «Del i soner» tegnes manuelt, viser hva de to
+  resulterende delene gir for matta som allerede ligger der. Ren visning, ingen snapping.
+- DEL C: ny «Fyll kilen (trapp)»-knapp (vises for en sone med skrå kant i stedet for DEL A sin
+  knapp) bygger en trapp av smale (≤60cm) matter med avtagende lengde mot spissen — mønsteret og
+  begrunnelsen fra folies `_slantStaircaseFill`, ikke koden (ulik datamodell). Frihånd urørt.
+
+**Testmetodikk:** alle tre Fjeldseth-felt reprodusert til centimeteren; retningsvalg for udelt rom
+testet og rettet (auto-retning valgte feil akse i én testcase); full del-og-fyll-syklus verifisert
+(riktige zoneId, riktig antall matter); étt undo nullstiller hele operasjonen; feilmelding med
+nærmeste alternativ verifisert; kile-trapp verifisert med heltalls-avrundede, avtagende lengder.
+Full regresjonsbatteri (mat/matZone/matFree/cableSkew/foil) grønt gjennom hele runden.
+
+**Fil:** index.html.
+
+---
+
 ## Trapp: bredder+kabellengder vises uten valg, detaljutsnitt på utskrift — 2026-09-11
 
 Kenneth: «utendørs trapp: jeg ønsker at bredden på trinn/repos vises på tegning. Jeg ønsker også at
