@@ -42355,6 +42355,10 @@ function _showExportDialog() {
   const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes
   const stairs = S.stairs || [];
   const hasStairs = stairs.length > 0;
+  // FEIL 1 (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): Trappeoversikten har alltid hatt en
+  // hasStairs-vakt — Romoversikten hadde ingen tilsvarende, så et rent trapp-prosjekt (#0219) fikk
+  // en tom Romoversikt-side med bare kolonneoverskrifter. Samme mønster begge veier.
+  const hasRooms = rooms.length > 0;
   const hasPrices = HEATING_PRODUCTS.some(p => p.price_list > 0);
   const _pp = (S.project && S.project.pricing) || {};   // lagrede rabatter per prosjekt
   const priceGroups = _projectProductGroups();
@@ -42381,7 +42385,7 @@ function _showExportDialog() {
           ${stairs.map(s => `<div class="exp-check sub"><input type="checkbox" class="exp-stair-cb" value="${s.id}" checked title="Hak av for utskrift"><span onclick="_expPreviewStair(${s.id})" style="flex:1;cursor:pointer" title="Klikk navnet for forhåndsvisning">${_esc(s.name||'Trapp')}</span></div>`).join('')}
         </div>` : ''}
         <div class="exp-group">
-          <div class="exp-check"><input type="checkbox" id="exp-roomtable" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('roomtable')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Romoversikt</span></div>
+          ${hasRooms ? `<div class="exp-check"><input type="checkbox" id="exp-roomtable" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('roomtable')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Romoversikt</span></div>` : ''}
           ${hasStairs ? `<div class="exp-check"><input type="checkbox" id="exp-stairtable" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('stairtable')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Trappeoversikt</span></div>` : ''}
           <div class="exp-check"><input type="checkbox" id="exp-matlist" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('matlist')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Materialliste</span></div>
           ${hasPrices ? `<label class="exp-check"><input type="checkbox" id="exp-pricing"${_pp.show ? ' checked' : ''}> Tilbudspris</label>
@@ -42488,16 +42492,20 @@ function _pdfCoverMetaRows(nextRev, prevDateStr) {
   const proj = S.project || {};
   const noDisplay = _fmtProjectNo(proj.projectNo) || '—';
   const genDate = new Date().toLocaleDateString('nb-NO', { year: 'numeric', month: 'long', day: 'numeric' });
-  return [
+  const rows = [
     ['Kunde',          (proj.customer || '—') + (proj._customerDeleted ? ' (slettet)' : '')],
     ['Kontaktperson',  proj.contact_name || '—'],
     ['', ''],
     ['Prosjektnr',     noDisplay],
     ['Generert',       genDate],
     ['Revisjon',       `${nextRev}${prevDateStr && prevDateStr !== '—' ? `   (forrige: ${prevDateStr})` : ''}`],
-    ['', ''],
-    ['Prosjektert av', proj.responsible || '—'],
   ];
+  // FEIL 4 (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): «Prosjektert av —» ser ut som en feil
+  // når feltet rett og slett aldri er fylt ut (via Kunde-modalen, _wfKundeModal/_wfKundeSave, som
+  // skriver riktig til S.project.responsible — lesingen her var aldri feil felt). Utelat raden helt
+  // når den er tom, i stedet for å late som Kunde/Prosjektnr sine «—»-fallbacker gjelder likt her.
+  if (proj.responsible) rows.push(['', ''], ['Prosjektert av', proj.responsible]);
+  return rows;
 }
 
 // Forhandsvisning av dokument-seksjonene (Forside/Prosjektoversikt/Romoversikt/
@@ -42726,7 +42734,12 @@ async function exportPDF(opts) {
   let _pageStarted = false;
 
   // ── Helper functions ──
-  const _addPage = () => { doc.addPage(); y = M; };
+  // PLASS (spec-trapp-utskrift-feil.md, 11.09.2026): eksplisitt 'a4'/'portrait' her, ikke det
+  // argumentløse doc.addPage() (som arver FORRIGE sides format) — en trappside med et rotert
+  // (liggende) bånd bruker nå en egen liggende SIDE (se stair-loopen under), og enhver seksjon
+  // ETTER trapper (Romoversikt/Trappeoversikt/Materialliste osv.) må garantert få stående tilbake,
+  // uansett hvilken orientering forrige side endte på.
+  const _addPage = () => { doc.addPage('a4', 'portrait'); y = M; };
   const _checkPage = (need) => { if (y + need > H - M) _addPage(); };
   const _line = (y0) => { doc.setDrawColor(180); doc.setLineWidth(0.3); doc.line(M, y0, W - M, y0); };
   const _date = () => new Date().toLocaleDateString('nb-NO', {year:'numeric',month:'long',day:'numeric'});
@@ -43330,40 +43343,95 @@ async function exportPDF(opts) {
   // ── Stair detail pages ──
   const _selectedStairs = Array.isArray(opts.stairs) ? (S.stairs||[]).filter(s => opts.stairs.includes(s.id)) : (S.stairs||[]);
   for (const stair of _selectedStairs) {
-    if (_pageStarted) _addPage(); else _pageStarted = true;
+    // PLASS (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): «tegningen bruker en tredjedel av
+    // siden». Rotårsak: STEG 6 roterer et bånd til liggende format når trappa er mye lengre enn bred
+    // (for god oppløsning, se _renderStairPrintImages) — men PDF-SIDEN har alltid vært stående
+    // (portrait, hardkodet i new jsPDF(...) over). Et liggende bilde presset inn på en stående side
+    // blir uunngåelig kort i høyden UANSETT skalering — det er en geometrisk umulighet, ikke noe en
+    // «fit»-formel kan løse. Bekreftet med Kenneth: denne trappens SIDE blir nå selv liggende når
+    // minst ett av båndene faktisk ble rotert, slik at det roterte bildet kan fylle en side formet
+    // som det selv. _stairImages regnes derfor ut FØR sideskiftet, ikke inni try-blokken som før.
+    let _stairImages = [];
+    try { _stairImages = _renderStairPrintImages(stair); } catch(e) { _stairImages = []; }
+    const _stairLandscape = _stairImages.some(img => img.rotated);
+    const pageW_s = _stairLandscape ? 297 : 210;
+    const pageH_s = _stairLandscape ? 210 : 297;
+    const pw_s = pageW_s - 2 * M;
+    const _fmt_s = _stairLandscape ? 'landscape' : 'portrait';
+    const _addPageS = () => { doc.addPage('a4', _fmt_s); y = M; };
+    const _checkPageS = (need) => { if (y + need > pageH_s - M) _addPageS(); };
+
+    if (!_pageStarted) {
+      _pageStarted = true;
+      // Side 1 finnes allerede (opprettet stående av new jsPDF over) — er DENNE trappen den aller
+      // første seksjonen i dokumentet (ingen forside/oversikt/rom foran) OG trenger liggende, må den
+      // ubrukte stående siden erstattes i stedet for å bli stående igjen som en blank side 1.
+      if (_stairLandscape) {
+        doc.addPage('a4', 'landscape');
+        try { doc.deletePage(1); } catch(e) {} // trygt: to sider finnes nå, aldri ned mot null
+        y = M;
+      }
+    } else {
+      doc.addPage('a4', _fmt_s);
+      y = M;
+    }
+
     doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(20, 40, 80);
     doc.text('Trapp: ' + (stair.name || 'Trapp'), M, y); y += 8;
     // STEG 6 (Kenneth 19.08.2026): stairImg ble tidligere tvunget inn i en FAST 5:3-boks
     // (imgW×imgW*0.6) uansett kildebildets faktiske form — for en portrett-formet (høy, smal) trapp
     // vranger dette bildet vertikalt/horisontalt i tillegg til at kilden selv var lavoppløst. PNG,
     // ekte format og evt. bånd (_renderStairPrintImages) stables nå under hverandre, hver med SIN
-    // EGEN oppløsning og aspekt bevart (bredde=pw, høyde utledet — aldri strukket).
+    // EGEN oppløsning og aspekt bevart.
+    // PLASS: bildet ble tidligere alltid tilpasset BREDDEN først (drawW=pw), med maxImgH kun som et
+    // NEDSKALeringstak for et bilde som ble for HØYT. Fyll i stedet den TILGJENGELIGE høyden på siden
+    // bildet faktisk havner på (som kan variere — tittelen flytter y ulikt for første/senere bånd):
+    // sjekk plass FØR endelig y er kjent (en forsiktig 40mm-terskel — under den er det uansett ikke
+    // vits i å bruke resten av siden), les så den faktiske resterende høyden derfra, og velg størst
+    // mulig av høyde- og breddebegrensning (samme prinsipp som CSS object-fit:contain) i stedet for
+    // alltid å prioritere bredden. Nå som liggende bånd får en liggende SIDE (over), er dette i
+    // praksis alltid høyde-bundet for dem — bredde-bundet gjelder fortsatt en stående enkelttrapp.
     try {
-      const stairImages = _renderStairPrintImages(stair);
-      const maxImgH = H - 2 * M;
-      for (const img of stairImages) {
-        let drawW = pw, drawH = pw / img.aspect;
-        if (drawH > maxImgH) { const s = maxImgH / drawH; drawH = maxImgH; drawW = pw * s; }
-        _checkPage(drawH + 6);
-        doc.addImage(img.dataUrl, 'PNG', M + (pw - drawW) / 2, y, drawW, drawH);
+      for (const img of _stairImages) {
+        _checkPageS(40);
+        const availH = (pageH_s - M) - y - 2; // 2mm sikkerhetsluft — _checkPageS(40) har avgjort endelig y
+        let drawW = availH * img.aspect, drawH = availH;
+        if (drawW > pw_s) { drawW = pw_s; drawH = pw_s / img.aspect; }
+        doc.addImage(img.dataUrl, 'PNG', M + (pw_s - drawW) / 2, y, drawW, drawH);
         y += drawH + 4;
       }
       y += 2;
     } catch(e) { y += 4; }
 
+    // FEIL 3 (spec-trapp-utskrift-feil.md, 11.09.2026): tegnforklaring for start-/sluttprikkene
+    // som nå tegnes inn i selve bildet over (_stairDrawToCanvas) — én linje, ikke en forklaringsboks.
+    if (stair.runs && stair.runs.length > 0) {
+      _checkPageS(6);
+      doc.setFillColor(34, 204, 68);
+      doc.circle(M + 1.4, y - 1.3, 1.4, 'F');
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(80, 90, 110);
+      doc.text('Start kabel', M + 5, y);
+      const _startLblW = doc.getTextWidth('Start kabel');
+      doc.setFillColor(238, 51, 34);
+      doc.circle(M + 5 + _startLblW + 7, y - 1.3, 1.4, 'F');
+      doc.text('Slutt kabel', M + 5 + _startLblW + 11, y);
+      y += 6;
+    }
+
     // DEL C (spec-trapp-detaljutsnitt.md, 11.09.2026): ett forstørret detaljutsnitt per geometrisk
     // DISTINKT flate (ett per trinn-type + ett per repos, se _stairDetailGroups) — etter trappens
     // egen tegning, før materiallista (som kommer mye lenger ned i dokumentet, se opts.materialList).
+    // Innsettene er alltid nesten kvadratiske uansett trappens egen form — urørt av liggende/stående.
     try {
       const _insets = _renderStairDetailInsets(stair);
-      const maxImgH3 = H - 2 * M;
+      const maxImgH3 = pageH_s - 2 * M;
       for (const ins of _insets) {
-        let drawW = pw, drawH = pw / ins.aspect;
-        if (drawH > maxImgH3) { const s = maxImgH3 / drawH; drawH = maxImgH3; drawW = pw * s; }
-        _checkPage(drawH + 14);
+        let drawW = pw_s, drawH = pw_s / ins.aspect;
+        if (drawH > maxImgH3) { const s = maxImgH3 / drawH; drawH = maxImgH3; drawW = pw_s * s; }
+        _checkPageS(drawH + 14);
         doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(20, 60, 130);
         doc.text(ins.title, M, y); y += 4.5;
-        doc.addImage(ins.dataUrl, 'PNG', M + (pw - drawW) / 2, y, drawW, drawH);
+        doc.addImage(ins.dataUrl, 'PNG', M + (pw_s - drawW) / 2, y, drawW, drawH);
         y += drawH + 3;
         doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(80, 90, 110);
         doc.text(ins.caption, M, y);
@@ -43386,7 +43454,7 @@ async function exportPDF(opts) {
       for (const sb of _soneBlocks) {
         _totalW += sb.watts;
         const groupLines = sb.groups.length;
-        _checkPage(14 + groupLines * 8);
+        _checkPageS(14 + groupLines * 8);
 
         // Header: farge-swatch (multi) + sonenavn + produkt, effekt til hoyre
         const _isMultiSone = _soneBlocks.length > 1;
@@ -43402,7 +43470,7 @@ async function exportPDF(opts) {
           doc.text(sb.label, M, y);
         }
         doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
-        doc.text(sb.watts + ' W', W - M, y, { align: 'right' });
+        doc.text(sb.watts + ' W', pageW_s - M, y, { align: 'right' });
         y += 4.5;
 
         doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(60, 70, 90);
@@ -43430,11 +43498,11 @@ async function exportPDF(opts) {
         doc.setTextColor(60, 70, 90);
         doc.text('Trinn: ' + sb.stepsLength_m + ' m   |   Repos: ' + (sb.reposLength_m > 0 ? sb.reposLength_m + ' m' : '—') + '   |   Lagt: ' + sb.assignedLength_m + ' m   |   Kabellengde: ' + (sb.productLength_m > 0 ? sb.productLength_m + ' m' : '—'), M, y);
         y += 5.5;
-        doc.setDrawColor(215, 220, 230); doc.setLineWidth(0.2); doc.line(M, y - 2, W - M, y - 2);
+        doc.setDrawColor(215, 220, 230); doc.setLineWidth(0.2); doc.line(M, y - 2, pageW_s - M, y - 2);
       }
 
       // Aggregert sum for hele trappa - STEG 3 (Regel 11): samlet behov/samlet kabel/differanse.
-      _checkPage(10);
+      _checkPageS(10);
       const _setFit = _stairCableSetFit(stair);
       doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(40, 50, 70);
       doc.text('Totalt: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m   |   ' + _totalW + ' W', M, y);
@@ -43456,7 +43524,10 @@ async function exportPDF(opts) {
 
   // \u2500\u2500 Romoversikt (A-L tabell, \u00e9n rad pr. rom) \u2500\u2500 (only when selected)
   // Kolonne J (Effekt W) = produktets RATEDE effekt (_roomRatedEffectW), ikke geometri-utledet.
-  if (opts.roomTable) {
+  // FEIL 1 (spec-trapp-utskrift-feil.md, 11.09.2026): samme vakt som Trappeoversikten under
+  // (opts.stairTable && stairs.length>0) \u2014 uten rom skal siden aldri skrives, selv om opts.roomTable
+  // skulle st\u00e5 true (f.eks. en gammel lagret preferanse fra da prosjektet hadde rom).
+  if (opts.roomTable && (S.rooms || []).some(r => !r.listDraft)) {
     if (_pageStarted) _addPage(); else _pageStarted = true;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(16);
@@ -43537,60 +43608,101 @@ async function exportPDF(opts) {
     doc.setTextColor(20, 40, 80);
     doc.text('Trappeoversikt', M, y); y += 9;
 
-    const sColX = [15, 29, 39, 65, 77, 91, 99, 107, 115, 123, 132, 143, 151, 159, 168, 177, 185];
-    const sColW = [14, 10, 26, 12, 14,  8,  8,  8,  8,  9,  11,  8,  8,  9,  9,  8,  8];
-    const sHeads = ['Trapp','Sone','Produkt','El.nr','Art.nr','Trinn','Bredde','N','CC','Streng','Kabel/trinn','Repos','Forb.','Lagt','Kabel','W','W/m²'];
+    // FEIL 2 (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): 16 kolonner presset inn på A4-
+    // bredde ga sammensmeltede overskrifter («BreddeN», «Kabel/trinnRepos»), en «Trinn»-kolonne som
+    // egentlig viste ANTALL trinn i gruppen (11/12 så ut som trinnummer, ikke en telling — tegningen
+    // på forrige side sier allerede riktig «Trinn 1–11»/«Trinn 12–23»), og trapp-nivå-totaler
+    // (Lagt/Kabel/W) gjentatt på HVER rad — summerer man kolonnen (som man gjør med en tabell) fikk
+    // man et tall dobbelt så stort som virkeligheten. El.nr/Art.nr står allerede i materiallista og
+    // i tekstblokken på forrige side (urørt) — droppet herfra. Ny struktur: én overskriftsrad per
+    // trapp (+ produktnavn når trappen kun har ETT produkt — det vanlige tilfellet; ellers får hver
+    // kabel/sone sin egen produktlinje), kun geometri per trinn-gruppe (nå med faktisk
+    // TRINNINTERVALL, samme ordlyd som tegningen), og totalene i ÉN egen «Sum»-rad per trapp.
+    const sColX = [19, 52, 74, 90, 108, 130, 160];
+    const sColW = [31, 20, 14, 16, 20, 28, 25];
+    const sHeads = ['Trinn', 'Bredde (cm)', 'N', 'CC (cm)', 'Streng (cm)', 'Kabel/trinn (cm)', 'W/m²'];
     const _sFit = (s, wmm) => {
       s = String(s == null ? '' : s);
       if (!s) return '';
       const parts = doc.splitTextToSize(s, wmm);
       return parts[0] || '';
     };
+    // Krav: overskrifter må ikke kunne kollidere — mål tekstbredden mot kolonnens plass og bryt over
+    // to linjer i stedet for å stole på at kolonnen alltid er bred nok.
     const _sDrawHead = () => {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(6.5);
       doc.setTextColor(120, 130, 150);
-      for (let i = 0; i < sHeads.length; i++) doc.text(sHeads[i], sColX[i], y);
-      y += 2.5; _line(y); y += 3.5;
+      let twoLine = false;
+      for (let i = 0; i < sHeads.length; i++) {
+        if (doc.getTextWidth(sHeads[i]) > sColW[i] - 1) {
+          const parts = doc.splitTextToSize(sHeads[i], sColW[i] - 1);
+          doc.text(parts[0] || '', sColX[i], y);
+          doc.text(parts[1] || '', sColX[i], y + 2.8);
+          twoLine = true;
+        } else {
+          doc.text(sHeads[i], sColX[i], y);
+        }
+      }
+      y += twoLine ? 5.3 : 2.5;
+      _line(y); y += 3.5;
       doc.setFont('helvetica', 'normal');
     };
-    _sDrawHead();
     const _rnd = (v) => v == null ? '' : String(Math.round(v * 10) / 10);
+    const _rangeLbl = (g) => g.fromLabel === g.toLabel ? String(g.fromLabel) : (g.fromLabel + '–' + g.toLabel);
+
     for (const st of S.stairs) {
       const blocks = _stairSoneGeometryBlocks(st);
-      // Regel 12-artet fallback (Romoversiktens «tomt rom → én rad»): en trapp uten kabel/soner
-      // skal fortsatt vises, ikke stille forsvinne fra tabellen.
-      const blockRows = blocks.length ? blocks : [null];
-      for (const b of blockRows) {
-        const groupRows = b && b.groups.length ? b.groups : [null];
+      if (y + 12 > H - M) _addPage();
+
+      const distinctProducts = new Set(blocks.map(b => b.product?.id).filter(id => id != null));
+      const singleProduct = distinctProducts.size === 1 ? blocks.find(b => b.product)?.product : null;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(20, 60, 130);
+      doc.text((st.name || 'Trapp') + (singleProduct ? ' — ' + singleProduct.name : ''), M, y);
+      y += 5;
+
+      // Regel 12-artet fallback (Romoversiktens «tomt rom → én rad»): en trapp uten kabel skal
+      // fortsatt nevnes, ikke stille forsvinne fra tabellen.
+      if (!blocks.length) {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(140, 145, 155);
+        doc.text('Ingen kabel lagt ut', M + 4, y); y += 6;
+        continue;
+      }
+
+      _sDrawHead();
+      let sumLagt = 0, sumW = 0;
+      for (const b of blocks) {
+        if (!singleProduct && b.product) {
+          if (y + 8 > H - M) { _addPage(); _sDrawHead(); }
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(80, 90, 110);
+          doc.text(b.label + ' · ' + b.product.name, M + 4, y); y += 4.5;
+          doc.setFont('helvetica', 'normal');
+        }
+        sumLagt += b.assignedLength_m || 0;
+        sumW += b.watts || 0;
+        const groupRows = b.groups.length ? b.groups : [null];
         for (const g of groupRows) {
           if (y + 5 > H - M) { _addPage(); _sDrawHead(); }
-          const dp = b ? b.product : null;
-          const cells = [
-            st.name || 'Trapp',
-            b ? b.label : '—',
-            dp ? dp.name : '',
-            dp?.el_no || '',
-            dp?.article_no || '',
-            g ? String(g.count) : '',
-            g ? _rnd(g.w_cm) : '',
-            g ? String(g.N) : '',
-            g ? _rnd(g.actualCC) : '',
-            g ? _rnd(g.strandLen_cm) : '',
-            g ? _rnd(g.laidPerStep_cm) : '',
-            b ? _rnd(b.reposLength_m) : '',
-            b ? _rnd(b.connectionLength_m) : '',
-            b ? _rnd(b.assignedLength_m) : '',
-            b ? _rnd(b.productLength_m) : '',
-            b ? String(b.watts) : '',
-            g && g.wm2 != null ? String(g.wm2) : '',
-          ];
-          doc.setFontSize(6.5);
+          const cells = g ? [
+            _rangeLbl(g), _rnd(g.w_cm), String(g.N), _rnd(g.actualCC), _rnd(g.strandLen_cm),
+            _rnd(g.laidPerStep_cm), g.wm2 != null ? String(g.wm2) : '—',
+          ] : ['—', '', '', '', '', '', ''];
+          doc.setFontSize(7.5);
           doc.setTextColor(30, 40, 60);
           for (let i = 0; i < cells.length; i++) doc.text(_sFit(cells[i], sColW[i]), sColX[i], y);
           y += 4.5;
         }
       }
+
+      // Krav: totalene i ÉN egen rad, aldri gjentatt per gruppe (samme kilder som tekstblokken over
+      // allerede bruker — _stairCableSetFit for «Samlet kabel», ikke en ny, potensielt avvikende sum).
+      if (y + 6 > H - M) _addPage();
+      const setFit = _stairCableSetFit(st);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(40, 50, 70);
+      doc.text('Sum', M + 4, y);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Lagt ' + sumLagt.toFixed(1) + ' m   ·   Kabel ' + setFit.availableLength_m.toFixed(1) + ' m   ·   Effekt ' + sumW + ' W', sColX[1], y);
+      y += 7;
     }
     _pageStarted = true;
   } // end if (opts.stairTable)
@@ -44411,6 +44523,15 @@ function _stairDrawToCanvas(stair, opts) {
   const tx = wx => ox + (wx - minX) * scale;
   const ty = wy => oy + (wy - minY) * scale;
 
+  // PLASS (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): trinnummerne var «rotert 90° og så
+  // små at de knapt kan leses» — roten var en font målt i RÅ PIKSLER (Math.max(11, ...)) uten noen
+  // forbindelse til hva 11px faktisk blir i mm på papiret. Denne funksjonens EGEN oppløsningsmatte
+  // over knytter allerede 1px på lerretet til 1/TARGET_DPI tomme på den TRYKTE siden (så lenge
+  // kalleren tegner nær den antatte printW_in-bredden, som _renderStairPrintImages/exportPDF gjør)
+  // — 11px ble dermed kun ~1,9mm på papiret. mm2px gir en ekte MINSTE teksthøyde i millimeter,
+  // ikke piksler; skalerer likevel OPP med tegningens egen scale (som før) når det er plass til det.
+  const mm2px = (mm) => (mm / 25.4) * TARGET_DPI;
+
   // Draw surfaces (kun båndets eget intervall)
   let _lNum = 0;
   for (let i = 0; i < rFrom; i++) if (surfs[i].type === 'landing') _lNum++; // repos-nummer fortsetter riktig over en båndgrense
@@ -44424,9 +44545,27 @@ function _stairDrawToCanvas(stair, opts) {
     c.strokeStyle = '#888'; c.lineWidth = 1;
     c.strokeRect(x1, y1, w, h);
     // Label
-    c.fillStyle = '#666'; c.font = Math.max(11, Math.round(scale * 3)) + 'px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#666'; c.font = Math.max(mm2px(3.5), Math.round(scale * 3)) + 'px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
     const lbl = sf.type === 'landing' ? 'Repos ' + _lNum : '' + ((sf.stepIdx != null ? sf.stepIdx : sf.index) + 1);
     c.fillText(lbl, x1 + w/2, y1 + h/2);
+  }
+
+  // ORIENTERING (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): «det står ingen steder hvilken
+  // ende som er nederst» — kabelen starter alltid på surfaces[0] (= trinn 1, se _generateStair-
+  // Surfaces), som per definisjon er trappens fysisk NEDERSTE trinn uansett buildDirection (den
+  // styrer kun hvor trinn 1 TEGNES på arket — øverst eller nederst — ikke hva som er fysisk nederst
+  // i virkeligheten). Én liten tekst ved trinn 1, ikke en forklaringsboks. Plasseres på den siden av
+  // trinn 1 som vender UT fra resten av trappen (motsatt av retning mot trinn 2), uavhengig av
+  // buildDirection. Tegnet kun når trinn 1 faktisk er med i DETTE båndet.
+  if (rFrom === 0 && surfs[0]) {
+    const sf0 = surfs[0];
+    const surfW0 = sf0.w_cm || stair.width_cm || 120;
+    const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
+    const outwardY = bottomUp ? (sf0.y_cm + sf0.d_cm) : sf0.y_cm;
+    c.fillStyle = '#c04030';
+    c.font = 'bold ' + Math.max(mm2px(3), Math.round(scale * 2.6)) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = bottomUp ? 'top' : 'bottom';
+    c.fillText('↓ Nederste trinn', tx(sf0.x_cm + surfW0 / 2), ty(outwardY) + (bottomUp ? 3 : -3));
   }
 
   // Draw cable runs
@@ -44528,6 +44667,57 @@ function _stairDrawToCanvas(stair, opts) {
         }
       }
       c.setLineDash([]);
+    }
+
+    // FEIL 3 (spec-trapp-utskrift-feil.md, Kenneth 11.09.2026): start-/sluttpunktene fra skjermen
+    // (_drawStairPlan, grønn #22cc44 / rød #ee3322) fantes ALDRI i utskriften — montøren i felt kan
+    // ikke se hvilken ende av trappen den kalde enden faktisk kommer ut. Nøyaktig samme algoritme
+    // som skjermversjonen: gå flatene i den FAKTISKE rekkefølgen kabelen traverserer dem (stair.runs
+    // sin egen emisjonsrekkefølge, IKKE en fast 0..N-1-antakelse — STEG 2/valgfri snuing kan gjøre
+    // den omvendt), finn FØRSTE/SISTE segment med cableIdx===ci — ikke bare første/siste RUN, siden
+    // et løp kan tilhøre to kabler ved en skjøt (Regel 11/STEG 2). Tegnet kun når punktets flate
+    // faktisk er i DETTE båndet — samme prinsipp som forbindelsene over («arket deles»-bruddet).
+    {
+      const endpoints = {};
+      const surfVisitOrder = [];
+      const seenSurf = new Set();
+      for (const r of stair.runs) { if (!seenSurf.has(r.surfaceIdx)) { seenSurf.add(r.surfaceIdx); surfVisitOrder.push(r.surfaceIdx); } }
+      for (const si of surfVisitOrder) {
+        const sf = surfs[si];
+        for (const run of (runsBySurf[si] || [])) {
+          const segsInTravelOrder = run.isGoingRight ? run.segments : [...run.segments].reverse();
+          for (const seg of segsInTravelOrder) {
+            const inX = run.isGoingRight ? seg.start_cm : seg.end_cm;
+            const outX = run.isGoingRight ? seg.end_cm : seg.start_cm;
+            const pt = { x: sf.x_cm + inX, y: sf.y_cm + run.pos_cm, si };
+            const pt2 = { x: sf.x_cm + outX, y: sf.y_cm + run.pos_cm, si };
+            if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: pt, end: pt2 };
+            else endpoints[seg.cableIdx].end = pt2;
+          }
+        }
+      }
+      const nCablesEp = Math.max(1, (stair.cables || []).length);
+      c.font = 'bold ' + Math.max(9, Math.round(scale * 2.2)) + 'px sans-serif';
+      const markerR = Math.max(3, scale * 0.5);
+      for (let ci = 0; ci < nCablesEp; ci++) {
+        const ep = endpoints[ci];
+        if (!ep) continue;
+        if (ep.start && ep.start.si >= rFrom && ep.start.si <= rTo) {
+          const sp = { x: tx(ep.start.x), y: ty(ep.start.y) };
+          c.fillStyle = '#22cc44';
+          c.beginPath(); c.arc(sp.x, sp.y, markerR, 0, Math.PI * 2); c.fill();
+          if (hasMulti) {
+            c.fillStyle = COLORS[ci] || '#333';
+            c.textAlign = 'left'; c.textBaseline = 'bottom';
+            c.fillText('K' + (ci + 1), sp.x + markerR + 2, sp.y - 2);
+          }
+        }
+        if (ep.end && ep.end.si >= rFrom && ep.end.si <= rTo) {
+          const epx = { x: tx(ep.end.x), y: ty(ep.end.y) };
+          c.fillStyle = '#ee3322';
+          c.beginPath(); c.arc(epx.x, epx.y, markerR, 0, Math.PI * 2); c.fill();
+        }
+      }
     }
   }
 
@@ -44676,7 +44866,7 @@ function _renderStairPrintImages(stair) {
   const surfs = stair.surfaces;
   if (!surfs || !surfs.length) {
     const c = _stairDrawToCanvas(stair);
-    return [{ dataUrl: c.toDataURL('image/png'), aspect: c.width / c.height }];
+    return [{ dataUrl: c.toDataURL('image/png'), aspect: c.width / c.height, rotated: false }];
   }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const sf of surfs) {
@@ -44698,7 +44888,10 @@ function _renderStairPrintImages(stair) {
     const rotated = bandSH > sW * 1.3;
     let canvas = _stairDrawToCanvas(stair, { surfaceRange: range, rotated });
     if (rotated) canvas = _stairRotateCanvas90(canvas);
-    return { dataUrl: canvas.toDataURL('image/png'), aspect: canvas.width / canvas.height };
+    // PLASS (spec-trapp-utskrift-feil.md, 11.09.2026): kalleren (exportPDF) trenger å vite om NOEN
+    // av båndene ble rotert til liggende, for å kunne velge liggende SIDE for denne trappen — et
+    // liggende bilde presset inn på en stående side blir uunngåelig kort, uansett skalering.
+    return { dataUrl: canvas.toDataURL('image/png'), aspect: canvas.width / canvas.height, rotated };
   });
 }
 
