@@ -4,6 +4,84 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Hurtigprosjektering: utendørs produkter (InSnow) + klasse huskes nå — 2026-09-11
+
+Kenneth: «jeg ønsker å kunne velge InSnow 30T 230V-kablene i listefunksjonen … i dette tilfellet er
+det mange like garasjeporter som skal ha samme varmekabel under portene.» Etter første test:
+«klasse må huskes, den endrer seg alltid tilbake. la InSnow 30T 230V være standard. sett på 230V
+bak»
+
+- **`d17403f`** — DEL A: modulfilteret i lista var hardkodet til `'indoor'` (`_listIndoorCat`) —
+  InSnow fantes derfor aldri der, ikke fordi noe manglet, men fordi modulen aldri var ment å
+  variere. Omgjort til et `envType`-argument (`_listCatFor`), med `'indoor'` fortsatt standard slik
+  at alle andre kallere er uendret. Ny «Varmetype»-velger (Innendørs/Utendørs) på raden, samme felt
+  (`room.moduleType`) som tegnede rom allerede bruker — ikke et nytt begrep. Ny rad arver forrige
+  rads varmetype (mange like porter etter hverandre skal ikke kreve tjue valg). Ønsket W/m² og
+  klassene (InSnow 20T/30T/40T) kommer gratis av eksisterende `_roomTargetWm2`/`_listFamiliesFor`
+  når de får riktig miljø å lese fra.
+- Samme commit — DEL B: familier er nå nøkler «familie|spenning» (`_listFamKey`), samme mønster
+  trappepanelet allerede bruker, slik at InSnow 30T 230V/400V ikke kollapser til én klasse med
+  begge spenningene blandet i variantlista (en 400V-kabel kunne vært valgt ved et uhell).
+- Samme commit — DEL C krevde ingen kodeendring: materialliste, Visma-kopiering, GBAO10-eksport og
+  PDF-romoversikten leser allerede rom/kabler uavhengig av `moduleType`. Verifisert i nettleser: seks
+  like InSnow-kabler aggregeres til én linje med antall 6, side om side med en innendørs InFloor-rad
+  i samme liste.
+- **`71d35e2`** — Kenneth testet live og fant at klassen «hoppet tilbake»: hvert areal-/hindring-/
+  W-m²-felt regnet ut en helt ny «nærmest ønsket effekt»-familie fra bunnen hver gang, og overskrev
+  et manuelt valg stille. Usynlig for InFloor 10T/17T (tette W/m²-verdier), åpenbart for InSnow
+  20T/30T/40T (mye bredere spenn). `_listAutoSuggest` beholder nå en gyldig `room.listFamily` urørt
+  og reberegner kun produkt+antall INNENFOR den — ny familie velges kun når ingen er satt ennå. Ny
+  standard for utendørs kabel: InSnow 30T 230V (samme standard trappepanelet bruker via
+  `preferredFamily`), ikke lenger «nærmest ønsket effekt» på tvers av 20T/30T/40T — innendørs
+  beholder sitt smarte nærmest-søk uendret. Klasseteksten viser nå spenning i klartekst alltid
+  («InSnow 30T 230V», «InFloor 10T 230V»), ikke bare når flere spenninger faktisk finnes i utvalget.
+
+**Testmetodikk:** Kenneths eget eksempel (YD-01, 2 m², Utendørs) verifisert i nettleser — foreslår
+300 W/m² og InSnow 30T 230V automatisk, 400V-varianten i egen klasse og kan ikke velges ved et
+uhell, fem påfølgende rader arver Utendørs uten å velges på nytt, en rad satt til Innendørs i samme
+liste gir InFloor/130 W/m² side om side, ekte DOM-select+change-event bekrefter koblingen, lagre/
+åpne-rundtrip beholder `moduleType` per rad, manuelt valgt klasse overlever påfølgende areal-/
+hindring-/W-m²-redigering i rekkefølge (var buggen, bekreftet både utendørs og innendørs), rent
+innendørs-scenario uendret tekst/verdier. Full regresjonsbatteri (mat/matZone/matFree/cableSkew/
+foil) grønt gjennom begge commits.
+
+**Fil:** index.html.
+
+---
+
+## Dra og slipp plantegning på alle etasjer, ikke bare den første — 2026-09-11
+
+Kenneth: «når jeg oppretter et prosjekt, kan jeg dra og slippe plantegning inn i prosjektet for
+etasje 1. Når jeg skal opprette etasje 2 og velge importer plantegning, så åpner mappevelgeren seg.
+Kan jeg få dra og slipp her også? Det er ofte jeg ønsker å dra fra epostprogrammet.»
+
+- **`56619a6`** — DEL A: nye, separate `dragover`/`dragleave`/`drop`-lyttere på selve lerretet
+  (aldri inni de finjusterte produkt-draging-lytterne — `S.ui.dragWidth` skiller dem allerede). En
+  ramme «Slipp plantegning her — {etasjenavn}» vises mens en fil dras, med en window-nivå
+  `dragleave` (`relatedTarget===null`) som rydder opp selv om musen forlater hele nettleservinduet
+  midt i dragingen. DEL B: hver etasjerad i sidepanelet er nå også en slippsone, uthevet under
+  dragingen; ny `_activateFloor()` skiller aktivering fra fold-ut/fold-inn (var sammenvevd i
+  `toggleFloor`) slik at et slipp aktiverer riktig etasje FØR import uten å tilfeldig folde raden.
+  DEL C: ny delt `_resolveDroppedImportFile()` sier alltid ifra i stedet for å være stille — «fant
+  ingen fil» ved en lenke/webmail-drag, hvilke filtyper som støttes ved feil type, «bare den første
+  importert» ved flere filer sluppet samtidig.
+- Underveis droppet en tidligere plan om å gate på `dataTransfer.types` — en lenke-draging mangler
+  `'Files'` i `.types`, så en slik gate ville gjort DEL C sin «aldri stillhet»-regel til nettopp
+  stillhet for akkurat lenke-/webmail-tilfellet spec-en handler mest om (Kenneths hovedgrunn for å
+  ønske funksjonen). Løsningen ble enklere: siden ingenting annet i appen bruker native HTML5-
+  draging mot lerret eller etasjerad, holder det å sjekke at det ikke er en produkt-draging.
+
+**Testmetodikk:** floor-2-aktiv PDF-drop lander på etasje 2, ramme vises med riktig etasjenavn og
+forsvinner ved dragleave/vindu-forlating, produkt-draging fra katalogen uendret (ingen ramme,
+`dragWidth`-gate uberørt), slipp på «Etasje 2»-raden mens etasje 1 er aktiv aktiverer og importerer
+til etasje 2 uten å folde raden, tom-prosjekt-sonen fortsatt fungerer, lenke-/webmail-drag gir
+feilmelding i stedet for stillhet, ugyldig filtype (.txt) lister støttede typer, tre filer sluppet
+samtidig importerer bare den første. Full regresjonsbatteri grønt.
+
+**Fil:** index.html.
+
+---
+
 ## Snøsmelting: del sone så matta går opp, kile i trapp (DEL A-C) — 2026-09-11
 
 Kenneth, med Fjeldseth-tegningen (håndtegnet fasit) som mål: «for utendørs ønsker man gjerne å
