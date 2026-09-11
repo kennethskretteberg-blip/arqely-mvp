@@ -4,6 +4,53 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Varmetype på tegnet rom, husket kabelklasse, FERDIG nær hånda — 2026-09-11
+
+Kenneth: «jeg står i en innendørs tegning … her skal jeg bruke utendørs varmekabel … uten å måtte
+opprette et nytt utendørs prosjekt eller nytt plan?» + «jeg får ikke opp valget dupliser i det hele
+tatt.» + «velger 10W/m på kabeltype … så ønsker jeg at begge de valgene huskes … den står alltid på
+17T.» + «man må innom først bekreft … så må man gå helt opp og trykke ferdig.»
+
+- **`4fee68e`** — DEL A: ny `setRoomModuleType(roomId, v)` setter KUN `room.moduleType` — samme
+  felt/verdier `_listOnEnv` allerede setter for listerader (forrige runde), ikke et nytt begrep.
+  Har rommet produkter, spør først («Rommet har utlagte produkter som ikke finnes utendørs. Fjern
+  dem og bytt varmetype?») og tømmer+bytter kun ved bekreft; er rommet tomt, byttes det uten
+  dialog. `targetWm2` røres bevisst ikke — `_roomTargetWm2` leser allerede modulens `wm2Default`
+  (300/130) automatisk når feltet er null; har rommet en egen verdi, beholdes den og nevnes i
+  dialogen/en toast. Nytt delt fragment `_varmetypeCtxItems` (samme sel-mønster hindringsavstanden
+  fikk i `22fbe9e`) satt inn i BEGGE `roomCtxMenu` (sidepanel) OG `canvasRoomCtxMenu` (lerret).
+- Samme commit — fant roten til «jeg får ikke opp Dupliser»: `canvasRoomCtxMenu`, menyen som
+  faktisk åpnes når man høyreklikker et rom PÅ LERRETET (der Kenneth jobber mens han tegner), er en
+  helt annen funksjon enn `roomCtxMenu` (sidepanelets rad-meny, der Dupliser-valgene alltid har
+  ligget) — og hadde ingen dupliser- eller varmetype-mulighet i det hele tatt. Varmetype-bryteren
+  er derfor lagt til akkurat der, ikke bare der spec-en selv antok. Sidepanelets romikon viser nå ❄
+  for et utendørs rom i stedet for en tom ⬡.
+- Samme commit — DEL B: familien ble forvalgt fra PRODUKTREKKEFØLGEN hver gang et rom uten egne
+  produkter fikk produktpanelet åpnet, aldri fra hva som faktisk ble brukt sist. Ny
+  `_lastUsedKlasse(modType)` leser samme `_trackProductUsage`-signal som allerede fantes (kun brukt
+  til «Mest brukt»-merket før), finner blant `_upcScopeProducts` sitt allerede miljø-filtrerte
+  utvalg produktet med nyeste `lastUsed`, og gir det som forslag når produktpanelet åpnes for et
+  rom uten egne produkter, og når Kabel/Matte byttes midt i panelet. SIST brukt, ikke MEST brukt —
+  per (produkttype, innendørs/utendørs) helt gratis, siden `_upcScopeProducts` allerede skiller
+  miljø. `arqely_usage`-nøkkelen urørt.
+- Samme commit — DEL C: ny «✓ Bruk og ferdig»-knapp ved siden av «✓ Bruk» i både kabel- og
+  matte-forhåndsvisningens footer. Kaller `_confirmCablePreview`/`_confirmMatPreview` FØRST,
+  deretter `finishRoomWorkflow()` uendret — ingen ny avslutningsvei, riktig rekkefølge (bekreft før
+  avslutt, ellers forsvinner utlegget).
+
+**Testmetodikk:** tomt rom byttet til utendørs uten dialog, produktpanelet viser InSnow/300 W/m²
+automatisk, rom med InFloor-kabel gir bekreft-dialog (avbryt bevarer, bekreft tømmer+bytter), egen
+`targetWm2` beholdes og varsles, samme rom/etasje/del gjennom hele bytte-syklusen, ❄-ikon i
+sidepanelet, lagre/åpne beholder `moduleType`, listerader upåvirket. InFloor 10T valgt i ett rom
+foreslås i neste, uavhengig av matte-/utendørs-valg i andre rom; ingen lagret historikk faller
+tilbake til dagens oppførsel. Ekte DOM-klikk på «✓ Bruk og ferdig» committer og lukker
+arbeidsflyten i ett klikk; «✓ Bruk» alene uendret. Fullt regresjonsbatteri
+(mat/matZone/matFree/cableSkew/foil) grønt.
+
+**Fil:** index.html.
+
+---
+
 ## Hurtigprosjektering: utendørs produkter (InSnow) + klasse huskes nå — 2026-09-11
 
 Kenneth: «jeg ønsker å kunne velge InSnow 30T 230V-kablene i listefunksjonen … i dette tilfellet er
