@@ -4,6 +4,54 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Mattebenk: N syntetiske rom, alle inngangspunkter, poeng og historikk — 2026-09-12
+
+Kenneth (19.08.2026): «Er det mulig å lage x antall syntetiske rom og kjøre en fast test med
+intervall? Kan man på den måten se hvilken motor/regel som vinner?» 4f8aa87 (03.09) beviste at dette
+virker (864 rom/37 % avvik forkastet, 4400 rom/0 avvik committet) — men målingen ble aldri stående i
+koden. Denne runden gjør fasiten til et tall.
+
+- **`7724f5f`** — delt katalogbygger (`_matBenchCatalog`) trukket ut av `_matRegressionTest` og
+  `_matZoneRegressionTest` sine nesten identiske arealsveip-kataloger (spennet, 1-30 m² mot maks
+  15 m², er fortsatt bevisst ulikt — kun byggeren er delt). To engine-utvidelser med `opts.dryRun`,
+  ingen endret virkemåte uten flagget: `_packSnowMats` (var den eneste av de fire mattevegene uten
+  dryRun) og `_matFillRoomSmart` (sone-/flermatte-grenen endte FØR alltid i et interaktivt
+  forslagspanel — umulig å måle uten DOM-klikk per rom; returnerer nå samme beregning panelet ville
+  vist, med samme «like»-forvalg).
+- Samme commit — seedet romgenerator (`_matBenchRooms`, mulberry32, aldri `Math.random()`) dekker
+  rektangler/L/T/U/hindring/smale/store/grensetilfeller. De navngitte fasit-rommene
+  (1110/1105/1102/1108 + nye 2102/2104/Obs Bygg) er alltid med, aldri generert. Fire vei-løpere
+  kjører UPC-auto, «Fyll rom», InSnow og en syntetisk frihånds-bane i dryRun. To reelle bugs funnet
+  og rettet UNDERVEIS i benkens egne antakelser (ikke i selve motoren): frihånds-banen gikk rett
+  gjennom bunnveggen for loddrette rom (`_matFreeStartFor` forankrer alltid i nedre-venstre hjørne),
+  og Regel 13 (overskuddsrull ≤ ett kuttintervall) ble feilaktig håndhevet også for rom hvor formen
+  faktisk klipper en bredde kortere — en allerede akseptert oppførsel for uregelmessige rom.
+- Samme commit — poengsummen (`_MAT_BENCH_WEIGHTS`, én navngitt konstant): cc-avvik (Regel 21) >
+  dekningsgrad (f2dc648) > breddespredning (Regel 6) > margin-symmetri/antall/spill — aldri
+  `_statsAtLeastAsGood` sitt prosentpoeng-bånd-mønster. Det uavklarte Regel 9/20-spørsmålet kjøres
+  med begge (via `S.varmematte.fromWall`) og legges fram som egen rapport, ikke gjettet. Tre
+  `console.table`-rapporter, JSONL-historikk i localStorage med diff mot forrige kjøring og en
+  flipp-teller — verifisert direkte mot en syntetisk 5→4→5→4-pendling. Autokjøring ved lasting i
+  utviklingsmodus (`_IS_DEV_HOST`), kun diff i konsollen.
+- **Ærlig funn, ikke gjettet bort:** DoD ba om at «rom 2104 viser målbart at vei 2 slår vei 1».
+  Kildelesing viser at UPC-auto siden `c4f4429` kaller PRESIS samme `_matFillRoomSmart`-funksjon
+  som «Fyll rom» selv er — vei 1 og vei 2 er derfor i dag samme kall, og benken viser dem (riktig)
+  som identiske for 2104. Beviser at ruting-fiksen fra `c4f4429` holder, ikke at benken bommer.
+  zoneRect-avviket (kommentaren over `_matZoneRegressionTest`) reprodusert som egne rader for
+  genererte L/T/U-rom — samme sone i sone-kontekst mot frittstående gir reelt forskjellig dekning,
+  akkurat som dokumentert. Ikke fikset, kun vist.
+
+**Testmetodikk:** alle fem eksisterende regresjonstester består uendret; 1110/1105 gir bit-for-bit
+samme utlegg i benken som i sine egne fasit-tester; samme seed gir identisk resultat (eksklusiv
+ms-kolonnen); `_matBench` endrer intet i S/HEATING_PRODUCTS/`_matFree` (full try/finally-
+gjenoppretting); 100 rom × 4 veier kjører på ~150ms; andre kjøring med identisk seed rapporterer
+«ingen endring»; autokjøring ved lasting bekreftet (historikk skrevet ~4s etter sideåpning uten
+bypass).
+
+**Fil:** index.html.
+
+---
+
 ## Varmetype på tegnet rom, husket kabelklasse, FERDIG nær hånda — 2026-09-11
 
 Kenneth: «jeg står i en innendørs tegning … her skal jeg bruke utendørs varmekabel … uten å måtte
