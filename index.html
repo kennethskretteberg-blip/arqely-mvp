@@ -7775,6 +7775,120 @@ function _matEqualWidthNL(totalLengthCm, cutCm, maxRuns, alongSpanCm, minLenCm) 
   return best;
 }
 
+// spec-matte-hele-per-sone.md (Kenneth 11.09.2026) DEL A: «Del så matta går opp» — kjører
+// _matEqualWidthNL sitt regnestykke BAKLENGS. Motoren løser allerede «gitt et rektangel
+// (alongSpanCm), finn riktig (N,L)» (rett over). Det NYE her: gitt akkurat samme (N,L) og mattens
+// EGEN fysiske bredde, hvor høyt (på tvers-aksen) må ÉTT bånd være for at N bredder skal dekke det
+// UTEN rest (N × matWidthCm + (N-1) × påkrevd mellomrom), og hvor mange slike bånd som får plass i
+// sonens fulle tverr-utstrekning. `zoneOrRoom` er alltid bare {points, direction?} — en ekte
+// S.zones-sone ELLER selve rommet før noen deling (samme «room-likt objekt»-konvensjon
+// _matZoneUsableRoom/_matAreaGeom allerede bruker andre steder).
+//
+// NB (dokumentert forenkling, IKKE en glipp): bruker ÉN uniform produktmargin rundt HELE den
+// valgte sonen — ikke Regel 20 sin kant-for-kant nullmargin mot en NABOsone (den er skrevet for
+// akseparallelle rektangler fra _decomposeRoomToRects, ikke en generell _splitPolygonByChord-
+// polygon). Utendørs mattprodukter har uansett normalt min_wall_margin_mm=0 (samme grunn som
+// autoFillMatSerpentine/_packSnowMats aldri trenger en egen «ingen vegger ute»-gren — det ligger i
+// PRODUKTETS eget felt), så dette er i praksis et null-problem for selve snøsmelte-bruken.
+// En SONE har allerede sin egen faste retning (zone.direction, valgt av brukeren — respekteres
+// uendret). Et RÅTT rom (ikke delt ennå) har INGEN slik retning, og _matAreaGeom sin egen auto-
+// retning er en GENERISK dekning-heuristikk som ikke vet noe om «går matta opp uten rest» — den
+// valgte 'v' for et 638×459-testtilfelle der 'h' var den eneste retningen som faktisk ga Fjeldseth-
+// tegningens egen løsning, og delelinjen endte på feil akse (bekreftet ved testing, se commit-
+// meldingen). Prøv derfor BEGGE retninger for et rom uten fast retning, og velg den som faktisk
+// gir best resultat etter SAMME kriterium som selve N-valget (mest dekket tverr-areal, minst N ved
+// likt) — retningsvalget skal tjene «matta går opp», ikke en generisk dekningsgjetning.
+function _matWholeBandPlan(zoneOrRoom, prod) {
+  if (!zoneOrRoom || !zoneOrRoom.points || zoneOrRoom.points.length < 3 || !prod) return null;
+  if (zoneOrRoom.direction !== 'h' && zoneOrRoom.direction !== 'v') {
+    const ph = _matWholeBandPlanForDir(zoneOrRoom, prod, 'h');
+    const pv = _matWholeBandPlanForDir(zoneOrRoom, prod, 'v');
+    if (ph.ok && pv.ok) return ph.usedCm > pv.usedCm + 0.01 ? ph : (pv.usedCm > ph.usedCm + 0.01 ? pv : (ph.N <= pv.N ? ph : pv));
+    return ph.ok ? ph : (pv.ok ? pv : ph); // ingen går opp i noen retning: rapporter 'h' sin feil (vilkårlig, men konsekvent)
+  }
+  return _matWholeBandPlanForDir(zoneOrRoom, prod, zoneOrRoom.direction);
+}
+
+function _matWholeBandPlanForDir(zoneOrRoom, prod, forcedDir) {
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const marginCm = (prod.min_wall_margin_mm || 0) / 10;
+  const gapCm = _matResolveGapCm(prod);
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const minMandatoryGapCm = _matProductMinGapCm(prod);
+  const geom = _matAreaGeom(zoneOrRoom, { matWidthCm, cutCm, minLenCm, marginCm, gapCm, userDir: forcedDir, minMandatoryGapCm });
+  if (!geom || geom.alongSpan < minLenCm || geom.acrossSpan < matWidthCm) return { ok: false, prod, reason: 'geom' };
+
+  const totalLenCm = (_matTotalLengthMm(prod) || 0) / 10;
+  if (!(totalLenCm > 0) || !(cutCm > 0)) return { ok: false, prod, geom, reason: 'geom' };
+  const totalUnits = Math.round(totalLenCm / cutCm);
+  if (Math.abs(totalUnits * cutCm - totalLenCm) > 0.05) return { ok: false, prod, geom, reason: 'along' }; // rullen går ikke opp i hele kuttenheter i det hele tatt, uansett N
+
+  // IKKE _matEqualWidthNL direkte: den løser et ANNET problem (gitt en FAST tverr-høyde, finn N som
+  // gir mest dekning — der er «flest bredder ved lik dekning» riktig tie-break, siden bredden uansett
+  // allerede får plass DER). Her er N det som DEFINERER båndets høyde (N × matWidthCm + gap) — flere
+  // bredder gjør båndet HØYERE, ikke bredere, og det motsatte tie-break-valget (prøvd først, se
+  // testnotatene i commit-meldingen) forkastet gang på gang ethvert N som faktisk ga et bånd i
+  // menneskelig størrelse. Verifisert direkte mot Fjeldseth-tegningen (felt 1: 638×459cm): N=2 og
+  // N=4 dekker NØYAKTIG likt (400 av 459 cm, 59 til overs) — N=2 gir to 200cm-bånd (Kenneths egen
+  // løsning, «en matte tur/retur» — den ENKLEST mulige serpentinen, gjentatt), N=4 ett enkelt
+  // 400cm-bånd med dobbelt så mange bredder i samme matte. Riktig kriterium: blant alle N der matta
+  // går opp UTEN rest langs banelengden, velg båndet som dekker MEST av sonens tverr-utstrekning —
+  // ved likt dekket areal, MINST N (enklest matte, gjentas i stedet for å vokse i bredde-antall).
+  const MAX_RUNS_CAP = 12; // sjenerøst tak, samme størrelsesorden som andre «antall»-tak i mattemotoren
+  let best = null;
+  for (let N = 1; N <= MAX_RUNS_CAP; N++) {
+    if (totalUnits % N !== 0) continue;
+    const L = (totalUnits / N) * cutCm;
+    if (L > geom.alongSpan + 0.01 || L < minLenCm - 0.01) continue;
+    const bandHeightCm = N * matWidthCm + (N - 1) * minMandatoryGapCm;
+    const nBands = Math.floor((geom.acrossSpan + 0.05) / bandHeightCm);
+    if (nBands < 1) continue;
+    const usedCm = nBands * bandHeightCm;
+    if (!best || usedCm > best.usedCm + 0.01
+        || (Math.abs(usedCm - best.usedCm) <= 0.01 && N < best.N)) {
+      best = { N, L, bandHeightCm, nBands, usedCm };
+    }
+  }
+  if (!best) return { ok: false, prod, geom, reason: 'across' }; // matta går opp i lengden for et par N, men ETT bånd av dem er alltid høyere enn sonen
+
+  const leftoverCm = geom.acrossSpan - best.usedCm;
+  return { ok: true, prod, geom, N: best.N, L: best.L, matWidthCm, bandHeightCm: best.bandHeightCm, nBands: best.nBands, usedCm: best.usedCm, leftoverCm, minMandatoryGapCm, totalLenCm };
+}
+
+// DEL A Krav 2/4: «Vis andre matter» + nærmeste alternativ når INGEN matte går opp. Prøver alle
+// varianter i samme familie+bredde, EN _matWholeBandPlan per variant. For varianter der rullen ikke
+// går opp langs banelengden i det hele tatt (reason:'along' — _matEqualWidthNL fant ingen eksakt
+// (N,L)), regner en enkel, tydelig merket beste-forsøk («nearFit») for å kunne vise en faktisk
+// rest på RULLEN i stedet for å late som varianten ikke finnes.
+function _matWholeBandFamilyOptions(zoneOrRoom, refProd) {
+  const fam = refProd.product_family;
+  const widthMm = refProd.mat_width_mm;
+  const variants = HEATING_PRODUCTS.filter(p => p.active !== false && p.mat_width_mm === widthMm
+    && (fam ? p.product_family === fam : p.name === refProd.name) && _matTotalLengthMm(p));
+  const withPlans = variants.map(p => {
+    const plan = _matWholeBandPlan(zoneOrRoom, p);
+    if (plan && !plan.ok && plan.reason === 'along' && plan.geom) {
+      // Enkelt beste-forsøk (IKKE Regel E — ingen eksakt (N,L) finnes): størst N som gir minst
+      // spill på selve rullen, brukt kun til visning av «faktisk rest», aldri til utlegg.
+      const cutCm = (p.mat_cut_interval_mm || 160) / 10;
+      const totalLenCm = (_matTotalLengthMm(p) || 0) / 10;
+      const minLenCm = (p.mat_min_length_mm || 1000) / 10;
+      let bestNear = null;
+      for (let N = 12; N >= 1; N--) {
+        const L = cutCm > 0 ? Math.floor((totalLenCm / N) / cutCm) * cutCm : totalLenCm / N;
+        if (L > plan.geom.alongSpan + 0.01 || L < minLenCm - 0.01) continue;
+        const restCm = totalLenCm - N * L;
+        if (!bestNear || restCm < bestNear.restCm - 0.01) bestNear = { N, L, restCm };
+      }
+      plan.nearFit = bestNear;
+    }
+    return { prod: p, plan };
+  });
+  withPlans.sort((a, b) => (_matTotalLengthMm(a.prod) || 0) - (_matTotalLengthMm(b.prod) || 0));
+  return withPlans;
+}
+
 // spec-matte-kabel-i-skjoten-halv-cc-like-bredder.md DEL D, Krav 1: SØSTERFUNKSJON til
 // _matEqualWidthNL (Regel E, LÅST, kun automatisk utlegg — IKKE endret her). Brukes KUN av
 // frihånds «Sentrer»-jevning: godtar en kort SISTE bredde (Regel E krever EKSAKT N×L===total —
@@ -7964,7 +8078,7 @@ function _matRoomGeomForFill(room, prod) {
   return _matAreaGeom(room, {
     matWidthCm: (prod.mat_width_mm || 500) / 10,
     cutCm: (prod.mat_cut_interval_mm || 160) / 10,
-    marginCm: (prod.min_wall_margin_mm || 50) / 10,
+    marginCm: (prod.min_wall_margin_mm ?? 50) / 10,
     gapCm: _matResolveGapCm(prod),   // REGEL 9: null → produktets CC-baserte standard
     minLenCm: (prod.mat_min_length_mm || 1000) / 10,
     minMandatoryGapCm: _matProductMinGapCm(prod),   // REGEL 18: 0 for EcoMat, 5cm for InSnow
@@ -8206,7 +8320,7 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
 function _matZonePlanFor(room, rect, prod) {
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
-  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
   const gapCm = _matResolveGapCm(prod);
   const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
   const minMandatoryGapCm = _matProductMinGapCm(prod);
@@ -8756,7 +8870,12 @@ function autoFillMatSerpentine(productId, opts) {
 
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
-  const marginCm = (prod.min_wall_margin_mm || 50) / 10;
+  // ?? ikke || (funnet ved «Del så matta går opp», spec-matte-hele-per-sone.md, 11.09.2026): ALLE
+  // utendørs mattprodukter setter min_wall_margin_mm=0 EKSPLISITT («ingen vegger ute» — se
+  // _matAreaGeom sin egen kommentar) — 0 || 50 blir likevel 50 (0 er falsy i JS), så ethvert
+  // utendørs produkt fikk stille en uønsket 5cm veggmargin, ikke den tiltenkte 0. Slo først ut som
+  // et feil antall bredder (maxRuns falt med én) for en sone hvis ene kant var rommets EKTE vegg.
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
   // REGEL 9 (spec-matte-utlegg.md, Kenneth 19.08.2026): brukerens mellomrom (0–MAT_GAP_MAX_CM cm,
   // eksplisitt tall) ELLER produktets CC-baserte standard (ingen eksplisitt valg ennå) — se
   // _matResolveGapCm/_matDefaultGapCm. Ikke lenger en inngangsverdi som spiser plass i maxRuns
@@ -11022,7 +11141,7 @@ function _autoFillPlates(productId) {
 
   const wCm = (prod.plate_width_mm || 600) / 10;
   const lCm = (prod.plate_length_mm || 1200) / 10;
-  const margin = (prod.min_wall_margin_mm || 50) / 10;
+  const margin = (prod.min_wall_margin_mm ?? 50) / 10;
 
   // Room bounding box
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
@@ -23784,6 +23903,7 @@ function drawZones() {
   }
 
   _drawZoneSplitPreview();
+  _drawMatWholeBandPreview();
 }
 
 function _zoneBBox(zone) {
@@ -24133,7 +24253,16 @@ function cancelZoneSplit(){
 
 // Perform a split from two raw click points. Splits the existing sone the line crosses,
 // else the whole room (first split). Both new parts become named 'sone' zones.
-function _performZoneSplit(roomId, rawA, rawB){
+// opts.skipPushUndo (spec-matte-hele-per-sone.md, Kenneth 11.09.2026): «Del så matta går opp»
+// (DEL A) kaller denne FLERE ganger på rad for å bygge N bånd — uten en delt undo-mekanisme (samme
+// mønster som autoFillMatSerpentine/_matPlaceMultiMats sin opts.skipPushUndo) ville hvert kutt fått
+// sitt EGET angre-steg, og «Angre» én gang ville bare gitt tilbake det SISTE kuttet, ikke hele
+// operasjonen. Alle eksisterende kallere er urørt (opts utelatt => samme atferd som før).
+// Returnerer nå de OPPRETTEDE sonene (array) på suksess i stedet for bare `true` — DEL A trenger
+// hvert bånds polygon for å plassere matta i det etterpå. Fortsatt falsy (`false`) på feil, så
+// «if (!_performZoneSplit(...))»-mønsteret hos eksisterende (ingen finnes i dag) ville fortsatt virke.
+function _performZoneSplit(roomId, rawA, rawB, opts){
+  opts = opts || {};
   const room=S.rooms.find(r=>r.id===roomId); if(!room) return false;
   const sones=_sonesForRoom(roomId);
   const mid={x:(rawA.x+rawB.x)/2,y:(rawA.y+rawB.y)/2};
@@ -24144,10 +24273,10 @@ function _performZoneSplit(roomId, rawA, rawB){
   const a=_nearestPtOnPolyBoundary(rawA, basePoly), b=_nearestPtOnPolyBoundary(rawB, basePoly);
   const halves=_splitPolygonByChord(basePoly, a, b);
   if(!halves || halves.some(h=>Math.abs(compArea(h))<50)){
-    alert('Klarte ikke å dele langs den linjen. Tegn en rett linje fra én vegg til en annen.');
+    if(!opts.silentFail) alert('Klarte ikke å dele langs den linjen. Tegn en rett linje fra én vegg til en annen.');
     return false;
   }
-  pushUndo();
+  if(!opts.skipPushUndo) pushUndo();
   if(replaceId) S.zones=S.zones.filter(z=>z.id!==replaceId);
   const dir = baseDir || _suggestDirection({points:basePoly}) || 'h';
   let base=_nextSoneBaseNum(roomId);
@@ -24158,9 +24287,8 @@ function _performZoneSplit(roomId, rawA, rawB){
     S.zones.push(z); created.push(z);
   }
   if(typeof _invalidateStripCache==='function') _invalidateStripCache();
-  selectZone(created[0].id);
-  renderSidebar();
-  return true;
+  if(!opts.skipSelect){ selectZone(created[0].id); renderSidebar(); }
+  return created;
 }
 
 // spec-soner-kabel-per-sone-og-N-deling.md DEL C: "del rommet opp i x antall soner, velg
@@ -24240,6 +24368,195 @@ function showAutoZoneSplitPicker(roomId){
   document.body.appendChild(modal);
   _autoZoneSplitRoomId=roomId;
   _autoZoneSplitRender();
+}
+
+// ─── DEL A (spec-matte-hele-per-sone.md, Kenneth 11.09.2026): «Del så matta går opp» ──────────
+// «Her har jeg på en måte delt opp en sone hvor jeg vet jeg får plass til en matte tur/retur.» —
+// _matWholeBandPlan (Regel E kjørt baklengs) foreslår NØYAKTIG den samme delingen, som stiplede
+// linjer oppå den valgte sonen/rommet. Godtar brukeren, kalles _performZoneSplit for HVER grense —
+// samme funksjon håndtegnet «Del i soner» bruker, INGEN ny sonetype. Hvert bånd fylles til slutt
+// med autoFillMatSerpentine(...,{zoneRect,exact:true}) — den eksisterende sone-utleggingsveien
+// _showMatZoneProposalPanel allerede bruker for én sone, ikke ny plasseringslogikk.
+let _mwbTargetType = null, _mwbTargetId = null, _mwbProductId = null, _mwbShowOthers = false;
+
+function _matWholeBandTargetObj() {
+  if (_mwbTargetType === 'zone') return S.zones.find(z => z.id === _mwbTargetId && z.type === 'sone');
+  if (_mwbTargetType === 'room') return S.rooms.find(r => r.id === _mwbTargetId);
+  return null;
+}
+
+// Trigget fra sone-ctxbaren («+ på en valgt sone») og rom-ctxbaren (rommet, når det ikke er delt
+// ennå) — kun i snø-modulen (_isSnowModule), se ctxbar-knappene. targetType: 'zone' | 'room'.
+function showMatWholeBandPanel(targetType, targetId) {
+  const target = targetType === 'zone'
+    ? S.zones.find(z => z.id === targetId && z.type === 'sone')
+    : S.rooms.find(r => r.id === targetId);
+  if (!target) return;
+  const cats = _filteredProductCategories().filter(c => c.module_type === 'mat');
+  let prods = HEATING_PRODUCTS.filter(p => p.active !== false && cats.some(c => c.id === p.category_id) && _matTotalLengthMm(p));
+  if (!prods.length) { _showToast('Ingen mattprodukter funnet for denne delen', 'warn'); return; }
+  _mwbTargetType = targetType; _mwbTargetId = targetId; _mwbShowOthers = false;
+  if (_mwbProductId == null || !prods.some(p => p.id === _mwbProductId)) {
+    // Forvalg: bredeste, så lengste — samme rekkefølge «anbefalt» bruker andre steder i mattemotoren.
+    prods = prods.slice().sort((a, b) => (b.mat_width_mm || 0) - (a.mat_width_mm || 0) || (_matTotalLengthMm(b) || 0) - (_matTotalLengthMm(a) || 0));
+    _mwbProductId = prods[0].id;
+  }
+  let panel = document.getElementById('mwb-panel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'mwb-panel';
+    panel.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:900;box-shadow:0 8px 32px rgba(0,0,0,0.35);width:380px;max-height:80vh;overflow-y:auto;font-size:13px;color:var(--text)';
+    document.body.appendChild(panel);
+  }
+  _mwbRender();
+}
+
+function _mwbSetProduct(id) { _mwbProductId = parseInt(id, 10); _mwbShowOthers = false; _mwbRender(); }
+function _mwbToggleOthers() { _mwbShowOthers = !_mwbShowOthers; _mwbRender(); }
+function _mwbCancel() {
+  const panel = document.getElementById('mwb-panel'); if (panel) panel.remove();
+  _mwbTargetType = null; _mwbTargetId = null; render();
+}
+
+const _mwb_cm1 = v => v == null ? '—' : (Math.round(v * 10) / 10).toLocaleString('nb-NO').replace('.', ',');
+const _mwb_m1 = cm => (Math.round(cm) / 100).toLocaleString('nb-NO', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+function _mwbPlanLine(plan) {
+  if (!plan) return '';
+  const p = plan.prod;
+  if (plan.ok) {
+    const restTxt = plan.leftoverCm > 0.5 ? ` (${_mwb_cm1(plan.leftoverCm)} cm til overs)` : '';
+    return `<b>${esc(p.name)}</b> → ${plan.N} baner à ${_mwb_m1(plan.L)} m · bånd ${_mwb_cm1(plan.bandHeightCm)} cm<br>
+      ${plan.nBands} hel${plan.nBands === 1 ? '' : 'e'} matte${plan.nBands === 1 ? '' : 'r'} → ${plan.nBands} bånd à ${_mwb_cm1(plan.bandHeightCm)} cm${restTxt}`;
+  }
+  if (plan.reason === 'across') {
+    return `<b>${esc(p.name)}</b> → ${plan.N} baner går opp, men ett bånd (${_mwb_cm1(plan.bandHeightCm)} cm) er høyere enn sonen (${_mwb_cm1(plan.geom.acrossSpan)} cm)`;
+  }
+  if (plan.reason === 'along' && plan.nearFit) {
+    return `<b>${esc(p.name)}</b> → går ikke opp uten rest. Nærmest: ${plan.nearFit.N} baner à ${_mwb_m1(plan.nearFit.L)} m, ${_mwb_cm1(plan.nearFit.restCm)} cm til overs på rullen`;
+  }
+  return `<b>${esc(p.name)}</b> → for smalt/kort for sonen`;
+}
+
+function _mwbRender() {
+  const panel = document.getElementById('mwb-panel'); if (!panel) return;
+  const target = _matWholeBandTargetObj();
+  if (!target) { _mwbCancel(); return; }
+  const cats = _filteredProductCategories().filter(c => c.module_type === 'mat');
+  const prods = HEATING_PRODUCTS.filter(p => p.active !== false && cats.some(c => c.id === p.category_id) && _matTotalLengthMm(p));
+  const prod = HEATING_PRODUCTS.find(p => p.id === _mwbProductId) || prods[0];
+  const plan = _matWholeBandPlan(target, prod);
+
+  const targetLabel = _mwbTargetType === 'zone' ? (target.name || 'Sone') : (target.name || 'Rommet');
+  const dimsLabel = plan && plan.geom ? `${_mwb_cm1(plan.geom.alongSpan)} × ${_mwb_cm1(plan.geom.acrossSpan)} cm` : '';
+
+  const famOpts = prods.map(p => `<option value="${p.id}"${p.id === prod.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+
+  let othersHtml = '';
+  if (_mwbShowOthers) {
+    const opts = _matWholeBandFamilyOptions(target, prod).filter(o => o.prod.id !== prod.id);
+    othersHtml = `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--brd);font-size:12px">
+      ${opts.length ? opts.map(o => `<div style="padding:4px 0">${_mwbPlanLine(o.plan)}</div>`).join('') : '<div style="color:var(--dim)">Ingen andre lengder i denne familien/bredden.</div>'}
+    </div>`;
+  }
+
+  let resultHtml, canApply = false;
+  if (plan && plan.ok) {
+    resultHtml = `<div style="padding:8px;background:var(--surface2);border-radius:6px;font-size:12px">${_mwbPlanLine(plan)}</div>`;
+    canApply = true;
+  } else if (plan) {
+    // DEL A Krav 4: si det rett ut, med nærmeste alternativ — aldri legg ut noe i stillhet.
+    const options = _matWholeBandFamilyOptions(target, prod);
+    const workable = options.find(o => o.plan && o.plan.ok);
+    const nearest = workable || options.filter(o => o.plan?.reason === 'along' && o.plan.nearFit)
+      .sort((a, b) => a.plan.nearFit.restCm - b.plan.nearFit.restCm)[0];
+    const nearestTxt = nearest ? ` Nærmest: ${_mwbPlanLine(nearest.plan)}` : '';
+    resultHtml = `<div style="padding:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:12px;color:#ef4444">
+      Ingen matte i denne familien går opp i ${dimsLabel || 'denne'} bredde.${nearestTxt}
+    </div>`;
+  } else {
+    resultHtml = `<div style="padding:8px;color:var(--dim);font-size:12px">Sonen er for liten for dette produktet.</div>`;
+  }
+
+  panel.innerHTML = `
+    <div style="font-weight:700;font-size:14px;margin-bottom:2px">Del så matta går opp</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(targetLabel)}${dimsLabel ? ' · ' + dimsLabel : ''}</div>
+    <div style="margin-bottom:8px">
+      <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:3px">Mattprodukt</label>
+      <select onchange="_mwbSetProduct(this.value)" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:12px">${famOpts}</select>
+    </div>
+    ${resultHtml}
+    ${othersHtml}
+    <div style="display:flex;gap:6px;margin-top:12px">
+      <button onclick="_mwbCancel()" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">Avbryt</button>
+      <button onclick="_mwbToggleOthers()" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">${_mwbShowOthers ? 'Skjul' : 'Vis'} andre matter</button>
+      ${canApply ? `<button onclick="_mwbApply()" style="flex:1;padding:8px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;font-size:12px">Del i ${plan.nBands} bånd</button>` : ''}
+    </div>`;
+
+  S.ui._mwbPreview = plan && plan.ok ? { target, plan } : null;
+  render();
+}
+
+// Bygger de rå (verden-koordinat) endepunktene for kutt nr. k (1-basert, k<nBands) — en linje på
+// tvers av HELE det opprinnelige mål-polygonets along-utstrekning, litt utenfor i begge ender slik
+// en ekte museklikk-tegnet linje ville vært (_nearestPtOnPolyBoundary i _performZoneSplit snapper
+// den inn på riktig kant uansett).
+function _mwbCutPoints(plan, k) {
+  const g = plan.geom;
+  const acrossCut = g.acrossMin + k * plan.bandHeightCm;
+  const pad = 50;
+  if (g.dir === 'h') return [{ x: g.alongMin - pad, y: acrossCut }, { x: g.alongMax + pad, y: acrossCut }];
+  return [{ x: acrossCut, y: g.alongMin - pad }, { x: acrossCut, y: g.alongMax + pad }];
+}
+
+function _mwbApply() {
+  const target = _matWholeBandTargetObj();
+  const plan = S.ui._mwbPreview?.plan;
+  if (!target || !plan || !plan.ok) return;
+  const roomId = _mwbTargetType === 'zone' ? target.roomId : target.id;
+  pushUndo();
+  S.ui._mwbPreview = null;
+  const panel = document.getElementById('mwb-panel'); if (panel) panel.remove();
+
+  // Del i plan.nBands bånd: plan.nBands-1 kutt, hver på den samme opprinnelige along-utstrekningen.
+  // Hvert kutt treffer den ENESTE gjenværende (ennå udelte) sonen fordi _performZoneSplit selv
+  // finner sonen midtpunktet til linjen ligger i (se funksjonens egen kommentar).
+  let ok = true;
+  for (let k = 1; k < plan.nBands && ok; k++) {
+    const [a, b] = _mwbCutPoints(plan, k);
+    const created = _performZoneSplit(roomId, a, b, { skipPushUndo: true, skipSelect: true, silentFail: true });
+    if (!created) ok = false;
+  }
+  if (!ok) { undo(); _showToast('Klarte ikke å dele sonen som forventet — prøvde ikke å legge ut matter', 'error'); render(); return; }
+
+  // Alle plan.nBands sonene finnes nå. De ligger i rekkefølge langs tvers-aksen fra sonens
+  // acrossMin — bygg zoneRect for hver ved å slå sammen ALLE sonepolygoner i roms(rommet) som
+  // ligger innenfor mål-polygonets opprinnelige along/across-boks (dvs. de nye + evt. uendrede
+  // naboer utenfor denne operasjonen påvirkes ikke, siden de aldri overlapper).
+  const bandSones = _sonesForRoom(roomId).filter(z => {
+    const cx = z.points.reduce((s, p) => s + (plan.geom.dir === 'h' ? p.y : p.x), 0) / z.points.length;
+    return cx >= plan.geom.acrossMin - 1 && cx <= plan.geom.acrossMin + plan.usedCm + Math.max(plan.leftoverCm, 0) + 1;
+  }).sort((za, zb) => {
+    const ca = za.points.reduce((s, p) => s + (plan.geom.dir === 'h' ? p.y : p.x), 0) / za.points.length;
+    const cb = zb.points.reduce((s, p) => s + (plan.geom.dir === 'h' ? p.y : p.x), 0) / zb.points.length;
+    return ca - cb;
+  });
+
+  let placed = 0;
+  for (const z of bandSones) {
+    const xs = z.points.map(p => p.x), ys = z.points.map(p => p.y);
+    const rect = { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+    const room = S.rooms.find(r => r.id === roomId);
+    const savedSel = S.ui.selectedRoomId;
+    S.ui.selectedRoomId = roomId; // autoFillMatSerpentine leser alltid det aktive rommet
+    const mat = autoFillMatSerpentine(plan.prod.id, { exact: true, zoneRect: rect, skipPushUndo: true, keepPanel: true });
+    S.ui.selectedRoomId = savedSel;
+    if (mat) { mat.zoneId = z.id; placed++; }
+  }
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  if (bandSones.length) selectZone(bandSones[0].id);
+  renderSidebar(); updateCtxBar(); render();
+  _showToast(placed ? `${placed} hele matte(r) lagt i ${bandSones.length} bånd` : 'Delte sonen, men fikk ikke lagt matter — legg dem til manuelt', placed ? 'ok' : 'warn');
 }
 
 function renameSone(zoneId){
@@ -24446,6 +24763,170 @@ function _fillSoneCable(zone, prod){
   _showToast(`Kabel lagt i ${zone.name}`, 'ok');
 }
 
+// ─── DEL C (spec-matte-hele-per-sone.md, Kenneth 11.09.2026): kilen — smale matter i trapp ──────
+// «egen sone, men med 50 cm brede matter for å få minst mulig kalde felter, slik som varmefolie
+// gjør mot skråvegger.» Gjenbruker MØNSTERET og BEGRUNNELSEN fra _slantStaircaseFill (folie,
+// _slantStaircaseFill-kommentaren over den funksjonen) — IKKE koden: den er skrevet for folie-
+// striper (egen datamodell, egen klipping via computeClippedSegments, roterer aldri, har en egen
+// «kjernebånd»-ombygging for resten av rommet). En kile-SONE er normalt HELE seg selv skrå — det
+// finnes intet rett kjernebånd å bygge om, bare selve trappa. Samme avveining likevel, ordrett fra
+// kommentaren der: «The clean staircase is preferred on BOTH sides even when a flat wide strip
+// would cover marginally more raw area — that flat cut is exactly what the user rejects.»
+//
+// Deteksjon av skrå kant: _roomHasSlantedWall (:12472) leser kun `.points` — den trenger ikke vite
+// om polygonet er et rom eller en sone. Kalles derfor DIREKTE på zone-objektet (spec sitt eget
+// spørsmål — «sjekk om den kan brukes på en sone-polygon» — svaret er ja, urørt).
+
+// Smaleste mattevariantene (≤60cm netto) i SAMME familie/kategori som referanseproduktet — mirrors
+// _narrowEdgeFillProducts (folie), bredest først (finere bredde brukes nærmest spissen der en
+// bredere ikke lenger får plass, se _matBuildNarrowStaircase).
+function _matNarrowFillProducts(refProd) {
+  if (!refProd) return [];
+  const fam = refProd.product_family;
+  const pool = HEATING_PRODUCTS.filter(p => p.active !== false && p.category_id === refProd.category_id
+    && _matTotalLengthMm(p) && (fam ? p.product_family === fam : p.name === refProd.name));
+  const seen = new Set(), out = [];
+  pool.map(p => ({ id: p.id, nc: (p.mat_width_mm || 0) / 10 }))
+    .filter(w => w.nc > 0 && w.nc <= 60.01)
+    .sort((a, b) => b.nc - a.nc)
+    .forEach(w => { const k = Math.round(w.nc * 100); if (!seen.has(k)) { seen.add(k); out.push(w); } });
+  return out;
+}
+
+// Bygger en trapp av smale matter over hele [zLo,zHi] langs perp-aksen i et allerede sone-formet
+// midlertidig rom (tempRoomId — se _matFillWedgeZone). Mirrors _buildNarrowStaircase (folie): ved
+// hver cursor-posisjon prøves hver smal bredde, den som DEKKER MEST der (klippet lengde × bredde)
+// committes, cursor rykker fram med akkurat bredde + påkrevd mellomrom. Hvert trappetrinn blir sin
+// EGEN, uavhengige matte (num_runs:1, ikke en jevn-bredde-rull som Regel E krever for automatisk
+// utlegg for øvrig) — en trapp har per definisjon AVTAGENDE lengde mot spissen, aldri like bredder.
+function _matBuildNarrowStaircase(tempRoomId, direction, zLo, zHi, narrow) {
+  const MIN_LEN = 30; // ingen støv — hopp over trinn kortere enn 30cm
+  const smallestNc = narrow[narrow.length - 1].nc;
+  const gapCm = Math.max(...narrow.map(nw => _matProductMinGapCm(HEATING_PRODUCTS.find(p => p.id === nw.id))));
+  // Kuttgranularitet PER produkt — mat_cut_interval_mm når satt, ellers det finere mat_length_step_mm
+  // (samme felt SOM regelen andre steder i mattemotoren bruker for hvor fint en kabel kan avkortes),
+  // ellers en trygg 10mm-fallback. Rundes NED (aldri opp — det kunne stukket ut over den klippede
+  // grensen), ellers ville en råklippet lengde som «236,46446609406723 cm» blitt sendt rett i S.mats.
+  const cutCmOf = id => { const p = HEATING_PRODUCTS.find(pp => pp.id === id); return ((p && (p.mat_cut_interval_mm || p.mat_length_step_mm)) || 10) / 10; };
+  const steps = [];
+  let cursor = zLo, guard = 0;
+  while (cursor + smallestNc <= zHi + 0.01 && guard++ < 500) {
+    let best = null;
+    for (const nw of narrow) {
+      if (cursor + nw.nc > zHi + 0.01) continue;
+      const segs = _matClippedSegments(tempRoomId, direction, cursor, nw.nc, 0, 0);
+      const seg = segs.reduce((a, b) => (b.length_cm > (a ? a.length_cm : 0) ? b : a), null);
+      if (!seg) continue;
+      const cutCm = cutCmOf(nw.id);
+      const roundedLen = cutCm > 0 ? Math.floor(seg.length_cm / cutCm) * cutCm : seg.length_cm;
+      if (roundedLen >= MIN_LEN) {
+        const area = roundedLen * nw.nc;
+        if (!best || area > best.area + 0.01) best = { nc: nw.nc, id: nw.id, start_cm: seg.start_cm, length_cm: roundedLen };
+      }
+    }
+    if (best) {
+      steps.push({ pos_cm: cursor, ncCm: best.nc, productId: best.id, start_cm: best.start_cm, length_cm: best.length_cm });
+      cursor += best.nc + gapCm; // ett mellomrom fram til neste trinn
+    } else {
+      cursor += smallestNc; // ingenting gikk opp her → kort steg videre
+    }
+  }
+  return steps;
+}
+
+// Fyller en KILE-formet sone (skrå kant) med en trapp av smale matter i stedet for den vanlige
+// hele-matte-utleggingen — kalt fra sone-ctxbaren når _roomHasSlantedWall(zone) er sann. Frihånd
+// (S.matPaths) er URØRT av dette — automatikken her er ett forslag blant flere, ikke enerett.
+function _matFillWedgeZone(zone, refProd) {
+  if (!zone || zone.type !== 'sone' || !refProd) return 0;
+  const room = S.rooms.find(r => r.id === zone.roomId); if (!room) return 0;
+  const narrow = _matNarrowFillProducts(refProd);
+  if (!narrow.length) { _showToast('Fant ingen smale (≤60cm) matter i denne familien', 'warn'); return 0; }
+  const tmp = _soneTempRoom(zone, room, refProd.id);
+  if (!tmp) { _showToast('Sonen er for liten for matte', 'warn'); return 0; }
+  const TID = tmp.id;
+  // dir beregnes ÉN gang, FØR try-blokken — brukt både til å bygge trappa OG (etterpå) til å
+  // tolke stegenes pos_cm/start_cm riktig når matte-objektene lages. To separate utregninger her
+  // kunne i prinsippet gitt ulikt svar (samme fallende-antakelse-feil unngått andre steder i filen).
+  const dir = zone.direction || _suggestDirection(tmp) || 'h';
+  S.rooms = S.rooms.filter(r => r.id !== TID); S.rooms.push(tmp);
+  let steps = [];
+  try {
+    const perp = p => dir === 'v' ? p.x : p.y;
+    const perpVals = tmp.points.map(perp);
+    const zLo = Math.min(...perpVals), zHi = Math.max(...perpVals);
+    steps = _matBuildNarrowStaircase(TID, dir, zLo, zHi, narrow);
+  } finally { S.rooms = S.rooms.filter(r => r.id !== TID); }
+  if (!steps.length) { _showToast('Fikk ikke lagt noen matter i kilen', 'warn'); return 0; }
+
+  pushUndo();
+  S.mats = S.mats.filter(m => m.zoneId !== zone.id); // erstatt et evt. tidligere forsøk i denne sonen
+  for (const st of steps) {
+    const mat = {
+      id: S.counters.nextMatId++, roomId: room.id, zoneId: zone.id, productId: st.productId,
+      x_cm: dir === 'v' ? st.pos_cm : st.start_cm,
+      y_cm: dir === 'v' ? st.start_cm : st.pos_cm,
+      width_cm: st.ncCm, length_cm: st.length_cm, num_runs: 1,
+      rotation_deg: dir === 'h' ? 90 : 0, gap_cm: 0, last_run_length_cm: null, runLengths: null, runStarts: null,
+    };
+    S.mats.push(mat);
+  }
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  if (typeof _trackProductUsage === 'function') _trackProductUsage(refProd.id);
+  renderSidebar(); updateCtxBar(); render();
+  _showToast(`${steps.length} smale matter lagt i trapp i ${zone.name}`, 'ok');
+  return steps.length;
+}
+
+let _mwzZoneId = null, _mwzProductId = null;
+// Liten produktvelger for DEL C — bevisst enklere enn showMatWholeBandPanel: en trapp har ingen
+// enkelt (N,L) å forhåndsvise (avtagende lengde per trinn, se _matBuildNarrowStaircase), så panelet
+// viser familie-valg + antall smale bredder tilgjengelig, ikke et regnestykke.
+function showMatWedgePanel(zoneId) {
+  const zone = S.zones.find(z => z.id === zoneId && z.type === 'sone'); if (!zone) return;
+  const cats = _filteredProductCategories().filter(c => c.module_type === 'mat');
+  let prods = HEATING_PRODUCTS.filter(p => p.active !== false && cats.some(c => c.id === p.category_id) && _matTotalLengthMm(p));
+  if (!prods.length) { _showToast('Ingen mattprodukter funnet', 'warn'); return; }
+  _mwzZoneId = zoneId;
+  if (_mwzProductId == null || !prods.some(p => p.id === _mwzProductId)) {
+    prods = prods.slice().sort((a, b) => (b.mat_width_mm || 0) - (a.mat_width_mm || 0) || (_matTotalLengthMm(b) || 0) - (_matTotalLengthMm(a) || 0));
+    _mwzProductId = prods[0].id;
+  }
+  let panel = document.getElementById('mwz-panel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'mwz-panel';
+    panel.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:900;box-shadow:0 8px 32px rgba(0,0,0,0.35);width:340px;font-size:13px;color:var(--text)';
+    document.body.appendChild(panel);
+  }
+  _mwzRender();
+}
+function _mwzSetProduct(id) { _mwzProductId = parseInt(id, 10); _mwzRender(); }
+function _mwzCancel() { const p = document.getElementById('mwz-panel'); if (p) p.remove(); _mwzZoneId = null; }
+function _mwzRender() {
+  const panel = document.getElementById('mwz-panel'); if (!panel) return;
+  const zone = S.zones.find(z => z.id === _mwzZoneId); if (!zone) { _mwzCancel(); return; }
+  const cats = _filteredProductCategories().filter(c => c.module_type === 'mat');
+  const prods = HEATING_PRODUCTS.filter(p => p.active !== false && cats.some(c => c.id === p.category_id) && _matTotalLengthMm(p));
+  const prod = HEATING_PRODUCTS.find(p => p.id === _mwzProductId) || prods[0];
+  const narrow = _matNarrowFillProducts(prod);
+  const opts = prods.map(p => `<option value="${p.id}"${p.id === prod.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  panel.innerHTML = `
+    <div style="font-weight:700;font-size:14px;margin-bottom:2px">Fyll kilen med en trapp</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(zone.name || 'Sone')} — skrå kant funnet</div>
+    <div style="margin-bottom:8px">
+      <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:3px">Mattfamilie</label>
+      <select onchange="_mwzSetProduct(this.value)" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);font-size:12px">${opts}</select>
+    </div>
+    <div style="padding:8px;background:var(--surface2);border-radius:6px;font-size:12px">
+      ${narrow.length ? `Smale bredder tilgjengelig: ${narrow.map(n => n.nc + ' cm').join(', ')} — lagt i avtagende trapp mot spissen.` : `<span style="color:#ef4444">Ingen bredder ≤60cm i denne familien.</span>`}
+    </div>
+    <div style="display:flex;gap:6px;margin-top:12px">
+      <button onclick="_mwzCancel()" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">Avbryt</button>
+      <button ${narrow.length ? '' : 'disabled'} onclick="_matFillWedgeZone(S.zones.find(z=>z.id===${zone.id}), HEATING_PRODUCTS.find(p=>p.id===${prod.id})); _mwzCancel();" style="flex:1;padding:8px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;font-size:12px">Fyll kilen</button>
+    </div>`;
+}
+
 // «+ Produkt» from a sone ctxbar → open the product picker targeting this sone.
 function _openSoneProdukt(e, zoneId){
   const z=S.zones.find(z=>z.id===zoneId); if(!z) return;
@@ -24464,7 +24945,71 @@ function _drawZoneSplitPreview(){
     const a=w2s(pts[0].x,pts[0].y);
     ctx.beginPath(); ctx.arc(a.x,a.y,4,0,Math.PI*2); ctx.fill();
     const mp=S.drawing.mousePos;
-    if(mp){ const m=w2s(mp.x,mp.y); ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(m.x,m.y); ctx.stroke(); }
+    if(mp){
+      const m=w2s(mp.x,mp.y);
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(m.x,m.y); ctx.stroke();
+      _drawZoneSplitMatReadout(pts[0], mp, m);
+    }
+  }
+  ctx.restore();
+}
+
+// DEL B (spec-matte-hele-per-sone.md, Kenneth 11.09.2026): «levende avlesning mens delelinja
+// tegnes» — REN visning, ingen snapping (Kenneth: «han vet ting om belegget appen ikke vet»). Viser
+// hva de to resulterende delene gir for MATTA SOM ALLEREDE LIGGER i sonen/rommet som deles (samme
+// produkt — DEL B er en avlesning på en eksisterende deling, ikke et nytt produktvalg; det er DEL A
+// sin jobb). Gjenbruker _matWholeBandPlan uendret på hver av de to halvdelene _splitPolygonByChord
+// ville gitt — samme regnestykke, ingen ny formel. Ingen matte lagt ennå → tegner ingenting (ikke
+// en feilmelding midt i en frihånds-tegneoperasjon).
+function _drawZoneSplitMatReadout(ptA, ptB, screenAnchor) {
+  const roomId = S.ui.zoneSplitRoomId;
+  const room = S.rooms.find(r => r.id === roomId); if (!room) return;
+  const sones = _sonesForRoom(roomId);
+  const mid = { x: (ptA.x + ptB.x) / 2, y: (ptA.y + ptB.y) / 2 };
+  const targetZone = sones.find(z => ptInPoly(mid.x, mid.y, z.points));
+  const basePoly = targetZone ? targetZone.points : room.points;
+  const existingMat = S.mats.find(m => targetZone ? m.zoneId === targetZone.id : (m.roomId === roomId && !m.zoneId));
+  if (!existingMat) return;
+  const prod = HEATING_PRODUCTS.find(p => p.id === existingMat.productId);
+  if (!prod) return;
+  const a = _nearestPtOnPolyBoundary(ptA, basePoly), b = _nearestPtOnPolyBoundary(ptB, basePoly);
+  const halves = _splitPolygonByChord(basePoly, a, b);
+  if (!halves || halves.length !== 2 || halves.some(h => Math.abs(compArea(h)) < 50)) return;
+
+  const dir = targetZone ? targetZone.direction : null;
+  const lines = halves.map((h, i) => {
+    const plan = _matWholeBandPlan({ points: h, direction: dir }, prod);
+    const arrow = i === 0 ? '↑' : '↓';
+    if (!plan || !plan.ok) return `${arrow} går ikke opp med ${prod.name}`;
+    const restTxt = plan.leftoverCm > 0.5 ? ` + ${Math.round(plan.leftoverCm)} cm til overs` : ' går opp';
+    return `${arrow} ${Math.round(plan.geom.acrossSpan)} cm  ·  ${esc(prod.name)}${restTxt}${plan.leftoverCm <= 0.5 ? ` (${plan.nBands > 1 ? plan.nBands + ' bånd' : plan.N + ' baner'})` : ''}`;
+  });
+
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.font = "600 11px 'IBM Plex Mono',monospace";
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const boxW = Math.max(...lines.map(l => ctx.measureText(l).width)) + 16;
+  const boxX = screenAnchor.x + 14, boxY = screenAnchor.y - 22;
+  ctx.fillStyle = 'rgba(20,22,28,0.9)';
+  ctx.fillRect(boxX - 6, boxY - 12, boxW, lines.length * 16 + 8);
+  ctx.fillStyle = '#e8eaf0';
+  lines.forEach((l, i) => ctx.fillText(l, boxX, boxY + i * 16));
+  ctx.restore();
+}
+
+// DEL A (spec-matte-hele-per-sone.md, 11.09.2026): «Forslaget vises som stiplede delelinjer oppå
+// sonen» — tegnet fra S.ui._mwbPreview (satt av _mwbRender når valgt matte faktisk går opp),
+// samme stiplet-linje-stil som _drawZoneSplitPreview over.
+function _drawMatWholeBandPreview() {
+  const prev = S.ui._mwbPreview; if (!prev || !prev.plan || !prev.plan.ok) return;
+  const plan = prev.plan;
+  ctx.save();
+  ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.setLineDash([8, 5]);
+  for (let k = 1; k < plan.nBands; k++) {
+    const [a, b] = _mwbCutPoints(plan, k);
+    const sa = w2s(a.x, a.y), sb = w2s(b.x, b.y);
+    ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
   }
   ctx.restore();
 }
@@ -34510,9 +35055,23 @@ function clipStripToRoom(pos_cm, nettoCm, direction, roomPoly, margin) {
   const positions = new Set([lo, hi]);
   for (let x = lo; x < hi; x += step) positions.add(x);
   for (const v of perpVals) { if (v > lo && v < hi) positions.add(v); }
+  // ROTÅRSAK (funnet ved «Del så matta går opp», spec-matte-hele-per-sone.md, 11.09.2026): scanner
+  // man EKSAKT på polygonets egen perp-yttergrense (lo===rMin eller hi===rMax — vanlig for enhver
+  // stripe/matte plassert helt inntil en vegg med 0 margin, f.eks. ALLE utendørs mattprodukter),
+  // faller de to kantlinjene som møtes akkurat DER (topp- og bunnkanten i en rett firkant) gjennom
+  // clipScanlineToPolygon sin kryssingstest — dens asymmetriske < / >= krever en STRENGT mindre
+  // verdi på én side, og et hjørne som ligger PRESIS på skannelinja gir det aldri (klassisk ray-
+  // casting-kant-kvirk). Resultatet: ett tomt intervall for akkurat DEN ene prøven, som via snittet
+  // (intersectIntervalSets) tømmer HELE stripen — selv om en prøve 0,01 cm lenger inn ville funnet
+  // hele rommet. Nudger derfor kun disse to KJENTE grensetilfellene et hårstrå innover FOR SELVE
+  // PRØVEPUNKTET (aldri lo/hi-verdiene som faktisk rapporteres/klippes til) — ikke en endring av
+  // selve kryssingsalgoritmen (mange andre kallere bruker den samme), bare av HVILKE punkter denne
+  // ene, allerede heuristiske tett-samplingen velger å prøve.
+  const EPS = 0.02;
+  const sample = v => (v === rMin) ? v + EPS : (v === rMax) ? v - EPS : v;
   let merged = null;
-  for (const posn of positions) {
-    const iv = clipScanlineToPolygon(sweepAxis, posn, roomPoly);
+  for (const posn0 of positions) {
+    const iv = clipScanlineToPolygon(sweepAxis, sample(posn0), roomPoly);
     merged = merged === null ? iv : intersectIntervalSets(merged, iv);
     if (!merged.length) break;   // ingenting igjen å krympe — tidlig ut
   }
@@ -39253,6 +39812,8 @@ function _ctxBarItems() {
         <span class="tc-sep"></span>
         <button class="snap-chip primary" onclick="_openSoneProdukt(event, ${_sz.id})" title="Legg folie i denne sonen">+ Produkt</button>
         <button class="snap-chip" onclick="toggleSoneDirection(${_sz.id})" title="Bytt utleggingsretning for sonen">${arrow} ${dir}</button>
+        ${_isSnowModule() && !_roomHasSlantedWall(_sz) ? `<button class="snap-chip" onclick="showMatWholeBandPanel('zone', ${_sz.id})" title="Del sonen i bånd der en hel matte går opp, uten rest">${IC('grid4',14)} Del så matta går opp</button>` : ''}
+        ${_isSnowModule() && _roomHasSlantedWall(_sz) ? `<button class="snap-chip" onclick="showMatWedgePanel(${_sz.id})" title="Fyll den skrå kilen med en trapp av smale matter, som varmefolie gjør mot skråvegger">${IC('grid4',14)} Fyll kilen (trapp)</button>` : ''}
         <span class="tc-sep"></span>
         <button class="snap-chip" onclick="deleteZone(${_sz.id})" title="Slett sone"><svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Slett</button>`;
     }
@@ -39505,6 +40066,7 @@ function _ctxBarItems() {
       <button class="snap-chip" onclick="autoSplitRoom(${ui.selectedRoomId})" title="Automatisk oppdeling i soner basert på hindringer">${IC('grid4',14)} Auto-soner</button>
       <button class="snap-chip" onclick="startZoneSplit(${ui.selectedRoomId})" title="Del rommet i utleggingssoner ved å tegne delelinjer (vegg til vegg)">${IC('grid4',14)} Del i soner</button>
       <button class="snap-chip" onclick="showAutoZoneSplitPicker(${ui.selectedRoomId})" title="Del rommet automatisk i N like store soner, horisontalt eller vertikalt">${IC('grid4',14)} Del i N soner</button>
+      ${_isSnowModule() && !_sonesForRoom(ui.selectedRoomId).length ? `<button class="snap-chip" onclick="showMatWholeBandPanel('room', ${ui.selectedRoomId})" title="Del rommet i bånd der en hel matte går opp, uten rest">${IC('grid4',14)} Del så matta går opp</button>` : ''}
       <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje (D)"><span class="snap-dot"></span>Mål</button>
       <span class="tc-sep"></span>
       <button class="snap-chip more" onclick="_showCtxMore(event,'room')" title="Flere handlinger (sentrer, tøm, dokumentasjon, mål, slett …)">⋯ Mer</button>`;
