@@ -7479,17 +7479,21 @@ function _snowLongestMat(prod) {
 // Beholder ekstern kontrakt ({placedIds:[id]} eller null) og roomId/productId-signaturen — eneste
 // kalleren (_upcPlaceMat) forventer nettopp dette, og har allerede ryddet rommet + kalt pushUndo()
 // FØR dette kallet (samme «forhåndsvisning før commit»-mønster som indre variant-klikk bruker).
-function _packSnowMats(roomId, productId) {
+// opts.dryRun (spec-mattebenk-n-syntetiske-rom.md, 12.09.2026): dette var den ENESTE av de fire
+// mattevegene uten en dryRun-vei — autoFillMatSerpentine hadde allerede sin egen (brukt av sone-
+// forhåndsvisningen), denne mangled bare et gjennomtrekk. Uendret oppførsel når opts utelates.
+function _packSnowMats(roomId, productId, opts) {
+  opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !room.points || room.points.length < 3) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) return null;
   const prevSelected = S.ui.selectedRoomId;
   S.ui.selectedRoomId = roomId;   // autoFillMatSerpentine leser alltid det aktive rommet
-  const mat = autoFillMatSerpentine(productId);
+  const mat = autoFillMatSerpentine(productId, opts.dryRun ? { dryRun: true } : undefined);
   S.ui.selectedRoomId = prevSelected;
   if (!mat) return null;
-  return { placedIds: [mat.id] };
+  return opts.dryRun ? { placedIds: [], mats: [mat] } : { placedIds: [mat.id] };
 }
 
 // Klipp ÉN matte-bredde mot rommets POLYGON (ikke bare det omsluttende rektangelet) + hindringer/
@@ -8499,6 +8503,45 @@ function _matPlanZones(room, prod) {
   return { zonePlans, excludedZones, totalAreaM2, totalWatt };
 }
 
+// ─── DELT KATALOGBYGGER (spec-mattebenk-n-syntetiske-rom.md, 12.09.2026) ───────────────────────
+// _matRegressionTest og _matZoneRegressionTest bygde hver sin nesten identiske arealsveip-katalog
+// (samme feltmønster som ekte Supabase-rader — mat_equal_widths/mat_required_gap_mm satt direkte,
+// som i databasen siden 22.08.2026). Trukket ut til ÉN felles bygger som tar arealspennet som
+// argument — spennet er BEVISST ulikt mellom de to (1-30 m² mot maks 15 m², se kommentaren under),
+// og skal fortsatt være det. Delt er byggeren, ikke tallene. Mattebenken (_matBench, lenger ned)
+// bruker samme bygger for sine egne kataloger, inkludert InSnow-varianten (marginMm:0) for
+// utendørs-testene. zoneRect-avviket (se _matBench sin egen kommentar) er IKKE en katalogbredde-
+// sak — det er sone-kontekst mot frittstående, samme katalog begge veier.
+// _matFreeRegressionTest sitt katalog er BEVISST IKKE flyttet hit — det er ett enkeltprodukt uten
+// mat_equal_widths/mat_required_gap_mm/article_no, ikke en sveip, og å tvinge det gjennom denne
+// byggeren ville lagt til felter frihånds-testen aldri har hatt, med reell risiko for å endre
+// oppførselen til nettopp den testen som skal stå «uendret».
+function _matBenchCatalog(areas, opts) {
+  opts = opts || {};
+  const idBase = opts.idBase || 900000;
+  const family = opts.family || 'EcoMat 150T';
+  const wm2 = opts.wm2 != null ? opts.wm2 : 150;
+  const catId = opts.categoryId != null ? opts.categoryId : 9800;
+  const prefix = opts.prefix || 'BENCH';
+  const marginMm = opts.marginMm != null ? opts.marginMm : 50;
+  const requiredGapMm = opts.requiredGapMm != null ? opts.requiredGapMm : 0;
+  let pid = idBase;
+  return areas.map((area, i) => {
+    const lenM = area * 2;   // 0,5m bred rull ⇒ areal = 0,5 × lengde
+    return {
+      id: ++pid, category_id: catId, active: true, supplier: 'Cenika AS',
+      article_no: prefix + i, product_family: family,
+      name: `${family} 0,5×${lenM}m ${Math.round(wm2 * area)}W`,
+      voltage: 230, watt_per_m2: wm2, total_effect_w: Math.round(wm2 * area), mat_area_m2: area,
+      mat_width_mm: 500, mat_total_length_mm: lenM * 1000,
+      mat_min_length_mm: 1000, mat_max_length_mm: lenM * 1000, mat_length_step_mm: 10,
+      mat_cc_mm: 80, mat_cut_interval_mm: 160,
+      mat_equal_widths: true, mat_required_gap_mm: requiredGapMm,
+      min_wall_margin_mm: marginMm, min_gap_mm: marginMm, min_obstacle_distance_mm: marginMm,
+    };
+  });
+}
+
 // ─── SONE-REGRESJONSTEST (STEG 3, «én matte per sone er taket», Kenneth 19.08.2026) ────────────
 // «1102 Garderobe» (uregelmessig, L-form) er den ENESTE fasit-testen som dekker sone+flermatte
 // SAMMEN — verken _matRegressionTest (rektangulære 1110/1105) eller _foilRegressionTest (folie,
@@ -8521,20 +8564,7 @@ function _matZoneRegressionTest() {
   try {
     HEATING_PRODUCTS.length = 0;
     const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    let pid = 901000;
-    areas.forEach(area => {
-      const lenM = area * 2;
-      HEATING_PRODUCTS.push({
-        id: ++pid, category_id: 9800, active: true, supplier: 'Cenika AS',
-        article_no: 'ZONETEST' + pid, product_family: 'EcoMat 150T',
-        name: `EcoMat 150T 0,5×${lenM}m ${Math.round(150 * area)}W`,
-        voltage: 230, watt_per_m2: 150, total_effect_w: Math.round(150 * area), mat_area_m2: area,
-        mat_width_mm: 500, mat_total_length_mm: lenM * 1000,
-        mat_min_length_mm: 1000, mat_max_length_mm: lenM * 1000, mat_length_step_mm: 10,
-        mat_cc_mm: 80, mat_cut_interval_mm: 160, mat_equal_widths: true, mat_required_gap_mm: 0,
-        min_wall_margin_mm: 50, min_gap_mm: 50, min_obstacle_distance_mm: 50,
-      });
-    });
+    HEATING_PRODUCTS.push(..._matBenchCatalog(areas, { idBase: 901000, prefix: 'ZONETEST' }));
 
     // «1102» L-form-analog (IKKE Kenneths eksakte polygon): 45 m² brutto, delt i to soner
     // (_decomposeRoomToRects): 35,84 m² (skal ta 3 matter) + 8,76 m² (skal forbli én matte).
@@ -8625,27 +8655,42 @@ function _matZoneRegressionTest() {
 // eventuelt sone-/flermatte-forslag, og til slutt selve utlegget — alltid havner i ÉTT
 // angre-steg, aldri to. Uten dette ville et Avbryt-klikk i et forslagspanel latt rommet stå tomt
 // (det ALLEREDE clearede rommet, uten noen vei tilbake til det opprinnelige innholdet).
+// opts.dryRun (spec-mattebenk-n-syntetiske-rom.md, 12.09.2026): de to «ekte» grenene (sone/
+// flermatte) endte FØR alltid i et interaktivt forslagspanel — riktig for en bruker som skal
+// godkjenne, men umulig å måle fra en synteisk benk uten å klikke i DOM-en for hvert rom. Returnerer
+// nå, når dryRun er satt, PRESIS samme beregning panelene ville vist (samme _matPlanZones/
+// _matMultiSolve/_matPlaceMultiMats dryRun-kall zone-forhåndsvisningen allerede bruker) i stedet for
+// å åpne et panel — ingen S/undo/render røres, ingen ny beregningslogikk. Standardvalget ved
+// flermatte (når dryRun) er «like» (Regel F pkt. 4/S.varmematte._multiMatPref), samme forvalg
+// _showMatMultiProposalPanel selv bruker. Uendret oppførsel (fortsatt panel, fortsatt undefined
+// returverdi) når opts.dryRun ikke er satt.
 function _matFillRoomSmart(productId, opts) {
   opts = opts || {};
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-  if (!prod) return;
+  if (!prod) return opts.dryRun ? null : undefined;
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (!room || !room.points || room.points.length < 3) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
-  if (!prod.mat_equal_widths) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
+  const _single = () => {
+    const mat = autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo, dryRun: opts.dryRun });
+    return opts.dryRun ? { kind: 'single', mats: mat ? [mat] : [] } : undefined;
+  };
+  if (!room || !room.points || room.points.length < 3) return _single();
+  if (!prod.mat_equal_widths) return _single();
 
   const zonePlan = _matPlanZones(room, prod);
   if (zonePlan) {
     if (!zonePlan.zonePlans.length) {
+      if (opts.dryRun) return { kind: 'zone', zonePlan, mats: [] };
       _showToast('Ingen sone i rommet har plass til denne matten', 'warn');
       if (opts.skipPushUndo) undo();   // rommet ble allerede tømt av kalleren — ingen sone kunne fylles, gi det tilbake
       return;
     }
+    if (opts.dryRun) return { kind: 'zone', zonePlan, mats: zonePlan.zonePlans.flatMap(zp => zp.mats) };
     _showMatZoneProposalPanel(room, prod, zonePlan, opts);
     return;
   }
 
   const geom = _matRoomGeomForFill(room, prod);
-  if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
+  if (geom.maxRuns <= 0 || geom.alongSpan < geom.minLenCm) return _single();
 
   const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
   const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
@@ -8657,7 +8702,7 @@ function _matFillRoomSmart(productId, opts) {
     .filter(p => p.active !== false && p.mat_width_mm === prod.mat_width_mm && _matTotalLengthMm(p) && variantOf(p))
     .map(p => ({ p, areaM2: p.mat_area_m2 || ((_matTotalLengthMm(p) / 10) * geom.matWidthCm / 10000), lenCm: _matTotalLengthMm(p) / 10 }))
     .sort((a, b) => a.lenCm - b.lenCm);
-  if (!candidates.length) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
+  if (!candidates.length) return _single();
   const largestAreaM2 = candidates[candidates.length - 1].areaM2;
 
   const capacityCm = _matRoomCapacityCm(room, geom);
@@ -8665,7 +8710,7 @@ function _matFillRoomSmart(productId, opts) {
   // Kun tilby flere matter når kapasiteten faktisk overstiger den STØRSTE tilgjengelige enkeltmatta
   // (Kenneth: «dersom rommet krever mer enn 1 stk 15 m² matte») — en liten toleranse (2%) unngår at
   // et rom som akkurat så vidt får plass til én matte trigger valgboksen unødig.
-  if (capacityAreaM2 <= largestAreaM2 * 1.02) { autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo }); return; }
+  if (capacityAreaM2 <= largestAreaM2 * 1.02) return _single();
 
   // FEIL 1 (Kenneth 19.08.2026, «utendørs: 4-matters-taket sperrer store arealer»): et fast tak på
   // 4 matter ble satt for innendørs rom (2-4 matter er normalt der) — et utendørs areal (Obs Bygg:
@@ -8676,9 +8721,17 @@ function _matFillRoomSmart(productId, opts) {
   const MAX_MATS = Math.min(40, Math.max(2, Math.ceil(capacityAreaM2 / largestAreaM2)));
   const solved = _matMultiSolve(candidates, geom.alongSpan, geom.maxRuns, capacityAreaM2, geom.cutCm, MAX_MATS);
   if (!solved.equal && !solved.unequal) {
+    if (opts.dryRun) return _single();
     _showToast(`Rommet trenger flere enn ${MAX_MATS} matter for god dekning — bruker den ene som dekker mest i stedet`, 'warn');
     autoFillMatSerpentine(productId, { skipPushUndo: opts.skipPushUndo });
     return;
+  }
+  if (opts.dryRun) {
+    // Samme forvalg som _showMatMultiProposalPanel: brukerens huskede preferanse, ellers «like».
+    const pref = (S.varmematte && S.varmematte._multiMatPref) || 'equal';
+    const sol = (pref === 'unequal' && solved.unequal) ? solved.unequal : (solved.equal || solved.unequal);
+    const mats = _matPlaceMultiMats(room, prod, geom, sol, { dryRun: true }) || [];
+    return { kind: 'multi', solved, sol, geom, capacityAreaM2, mats };
   }
   _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved, opts);
 }
@@ -9427,24 +9480,10 @@ function _matRegressionTest() {
   try {
     HEATING_PRODUCTS.length = 0;
     const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30];
-    let pid = 900000;
-    areas.forEach((area, i) => {
-      const lenM = area * 2;
-      HEATING_PRODUCTS.push({
-        id: ++pid, category_id: 9800, active: true, supplier: 'Cenika AS',
-        article_no: 'REGTEST' + i, product_family: 'EcoMat 150T',
-        name: `EcoMat 150T 0,5×${lenM}m ${Math.round(150 * area)}W`,
-        voltage: 230, watt_per_m2: 150, total_effect_w: Math.round(150 * area), mat_area_m2: area,
-        mat_width_mm: 500, mat_total_length_mm: lenM * 1000,
-        mat_min_length_mm: 1000, mat_max_length_mm: lenM * 1000, mat_length_step_mm: 10,
-        mat_cc_mm: 80, mat_cut_interval_mm: 160,
-        // mat_equal_widths/mat_required_gap_mm satt direkte her, som på de ekte Supabase-radene
-        // siden 22.08.2026 (STEG 2) — normaliseringsfunksjonen som tidligere patchet dem inn er
-        // fjernet, denne testens eget katalog må derfor bære feltene selv, akkurat som databasen nå gjør.
-        mat_equal_widths: true, mat_required_gap_mm: 0,
-        min_wall_margin_mm: 50, min_gap_mm: 50, min_obstacle_distance_mm: 50,
-      });
-    });
+    // mat_equal_widths/mat_required_gap_mm satt direkte her, som på de ekte Supabase-radene siden
+    // 22.08.2026 (STEG 2) — normaliseringsfunksjonen som tidligere patchet dem inn er fjernet,
+    // denne testens eget katalog må derfor bære feltene selv, akkurat som databasen nå gjør.
+    HEATING_PRODUCTS.push(..._matBenchCatalog(areas, { idBase: 900000, prefix: 'REGTEST' }));
     S.hindrings = []; S.matPaths = []; S.floors = [];
     S.varmefolie = S.varmefolie || {};
     S.varmefolie.direction = 'v';
@@ -10386,6 +10425,561 @@ function _matFreeRegressionTest() {
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_matFreeRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
   return { ok: allOk, results };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// ─── MATTEBENK (spec-mattebenk-n-syntetiske-rom.md, Kenneth 12.09.2026) ────────────────────────
+// «Er det mulig å lage x antall syntetiske rom og kjøre en fast test med intervall? Kan man på den
+// måten se hvilken motor/regel som vinner?» (19.08.2026) — 4f8aa87 (03.09) beviste at dette VIRKER:
+// et forsøk målt mot 864 rom (37% avvik) ble forkastet, en konservativ variant målt mot 4400 rom
+// (0 avvik) ble committet. Selve målingen finnes ikke i koden — neste gang noen rører motoren, må
+// riggen bygges fra bunnen igjen. Denne runden gjør fasiten til et tall som blir stående.
+//
+// Omfang: KUN matte (EcoMat, InSnow, frihånd). Rapport + historikk, ingen commit-blokkering. De fem
+// eksisterende regresjonstestene over/under er den HARDE fasiten på kjente rom og står UENDRET ved
+// siden av denne — mattebenken er den BREDE målingen, ikke en erstatning. Delt mellom dem: kun
+// katalogbyggeren (_matBenchCatalog, over _matZoneRegressionTest).
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+// ── Seedet PRNG (mulberry32) — ALDRI Math.random() uten seed, ellers er ikke to kjøringer
+// sammenlignbare og historikken (lenger ned) mister all mening.
+function _matBenchRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function _matBenchRandRange(rng, lo, hi) { return lo + rng() * (hi - lo); }
+function _matBenchRandInt(rng, lo, hi) { return Math.floor(_matBenchRandRange(rng, lo, hi + 1)); }
+function _matBenchPick(rng, arr) { return arr[Math.floor(rng() * arr.length)]; }
+
+// ── STEG 3: kvalitetsvekting for LOVLIGE utlegg, ÉN navngitt konstant — samme prinsipp som
+// _scoreFoilLayout (LÅST REGEL, Kenneth 19.08.2026, «foliemotorens egen score rangerer dens eget
+// utlegg sist»): vektene skal stå ÉTT sted, dokumentert, aldri spredt ad-hoc flere steder.
+// Rekkefølgen kommer fra Kenneths egne låste avgjørelser, ikke fra en gjetning:
+//   1. cc_avvik   — Regel 21 (spec-mattebenk-n-syntetiske-rom.md): nærmest ideell CC avgjør FØRST.
+//   2. dekningsgrad — f2dc648 («Matte dekning slår like bredder»): dekning slår Regel 6, men taper
+//      mot et bedre CC-treff.
+//   3. breddespredning — Regel 6 (like bredder), tredjeprioritet.
+//   4. margin_symmetri / antall_matter / spill_cm — sekundære finjusteringer.
+// Alt uttrykt som poeng per naturlig enhet (cm-avvik, prosentpoeng dekning) slik at faktorene er
+// direkte sammenlignbare i ÉTT tall — aldri råe, blandede enheter i samme sum. ⚠ Ikke gjenbruk
+// _statsAtLeastAsGood (folie-siden) som mønster her — kommentarene ved :12212/:12271 dokumenterer
+// at et ukalibrert prosentpoeng-bånd der lot dekningsdifferansen overstyre en allerede riktig
+// vektet score. Denne funksjonen rangerer direkte på ÉN vektet sum, aldri et sekundært bånd.
+const _MAT_BENCH_WEIGHTS = {
+  ccIdeal: 1000,        // poeng per cm avvik fra produktets ideelle CC (mat_cc_mm)
+  coverage: 800,        // poeng per prosentpoeng dekning av brukbart areal
+  widthSpread: 300,     // poeng per cm spredning i breddelengder (Regel 6)
+  marginSymmetry: 150,  // poeng per cm differanse mellom marginene mot de to endeveggene
+  matCount: 50,         // poeng per matte — færre er bedre
+  wastePer100cm: 20,    // poeng per 100 cm «spill» (se _matBenchMatsResult for definisjon)
+};
+// STEG 3, det uavklarte spørsmålet: Regel 9 (jevn spredning) mot Regel 20 (tett, slakk mot
+// yttervegg) i enkle rektangulære rom — dette ER allerede S.varmematte.fromWall (false=Sentrer=
+// Regel 9, true=Fra vegg=Regel 20, se _matPlaceMultiMats/autoFillMatSerpentine). Ikke gjettet på
+// hvilken som skal vinne — begge kjøres, se rapport 4 i _matBench.
+const _MAT_BENCH_FROMWALL_VARIANTS = [false, true];
+
+function _matBenchScore(m, weights) {
+  const w = weights || _MAT_BENCH_WEIGHTS;
+  return Math.round(
+    m.coveragePct * w.coverage
+    - m.ccDeviationCm * w.ccIdeal
+    - m.widthSpreadCm * w.widthSpread
+    - m.marginSymmetryCm * w.marginSymmetry
+    - m.matCount * w.matCount
+    - (m.wasteCm / 100) * w.wastePer100cm
+  );
+}
+
+// ── STEG 1: romgeneratoren ──────────────────────────────────────────────────────────────────
+function _matBenchRectPts(w, h) { return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]; }
+function _matBenchLPts(w, h, nw, nh) {
+  nw = Math.min(nw, w * 0.6); nh = Math.min(nh, h * 0.6);
+  return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h - nh }, { x: w - nw, y: h - nh }, { x: w - nw, y: h }, { x: 0, y: h }];
+}
+function _matBenchTPts(w, h, stemW, stemH) {
+  stemW = Math.min(stemW, w * 0.6);
+  const x0 = (w - stemW) / 2, x1 = (w + stemW) / 2;
+  return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: x1, y: h }, { x: x1, y: h + stemH }, { x: x0, y: h + stemH }, { x: x0, y: h }, { x: 0, y: h }];
+}
+function _matBenchUPts(w, h, nw, nh) {
+  nw = Math.min(nw, w * 0.5); nh = Math.min(nh, h * 0.6);
+  const x0 = (w - nw) / 2, x1 = (w + nw) / 2;
+  return [{ x: 0, y: 0 }, { x: x0, y: 0 }, { x: x0, y: nh }, { x: x1, y: nh }, { x: x1, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+}
+
+// De navngitte fasit-rommene: ALLTID med, ALDRI generert — de eneste hvor vi vet hva Kenneth mener
+// er riktig. 1110/1105/1102/1108 er allerede låst i de fire mat-regresjonstestene over; benken og
+// testene SKAL gi samme svar på dem (se kvalitetssjekklisten i spec-en). 2102/2104/Obs Bygg er nye
+// — tatt med slik at 2104 sin historiske vei1/vei2-sak (se _matBench) vises uten en egen fasit-test.
+function _matBenchNamedRooms() {
+  return [
+    { id: 'fasit-1110', name: '1110 Lærergarderobe HC', kind: 'fasit', points: _matBenchRectPts(279, 272) },
+    { id: 'fasit-1105', name: '1105 Dusj', kind: 'fasit', points: _matBenchRectPts(567, 242) },
+    { id: 'fasit-1102', name: '1102 Garderobe', kind: 'fasit', points: [{ x: 0, y: 0 }, { x: 900, y: 0 }, { x: 900, y: 400 }, { x: 300, y: 400 }, { x: 300, y: 700 }, { x: 0, y: 700 }] },
+    { id: 'fasit-1108', name: '1108 Garderobe (frihånd)', kind: 'fasit', points: [{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 400 }, { x: 200, y: 400 }, { x: 200, y: 200 }, { x: 0, y: 200 }] },
+    { id: 'fasit-2102', name: '2102', kind: 'fasit', points: _matBenchRectPts(480, 310) },
+    // 2104: 26,3 m² — den historiske vei1/vei2-saken («én 15 m²-matte i et rom som trenger 24,4»,
+    // 72f9267). Se _matBench for hva benken faktisk finner i dagens kode.
+    { id: 'fasit-2104', name: '2104', kind: 'fasit', points: _matBenchRectPts(1000, 263) },
+    { id: 'fasit-obsbygg', name: 'Obs Bygg', kind: 'fasit', points: _matBenchRectPts(2100, 930) },
+  ];
+}
+
+// N syntetiske rom, deterministisk seedet. Fordelingen ligner virkeligheten (tett i 4–15 m² der de
+// fleste bad/garderober ligger), ikke uniform. «Grensetilfeller» er beste-forsøk mot standard-
+// katalogens felter (500mm bredde, 50mm margin, 1000mm minstelengde) — IKKE en garanti om å treffe
+// grensen eksakt for enhver katalog benken senere kjøres med. Benken RAPPORTERER det faktiske
+// utfallet uansett; den gjetter aldri på et tall den ikke har målt.
+function _matBenchRooms(seed, n) {
+  const rng = _matBenchRng(seed);
+  const rooms = _matBenchNamedRooms();
+  const catCount = Math.max(1, Math.floor((n || 0) / 8));
+  const mk = (kind, points, extra) => rooms.push(Object.assign({ id: kind + '-' + rooms.length, name: kind + ' #' + rooms.length, kind, points }, extra || {}));
+  const rectFor = areaM2 => {
+    const areaCm2 = areaM2 * 10000;
+    const aspect = _matBenchRandRange(rng, 0.5, 1.8);
+    const w = Math.round(Math.sqrt(areaCm2 * aspect));
+    const h = Math.round(areaCm2 / w);
+    return { w, h };
+  };
+  for (let i = 0; i < catCount; i++) {
+    const areaM2 = rng() < 0.6 ? _matBenchRandRange(rng, 4, 15) : _matBenchRandRange(rng, 2, 30);
+    const { w, h } = rectFor(areaM2);
+    mk('rect', _matBenchRectPts(w, h));
+  }
+  for (let i = 0; i < catCount; i++) {
+    const areaM2 = _matBenchRandRange(rng, 4, 30);
+    const { w, h } = rectFor(areaM2 * 1.35);   // brutto boks er større enn netto p.g.a. hakket
+    const shapeFn = _matBenchPick(rng, [_matBenchLPts, _matBenchTPts, _matBenchUPts]);
+    const shapeName = shapeFn === _matBenchLPts ? 'L' : shapeFn === _matBenchTPts ? 'T' : 'U';
+    const nw = Math.round(w * _matBenchRandRange(rng, 0.25, 0.45));
+    const nh = Math.round(h * _matBenchRandRange(rng, 0.25, 0.45));
+    mk(shapeName, shapeFn(w, h, nw, nh));
+  }
+  for (let i = 0; i < catCount; i++) {
+    const areaM2 = _matBenchRandRange(rng, 4, 20);
+    const { w, h } = rectFor(areaM2);
+    const hw = _matBenchRandInt(rng, 20, 60), hh = _matBenchRandInt(rng, 20, 60);
+    const nearWall = rng() < 0.5;
+    const hx = nearWall ? 10 : _matBenchRandInt(rng, 30, Math.max(31, w - hw - 30));
+    const hy = nearWall ? 10 : _matBenchRandInt(rng, 30, Math.max(31, h - hh - 30));
+    mk('hindring', _matBenchRectPts(w, h), {
+      hindring: { points: [{ x: hx, y: hy }, { x: hx + hw, y: hy }, { x: hx + hw, y: hy + hh }, { x: hx, y: hy + hh }], clearance: 'wall' }
+    });
+  }
+  for (let i = 0; i < catCount; i++) {
+    const w = _matBenchRandInt(rng, 60, 95);   // under to bredder på tvers (maxRuns=1 ved 50cm mattebredde)
+    const h = _matBenchRandInt(rng, 150, 600);
+    mk('smal', _matBenchRectPts(w, h));
+  }
+  for (let i = 0; i < catCount; i++) {
+    const areaM2 = _matBenchRandRange(rng, 50, 200);   // Obs Bygg-skalaen — flermatte, MAX_MATS
+    const { w, h } = rectFor(areaM2);
+    mk('stor', _matBenchRectPts(w, h));
+  }
+  for (let i = 0; i < Math.max(1, Math.floor(catCount / 2)); i++) {
+    const alongCm = _matBenchRandInt(rng, 95, 115);   // akkurat på mat_min_length_mm (100cm)
+    const acrossCm = _matBenchRandInt(rng, 150, 400);
+    mk('grense-minlengde', _matBenchRectPts(acrossCm, alongCm));
+  }
+  for (let i = 0; i < Math.max(1, Math.floor(catCount / 2)); i++) {
+    // ≈ rett over 1,02×30 m² ved standardkatalogens 50cm bredde/5cm margin, 4 bredder — se
+    // kommentaren over om at dette er et beste-forsøk, ikke en garanti.
+    mk('grense-kapasitet', _matBenchRectPts(210, 1560));
+  }
+  return rooms;
+}
+
+// ── STEG 2: kjør ALLE fire inngangspunktene, i dryRun ────────────────────────────────────────
+// All fysikk kommer fra motoren selv (dryRun-kallene under, samme som sone-forhåndsvisningen
+// allerede bruker) — funksjonene her oversetter bare de to ulike returformene (mat[]-objekter for
+// vei 1-3, en matPath-lignende «bane» for vei 4) til de samme sammenlignbare tallene.
+function _matBenchCheckLegal(mats, room, marginCm) {
+  const reasons = [];
+  for (const mat of mats) {
+    const p = HEATING_PRODUCTS.find(pp => pp.id === mat.productId);
+    if (!p) { reasons.push('ukjent produkt på matte ' + mat.id); continue; }
+    // Regel 1 + Regel 14 (kabelen i nettet) — _matRunsWithinRoom sjekker begge når prod sendes med.
+    if (!_matRunsWithinRoom(mat, room, marginCm, p)) reasons.push('Regel 1/14: matte ' + mat.id + ' utenfor rommet eller kabel utenfor nettet');
+    const nominalLenCm = _matTotalLengthMm(p) / 10;
+    const laidCm = _matLaidLengthCm(mat);
+    if (laidCm > nominalLenCm + 0.5) reasons.push('Regel 3: matte ' + mat.id + ' lagt lengde > rullens lengde');
+    const cutCm = (p.mat_cut_interval_mm || 160) / 10;
+    const excessCm = nominalLenCm - laidCm;
+    // Regel 13 gjelder KUN den uklippede, rene N×L-søket (Regel E) — et rom hvor romformen faktisk
+    // klipper en eller flere bredder kortere (mat.runLengths satt) legger IKKE resten av rullen
+    // igjen på noen annen bredde; det er den samme, dokumenterte «for uregelmessige rom dekkes ikke
+    // alt» (se kommentaren over _matZoneRegressionTest og CLAUDE.md sine kabel-regler), ikke et
+    // brudd. Funnet under testing: uten dette unntaket diskvalifiserte benken nesten ethvert utlegg
+    // i et ikke-rektangulært rom.
+    if (p.mat_equal_widths && !mat.runLengths && excessCm > cutCm + 0.5) reasons.push('Regel 13: matte ' + mat.id + ' overskuddsrull > ett kuttintervall');
+    const minGapCm = _matProductMinGapCm(p);
+    if ((mat.gap_cm || 0) < minGapCm - 0.05) reasons.push('Regel 18: matte ' + mat.id + ' gap under påkrevd minsteavstand');
+  }
+  return reasons;
+}
+// Delt av vei 1-3 (alle returnerer mat[]-objekter fra samme motor).
+function _matBenchMatsResult(mats, room, prod, ruleAttribution) {
+  mats = mats || [];
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
+  const usableM2 = _matUsableAreaM2(room, marginCm) || 0;
+  const idealCC = (prod.mat_cc_mm || 80) / 10;
+  const geom = _matRoomGeomForFill(room, prod);
+  let coverageM2 = 0, ccSum = 0;
+  const runLens = [], marginDeltas = [];
+  const illegal = _matBenchCheckLegal(mats, room, marginCm);
+  for (const mat of mats) {
+    coverageM2 += mat.width_cm * _matLaidLengthCm(mat) / 10000;
+    ccSum += Math.abs((mat.width_cm + (mat.gap_cm || 0)) - idealCC);
+    const n = mat.num_runs || 1;
+    for (let i = 0; i < n; i++) {
+      const len = _matRunLenCm(mat, i);
+      if (len <= 0) continue;
+      runLens.push(len);
+      if (geom) {
+        const start = _matRunStartCm(mat, i);
+        const front = start - geom.alongMin, back = geom.alongMax - (start + len);
+        marginDeltas.push(Math.abs(front - back));
+      }
+    }
+  }
+  const widthSpreadCm = runLens.length ? Math.max(...runLens) - Math.min(...runLens) : 0;
+  const marginSymmetryCm = marginDeltas.length ? marginDeltas.reduce((a, b) => a + b, 0) / marginDeltas.length : 0;
+  const ccDeviationCm = mats.length ? ccSum / mats.length : 0;
+  // «spill»: gjenstående (udekket) areal uttrykt som cm langs én standard mattebredde — spec sier
+  // «tegnet kapasitet minus lagt», som ikke gir én entydig formel på tvers av sone/multi/enkelt-
+  // veiene; dette er den mest direkte lesningen (udekket areal, linearisert til én bredde) og holder
+  // seg i samme cm-enhet som de andre kvalitetsmålene.
+  const matWidthCm = geom ? geom.matWidthCm : (prod.mat_width_mm || 500) / 10;
+  const wasteCm = matWidthCm > 0 ? Math.round((usableM2 - coverageM2) * 10000 / matWidthCm) : 0;
+  return { mats, coverageM2, usableM2, matCount: mats.length, ccDeviationCm, widthSpreadCm, marginSymmetryCm, wasteCm, illegal, ruleAttribution };
+}
+function _matBenchRunVei1(room, prod) {
+  // UPC «Fyll rom automatisk»: samme _matFillRoomSmart-kall _upcPlaceMat sin auto-gren bruker
+  // (etter ruting-fiksen, c4f4429) — pushUndo/_clearRoomProductCollections utelates bevisst her,
+  // dryRun har ingenting å tømme eller angre.
+  const out = _matFillRoomSmart(prod.id, { dryRun: true }) || { mats: [] };
+  return _matBenchMatsResult(out.mats, room, prod, out.kind || 'single');
+}
+function _matBenchRunVei2(room, prod) {
+  // «Fyll rom» (legacy-panelet): samme funksjon som vei 1 kaller internt — se _matBench sin egen
+  // kommentar om hvorfor vei 1 og vei 2 derfor gir IDENTISKE tall for et rom som 2104 i dag.
+  const out = _matFillRoomSmart(prod.id, { dryRun: true }) || { mats: [] };
+  return _matBenchMatsResult(out.mats, room, prod, out.kind || 'single');
+}
+function _matBenchRunVei3(room, prod) {
+  const res = _packSnowMats(room.id, prod.id, { dryRun: true });
+  return _matBenchMatsResult(res ? res.mats : [], room, prod, 'single');
+}
+function _matBenchRunVei4(room, prod) {
+  const geom = _matRoomGeomForFill(room, prod);
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
+  if (!geom || geom.maxRuns <= 0) {
+    return { mats: [], coverageM2: 0, usableM2: _matUsableAreaM2(room, marginCm) || 0, matCount: 0, ccDeviationCm: 0, widthSpreadCm: 0, marginSymmetryCm: 0, wasteCm: 0, illegal: [], ruleAttribution: 'frihånd' };
+  }
+  const { NET, cc } = _matFreeConsts(prod);
+  const raster = 2 * cc;
+  const lenRaster = raster > 0 ? Math.floor(geom.alongSpan / raster) * raster : geom.alongSpan;
+  const start = _matFreeStartFor(room, prod, geom.dir);
+  if (!start || lenRaster <= 0) {
+    return { mats: [], coverageM2: 0, usableM2: _matUsableAreaM2(room, marginCm) || 0, matCount: 0, ccDeviationCm: 0, widthSpreadCm: 0, marginSymmetryCm: 0, wasteCm: 0, illegal: ['frihånd: ingen gyldig startpunkt/lengde'], ruleAttribution: 'frihånd' };
+  }
+  // Syntetisk, håndtegnet-lignende bane: N serpentin-bredder (samme antall som motoren, øvre grense
+  // 6 for ytelse/realisme — en manuelt tegnet bane har sjelden flere vendinger), bygget med SAMME
+  // move-form (axis/dir/len/conn/side) som en ekte frihånds-økt (_matFree) allerede bruker.
+  // _matFreeStartFor forankrer ALLTID i nedre-venstre hjørne (se dens egen kommentar) — for aksen
+  // 'v' betyr det startpunktet ligger NÆR BUNNEN, så FØRSTE bevegelse må gå OPP (dir:-1) for å
+  // holde seg inne i rommet; for 'h' ligger startpunktet til VENSTRE, så første bevegelse går til
+  // høyre (dir:1) som normalt. Uten dette fortegnsskillet går hver 'v'-bane rett ut gjennom
+  // bunnveggen (funnet under testing — «banen starter utenfor rommet» for ALLE fasit-rom).
+  const dir0 = geom.dir === 'v' ? -1 : 1;
+  const runs = Math.max(1, Math.min(geom.maxRuns, 6));
+  const moves = [];
+  for (let i = 0; i < runs; i++) {
+    moves.push(i === 0
+      ? { axis: geom.dir, dir: dir0, len: lenRaster, conn: 'first', side: 1 }
+      : { axis: geom.dir, dir: (i % 2 === 0 ? dir0 : -dir0), len: lenRaster, conn: 'uturn', side: 1 });
+  }
+  const mp = { roomId: room.id, productId: prod.id, start, moves, gapCm: 0, offX: 0, offY: 0 };
+  const legal = _matFreeRunsWithinRoom(mp);
+  const catalog = _matFreeCatalog(mp);
+  const coverageM2 = _matFreeCoveredAreaM2(mp);
+  const usableM2 = _matFreeUsableAreaM2(mp) || 0;
+  const runLens = _matFreeDeriveRuns(mp).map(r => _matFreeRunLen(r)).filter(l => l > 0.5);
+  const widthSpreadCm = runLens.length ? Math.max(...runLens) - Math.min(...runLens) : 0;
+  const idealCC = (prod.mat_cc_mm || 80) / 10;
+  const actualCC = NET + Math.max(0, mp.gapCm || 0);
+  const ccDeviationCm = Math.abs(actualCC - idealCC);
+  const wasteCm = NET > 0 ? Math.round((usableM2 - coverageM2) * 10000 / NET) : 0;
+  return {
+    mats: [], coverageM2, usableM2, matCount: catalog.segments.length, ccDeviationCm, widthSpreadCm,
+    // Frihånd er en brukerstyrt bane, ingen sentrert blokk å måle endevegg-symmetri mot (til
+    // forskjell fra vei 1-3, som alltid sentrerer langs-aksen) — 0 er derfor korrekt her, ikke en
+    // mangel i målingen.
+    marginSymmetryCm: 0,
+    wasteCm, illegal: legal.ok ? [] : [legal.reason], ruleAttribution: 'frihånd',
+  };
+}
+
+// ── STEG 5: historikk (JSONL i localStorage) — diff mot forrige kjøring + flipp-teller ───────
+const _MAT_BENCH_HISTORY_KEY = 'arqely_mat_bench_history';
+const _MAT_BENCH_FLIP_WINDOW = 10;
+function _matBenchLoadHistory() {
+  try {
+    const raw = localStorage.getItem(_MAT_BENCH_HISTORY_KEY);
+    if (!raw) return [];
+    return raw.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+  } catch (e) { return []; }
+}
+function _matBenchAppendHistory(entry) {
+  try {
+    const line = JSON.stringify(entry) + '\n';
+    const cur = localStorage.getItem(_MAT_BENCH_HISTORY_KEY) || '';
+    localStorage.setItem(_MAT_BENCH_HISTORY_KEY, cur + line);
+  } catch (e) { console.warn('_matBench: kunne ikke lagre historikk (kvote/privat nettlesing?)', e.message); }
+}
+function _matBenchRowKey(row) { return row.roomId + '×' + row.vei; }
+// Flipp: for hvert rom×vei, hvor mange ganger utfallet (lovlig/regel-attribusjon) har endret seg
+// over de siste _MAT_BENCH_FLIP_WINDOW kjøringene — «et rom som pendler er to regler som slåss»,
+// den mest verdifulle enkeltkolonnen i hele benken (den som ville fanget 1110 uka før Kenneth gjorde).
+function _matBenchDiffAndFlips(rows, history) {
+  const prev = history.length ? history[history.length - 1] : null;
+  const prevByKey = new Map((prev ? prev.rows : []).map(r => [_matBenchRowKey(r), r]));
+  const diffs = [];
+  for (const row of rows) {
+    const p = prevByKey.get(_matBenchRowKey(row));
+    if (!p) { diffs.push({ ...row, change: 'ny' }); continue; }
+    if (p.legal !== row.legal || p.score !== row.score || p.ruleAttribution !== row.ruleAttribution) {
+      diffs.push({ ...row, change: 'endret', prevScore: p.score, prevLegal: p.legal });
+    }
+  }
+  const recent = history.slice(-(_MAT_BENCH_FLIP_WINDOW - 1)).concat([{ rows }]);
+  const flips = new Map();
+  for (const row of rows) {
+    const key = _matBenchRowKey(row);
+    let flipCount = 0, lastSig = null;
+    for (const run of recent) {
+      const r = (run.rows || []).find(x => _matBenchRowKey(x) === key);
+      if (!r) continue;
+      const sig = r.legal + '|' + r.ruleAttribution;
+      if (lastSig != null && sig !== lastSig) flipCount++;
+      lastSig = sig;
+    }
+    if (flipCount > 0) flips.set(key, flipCount);
+  }
+  return { diffs, flips };
+}
+
+// ── STEG 4: rapporten ─────────────────────────────────────────────────────────────────────────
+function _matBenchReport(rows, flips) {
+  const t1 = rows.map(r => ({
+    Rom: r.roomName, Vei: r.veiName, Lovlig: r.legal ? 'JA' : 'NEI', Poeng: r.legal ? r.score : '—',
+    'Dekning %': r.coveragePct != null ? r.coveragePct.toFixed(1) : '—', Matter: r.matCount,
+    ms: r.ms, Flipp: flips.get(_matBenchRowKey(r)) || '',
+  }));
+  console.log('%c── Mattebenk: per rom × vei ──', 'font-weight:bold');
+  console.table(t1);
+
+  const byRoom = new Map();
+  for (const r of rows) { if (!byRoom.has(r.roomId)) byRoom.set(r.roomId, []); byRoom.get(r.roomId).push(r); }
+  const veiStats = new Map();
+  for (const [, group] of byRoom) {
+    const legalGroup = group.filter(g => g.legal);
+    const winner = legalGroup.length ? legalGroup.reduce((a, b) => (b.score > a.score ? b : a)) : null;
+    for (const r of group) {
+      const s = veiStats.get(r.vei) || { vei: r.veiName, runs: 0, legal: 0, disqualified: 0, wins: 0, coverageSum: 0, coverageN: 0 };
+      s.runs++;
+      if (r.legal) { s.legal++; s.coverageSum += (r.coveragePct || 0); s.coverageN++; } else s.disqualified++;
+      if (winner && winner.vei === r.vei) s.wins++;
+      veiStats.set(r.vei, s);
+    }
+  }
+  const t2 = [...veiStats.values()].map(s => ({
+    Vei: s.vei, 'Vinner (av rom)': s.wins, 'Snitt dekning %': s.coverageN ? (s.coverageSum / s.coverageN).toFixed(1) : '—',
+    Diskvalifisert: s.disqualified, Kjøringer: s.runs,
+  }));
+  console.log('%c── Mattebenk: per vei, aggregert (hvilken motor vinner) ──', 'font-weight:bold');
+  console.table(t2);
+
+  const ruleStats = new Map();
+  for (const r of rows) {
+    if (!r.ruleAttribution) continue;
+    const s = ruleStats.get(r.ruleAttribution) || { regel: r.ruleAttribution, avgjorde: 0, kostetDekning: 0 };
+    s.avgjorde++;
+    if (r.legal && r.coveragePct != null && r.coveragePct < 95) s.kostetDekning++;
+    ruleStats.set(r.ruleAttribution, s);
+  }
+  const t3 = [...ruleStats.values()].map(s => ({ Regel: s.regel, 'Avgjørende i N rom': s.avgjorde, 'Kostet dekning (< 95%) i N': s.kostetDekning }));
+  console.log('%c── Mattebenk: regel-attribusjon (hvilken regel vinner) ──', 'font-weight:bold');
+  console.table(t3);
+}
+
+// ── Hovedfunksjon ─────────────────────────────────────────────────────────────────────────────
+// _matBench(seed, n): kjør N syntetiske rom + de navngitte fasit-rommene gjennom alle fire
+// mattevegene uten å røre det åpne prosjektet — samme try/finally-disiplin som de fem
+// regresjonstestene over (utvidet med _matFree, S.varmematte.fromWall, window.alert/confirm og
+// render-funksjonene, som _matFreeRegressionTest allerede stubber av samme grunn).
+//
+// Kjent funn (dokumentert her, ikke gjettet bort): rom 2104 var historisk beviset på at vei 1 (UPC
+// «Fyll rom automatisk») hoppet over sone/flermatte-søket vei 2 («Fyll rom») nådde — én 15 m²-matte
+// mot 24,4 m² i et rom som trengte det. Siden c4f4429 kaller _upcPlaceMat sin auto-gren _matFillRoomSmart
+// (samme funksjon vei 2 selv er) — vei 1 og vei 2 er derfor i dag SAMME kall, og benken viser dem
+// (riktig) som identiske for 2104. Det beviser at ruting-fiksen holder, ikke at benken bommer.
+function _matBench(seed, n, opts) {
+  opts = opts || {};
+  seed = seed == null ? 42 : seed;
+  n = n == null ? 64 : n;
+  const now = opts._now || Date.now;
+
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedHindrings = S.hindrings, savedMats = S.mats, savedMatPaths = S.matPaths,
+    savedZones = S.zones, savedFloors = S.floors, savedSelectedRoomId = S.ui.selectedRoomId,
+    savedVarmematte = { ...S.varmematte }, savedDirection = S.varmefolie && S.varmefolie.direction,
+    savedNextMatId = S.counters.nextMatId, savedMatFree = _matFree;
+  const savedAlert = window.alert, savedConfirm = window.confirm;
+  const savedRenderSidebar = renderSidebar, savedUpdateCtxBar = updateCtxBar, savedRender = render;
+  window.alert = () => {}; window.confirm = () => true;
+  renderSidebar = () => {}; updateCtxBar = () => {}; render = () => {};
+
+  const rows = [];
+  try {
+    HEATING_PRODUCTS.length = 0;
+    const indoorAreas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30];
+    const indoorCat = _matBenchCatalog(indoorAreas, { idBase: 970000, prefix: 'BENCHIN', family: 'EcoMat 150T', wm2: 150 });
+    const outdoorCat = _matBenchCatalog(indoorAreas, { idBase: 971000, prefix: 'BENCHOUT', family: 'InSnow 30T', wm2: 300, marginMm: 0, requiredGapMm: 50 });
+    HEATING_PRODUCTS.push(...indoorCat, ...outdoorCat);
+
+    const rooms = _matBenchRooms(seed, n);
+    S.matPaths = []; S.zones = []; S.floors = [];
+    S.varmefolie = S.varmefolie || {}; S.varmefolie.direction = null;   // la geometrikjernen velge retning selv, per rom
+    S.varmematte = S.varmematte || {};
+
+    const veiDefs = [
+      { vei: 1, name: 'UPC auto', run: _matBenchRunVei1, outdoor: false },
+      { vei: 2, name: 'Fyll rom (sone+multi)', run: _matBenchRunVei2, outdoor: false },
+      { vei: 3, name: 'InSnow/utendørs', run: _matBenchRunVei3, outdoor: true },
+      { vei: 4, name: 'Frihånd', run: _matBenchRunVei4, outdoor: false },
+    ];
+    const indoorProd = indoorCat[Math.floor(indoorCat.length / 2)];
+    const outdoorProd = outdoorCat[Math.floor(outdoorCat.length / 2)];
+
+    let skipped = 0;
+    for (const room of rooms) {
+      S.rooms = [room];
+      S.hindrings = room.hindring ? [{ id: 1, roomId: room.id, ...room.hindring }] : [];
+      S.ui.selectedRoomId = room.id;
+
+      for (const vd of veiDefs) {
+        const prod = vd.outdoor ? outdoorProd : indoorProd;
+        const t0 = now();
+        let out;
+        try { out = vd.run(room, prod); }
+        catch (e) {
+          skipped++;
+          out = { coverageM2: 0, usableM2: 0, matCount: 0, ccDeviationCm: 0, widthSpreadCm: 0, marginSymmetryCm: 0, wasteCm: 0, illegal: ['unntak: ' + e.message], ruleAttribution: null };
+        }
+        const ms = now() - t0;
+        const coveragePct = out.usableM2 > 0 ? Math.min(100, (out.coverageM2 / out.usableM2) * 100) : (out.matCount === 0 && out.coverageM2 === 0 ? 100 : 0);
+        const legal = !out.illegal || out.illegal.length === 0;
+        const metrics = { coveragePct, ccDeviationCm: out.ccDeviationCm || 0, widthSpreadCm: out.widthSpreadCm || 0, marginSymmetryCm: out.marginSymmetryCm || 0, matCount: out.matCount || 0, wasteCm: out.wasteCm || 0 };
+        rows.push({
+          roomId: room.id, roomName: room.name, roomKind: room.kind, vei: vd.vei, veiName: vd.name,
+          legal, illegalReasons: out.illegal || [], coveragePct, matCount: out.matCount || 0,
+          ccDeviationCm: metrics.ccDeviationCm, widthSpreadCm: metrics.widthSpreadCm,
+          marginSymmetryCm: metrics.marginSymmetryCm, wasteCm: metrics.wasteCm, ms,
+          score: legal ? _matBenchScore(metrics) : null,
+          ruleAttribution: out.ruleAttribution || null,
+        });
+      }
+
+      // zoneRect-avviket (kommentaren over _matZoneRegressionTest): IKKE «smal katalog mot bred
+      // katalog» — den faktisk dokumenterte saken er samme sone/samme produkt/samme geometri,
+      // testet i SONE-KONTEKST (autoFillMatSerpentine sin opts.zoneRect-gren) mot samme rektangel
+      // testet FRITTSTÅENDE (uten zoneRect) — kun single-mat-modus er berørt (multi-mat/
+      // _matMultiSolve har full paritet, se kommentaren). Reprodusert her, ikke fikset: benken skal
+      // vise saken, ikke løse den.
+      if (room.kind === 'L' || room.kind === 'T' || room.kind === 'U' || room.id === 'fasit-1102') {
+        const zonePlan = _matPlanZones(room, indoorProd);
+        const singleZone = zonePlan && zonePlan.zonePlans.find(zp => zp.mode === 'single');
+        if (singleZone) {
+          const standaloneRoom = { id: room.id + '-standalone', points: _matBenchRectPts(singleZone.rect.x1 - singleZone.rect.x0, singleZone.rect.y1 - singleZone.rect.y0) };
+          const savedR2 = S.rooms, savedSel2 = S.ui.selectedRoomId;
+          S.rooms = [standaloneRoom]; S.ui.selectedRoomId = standaloneRoom.id;
+          const standaloneMat = autoFillMatSerpentine(indoorProd.id, { dryRun: true });
+          S.rooms = savedR2; S.ui.selectedRoomId = savedSel2;
+          const standaloneCoverM2 = standaloneMat ? standaloneMat.width_cm * _matLaidLengthCm(standaloneMat) / 10000 : 0;
+          if (Math.abs(singleZone.coveredM2 - standaloneCoverM2) > 0.05) {
+            console.warn(`_matBench: zoneRect-avviket (kjent, urettet — se _matZoneRegressionTest) for ${room.name}: ${singleZone.coveredM2.toFixed(2)} m² i sone-kontekst mot ${standaloneCoverM2.toFixed(2)} m² frittstående (samme produkt, samme geometri)`);
+          }
+        }
+      }
+    }
+    if (skipped > 0) console.warn(`_matBench: ${skipped} vei-kjøring(er) kastet unntak — talt som diskvalifisert, ikke utelatt stille.`);
+
+    // STEG 3, Regel 9/20: enkle rektangulære rom (inkl. de rektangulære fasit-rommene — 1102/1108
+    // er L-formet/notchet og hører ikke hjemme i «enkel rektangulær»-spørsmålet, filtrert bort via
+    // punktantall siden en firepunkts-boks alltid er en ren rektangel her) kjørt med BEGGE fromWall-
+    // variantene — Kenneth avgjør på tallene, ikke på magefølelse.
+    const rectRooms = rooms.filter(r => r.points.length === 4);
+    const fromWallRows = [];
+    for (const fw of _MAT_BENCH_FROMWALL_VARIANTS) {
+      S.varmematte.fromWall = fw;
+      for (const room of rectRooms) {
+        S.rooms = [room]; S.hindrings = []; S.ui.selectedRoomId = room.id;
+        const out = _matBenchRunVei2(room, indoorProd);
+        const coveragePct = out.usableM2 > 0 ? Math.min(100, (out.coverageM2 / out.usableM2) * 100) : 0;
+        const legal = !out.illegal || !out.illegal.length;
+        const score = legal ? _matBenchScore({ coveragePct, ccDeviationCm: out.ccDeviationCm || 0, widthSpreadCm: out.widthSpreadCm || 0, marginSymmetryCm: out.marginSymmetryCm || 0, matCount: out.matCount || 0, wasteCm: out.wasteCm || 0 }) : null;
+        fromWallRows.push({ Rom: room.name, Variant: fw ? 'Fra vegg (Regel 20)' : 'Sentrer (Regel 9)', Poeng: score, 'Dekning %': coveragePct.toFixed(1) });
+      }
+    }
+    console.log('%c── Mattebenk: Regel 9 (Sentrer) mot Regel 20 (Fra vegg) — uavklart, se poengene ──', 'font-weight:bold');
+    console.table(fromWallRows);
+
+    const history = _matBenchLoadHistory();
+    const { diffs, flips } = _matBenchDiffAndFlips(rows, history);
+    if (diffs.length === 0 && history.length) {
+      console.log('%c_matBench: ingen endring siden forrige kjøring.', 'color:#22c55e');
+    } else {
+      _matBenchReport(rows, flips);
+      if (history.length) {
+        console.log('%c── Mattebenk: diff mot forrige kjøring ──', 'font-weight:bold');
+        console.table(diffs.map(d => ({ Rom: d.roomName, Vei: d.veiName, Endring: d.change, 'Poeng (nå)': d.score, 'Poeng (før)': d.prevScore })));
+      }
+    }
+    _matBenchAppendHistory({ ts: Date.now(), seed, n, rows });
+
+    return { ok: true, rows, flips: Object.fromEntries(flips), fromWallRows };
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.hindrings = savedHindrings; S.mats = savedMats; S.matPaths = savedMatPaths;
+    S.zones = savedZones; S.floors = savedFloors; S.ui.selectedRoomId = savedSelectedRoomId;
+    S.varmematte = savedVarmematte;
+    if (S.varmefolie) S.varmefolie.direction = savedDirection;
+    S.counters.nextMatId = savedNextMatId;
+    _matFree = savedMatFree;
+    window.alert = savedAlert; window.confirm = savedConfirm;
+    renderSidebar = savedRenderSidebar; updateCtxBar = savedUpdateCtxBar; render = savedRender;
+  }
+}
+
+// STEG 6: «fast test med intervall» — intervall er feil akse (en benk som kjører hver time
+// forteller AT noe brakk, ikke HVA), verdien ligger i å knytte et poengfall til en endring. Derfor:
+// (1) _matBench() kjørbar fra konsollen etter enhver endring i mattegeometrien, som de fem
+// regresjonstestene over/under. (2) Autokjør ved lasting i utviklingsmodus — samme _IS_DEV_HOST-
+// flagg appen allerede bruker for andre kun-lokalt-varsler (:4235) — med KUN diffen i konsollen
+// (null støy når ingenting endret seg, se _matBench selv). Forsinket og pakket i try/catch: et
+// syntetisk katalog-/rombygge-problem skal ALDRI kunne hindre appen i å laste for en ekte bruker.
+if (_IS_DEV_HOST) {
+  setTimeout(() => {
+    try { _matBench(42, 64); } catch (e) { console.warn('_matBench (autokjøring ved lasting): ' + e.message); }
+  }, 4000);
 }
 
 // ── Del 4: justering (avstand mellom baner + Sentrer) + valg/slett ──
