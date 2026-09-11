@@ -4,6 +4,41 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Trapp: bredder+kabellengder vises uten valg, detaljutsnitt på utskrift — 2026-09-11
+
+Kenneth: «utendørs trapp: jeg ønsker at bredden på trinn/repos vises på tegning. Jeg ønsker også at
+lengden på kabelstrengene i trapp/repos vises. På utskrift ønsker jeg meg at det vises et utsnitt av
+f.eks. ett trinn men detaljerte mål. Avstand fra kanter, fra opptrinn, sider, cc, lengde kabel. Og
+hvis det er et eller flere repos, må de også ha sitt eget utsnitt.»
+
+- **`6e607cd`** — DEL A: totalbredde (`surf.w_cm`) tegnes nå i egen målelinje over de to
+  eksisterende marginmålene, på både skjerm og utskrift, slik at «5 · ... · 5» og «120» leses
+  samtidig. Egen gruppering (uavhengig av den eksisterende `dimSurfaces`, som styrer dybde-mål og
+  er bundet til kabel-ruting): trinn med lik bredde kollapses til ett mål + «(×N trinn)»-notat,
+  repos får alltid sitt eget. Fant og rettet en kollisjon underveis der notatet lå rett oppå
+  selve breddetallet. DEL B: `isSel`-kravet fjernet fra både kabellengde- og målsettingsblokken —
+  begge vises nå uten at trappen må være valgt, zoom-grensene uendret. DEL C: nytt forstørret
+  detaljutsnitt per GEOMETRISK DISTINKT flate på utskrift (én per trinn-type + én per repos). Ny
+  `_stairDetailGroups()` grupperer trinn etter signatur (bredde/dybde/antall strenger/CC/offset
+  topp/offset bunn) — bevisst ikke den eksisterende kabel-baserte `dimSurfaces`/`dimSurfacesImg`:
+  to trinn matet av ulike kabler men med identisk geometri gir nå riktig ÉN utsnitt, ikke to. Repos
+  slås aldri sammen med hverandre, selv ved identisk geometri. Ny `_renderStairDetailInsets()`
+  gjenbruker `_stairDrawToCanvas` uendret (ingen ny tegnekode) med `surfaceRange` begrenset til
+  gruppens representant-flate, plassert i `exportPDF` rett etter trappens egen tegning, før
+  materiallista.
+
+**Testmetodikk:** 17 identiske trinn ga nøyaktig ett breddemål og én inset merket «(typisk)»; én
+avvikende dybde midt i 17 trinn ga to trinn-innsett med korrekt fragmentert rekke («Trinn 1–8,
+10–17» og «Trinn 9»); to repos ga tre innsett totalt, aldri slått sammen; en trapp uten lagt kabel
+ga null grupper/innsett og ingen feil; en lang 1468cm-trapp bekreftet at STEG-6 bånd-splitting (3
+bånd) fortsatt virker uendret, med innsett lagt til i tillegg. Full `exportPDF` kjørt live (med
+`jsPDF.save` stagget for å unngå faktisk nedlasting) bekreftet at innsettene genereres fra riktig
+sted i den ekte PDF-loopen. Full regresjonsbatteri grønt.
+
+**Fil:** index.html.
+
+---
+
 ## Hindringsavstand: alltid 25mm-regel som standard, valget til høyreklikk — 2026-09-10
 
 Kenneth, dagen etter forrige runde: «kan vi gå tilbake til at alle hindringer i utgangspunktet har
