@@ -40386,6 +40386,9 @@ function _listMatProducts(envType){ return HEATING_PRODUCTS.filter(p=>{ const c=
 // kollapser f.eks. InSnow 30T 230V/400V til ÉN klasse med begge spenningene blandet i variant-
 // lista, og en 400V-kabel kan velges ved et uhell der Kenneth ba eksplisitt om 230V.
 function _listFamKey(p){ return (p.product_family||p.name) + '|' + (p.voltage||230); }
+// Kenneth (11.09.2026): «la InSnow 30T 230V være standard» — samme standardfamilie stairpanelet
+// allerede bruker (stair.preferredFamily || 'InSnow 30T'), nå delt av hurtigprosjektering også.
+const _LIST_SNOW_DEFAULT_FAM = 'InSnow 30T|230';
 function _listRoomProductId(roomId){
   const c=S.cables.find(c=>c.roomId===roomId && c.labelOnly); if(c) return c.productId;
   const m=S.mats.find(m=>m.roomId===roomId && m.labelOnly); return m?m.productId:null;
@@ -40511,25 +40514,45 @@ function _listSuggestInFamily(roomId, modType, family, envType){
     ? _listSuggestCableFrom(roomId, _listFamilyProducts('cable',family,envType))
     : _listSuggestMatFrom(roomId, _listFamilyProducts('mat',family,envType));
 }
-// Foreslå produkt + antall fra netto areal + ønsket W/m² (velger familie, variant OG antall).
-// DEL A: varmetype (Innendørs/Utendørs) er rommets EGET moduleType-felt (samme kilde som drawn
-// rooms, _roomModuleType) — automatisk InSnow-utvalg + 300 W/m² så snart raden er satt til Utendørs.
+// Foreslå produkt + antall fra netto areal + ønsket W/m² — velger en NY familie kun når ingen er
+// valgt ennå. Kenneth (11.09.2026): «klasse må huskes, den endrer seg alltid tilbake» — hvert
+// areal-/hindring-/W-m²-felt kalte denne på nytt og regnet ut en HELT NY «nærmest ønsket effekt»-
+// familie hver gang, og overskrev dermed stille en allerede valgt klasse. En gyldig room.listFamily
+// (satt av brukeren via _listOnClass, ELLER av denne funksjonen forrige gang) beholdes nå urørt —
+// kun produkt+antall INNENFOR den familien reberegnes. _listOnType/_listOnEnv nullstiller
+// listFamily bevisst FØR de kaller denne, slik at type-/varmetype-bytte fortsatt velger en frisk
+// familie (uendret oppførsel der).
 function _listAutoSuggest(roomId){
   const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
   const envType=_roomModuleType(roomId);
   const target=_roomTargetWm2(roomId), net=roomAreas(room).net/10000;
   if(net<=0){ S.cables=S.cables.filter(c=>c.roomId!==roomId); S.mats=S.mats.filter(m=>m.roomId!==roomId); room.listCount=1; return; }
   const modType=room.listModType||'cable';
+  const validFams=_listFamiliesFor(modType,envType);
+  let fam = (room.listFamily && validFams.includes(room.listFamily)) ? room.listFamily : null;
+  if(!fam){
+    if(modType==='cable' && envType==='snow' && validFams.includes(_LIST_SNOW_DEFAULT_FAM)){
+      // Kenneth: «la InSnow 30T 230V være standard» — ikke «nærmest ønsket W/m²» som for
+      // innendørs (der 10T/17T ligger tett nok at det sjelden merkes); InSnow 20T/30T/40T spenner
+      // for vidt til at en stille auto-bytte mellom dem er ønskelig.
+      fam = _LIST_SNOW_DEFAULT_FAM;
+    } else if(modType==='cable'){
+      const s=_listSuggestCableFrom(roomId, _listCableProducts(envType));
+      const p=s?HEATING_PRODUCTS.find(pr=>pr.id===s.productId):null;
+      fam = p ? _listFamKey(p) : (validFams[0]||null);
+    } else {
+      const fams=_listMatFamiliesByWm2(envType);
+      let bestF=fams[0], bd=Infinity;
+      for(const f of fams){ const d=Math.abs(f.wm2-target); if(d<bd){bd=d;bestF=f;} }
+      fam = bestF ? bestF.family : (validFams[0]||null);
+    }
+  }
+  room.listFamily = fam;
   if(modType==='cable'){
-    const s=_listSuggestCableFrom(roomId, _listCableProducts(envType));
-    if(s){ const p=HEATING_PRODUCTS.find(pr=>pr.id===s.productId); room.listFamily=p?_listFamKey(p):(_listFamiliesFor('cable',envType)[0]||null); _listSetRoomProduct(roomId,'cable',s.productId,s.count); }
-    else { room.listFamily=_listFamiliesFor('cable',envType)[0]||null; _listSetRoomProduct(roomId,'cable',null,1); }
+    const s=_listSuggestInFamily(roomId,'cable',fam,envType);
+    _listSetRoomProduct(roomId,'cable', s?s.productId:null, s?s.count:1);
   } else {
-    const fams=_listMatFamiliesByWm2(envType);
-    let bestF=fams[0], bd=Infinity;
-    for(const f of fams){ const d=Math.abs(f.wm2-target); if(d<bd){bd=d;bestF=f;} }
-    room.listFamily = bestF ? bestF.family : (_listFamiliesFor('mat',envType)[0]||null);
-    const s=_listSuggestMatFrom(roomId, _listFamilyProducts('mat',room.listFamily,envType));
+    const s=_listSuggestInFamily(roomId,'mat',fam,envType);
     _listSetRoomProduct(roomId,'mat', s?s.productId:null, s?s.count:1);
   }
 }
@@ -40565,7 +40588,10 @@ function _listCreateRoomObj(part, floor, envType){
     floorId:floor.id, partId:part.id, listMode:true, shape:'list', points:[], walls:[],
     area:0, listHindCm2:0, targetWm2:null, roomType:null, floorType:null, dims:[], annotOffsets:{}, color:'#888', cardVisible:false,
     moduleType: mt,
-    listModType:'cable', listFamily:(_listFamiliesFor('cable', mt)[0]||null), listCount:1 };
+    // listFamily:null (ikke en gjettet standard) — _listAutoSuggest sin «behold valgt familie»-
+    // sjekk (Kenneth: «klasse må huskes») ville ellers tolket en gjettet plassholder som et EKTE
+    // valg og aldri kjørt det egentlige forslaget (InSnow 30T 230V/nærmest-W-m²) i det hele tatt.
+    listModType:'cable', listFamily:null, listCount:1 };
 }
 // Utkast-rommet som redigeres i «Nytt rom»-kortet (kun ett om gangen). DEL A Krav 3: en NY rad
 // arver forrige rads varmetype — Kenneth legger inn mange like utendørs porter etter hverandre,
@@ -40686,13 +40712,11 @@ function _listKey(e){
     else if(e.shiftKey && i===0 && btn){ e.preventDefault(); btn.focus(); }                    // Shift+TAB første felt → knapp
   }
 }
-// DEL B Krav 2: spenning i klartekst KUN når samme familienavn faktisk finnes i mer enn én
-// spenning i DETTE utvalget (typisk InSnow 230V/400V) — for et rent innendørs utvalg (alltid
-// 230V) blir teksten identisk med før (Test 10, ingen regresjon).
-function _listFamKeyLabel(key, fams){
-  const i=key.lastIndexOf('|'); const name=key.slice(0,i), volt=key.slice(i+1);
-  let count=0; for(const f of fams){ if(f.slice(0,f.lastIndexOf('|'))===name) count++; }
-  return count>1 ? `${name} ${volt}V` : name;
+// Kenneth (11.09.2026): «sett på 230V bak» — spenning i klartekst alltid, ikke bare når flere
+// spenninger faktisk finnes i utvalget (den forrige, forsiktigere regelen skjulte «230V» akkurat
+// der InSnow-klassen viste den).
+function _listFamKeyLabel(key){
+  const i=key.lastIndexOf('|'); return key.slice(0,i)+' '+key.slice(i+1)+'V';
 }
 function _listClassOptionsHtml(room){
   const envType=_roomModuleType(room.id);
@@ -40700,8 +40724,12 @@ function _listClassOptionsHtml(room){
   let cur=room.listFamily;
   if(!cur){ const pid=_listRoomProductId(room.id); const p=pid!=null?HEATING_PRODUCTS.find(pr=>pr.id===pid):null; if(p) cur=_listFamKey(p); }
   const fams=_listFamiliesFor(modType, envType);
+  // Ingen familie valgt ennå (rad uten areal, _listAutoSuggest har aldri kjørt) — vis InSnow 30T
+  // 230V som «ville blitt valgt», samme standard som _listAutoSuggest selv bruker, ikke en
+  // tilfeldig første-i-lista.
+  if(!cur) cur = (modType==='cable' && envType==='snow' && fams.includes(_LIST_SNOW_DEFAULT_FAM)) ? _LIST_SNOW_DEFAULT_FAM : (fams[0]||null);
   let o='';
-  for(const f of fams){ o+=`<option value="${esc(f)}"${f===cur?' selected':''}>${esc(_listFamKeyLabel(f,fams))}</option>`; }
+  for(const f of fams){ o+=`<option value="${esc(f)}"${f===cur?' selected':''}>${esc(_listFamKeyLabel(f))}</option>`; }
   return o || `<option value="">—</option>`;
 }
 function _listProductOptionsHtml(room){
