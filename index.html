@@ -7095,6 +7095,89 @@ function _matPolyXInterval(room, yLo, yHi) {
   return xIv && xIv.length ? xIv.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a)) : null;
 }
 
+// DEL D (spec-matte-autoutlegg-startpunkt-hjørne-vending-romform.md, Kenneth 12.09.2026): speilbilde
+// av _matPolyXInterval over — samme tette skanning, transponert til lengdeaksen (Y). STEG 0 fant at
+// _matPlaceCandidate sin Y-akse fortsatt kun brukte romMENS boks (kommentert der: «Y bruker fortsatt
+// bbox») — for et uregelmessig rom (Kenneths L-form) kan lengdeaksens EKTE grense ligge nærmere enn
+// boksen sier, og en full-lengde matte stikker da forbi den EKTE veggen selv om boksen har «plass».
+function _matPolyYInterval(room, xLo, xHi) {
+  const xs = room.points.map(p => p.x);
+  const xStep = Math.max(1, (xHi - xLo) / 20);
+  const xPositions = new Set([xLo, xHi]);
+  for (let x = xLo; x < xHi; x += xStep) xPositions.add(x);
+  for (const v of xs) { if (v > xLo && v < xHi) xPositions.add(v); }
+  let yIv = null;
+  for (const x of xPositions) {
+    let ivs; try { ivs = clipScanlineToPolygon('y', x, room.points); } catch (e) { ivs = null; }
+    if (!ivs || !ivs.length) return null;
+    yIv = yIv === null ? ivs : intersectIntervalSets(yIv, ivs);
+    if (!yIv.length) return null;
+  }
+  return yIv && yIv.length ? yIv.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a)) : null;
+}
+
+// ═══ STEG 0 (spec-matte-autoutlegg-startpunkt-hjørne-vending-romform.md, Kenneth 12.09.2026) ═══
+// Kenneths bilde («500×400 L-rom, 200×200 hakk, tre EcoMat 100T: 4m/3m/6m vertikalt») — MÅLT, ikke
+// antatt, mot en syntetisk kopi av rommet + produktene:
+//
+// PUNKT 1+2 (hvilket inngangspunkt, tre matter samtidig): _matFillRoomSmart('auto', dryRun) på
+// dette rommet gir {kind:'zone', 2 matter à 368/176cm} — treffer IKKE bildet. Direkte
+// _matRoomGeomForFill+_matMultiSolve på HELE (udekomponerte) rommet gir alongSpan=395cm — en 6m
+// (600cm) matte er derfor MATEMATISK UMULIG å plassere via NOEN av de «smarte» motorene
+// (_matFillRoomSmart/autoFillMatSerpentine/_matPlaceMultiMats forkaster ALLE en for lang matte, se
+// linje ~9015 og Regel E-søket ved ~9134). _upcPlaceMat sine 'auto'/'variant'-moduser rydder OGSÅ
+// rommet FØR de legger ut (_clearRoomProductCollections) — tre sekvensielle klikk på disse kan
+// derfor aldri gi tre SAMTIDIGE matter. _upcStartMatPlace/_startMatPlacementFromSelect (klikk-for-
+// å-plassere) rører derimot ALDRI rommet (eksplisitt kommentert der) — dette er den ENESTE veien
+// som kan gi tre matter fra tre uavhengige handlinger.
+// KONKLUSJON PUNKT 1+2: bildet kommer fra MANUELL KLIKK-PLASSERING (_matPlaceCandidate + commit-
+// handleren ved mousedown, ~L38055), ikke fra noen auto-/variant-motor — selv om Kenneth selv husker
+// det som «auto». Dette er ikke en gjetning: en 600cm matte er beviselig umulig via de smarte
+// motorene i dette rommet, og klikk-veien er beviselig den eneste som lar tre matter sameksistere.
+//
+// Hvorfor DETTE forklarer alle fire symptomene, lest direkte i _matPlaceCandidate under:
+//  - Symptom 1 («nettet gjennom veggen»): lengthCm (linje ~7117) er PRODUKTETS FULLE nominelle
+//    lengde, uten NOEN sjekk mot rommets langakse. freeY klemmes til [rMinY+marginCm,
+//    rMaxY-marginCm-lengthCm] (linje ~7147) — er lengthCm > tilgjengelig spenn, blir den ØVRE
+//    grensen i Math.min lavere enn den NEDRE grensen i Math.max, og Math.max vinner alltid: matta
+//    forankres i toppmargen og stikker rått forbi bunnmargen. INGEN avvisning finnes her (til
+//    forskjell fra breddesjekken to linjer over, ~7141, som FAKTISK avviser for smalt rom).
+//  - Symptom 2 (følger ikke innsettingshjørne): _matPlaceCandidate leser aldri
+//    S.varmefolie.startCorner NOE sted — Y-ankeret er rått wp.y (klikkpunktet), ikke et hjørnevalg.
+//  - Symptom 3 (for lang matte bør kuttes og vendes): samme rotårsak som symptom 1 — INGEN
+//    _matEqualWidthNL/Regel E-kall finnes i denne funksjonen. autoFillMatSerpentine har allerede
+//    dette søket (~9134) OG en eksplisitt avvisning (~9015) — klikk-veien har ingen av delene.
+//  - Symptom 4 (19 vs 11cm — bør være 5cm standard fra vegg): klikk-veien er PER DESIGN styrt av
+//    klikkposisjon (kommentert andre steder: «Kenneth skal kunne legge tre matter... uten at noen av
+//    de foregående forsvinner») — 19/11cm er ganger to ulike lengder (4m/3m) treffer klemmingen ulikt
+//    ved samme klikk-Y, IKKE _effMarginAlongCm sin sentrerings-formel (den bor i de to andre
+//    motorene, ~8266/~9218, og er algebraisk uavhengig av disse to produktenes lengdedifferanse —
+//    100cm/200cm/300cm, ingen av dem 16cm/ett kuttintervall slik STEG 0 punkt 3 spurte om). Punkt 3
+//    sin hypotese stemmer altså IKKE for akkurat disse tre produktene.
+//
+// PUNKT 4 (margin — «5cm»): _matPlaceCandidate (linje ~7118) bruker `(prod.min_wall_margin_mm || 0)
+// / 10` — IKKE samme `?? 50`-mønster som resten av mattemotoren (_matRoomGeomForFill ~8123,
+// autoFillMatSerpentine ~8969, _matFreeCableMarginCm ~9905, alle andre). Innlastingsstandarden
+// (~53295) setter 25mm (2,5cm) for produkter uten feltet satt — IKKE 50mm Kenneth antar. Hvilket tall
+// EcoMat 100T faktisk har i Supabase kan IKKE verifiseres herfra (samme begrensning som InSnow-
+// runden tidligere denne økten) — Kenneth kan lese det EKTE tallet selv i appen: Produktkatalog →
+// EcoMat 100T → kolonnen som viser marginOf() (~L49138, `p.min_wall_margin_mm/10 + ' cm'`). DEL-ene
+// under leser uansett ALLTID fra produktfeltet (aldri en ny hardkodet verdi) — korrektheten er
+// derfor uavhengig av hvilket tall raden faktisk har.
+//
+// KONSEKVENS FOR DEL A/D: spec ber om at DEL A rutes gjennom autoFillMatSerpentine (den har allerede
+// Regel E-søket OG avvisningen — begge trygge, verifisert over) og at DEL D vurderer _matAreaGeom sin
+// bbox. Bevisene over peker derimot på at DEN FAKTISKE feilen (symptom 1+3) sitter i
+// _matPlaceCandidate, som verken auto-forkastningen, Regel E-søket, eller (for lengdeaksen)
+// polygon-klipping i det hele tatt berører — kommentert eksplisitt der: «Y bruker fortsatt bbox».
+// DEL A bygges derfor i _matPlaceCandidate (samme Regel E-mønster, portert dit), IKKE i
+// autoFillMatSerpentine (som allerede er trygg og forblir urørt). DEL D (polygon i stedet for bbox
+// på langaksen) bygges også i _matPlaceCandidate av samme grunn — det er presis der bbox-antagelsen
+// faktisk forårsaket Kenneths symptom, ikke i _matAreaGeom (som IKKE var involvert i dette bildet).
+// DEL B og DEL C (senterings-formel / startCorner) gjelder fortsatt de to auto-motorene som spec sier
+// — klikk-veien er per design klikk-styrt og skal IKKE få et fast standardpunkt eller lese
+// startCorner (det ville motsagt hele funksjonens formål: fri, manuell plassering).
+
 // DEL B3 (Kenneth 28.08.2026): excludeId — valgfri, tredje parameter. Brukt av
 // _marginWarnSnapMat() («Juster til nærmeste lovlige posisjon» for en ALLEREDE plassert, nå
 // flyttet matte) til å utelate matta fra sin egen nabo-kollisjonssjekk under — uten denne ville
@@ -7114,9 +7197,18 @@ function _matPlaceCandidate(wp, productId, excludeId) {
 
   const widthCm = (prod.mat_width_mm || 500) / 10;
   const totalMm = _matTotalLengthMm(prod);
-  const lengthCm = totalMm ? totalMm / 10 : (prod.mat_min_length_mm || 1000) / 10;
-  const marginCm = (prod.min_wall_margin_mm || 0) / 10;
-  const gapReq = Math.max(0, _matProductMinGapCm(prod));   // Regel 18 — obligatorisk minsteavstand
+  let lengthCm = totalMm ? totalMm / 10 : (prod.mat_min_length_mm || 1000) / 10;
+  // STEG 0-KONSEKVENS (12.09.2026): var `|| 0` — eneste sted i mattemotoren som IKKE fulgte
+  // `?? 50`-mønsteret (_matRoomGeomForFill :8123, autoFillMatSerpentine :8969, _matFreeCableMarginCm
+  // :9905, m.fl.). Skiller seg kun fra `|| 0` når feltet mangler helt (null/undefined) — et
+  // eksplisitt 0 (utendørs, «ingen vegger ute») er uendret 0 med begge. Retter avviket for
+  // konsistens; ingen kjent produktrad mangler feltet i dag (innlastingsstandarden ~53295 setter
+  // 25mm), så dette er et sikkerhetsnett, ikke en observert feil for et konkret produkt.
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const minMandatoryGapCm = Math.max(0, _matProductMinGapCm(prod));   // Regel 18 — samme kilde Regel E-søket i autoFillMatSerpentine bruker
+  const gapReq = minMandatoryGapCm;   // obligatorisk minsteavstand mot NABOMATTER (samme gulv som internt bredde-gap)
   // DEL B1 (Kenneth 28.08.2026, «magnet-snap... bør snappe til innstilte verdi»): gapReq er ET
   // GULV (Regel 18), aldri et MÅL — magneten snappet før ALLTID til gapReq alene, så en innstilt
   // «↔ 10 cm» ble ignorert ved snapping. snapGap er det brukeren faktisk ba om, aldri under
@@ -7140,51 +7232,86 @@ function _matPlaceCandidate(wp, productId, excludeId) {
   const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
   if (rMaxX - rMinX - 2 * marginCm < widthCm) return empty;   // rommet er for smalt for denne bredden i det hele tatt
 
-  // Fri posisjon: rå peker minus halv bredde/lengde, klemt mot romboks ⊖ margin (samme konvensjon
-  // som _stripDropCandidate sin egen freePos). Y bruker fortsatt bbox — mattas RAD (dens Y-utstrekning)
-  // er det eneste som avgjør DEL B2 sitt polygon-intervall under, og den må være kjent først.
-  const freeXBbox = Math.max(rMinX + marginCm, Math.min(wp.x - widthCm / 2, rMaxX - marginCm - widthCm));
-  const freeY = Math.max(rMinY + marginCm, Math.min(wp.y - lengthCm / 2, rMaxY - marginCm - lengthCm));
+  // DEL D (12.09.2026, STEG 0 KONSEKVENS): Y-aksen (lengderetningen) brukte KUN romboksen — se
+  // _matPolyYInterval (speilbilde av _matPolyXInterval, samme skannemetode transponert). Proben
+  // ligger over klikkets EGEN X-bredde, samme prinsipp som X-intervallet lenger ned bruker mattas
+  // egen Y-utstrekning. Rektangulære rom uendret (skannelinja treffer alltid boks-kanten der).
+  const probeXLo = wp.x - widthCm / 2, probeXHi = wp.x + widthCm / 2;
+  const widestY = _matPolyYInterval(room, probeXLo, probeXHi);
+  const pMinY = widestY ? widestY[0] + marginCm : rMinY + marginCm;
+  const pMaxY = widestY ? widestY[1] - marginCm : rMaxY - marginCm;
+  if (pMaxY - pMinY < minLenCm - 0.01) return empty;   // ingen brukbar rad her i det hele tatt
+
+  // DEL A (12.09.2026, STEG 0 KONSEKVENS, «for lang matte bør kuttes og vendes»): FØR denne fiksen
+  // ble prod sin fulle nominelle lengde alltid brukt uansett hvor mye plass raden faktisk hadde —
+  // Kenneths 6m matte stakk da rett gjennom veggen (DEL D sitt pMaxY-pMinY over var alltid nok
+  // til å AVDEKKE dette, men ingenting handlet på det). Er det for trangt og produktet støtter jevne
+  // bredder (mat_equal_widths, samme flagg autoFillMatSerpentine sitt Regel E-søk bruker), del
+  // rullen inn i N side-ved-side bredder à L cm via _matEqualWidthNL — SAMME funksjon, SAMME
+  // (N,L)-regel, ikke en ny kopi. maxAcrossRuns bruker Regel 8+18-formelen (_matAreaGeom), estimert
+  // fra polygonets X-intervall for denne raden. Finnes intet gyldig (N,L)-par, eller produktet ikke
+  // støtter jevne bredder, avvises plasseringen (under) i stedet for å stikke gjennom veggen —
+  // samme «avvis stille, ghost viser rødt»-konvensjon funksjonen allerede bruker for et for smalt rom.
+  let numRuns = 1, effGapCm = 0;
+  const availableAlongCm = pMaxY - pMinY;
+  if (lengthCm > availableAlongCm + 0.01 && prod.mat_equal_widths && totalMm) {
+    const rowX = _matPolyXInterval(room, pMinY, pMaxY);
+    const acrossSpanEst = Math.max(0, (rowX ? (rowX[1] - rowX[0]) : (rMaxX - rMinX)) - 2 * marginCm);
+    const maxAcrossRuns = acrossSpanEst >= widthCm
+      ? Math.floor((acrossSpanEst + minMandatoryGapCm) / (widthCm + minMandatoryGapCm)) : 0;
+    const nl = _matEqualWidthNL(lengthCm, cutCm, maxAcrossRuns, availableAlongCm, minLenCm);
+    if (nl) { numRuns = nl.N; lengthCm = nl.L; effGapCm = minMandatoryGapCm; }
+  }
+  if (lengthCm > availableAlongCm + 0.01) return empty;   // fant ingen gyldig oppdeling — avvis fremfor å stikke gjennom veggen
+
+  // Blokkens totale tverr-bredde (flere bredder + internt gap ved DEL A-oppdeling, ellers samme
+  // som widthCm alene — bit-for-bit uendret for enhver matte som IKKE trengte oppdeling).
+  const blockW = numRuns * widthCm + Math.max(0, numRuns - 1) * effGapCm;
+
+  // Fri posisjon: rå peker minus halv bredde/lengde, klemt mot DEL D sitt polygon-intervall (samme
+  // konvensjon som _stripDropCandidate sin egen freePos).
+  const freeXBbox = Math.max(rMinX + marginCm, Math.min(wp.x - blockW / 2, rMaxX - marginCm - blockW));
+  const freeY = Math.max(pMinY, Math.min(wp.y - lengthCm / 2, pMaxY - lengthCm));
 
   // DEL B2: polygon-bevisst X-intervall for MATTAS EGEN Y-utstrekning — se _matPolyXInterval.
   const widestX = _matPolyXInterval(room, freeY, freeY + lengthCm);
   const pMinX = widestX ? widestX[0] + marginCm : rMinX + marginCm;
   const pMaxX = widestX ? widestX[1] - marginCm : rMaxX - marginCm;
-  if (pMaxX - pMinX < widthCm - 0.01) return empty;   // ingen gyldig X-posisjon for DENNE raden
+  if (pMaxX - pMinX < blockW - 0.01) return empty;   // ingen gyldig X-posisjon for DENNE raden
 
-  const freeX = Math.max(pMinX, Math.min(freeXBbox, pMaxX - widthCm));
+  const freeX = Math.max(pMinX, Math.min(freeXBbox, pMaxX - blockW));
 
   // Naboer: andre matter i SAMME rom, samme rotasjon (0 — samme kryssakse X), som faktisk
   // overlapper denne mattas Y-utstrekning (kun DA er de en reell side-ved-side-nabo på X-aksen).
   const neighbors = (S.mats || []).filter(m => m.roomId === room.id && m.id !== excludeId && (m.rotation_deg || 0) === 0
     && Math.max(freeY, m.y_cm) < Math.min(freeY + lengthCm, m.y_cm + m.length_cm) - 0.5);
-  const perpGapAt = (cx, m) => { const mw = _matTotalWidthCm(m); return cx >= m.x_cm ? cx - (m.x_cm + mw) : m.x_cm - (cx + widthCm); };
+  const perpGapAt = (cx, m) => { const mw = _matTotalWidthCm(m); return cx >= m.x_cm ? cx - (m.x_cm + mw) : m.x_cm - (cx + blockW); };
   const collidesAt = cx => neighbors.some(m => perpGapAt(cx, m) < gapReq - 0.01);
   const collidingNeighbors = neighbors.filter(m => perpGapAt(freeX, m) < gapReq - 0.01);
 
   let candidates, unconditional;
   if (collidingNeighbors.length === 1) {
     const m = collidingNeighbors[0], mw = _matTotalWidthCm(m);
-    candidates = [{ x: m.x_cm - widthCm - snapGap }, { x: m.x_cm + mw + snapGap }];
+    candidates = [{ x: m.x_cm - blockW - snapGap }, { x: m.x_cm + mw + snapGap }];
     unconditional = true;
   } else if (collidingNeighbors.length > 1) {
     candidates = collidingNeighbors.map(m => {
       const mw = _matTotalWidthCm(m);
-      const towardLeft = (freeX + widthCm / 2) < (m.x_cm + mw / 2);
-      return { x: towardLeft ? m.x_cm - widthCm - snapGap : m.x_cm + mw + snapGap };
+      const towardLeft = (freeX + blockW / 2) < (m.x_cm + mw / 2);
+      return { x: towardLeft ? m.x_cm - blockW - snapGap : m.x_cm + mw + snapGap };
     });
     unconditional = true;
   } else {
-    const wallCands = [{ x: pMinX }, { x: pMaxX - widthCm }];
+    const wallCands = [{ x: pMinX }, { x: pMaxX - blockW }];
     const neighborCands = neighbors.flatMap(m => { const mw = _matTotalWidthCm(m);
-      return [{ x: m.x_cm - widthCm - snapGap }, { x: m.x_cm + mw + snapGap }]; });
+      return [{ x: m.x_cm - blockW - snapGap }, { x: m.x_cm + mw + snapGap }]; });
     candidates = [...wallCands, ...neighborCands];
     unconditional = false;
   }
   // DEL B2: grensa er nå polygonets EGNE X-grenser for denne raden (pMinX/pMaxX), ikke bbox — en
   // nabo-avledet kandidat (snapGap fra en matte langt unna raden) kan fortsatt havne utenfor et
   // innhukk selv om selve naboen var gyldig.
-  candidates = candidates.filter(c => c.x >= pMinX - 0.01 && c.x + widthCm <= pMaxX + 0.01);
+  candidates = candidates.filter(c => c.x >= pMinX - 0.01 && c.x + blockW <= pMaxX + 0.01);
   const radiusCm = 14 / (S.view.zoom * BASE_SCALE);   // 14 skjerm-px, uavhengig av zoom — samme som folie
 
   let bestX = null, bestDist = Infinity;
@@ -7195,7 +7322,7 @@ function _matPlaceCandidate(wp, productId, excludeId) {
     if (d < bestDist - 0.01) { bestX = c.x; bestDist = d; }
   }
   const x = bestX != null ? bestX : freeX;
-  return { valid: !collidesAt(x), x, y: freeY, widthCm, lengthCm, snapped: bestX != null };
+  return { valid: !collidesAt(x), x, y: freeY, widthCm, lengthCm, numRuns, gapCm: effGapCm, snapped: bestX != null };
 }
 
 /* ── Auto-fill room with serpentine mat rows ── */
@@ -21053,7 +21180,9 @@ canvas.addEventListener('drop', e => {
     const mat = {
       id: S.counters.nextMatId++, roomId: _manualPlaceSession ? _manualPlaceSession.roomId : S.ui.selectedRoomId, productId: dragProdId,
       x_cm: cand.x, y_cm: cand.y, width_cm: cand.widthCm, length_cm: cand.lengthCm,
-      num_runs: 1, rotation_deg: 0, _manualPlace: true,
+      // DEL A (12.09.2026): samme cand.numRuns/gapCm som klikk-veien — dra-slipp er samme
+      // _matPlaceCandidate, samme Regel E-oppdeling for en for lang rull.
+      num_runs: cand.numRuns || 1, gap_cm: cand.gapCm || 0, rotation_deg: 0, _manualPlace: true,
     };
     S.mats.push(mat); _invalidateMatCache();
     S.ui.selectedMatId = mat.id;
@@ -22711,8 +22840,15 @@ function drawMats() {
   // gyldig. Bruker nå _matPlaceCandidate (samme funksjon commit-klikket kaller under) — «ghosten
   // skal ikke endre figur ved commit», samme prinsipp som _matFreeCandidate/_stripDropCandidate.
   if (S.ui.matPlaceMode && S.ui.matPlaceWidthCm && S.ui.matPlaceLengthCm && S.drawing.mousePos) {
-    const wCm = S.ui.matPlaceWidthCm, lCm = S.ui.matPlaceLengthCm;
     const cand = _matPlaceCandidate(S.drawing.mousePos, S.ui.matPlaceProductId);
+    // DEL A (12.09.2026, «ghosten skal ikke endre figur ved commit»): en for lang rull kan nå bli
+    // kuttet/delt av _matPlaceCandidate (Regel E) — ghosten må vise DEN faktiske footprinten (flere
+    // bredder + internt gap, kortere lengde), ikke alltid produktets rå nominelle mål, ellers lover
+    // ghosten en figur commit aldri leverer. Ingen kandidat ennå (utenfor rom e.l.) → samme statiske
+    // fallback som posisjonen under bruker.
+    const haveCand = cand.x != null;
+    const wCm = haveCand ? (cand.numRuns || 1) * cand.widthCm + Math.max(0, (cand.numRuns || 1) - 1) * (cand.gapCm || 0) : S.ui.matPlaceWidthCm;
+    const lCm = haveCand ? cand.lengthCm : S.ui.matPlaceLengthCm;
     const mx = cand.x != null ? cand.x + wCm / 2 : S.drawing.mousePos.x;
     const my = cand.y != null ? cand.y + lCm / 2 : S.drawing.mousePos.y;
     const candInvalid = cand.valid === false;
@@ -38062,7 +38198,6 @@ canvas.addEventListener('mousedown', e=>{
     if (S.ui.matPlaceMode && S.ui.matPlaceProductId) {
       const cand = _matPlaceCandidate(rawWp0, S.ui.matPlaceProductId);
       if (cand.valid) {
-        pushUndo();
         const mat = {
           id: S.counters.nextMatId++,
           roomId: S.ui.selectedRoomId,
@@ -38071,7 +38206,11 @@ canvas.addEventListener('mousedown', e=>{
           y_cm: cand.y,
           width_cm: cand.widthCm,
           length_cm: cand.lengthCm,
-          num_runs: 1,
+          // DEL A (12.09.2026): cand.numRuns/gapCm — 1/0 for enhver matte som fikk plass i sin
+          // fulle lengde (bit-for-bit uendret), >1/>0 kun når _matPlaceCandidate delte en for lang
+          // rull i N side-ved-side bredder (Regel E-søket, se der).
+          num_runs: cand.numRuns || 1,
+          gap_cm: cand.gapCm || 0,
           rotation_deg: 0,
           // STEG 2 (Kenneth 19.08.2026, «Sentrer kaster matta og kjører auto på nytt»): merker
           // denne mattas rom som «noen har plassert manuelt her» — _matToggleFromWall leser dette
@@ -38079,9 +38218,21 @@ canvas.addEventListener('mousedown', e=>{
           // ut på nytt (rent, urørt auto-utlegg — se der).
           _manualPlace: true,
         };
-        S.mats.push(mat); _invalidateMatCache();
-        S.ui.selectedMatId = mat.id;
-        renderSidebar(); updateCtxBar(); render();
+        // DEL A testkrav (spec-matte-autoutlegg...): _matRunsWithinRoom-vakten skal også gjelde
+        // klikk-veien — DEL D/A over beregner allerede en geometri som SKAL holde seg innenfor
+        // rommet, denne er et sikkerhetsnett mot et polygon skanningen (tett, men diskret) ikke
+        // fanget perfekt, ikke den primære mekanismen.
+        const _placeRoom = S.rooms.find(r => r.id === mat.roomId);
+        const _placeProd = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+        const _placeMarginCm = (_placeProd?.min_wall_margin_mm ?? 50) / 10;
+        if (_placeRoom && !_matRunsWithinRoom(mat, _placeRoom, _placeMarginCm, _placeProd)) {
+          console.error('Klikk-plassering avvist: matte ville ligget utenfor rommet', mat);
+        } else {
+          pushUndo();
+          S.mats.push(mat); _invalidateMatCache();
+          S.ui.selectedMatId = mat.id;
+          renderSidebar(); updateCtxBar(); render();
+        }
       }
       return;
     }
