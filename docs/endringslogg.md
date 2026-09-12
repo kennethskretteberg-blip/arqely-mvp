@@ -4,6 +4,56 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Frihånd matte: veggmargin, romform, hindringsavstand, forbudte soner, produktmargin, overlapp — 2026-09-12
+
+Kenneth: «jeg føler at frihånd matter ikke er optimal enda.» Seks funn, samme form på alle: regelen
+finnes allerede i appen (auto-matte/folie), og frihåndsmotoren var ikke koblet på den. STEG 0-rapport
+(seks punkter, alle MÅLT mot koden/en kjørende økt — ikke antatt) skrevet inn som kildekommentar over
+`_matFreeCableMarginCm` før noe ble bygget.
+
+- **`8a97385` DEL D** — kabelmarginen (`_matFreeCableMarginCm`) leser nå `prod.min_wall_margin_mm`
+  (`??`, ikke `||` — en eksplisitt 0 på et utendørsprodukt er gyldig) i stedet for et flatt 5cm/0cm
+  utledet av inne/ute. Samme kilde auto allerede bruker. Kommentartabellen fra 19.08-STEG-0-en
+  («Én mattemotor for alle») oppdatert der den nå var utdatert.
+- **`63c275e` DEL A** — `_matFreeClampLen` bruker nå `clipStripToRoom` (samme delte primitiv auto-
+  mattemotoren allerede bruker) i stedet for en bar `clipScanlineToPolygon` på senterlinja — trekker
+  margin fra i samme kall OG sampler tett over HELE lane-bredden, ikke bare senterlinja. STEG 0 punkt
+  2 (skrå/uregelmessig vegg) MÅLT med et trapesformet rom: en senterlinje godt innenfor komfortsonen
+  lot likevel en lane-KANT stikke 5cm utenfor den lokale takhøyden, feilaktig godkjent av den gamle
+  logikken. Samme bytte lukket et funn UTOVER spec-en: commit-vakten (`_matFreeRunsWithinRoom`)
+  hadde INGEN tverr-sjekk i det hele tatt. `_matFreeStartFor` sin `shortM` er nå
+  `Math.max(cc/2, marginCm)` — cc/2 er MÅLT (via `_drawMatPathCable`) til å være avstanden fra
+  MESH-KANTEN til kabelens første streng, ikke et mål mot veggen selv. `_matFreeRegressionTest` sin
+  «(30,296)»-fasit MÅLT til å bli «(30,295)» for 1108-produktet (marginCm=5 > cc/2=4 der) — oppdatert
+  med forklaring.
+- **`c938f23` DEL B** — samme feilklasse `_matFreeStartFor` hadde i rom 1108 før 19.08, gjort ett
+  sted og ikke det andre: `_matFreeCandidate` sin perpendikulære «passer lanen»-sjekk brukte romMENS
+  bbox, ikke romMENS FORM. Bytter til `clipStripToRoom` (samme primitiv DEL A innførte). Verifisert
+  direkte: en L-formet 900×400+300×700-rom med en bane midt i det fjernede hjørnet — gammel bbox-
+  logikk ville godkjent den, ny sjekk avviser den korrekt.
+- **`fc96d4e` DEL C** — hindringsløkka stoppet på rå bbox-kant, avstand null, og leste aldri
+  `h.clearance` (10.09.2026, 22fbe9e/d0c60fd — auto respekterer allerede 'wall'/'none'). Ruter nå
+  gjennom `_splitHindringsByClearance` + `clipStripAroundHindrings`, samme kilde som auto.
+- **`51aa721` DEL E** — funnet MENS spec-en ble skrevet, ikke i de fem punktene Kenneth fikk:
+  forbudte soner (dusj/våtrom/sluk) ble aldri klippet mot i frihånd. Lagt til med samme mekanisme.
+- **`f975ef3` DEL F** — `_matPathOverlapsOthers`/`_matPathMoveValid` fantes og virket, men kun
+  drag-veien brukte den; en NY bane committet via `_matFreeRunsWithinRoom` alene (kun selv-overlapp).
+  `_matFreeExit` bruker nå `_matPathMoveValid` — dro du en matte oppå en annen ble du stoppet, tegnet
+  du en ny oppå en annen ble du ikke det, nå er begge veier dekket.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt etter hver commit. `_matBench(42,64)` kjørt før/etter
+(ved midlertidig å bytte tilbake de tre berørte funksjonene i en levende økt, ikke via git) — vei 4
+(Frihånd) sin AGGREGERTE dekning (ulovlig talt som 0%, ikke utelatt) falt fra 52,19 % til 36,58 %,
+nøyaktig som ventet («marginen tar areal»); vei 1-3 (UPC auto/Fyll rom/InSnow) bit-for-bit uendret
+(67,83/67,83/48,78 begge veier). Utendørs (`min_wall_margin_mm=0`) eksplisitt verifisert bit-for-bit
+uendret (samme margin, samme shortM/longM, samme klipp, før og etter). Dusjsone-scenario, L-form-
+scenario og to-matter-overlapp-scenario alle verifisert direkte (se commit-meldingene). 100 rom × 4
+veier på ~200ms.
+
+**Fil:** index.html.
+
+---
+
 ## Mattebenk: N syntetiske rom, alle inngangspunkter, poeng og historikk — 2026-09-12
 
 Kenneth (19.08.2026): «Er det mulig å lage x antall syntetiske rom og kjøre en fast test med
