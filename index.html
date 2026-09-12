@@ -9905,18 +9905,28 @@ function _matFreeCableMarginCm(mp) {
   return (prod?.min_wall_margin_mm ?? 50) / 10;
 }
 
-// Klamp en bane-lengde slik at MESHEN holder seg innenfor rom-polygonet (kan gå til vegg) og
-// ikke legger seg oppå en hindring. Full-polygon: skann-linje langs baneaksen ved banens
-// tverr-posisjon; kort ned til rom-kant / hindring-kant i baneretningen. Snappet ned til raster.
+// DEL A (spec-frihand-matte-veggmargin-romform-hindring-forbudte-soner.md, Kenneth 12.09.2026):
+// Klamp en bane-lengde slik at MESHEN holder seg innenfor rom-polygonet MINUS produktets veggmargin
+// (kan IKKE lenger gå helt til selve veggen — se STEG 0-rapporten over _matFreeCableMarginCm) og
+// ikke legger seg oppå en hindring. clipStripToRoom (:35811, samme primitiv auto-mattemotoren
+// allerede bruker via _matClippedSegments) sampler TETT over HELE lane-bredden (NET), ikke bare
+// senterlinja — STEG 0 punkt 2 målte at en senterlinje-skanning lot en lane-KANT stikke ut av
+// veggen uoppdaget i et rom med skrå vegg, OG at commit-vakten (_matFreeRunsWithinRoom) ikke hadde
+// NOEN tverr-sjekk i det hele tatt. Samme bytte lukker begge hullene, siden begge kaller denne
+// funksjonen. Rotårsaken selve DEL A retter: FØR denne fiksen kjente klippingen ALDRI til margin
+// (bare selve romveggen) — arealregningen (_matFreeUsableAreaM2) og tegningen sa 5 cm, klippingen
+// sa 0. Snappet ned til raster.
 function _matFreeClampLen(mp, axis, dir, from, len) {
   const room = S.rooms.find(r => r.id === mp.roomId);
   if (!room || !room.points || room.points.length < 3) return len;
+  const marginCm = _matFreeCableMarginCm(mp);
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
   const cross = axis === 'h' ? from.y : from.x;   // fast tverr-koordinat
   const along = axis === 'h' ? from.x : from.y;   // start langs banen
   let intervals;
-  try { intervals = clipScanlineToPolygon(axis === 'h' ? 'x' : 'y', cross, room.points); }
-  catch (e) { return len; }
-  if (!intervals || !intervals.length) return len;
+  try { intervals = clipStripToRoom(cross - NET / 2, NET, axis, room.points, marginCm); }
+  catch (e) { return 0; }
+  if (!intervals || !intervals.length) return 0;
   const iv = intervals.find(([lo, hi]) => along >= lo - 1 && along <= hi + 1);
   // DEL B FEIL 2 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): startet FEIL ÅPEN — «fant
   // ikke noe intervall som inneholder startpunktet» ble lest som «ingenting å klampe mot», og
@@ -10007,8 +10017,9 @@ function _matFreeCandidate(mp, P) {
   return move;
 }
 
-// Start-punkt (kaldskjøt) i nedre-venstre hjørne, gitt første banes akse. ½ cc fra vegg mot
-// KORTSIDEN (bane-enden) og 5 cm fra vegg mot LANGSIDEN (den 50 cm brede mesh-kanten).
+// Start-punkt (kaldskjøt) i nedre-venstre hjørne, gitt første banes akse. max(½ cc, veggmargin)
+// fra vegg mot KORTSIDEN (bane-enden) og veggmargin fra vegg mot LANGSIDEN (den 50 cm brede
+// mesh-kanten).
 //
 // DEL B FEIL 1 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): bbox-hjørnet (minX/maxX/
 // minY/maxY) er romMENS omsluttende boks, ikke romMENS FORM — for et uregelmessig rom (Kenneths
@@ -10018,14 +10029,20 @@ function _matFreeCandidate(mp, P) {
 // klippe-mekanisme), og forankre startpunktet i DET intervallet. Rektangulære rom er BIT-FOR-BIT
 // uendret: der treffer skannelinja polygonet på FØRSTE forsøk (bbox-kant ER polygon-kant), og
 // intervallet er identisk med [minX,maxX]/[minY,maxY] — samme tall som FØR denne fiksen.
+//
+// DEL A (12.09.2026, STEG 0 punkt 1): cc/2 er MÅLT (se _drawMatPathCable) til å være avstanden fra
+// MESH-KANTEN til kabelens første streng — ikke et mål mot veggen. shortM plasserer selve
+// mesh-kanten cc/2 fra veggen, og må derfor aldri bli SMALERE enn produktets egen veggmargin
+// (marginCm) — ellers ville en kort kaldskjøt tillate mesh nærmere veggen enn produktregelen sier.
+// max() er et no-op for dagens EcoMat-produkter (cc/2 dominerer allerede der, målt i STEG 0), en
+// reell korreksjon for et fremtidig produkt med strammere cc enn sin egen margin. longM hentes fra
+// DEL D sin kilde (samme produktrad), ikke lenger en egen hardkodet 5/0.
 function _matFreeStartFor(room, prod, axis) {
   const { NET, cc } = _matFreeConsts(prod);
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-  // Langkant-margin (mattas 50/100 cm brede kant mot vegg): snø pakkes til kanten (0), som
-  // _packSnowMats; innendørs EcoMat holder 5 cm.
-  const snow = _roomModuleType(room.id) === 'snow';
-  const shortM = cc / 2, longM = snow ? 0 : 5;
+  const marginCm = (prod?.min_wall_margin_mm ?? 50) / 10;
+  const shortM = Math.max(cc / 2, marginCm), longM = marginCm;
   // Innsettingspunkt fra samme hjørne-velger som ellers (S.varmefolie.startCorner: bl/br/tl/tr).
   const corner = (S.varmefolie && S.varmefolie.startCorner) || 'bl';
   const left = corner.charAt(1) === 'l';     // bl/tl → venstre
@@ -10048,14 +10065,14 @@ function _matFreeStartFor(room, prod, axis) {
   }
 
   if (axis === 'h') {
-    // Liggende bane: kortkant = venstre/høyre ende (½ cc); langkant = topp/bunn (5 cm).
+    // Liggende bane: kortkant = venstre/høyre ende (shortM); langkant = topp/bunn (longM).
     const crossStart = bottom ? maxY - NET / 2 - longM : minY + NET / 2 + longM;
     const found = findInterval('x', crossStart, bottom, minY, maxY);
     if (!found) return { x: left ? minX + shortM : maxX - shortM, y: crossStart };   // bbox-fallback
     const [lo, hi] = found.interval, mid = (lo + hi) / 2;
     return { x: left ? Math.min(lo + shortM, mid) : Math.max(hi - shortM, mid), y: found.pos };
   }
-  // Stående bane: kortkant = topp/bunn ende (½ cc); langkant = venstre/høyre (5 cm).
+  // Stående bane: kortkant = topp/bunn ende (shortM); langkant = venstre/høyre (longM).
   const crossStart = left ? minX + NET / 2 + longM : maxX - NET / 2 - longM;
   const found = findInterval('y', crossStart, !left, minX, maxX);
   if (!found) return { x: crossStart, y: bottom ? maxY - shortM : minY + shortM };   // bbox-fallback
@@ -10399,12 +10416,18 @@ function _matFreeRegressionTest() {
     check('1108 loddrett startpunkt er inne i polygonet', 'inne', inside(startV), JSON.stringify(startV));
     check('1108 liggende startpunkt er inne i polygonet', 'inne', inside(startH), JSON.stringify(startH));
 
-    // Regresjon: et RENT rektangel skal gi BIT-FOR-BIT samme startpunkt som bbox-formelen ga FØR
-    // FEIL 1-fiksen (30,296 for bl/v med denne produktkonstanten — cc=8→shortM=4, NET=50→longM=5).
+    // Regresjon: et RENT rektangel skal gi et DETERMINISTISK startpunkt fra bbox-formelen.
+    // DEL A (spec-frihand-matte-veggmargin-romform-hindring-forbudte-soner.md, 12.09.2026, STEG 0
+    // punkt 1 og 6, MÅLT ikke antatt): var (30,296) — cc=8→shortM=cc/2=4, NET=50→longM=5 (hardkodet
+    // 5cm). shortM er nå Math.max(cc/2, marginCm); for DENNE produktkonstanten (min_wall_margin_mm
+    // =50 ⇒ marginCm=5) er marginCm STRENGERE enn cc/2, så shortM blir 5 (ikke 4) — riktig tall,
+    // ikke en tilfeldig historisk verdi: en kort kaldskjøt skal aldri tillate mesh nærmere veggen
+    // enn produktets egen margin. y flytter derfor fra 296 til 295 (300−5). longM er uendret (var
+    // allerede hardkodet 5cm for nettopp DETTE produktet — DEL D endrer KILDEN, ikke tallet her).
     const rectRoom = { id: 901109, points: [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 300 }, { x: 0, y: 300 }] };
     const rectStart = _matFreeStartFor(rectRoom, prod, 'v');
-    check('Rektangulært rom: startpunkt uendret (30,296)', '{x:30,y:296}',
-      Math.abs(rectStart.x - 30) < 0.01 && Math.abs(rectStart.y - 296) < 0.01, JSON.stringify(rectStart));
+    check('Rektangulært rom: startpunkt (30,295) — shortM=max(cc/2,marginCm)', '{x:30,y:295}',
+      Math.abs(rectStart.x - 30) < 0.01 && Math.abs(rectStart.y - 295) < 0.01, JSON.stringify(rectStart));
 
     // FEIL 2: klampen feiler LUKKET (0) når startpunktet likevel er utenfor polygonet.
     const outsideFrom = { x: 30, y: 396 };   // det manglende hjørnet
