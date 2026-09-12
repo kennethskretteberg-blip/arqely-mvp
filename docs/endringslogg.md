@@ -4,6 +4,94 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Avstand-knappen og Sentrer på et auto-utlegg med flere matter — 2026-09-12
+
+Kenneth, sak 2: «velger en matte etter auto-utlegg, sentrer og avstand-knapp dukker opp, men det
+skjer ingenting når jeg endrer avstanden.» Og: «Sentrer knappen er kanskje litt mer tvilsom når det
+er to matter i rommet.» STEG 0-rapport (fem punkter, alle MÅLT mot koden) skrevet inn som
+kildekommentar over `_matCenterGroupInRoom` før noe ble bygget.
+
+Rotårsak, ett flagg: `_manualPlace`, satt KUN ved klikk-plassering. Alle de trygge gruppe-
+operasjonene (`_matManualGroupX`, `_matSetGroupGap`, `openMatGroupGapPanel`, den trygge Sentrer-
+grenen) var gatet på nettopp det flagget — for et auto-utlegg var gruppa alltid tom, og både
+avstand-chippen og Sentrer traff i stedet mekanismer som enten ikke flyttet noe (skrev kun den
+globale `S.varmematte.gapCm`) eller var direkte destruktive (slettet den valgte matta og la den ut
+på nytt alene, mens de andre auto-mattene ble stående urørt og kunne overlappe).
+
+- **`bce18b6` DEL A** — de gatede gruppe-funksjonene virker nå for ALLE matter i et rom, uansett
+  opprinnelse — ingen ny mekanisme, samme `_matSetGroupGap` som allerede var riktig for manuelt
+  plasserte matter. Generalisert til begge akser (`rotation_deg` 0→X, 90→Y, default 0 — bit-for-bit
+  uendret for det vanligste tilfellet). Ny `_matGroupMaxMarginCm` klemmer et for stort avstandsønske
+  NED til det romboksen faktisk har plass til (Regel 9: gapet gir etter, ikke margen), aldri under
+  Regel 18-gulvet; `_matRunsWithinRoom` som sikkerhetsnett etter flyttingen ruller tilbake og avviser
+  stille om en uregelmessig vegg likevel ikke fanges av boks-estimatet. `pushUndo()` flyttet fra
+  «per tastetrykk» til «én gang, ved panelåpning» (samme mønster som folie sitt gap-panel).
+- **`c76dba4` DEL B** — `_matToggleFromWall` sin destruktive vei (slett valgt matte, legg den ut på
+  nytt alene med ett-blokk-motoren) er fjernet helt. Gruppeforskyvning (`_matCenterGroupInRoom`, fra
+  19.08.2026) gjelder nå ubetinget — Sentrer flytter, sletter aldri. Kommentaren over
+  `_matFillRoomSmart` som advarte om nøyaktig denne bugen er merket RETTET.
+- **`ff77d8f` DEL C** — `openMatGapPanel` sin tittel («Avstand mellom matter») viste alltid gapet
+  MELLOM BANER inni ett matteobjekt — misvisende nå som DEL A ga «mellom matter» sin egen, ekte
+  chip. Omdøpt til «Avstand mellom baner», samme tall, samme funksjon.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt etter hver commit. Live verifisert på en syntetisk
+kopi av Kenneths L-rom (500×400, hakk 200×200) med et ekte to-matte sone-auto-utlegg: avstands-
+endring flytter begge mattene og rapporterer riktig tall; en absurd stor endring klemmes til det som
+får plass; en endring som ville presset en matte over romformens hakk avvises stille. Samme fire
+prøvene gjentatt for `rotation_deg: 90` (liggende) med identisk resultat på Y-aksen. Rom med kun
+klikk-plasserte matter bevist bit-for-bit uendret. `_matBench(42,64)` kjørt før/etter — denne runden
+rører ikke selve utleggsmotoren, og alle fire veier ga identisk resultat (224 rom, 180 fromWall-
+rader, samme tall for Kenneths L-rom på alle fire veier).
+
+**Fil:** index.html.
+
+---
+
+## Auto-matte: startpunkt fra vegg, innsettingshjørne, vending av for lang matte, romform — 2026-09-12
+
+Kenneth, med skjermbilde av et L-rom (500×400, hakk 200×200): fire symptomer — en 4m matte legger
+seg for nærme veggen (nett gjennom veggen), en kortere matte følger ikke innsettingshjørne-
+velgeren, en 6m matte (lengre enn rommet) burde vært kuttet og vendt, og to matter starter ulik
+avstand fra vegg (19 vs. 11 cm) der 5 cm burde vært standard. STEG 0-rapport skrevet inn som
+kildekommentar over `_matPlaceCandidate` — MÅLT, ikke antatt: en 6m matte er matematisk umulig å
+plassere via noen av de «smarte» auto-/variant-motorene i dette rommet (alongSpan=395cm, alle
+forkaster en for lang matte), og `_upcPlaceMat` sine auto/variant-moduser tømmer rommet før utlegg
+(tre matter kan derfor aldri komme fra tre sekvensielle klikk der). Bildet kom i stedet fra MANUELL
+KLIKK-PLASSERING (`_matPlaceCandidate`) — som verken sjekket lengde mot romform, leste
+innsettingshjørnet, eller hadde noen kutt-og-vend-mekanisme. Kenneths egen omtale («jeg brukte
+auto») stemte altså ikke med hva koden faktisk gjorde — rapportert ærlig, deretter bygget videre
+med Kenneths eksplisitte «Enig, bygg det» på den nye fordelingen.
+
+- **`3267ebc` DEL A+D** (kombinert — A avhenger av D sin korrekte spenn) — ny `_matPolyYInterval`
+  (speilbilde av `_matPolyXInterval`) gir lengdeaksen samme polygon-bevisste behandling
+  breddeaksen allerede hadde. Er produktet for langt for den (nå korrekte) tilgjengelige spennen,
+  søkes et gyldig (N,L)-par via `_matEqualWidthNL` (samme Regel E-funksjon `autoFillMatSerpentine`
+  bruker) — rullen kuttes og legges tilbake som N side-ved-side bredder. Finnes intet gyldig par,
+  avvises plasseringen stille i stedet for å stikke gjennom veggen. Samme fiks i dra-slipp-veien.
+  Sideleddet: `min_wall_margin_mm`-lesingen brukte `|| 0` (eneste stedet som ikke fulgte `?? 50`-
+  mønsteret ellers i mattemotoren) — rettet for konsistens.
+- **`2fe9b58` DEL C** — `autoFillMatSerpentine`/`_matPlaceMultiMats` leser nå
+  `S.varmefolie.startCorner` (ny delt `_matCornerFlags`) — «fra vegg» ankrer fra riktig hjørne på
+  tvers-aksen i stedet for alltid laveste kant.
+- **`c912561` DEL B** — langaksen har fått sitt eget «fra vegg»-standardvalg
+  (`_matAlongFromWallDefault`, default sann — Kenneths «5cm standard, trykk Sentrer etterpå»),
+  uavhengig av tvers-aksens `fromWall` (default usann). `_matToggleFromWall` kobler nå begge
+  sammen i ett trykk. Avgrenset til UTENFOR en sone — en målt ~1cm grense-uenighet mellom sonens
+  egen rektangel-geometri og den ekte klippingen kunne ellers utløse Regel H sin nedgraderingsløkke
+  og halvere reell dekning.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt etter hver commit. Kenneths eksakte L-rom lagt til
+`_matBenchNamedRooms` som fasit; langaksen lagt til som egen 2×2-dimensjon i mattebenkens
+Regel 9/20-rapport. `_matBench(42,64)` kjørt rent med begge nye varianter (224 rom, 180 fromWall-
+rader). Live verifisert: en 6m matte i rommets smaleste hakk deles nå trygt i N bredder innenfor
+romformen; alle fire innsettingshjørner gir fire distinkte, korrekte startpunkt; utendørs
+(`min_wall_margin_mm=0`) flytter seg til flukt-mot-vegg under det nye standardvalget (rapportert til
+Kenneth som en bevisst, ikke skjult, atferdsendring).
+
+**Fil:** index.html.
+
+---
+
 ## Frihånd matte: veggmargin, romform, hindringsavstand, forbudte soner, produktmargin, overlapp — 2026-09-12
 
 Kenneth: «jeg føler at frihånd matter ikke er optimal enda.» Seks funn, samme form på alle: regelen
