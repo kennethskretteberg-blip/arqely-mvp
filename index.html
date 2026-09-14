@@ -18748,7 +18748,148 @@ function _scoreCableCandidate(res, ep, ctx) {
   return score;
 }
 
-function _autoFillCableImpl(roomId, productId) {
+// ═══ STEG 0 (spec-kabel-celle-dekomponering.md, Kenneth 14.09.2026) ═══
+// Kenneths L-formet bad (InFloor 17T 1000W/59m, CC 9,6): «appen klarte ikke å legge kabelen ut på
+// en god måte... trodde vi hadde en motor som forstod alle romgeometrier uavhengig?»
+//
+// STORT FUNN, MÅLT — spec'ens EGEN modell av motoren er utdatert, ikke bare linjenumrene: prompten
+// beskriver _autoFillCableImpl som «CC-regning → generateCableSerpentine → 70%-terskel →
+// snitt-trim → overshoot-trim», alt i én funksjon. Slik er koden IKKE lenger bygget (P1,
+// 2026-06-03-kommentaren rett over dette avsnittet, «V5/V4/generateCableLayoutLengthDriven ble
+// fjernet her»). _autoFillCableImpl er i dag en KASKADE av FIRE separate motorer, forsøkt i
+// rekkefølge til én lykkes: (1) generateCableSkew — ikke-rettvinklede rom/hindringer, (2)
+// generateCableBoustrophedon — «rene» rektvinklede rom, (3) generateCableV6 — EGEN, ALLEREDE
+// EKSISTERENDE celle-basert motor (topologi → celler → per-celle-sveip → dekningsvalidering, med
+// celle-til-celle `connections`), forsøkt når boustrophedon underfyller en fastlengde-kabel, (4)
+// generateCableSerpentine — SISTE fallback, kun nådd om (1)-(3) ALLE feiler.
+//
+// De to «skadelige stegene» prompten peker på (70%-median-sletting, commonLo/commonHi-snitt-
+// trimming) bor KUN i generateCableSerpentine (og i den DØDE generateCableLayoutLengthDriven,
+// aldri kalt av kaskaden) — IKKE i _autoFillCableImpl selv. For et rettvinklet L-rom (som
+// Kenneths, MED veggstubbe) er serpentine ALDRI motoren som faktisk kjører — boustrophedon (rene
+// rom) eller V6 (rom med hindringer) fanger det først. Bygget en representativ kopi av Kenneths
+// bad (350×250cm minus 100×100-hakk = 7,75 m² BTA, dusj-hindring + toalett-forbudt-sone som gir
+// netto≈5,73 m², CC≈9,7 — tett på Kenneths egne 9,6) og kjørte _autoFillCableImpl direkte:
+//   - MED hindringer (nærmest Kenneths ekte bad): motor='v6', lagt lengde 5899,9 av 5900cm mål
+//     (0,09cm avvik — praktisk talt null undershoot), MEN målt dekning (Σ banelengde×CC mot
+//     netto areal) er kun 85,7% — 0,82 m² av 5,73 m² netto ligger KALDT, usett i noe tall
+//     materiallista eller kabelpanelet viser.
+//   - UTEN hindringer (ren L-form, isolerer selve romformens effekt): motor='boustrophedon',
+//     lagt lengde 5852cm av 5900cm mål (48cm/0,8% undershoot, stille — ingen melding), dekning
+//     92,5% (0,58 m² av 7,75 m² kaldt).
+//
+// KONKLUSJON: Kenneths symptom er REELT og målt — udekket areal og stille undershoot finnes,
+// nøyaktig som beskrevet. Men de oppstår i boustrophedon/V6 (de FAKTISK aktive motorene for et
+// rettvinklet uregelmessig rom), ikke i generateCableSerpentine (spec'ens angitte mål, i praksis
+// en dead-ish fallback for denne romklassen). Kenneths egen DEL B-idé («del i celler, sveip hver
+// celle») er allerede bygget — V6 GJØR nøyaktig dette, med sin egen topologi/celle/tilkoblings-
+// motor, uavhengig av _matPlanZones/_decomposeRoomToRects (mattesidens celle-motor, en HELT
+// ANNEN, enklere rektangel-grådig algoritme V6 ikke bruker eller deler kode med).
+//
+// DETTE ENDRER HVOR DEL A-D FAKTISK MÅ TREFFE — se meldingen til Kenneth i samme runde for
+// forslag til omfordeling før bygging (samme mønster som forrige rundes «Enig, bygg det» på
+// auto-matte-oppgaven: STEG 0 pekte òg der på et annet sted enn prompten antok). Kenneth valgte:
+// DEL D (nedenfor og i CC-regningen over kaskaden) + en nedskalert DEL A (fjern de to skadelige
+// stegene fra generateCableSerpentine — den er fortsatt en reell, om enn sjelden nådd, fallback).
+// DEL B/C (V6 sin egen celle/tilkoblingsdekning) er UTSATT til en egen runde med fersk STEG 0.
+
+// DEL D, del 2 + DEL A punkt 2 (engine-uavhengig ærlighetssjekk): kjøres på RESULTATET uansett
+// hvilken av de fire motorene som vant — STEG 0 målte TO uavhengige måter et lovlig, «vellykket»
+// resultat likevel kan lure brukeren:
+//  (a) AREAL-gap: V6/boustrophedon kan treffe lovlig CC og riktig totallengde og LIKEVEL la reelt
+//      areal ligge kaldt (V6: 14,3 % av netto i et hindringsrom; boustrophedon: 7,5 % i et rent
+//      L-rom) — målt som Σ banelengde×CC (skew: bruker motorens egen coverage-brøk) mot
+//      _roomAreas sin egen netto, samme formel CC-regningen selv bruker.
+//  (b) LENGDE-gap (DEL A punkt 2, «undershoot rapporteres ikke»): calcSp<minSp klemmer CC opp,
+//      og en STOR del av produktets rullelengde legges aldri (målt: et 2,25 m² rom med en 100 m
+//      kabel dekket 93 % av arealet — men brukte bare 44 m av de 100, 56 m usett i materiallista
+//      likevel viser «100 m»). Dette er en ANNEN feilklasse enn (a) — full dekning, men til
+//      prisen av en halvbrukt rull — og fanges ikke av arealsjekken alene.
+// Verste av de to avgjør alvorlighetsgrad. Et rektangulært rom uten hindringer og en fornuftig
+// produktstørrelse treffer ALDRI noen av tersklene under (bit-for-bit uendret brukeropplevelse
+// for det vanligste tilfellet — kun nye felter lagt PÅ kabelobjektet, ingen ny geometri).
+//
+// Terskler, MÅLT resultat — ikke den naive areal/lengde-formelen alene (se merknaden i
+// _autoFillCableImpl om hvorfor den avgjørelsen ikke lenger tas FØR kaskaden kjører):
+//  - VARSEL: areal >5 % OG >0,1 m² kaldt, ELLER lengde >2 % OG >20 cm ubrukt av rullen.
+//  - AVVIS (standard, overstyrbart): areal >20 % OG >0,3 m² kaldt, ELLER lengde >25 % OG >2 m
+//    ubrukt. Navngi et produkt i samme familie (getProductFamily) i RIKTIG retning — lengre hvis
+//    arealet ikke dekkes, kortere hvis mesteparten av rullen aldri blir lagt — og la brukeren
+//    eksplisitt overstyre (confirm(), samme mønster _batchAction bruker for sine bekreftelser).
+function _finishCableAutoFill(cable, room, prod, opts) {
+  if (!cable || !room) return cable;
+  opts = opts || {};
+  const areas = roomAreas(room);
+  const nettoM2 = areas.net / 10000;
+  if (!(nettoM2 > 0)) return cable;
+  let coveredM2;
+  if (cable.pathEls && cable.pathEls.length) {
+    coveredM2 = (cable.coverage != null ? cable.coverage : 1) * nettoM2;
+  } else if (cable.runs && cable.runs.length && cable.spacing_cm) {
+    let lenCm = 0;
+    for (const run of cable.runs) for (const seg of (run.segments || [])) lenCm += Math.abs(seg.end_cm - seg.start_cm);
+    coveredM2 = lenCm * cable.spacing_cm / 10000;
+  } else {
+    return cable;
+  }
+  const uncoveredM2 = Math.max(0, nettoM2 - coveredM2);
+  const uncoveredPct = nettoM2 > 0 ? (uncoveredM2 / nettoM2 * 100) : 0;
+
+  let lenShortfallCm = 0, lenShortfallPct = 0;
+  if (prod && prod.cable_length_m && cable.totalLength_cm != null) {
+    const targetCm = prod.cable_length_m * 100;
+    lenShortfallCm = Math.max(0, targetCm - cable.totalLength_cm);
+    lenShortfallPct = targetCm > 0 ? (lenShortfallCm / targetCm * 100) : 0;
+  }
+
+  const areaBad = uncoveredM2 > 0.3 && uncoveredPct > 20;
+  const lenBad = lenShortfallCm > 200 && lenShortfallPct > 25;
+  if ((areaBad || lenBad) && prod && prod.cable_length_m) {
+    const family = getProductFamily(prod.id).filter(p => p.id !== prod.id && p.cable_length_m);
+    // Areal ikke dekket → trenger MER kabel. Mesteparten av rullen ubrukt → et MINDRE produkt holder.
+    const wantLonger = areaBad;
+    let suggestion;
+    if (wantLonger) {
+      const neededLenM = nettoM2 * 100 / ((prod.max_spacing_mm || 200) / 10);
+      suggestion = family.filter(p => p.cable_length_m >= neededLenM).sort((a, b) => a.cable_length_m - b.cable_length_m)[0] || null;
+    } else {
+      const neededLenM = nettoM2 * 100 / ((prod.min_spacing_mm || 50) / 10);
+      suggestion = family.filter(p => p.cable_length_m <= neededLenM).sort((a, b) => b.cable_length_m - a.cable_length_m)[0] || null;
+    }
+    const suggestionTxt = suggestion
+      ? ` ${suggestion.name} (${suggestion.cable_length_m} m) ville passet bedre.`
+      : ` Fant ikke et ${wantLonger ? 'lengre' : 'kortere'} produkt i samme familie.`;
+    const msg = areaBad
+      ? `${prod.name} (${prod.cable_length_m} m) dekker ikke dette rommet godt — ${uncoveredM2.toFixed(2)} m² (${uncoveredPct.toFixed(0)}%) ville ligget uten kabel.${suggestionTxt}`
+      : `${prod.name} (${prod.cable_length_m} m) er for lang for dette rommet — ${(lenShortfallCm / 100).toFixed(1)} m (${lenShortfallPct.toFixed(0)}%) av rullen ville aldri blitt lagt.${suggestionTxt}`;
+    const allowPartial = !!opts.allowPartial || (typeof confirm === 'function' && confirm(msg + '\n\nVil du likevel legge den ut slik?'));
+    if (!allowPartial) {
+      if (typeof _showToast === 'function') _showToast(msg, 'warn');
+      return null;
+    }
+    if (typeof _showToast === 'function') _showToast('Legger likevel — ' + msg, 'warn');
+    cable._coverageWarningM2 = Math.round(uncoveredM2 * 100) / 100;
+    cable._coverageWarningPct = Math.round(uncoveredPct * 10) / 10;
+    cable._lengthShortfallCm = Math.round(lenShortfallCm);
+    return cable;
+  }
+  const areaWarn = uncoveredM2 > 0.1 && uncoveredPct > 5;
+  const lenWarn = lenShortfallCm > 20 && lenShortfallPct > 2;
+  if (areaWarn || lenWarn) {
+    cable._coverageWarningM2 = Math.round(uncoveredM2 * 100) / 100;
+    cable._coverageWarningPct = Math.round(uncoveredPct * 10) / 10;
+    cable._lengthShortfallCm = Math.round(lenShortfallCm);
+    if (typeof _showToast === 'function') {
+      const parts = [];
+      if (areaWarn) parts.push(`${cable._coverageWarningM2.toFixed(2)} m² (${cable._coverageWarningPct.toFixed(0)}%) av rommet ligger uten kabel`);
+      if (lenWarn) parts.push(`${(lenShortfallCm / 100).toFixed(1)} m av rullen ble ikke lagt`);
+      _showToast(parts.join(' — ') + ' — sjekk utlegget.', 'warn');
+    }
+  }
+  return cable;
+}
+function _autoFillCableImpl(roomId, productId, opts) {
+  opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
@@ -18759,6 +18900,17 @@ function _autoFillCableImpl(roomId, productId) {
   const recSp = (prod.recommended_spacing_mm || 100) / 10;
 
   // For cables with fixed length: calculate optimal CC from room area
+  // DEL D-MERKNAD (14.09.2026): en tidligere versjon av denne fiksen avviste HER, FØR kaskaden
+  // (skew/boustrophedon/V6/serpentine) i det hele tatt fikk prøve seg, basert på om DENNE naive
+  // areal/lengde-formelen alene lå utenfor [minSp,maxSp]. Det brøt _cableSkewRegressionTest sine
+  // egne fasit-rom (bl.a. test A: 60m² rom, 60m kabel → calcSp=100cm, godt utenfor et typisk
+  // produkts spennvidde — men testen tester VINKELEN skew treffer, ikke areal/lengde-konsistens,
+  // og skew-motoren tar aldri imot `spacing` som argument i det hele tatt — den regner sin EGEN
+  // CC internt). Å avvise FØR kaskaden kjører hindrer nettopp de motorene STEG 0 fant er
+  // flinkere enn denne grove formelen fra å få vise det. `spacing` her er derfor UENDRET (samme
+  // klemming som før, bit-for-bit) — den brukes kun som ETT av flere innspill kaskaden selv
+  // veier. Den FAKTISKE «for kort/for lang»-avgjørelsen er flyttet til _finishCableAutoFill,
+  // basert på MÅLT dekning av det kaskaden faktisk endte opp med — se kommentaren der.
   let spacing;
   if (prod.cable_length_m) {
     const areas = roomAreas(room);
@@ -18900,7 +19052,7 @@ function _autoFillCableImpl(roomId, productId) {
       // NB: res.coverage is a 0–1 fraction (not a percentage).
       if (res && res.pathEls && res.pathEls.length > 0 &&
           res.coverage >= 0.70 && (res.openLen || 0) < spacing * 1.5) {
-        return {
+        return _finishCableAutoFill({
           id: S.counters.nextCableId++,
           roomId, productId,
           _engine: 'skew',
@@ -18917,7 +19069,7 @@ function _autoFillCableImpl(roomId, productId) {
           runs: [], connections: [],
           lockedEnd: !!prod.cable_length_m,
           lockedStart: false
-        };
+        }, room, prod, opts);
       }
       // else: fall through to boustrophedon/V6/V5/V4 below.
     }
@@ -18982,7 +19134,7 @@ function _autoFillCableImpl(roomId, productId) {
       // L/T-rooms: boustrophedon drops short runs and badly under-fills a fixed-length
       // cable (e.g. uses 15.6 m of 50 m). Don't accept that blindly — keep it as a
       // fallback and let V6 (cell-based) try; the better-filling engine wins below.
-      if (_fills(bChosen)) return boustCable;
+      if (_fills(bChosen)) return _finishCableAutoFill(boustCable, room, prod, opts);
       _boustFallback = boustCable;
     }
   }
@@ -19034,14 +19186,14 @@ function _autoFillCableImpl(roomId, productId) {
       // fills the cable length better (V6 typically fills L/T-rooms via cells).
       if (_boustFallback && prod.cable_length_m) {
         const tgt = prod.cable_length_m * 100;
-        return (Math.abs(v6Best.totalLength_cm - tgt) <= Math.abs(_boustFallback.totalLength_cm - tgt))
-          ? v6Cable : _boustFallback;
+        return _finishCableAutoFill((Math.abs(v6Best.totalLength_cm - tgt) <= Math.abs(_boustFallback.totalLength_cm - tgt))
+          ? v6Cable : _boustFallback, room, prod, opts);
       }
-      return v6Cable;
+      return _finishCableAutoFill(v6Cable, room, prod, opts);
     }
   }
   // V6 produced nothing but boustrophedon had an (under-filling) result → use it.
-  if (_boustFallback) return _boustFallback;
+  if (_boustFallback) return _finishCableAutoFill(_boustFallback, room, prod, opts);
 
   // P1 (2026-06-03): V5 (generateCablePolygonV5), V4 (generateCablePolygonAware) and the
   // length-driven generator (generateCableLayoutLengthDriven) engines were removed here.
@@ -19062,7 +19214,7 @@ function _autoFillCableImpl(roomId, productId) {
     }
   }
 
-  return {
+  return _finishCableAutoFill({
     id: S.counters.nextCableId++,
     roomId,
     productId,
@@ -19074,7 +19226,7 @@ function _autoFillCableImpl(roomId, productId) {
     lockedEnd: !!prod.cable_length_m,
     lockedStart: false,
     _engine: 'serpentine'
-  };
+  }, room, prod, opts);
 }
 
 /**
