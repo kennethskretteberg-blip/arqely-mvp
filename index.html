@@ -19921,8 +19921,9 @@ function _buildNCableZones(room, products, dir) {
       // DEL A (spec-flerkabel-hindringer-usynlige.md): gi sub-rommet sine EGNE, klippede kopier
       // av rommets hindringer/forbudte+foretrukne soner FØR autoFillCable kalles — uten dette er
       // ni motor-oppslag (S.hindrings.filter(h=>h.roomId===...) osv.) alle tomme for et sub-rom,
-      // selv om de bruker riktig id.
-      _cloneObstaclesForSubRoom(roomId, tempRoom.id, axis, bounds[i], bounds[i + 1]);
+      // selv om de bruker riktig id. subObstaclePolys beholdes lokalt til DEL B under (klonene
+      // fjernes fra S.hindrings/S.zones i finally, før split-sjekken ellers ville nådd dem).
+      const subObstaclePolys = _cloneObstaclesForSubRoom(roomId, tempRoom.id, axis, bounds[i], bounds[i + 1]);
       let cable = null;
       try {
         // (2) Same direction for every sub-room → all strings parallel, cables tile evenly.
@@ -19955,13 +19956,30 @@ function _buildNCableZones(room, products, dir) {
       // report their own coverage (no runs to sum).
       areaSum += subAreaM2;
       covSum += (cable ? (cable.runs && cable.runs.length ? _cableCoverageFrac(cable, subAreaM2) : (cable.coverage || 0)) : 0) * subAreaM2;
-      // SPLIT-ZONE detection: a run broken into ≥2 segments means a void (notch/doorway) cuts the
-      // zone, and the cable must bridge across it. Sub-rooms carry no hindrings, so a split here is
-      // always caused by the room polygon (a real notch). Track the worst zone's split fraction —
-      // if a zone is substantially divided in two, the whole DIRECTION is invalid (see caller).
+      // SPLIT-ZONE detection: a run broken into ≥2 segments means something interrupts the sweep
+      // line inside this sub-room. DEL B (spec-flerkabel-hindringer-usynlige.md): «Sub-rooms carry
+      // no hindrings, so a split is always a real notch» was true only because of the DEL A bug —
+      // now that sub-rooms DO see hindrings/zones (subObstaclePolys, captured above before cleanup
+      // removed the clones), a split can ALSO be the cable correctly routing around an obstacle,
+      // which is NORMAL and must not invalidate the direction. Decided on geometry, not a guessed
+      // threshold: test each gap's MIDPOINT against this sub-room's own obstacle polygons — only a
+      // gap explained by NO obstacle is a real polygon notch and counts toward maxSplitFrac. Målt
+      // på fasit-rommet: naiv telling (denne logikken FØR DEL B) ga maxSplitFrac=0,3235 (≥0,30 —
+      // ville kastet retningen, se DEL A sin commit-melding); geometrisk telling (under) gir 0
+      // (alle bruddene forklares av en hindring — ingen ekte hakk i dette rommet).
       if (cable && cable.runs && cable.runs.length) {
         let zSplit = 0;
-        for (const r of cable.runs) if ((r.segments || []).length > 1) zSplit++;
+        for (const r of cable.runs) {
+          const segs = r.segments || [];
+          if (segs.length <= 1) continue;
+          let isRealNotch = false;
+          for (let k = 0; k < segs.length - 1 && !isRealNotch; k++) {
+            const gapMid = (segs[k].end_cm + segs[k + 1].start_cm) / 2;
+            const pt = dir === 'v' ? { x: r.pos_cm, y: gapMid } : { x: gapMid, y: r.pos_cm };
+            if (!subObstaclePolys.some(poly => ptInPoly(pt.x, pt.y, poly))) isRealNotch = true;
+          }
+          if (isRealNotch) zSplit++;
+        }
         maxSplitFrac = Math.max(maxSplitFrac, zSplit / cable.runs.length);
       }
       if (!_cableHasGeom(cable)) {
