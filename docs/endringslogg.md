@@ -4,6 +4,46 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Endre status» på flere prosjekter: modal bak lista, stille feil, død advarsel-farge — 2026-09-14
+
+Kenneth: «jeg ønsker å merke mange prosjekter og endre status... det får jeg ikke til nå.»
+Oppfølging: «jeg ser knappen «endre status» men det skjer ingenting når jeg trykker på den.»
+Funksjonen manglet ikke — hele kjeden (avkrysning, verktøylinje, modal, `SALES_STATUSES`,
+`_applySalesTransition`) var riktig og uendret. Rotårsaken var to CSS-linjer.
+
+- **`9d352d4` DEL A** — `#project-list-screen` (z-index 1001, ugjennomsiktig) lå ett lag over
+  `#modal-ov` (1000). `showModal('modal-batch-status')` kjørte helt korrekt — modalen åpnet, den
+  var bare skjult under prosjektlista. Ingen andre `showModal()`-kall traff dette (de ni andre
+  åpnes over `#module-screen`, 999). Hevet `#modal-ov` til 1250 — over ALLE fullskjermlag i appen;
+  kildekommentaren ved regelen begrunner hvert lag i huset (999-1200), inkludert hvorfor
+  `.fb-overlay`/`.exp-overlay` (1200) aldri kan kollidere (åpne-knappene deres er allerede blokkert
+  av et åpent modal-ov). Bifunn i `closeModal()` (fryktet at `showDrawToolbar()` kunne tegne
+  ctxbar oppå prosjektlista) reprodusert direkte og MÅLT til IKKE å skje — `#ctxbar` er nøstet inni
+  `#module-screen`, og en `display:none`-forelder skjuler alle etterkommere uansett egen
+  z-index/display. Ikke rettet — ingenting å rette.
+- **`ec4d966` DEL B** — Supabase-klienten kaster ikke, den returnerer `{data,error}` — `try/catch`
+  i `_setProjectStatus` fanget derfor så godt som ingenting, og `error` ble aldri lest. En
+  RLS-avvisning ga stille retur, og appen sa «Status endret» uansett. `_setProjectStatus` returnerer
+  nå samme resultatform som `_deleteFromSupabase` (`{ok:true}`/`{ok:false,reason,message?}`), og
+  skiller «cond traff ikke» (et gyldig, forventet utfall) fra en ekte RLS-avvisning.
+  `_applyBatchStatus` teller nå opp «X av Y prosjekt(er)» med årsak ved feil (samme mønster
+  `_batchAction` sin slette-gren allerede bruker); `_quickSetStatus` hadde samme hull og
+  tilbakestiller nå raden til faktisk status ved feil.
+- **`332e54f` DEL C** (funnet underveis, app-omfattende) — `_showToast` kjente kun igjen strengen
+  `'warning'`, men samtlige ~44 kallesteder som mente advarsel skriver `'warn'` — advarsel-grenen
+  (gul, 5000ms) har derfor ALDRI kjørt noe sted i appen, inkludert klemme-meldingen fra `7cc97ee`.
+  `'warn'` godtas nå som alias. Én av de 44 (`_listDoSave` sin lagrings-feil) mente faktisk «feil»,
+  ikke «advarsel» — rettet til `'error'`.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt etter hver commit, `_matBench(42,64)` bit-for-bit
+uendret (ingen geometri rørt). Live verifisert: modal-batch-status ligger nå over prosjektlista;
+alle åtte tegneverktøy-modalene upåvirket; en oppdatering mot en id som ikke finnes gir et ærlig
+«0 av N feilet»; klemme-/feilmeldinger viser nå faktisk gult/rødt i stedet for grønt.
+
+**Fil:** index.html.
+
+---
+
 ## Utendørs flateeffekt-tak hevet til 450 W/m², ett felles tak per modul — 2026-09-14
 
 Kenneth: «for utendørs, så får jeg ikke satt inn høyere ønsket flate effekt enn 300 W/m². Her kan
