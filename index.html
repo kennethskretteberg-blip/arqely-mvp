@@ -2594,10 +2594,30 @@ function _roomTargetWm2(roomId) {
   const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
   return _moduleContext(modType).wm2Default;
 }
+// DEL B (12/14.09.2026): felles klemming for BEGGE skriveveiene (setRoomTargetWm2 og
+// _setRoomOrGlobalWm2 under) — se STEG 0-rapporten ved _moduleContext for hvorfor. Samme
+// modul-kilde som _roomTargetWm2 over (_roomModuleType, ikke aktiv fane). Varsler KUN når
+// klemmingen faktisk endrer tallet — et rent lese-/tegne-kall går aldri gjennom denne funksjonen
+// (kalt kun fra de to skrivefunksjonene, aldri fra rendering), så en lagret verdi over taket står
+// urørt helt til brukeren selv taster et nytt tall.
+function _clampTargetWm2(roomId, val) {
+  const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
+  const mc = _moduleContext(modType);
+  const requested = Number(val);
+  const hasRequest = isFinite(requested) && requested > 0;
+  const clamped = Math.max(mc.wm2Min, Math.min(mc.wm2Max, hasRequest ? requested : mc.wm2Default));
+  if (hasRequest && clamped !== requested && typeof _showToast === 'function') {
+    const overMax = requested > clamped;
+    const bound = overMax ? mc.wm2Max : mc.wm2Min;
+    _showToast(`${overMax ? 'Maks' : 'Min'} ${bound} W/m² for ${mc.isSnow ? 'utendørs' : 'innendørs'} — satt til ${clamped}.`, 'warn');
+  }
+  return clamped;
+}
 function _setRoomOrGlobalWm2(val) {
   const room = S.rooms.find(r => r.id === S.ui.selectedRoomId);
-  if (room && room.roomType) { room.targetWm2 = val; }
-  else { S.varmekabel.targetWm2 = val; }
+  const clamped = _clampTargetWm2(room ? room.id : null, val);
+  if (room && room.roomType) { room.targetWm2 = clamped; }
+  else { S.varmekabel.targetWm2 = clamped; }
 }
 // Save current W/m² as personal user override for the room's type
 async function _savePersonalWm2Override() {
@@ -3722,6 +3742,34 @@ function _snowUsageWm2(key) {
   return u ? u.wm2 : 300;
 }
 
+// ═══ STEG 0 (spec-utendors-flateeffekt-tak-450.md, Kenneth 14.09.2026) ═══
+// Kenneth: «for utendørs, får jeg ikke satt inn høyere ønsket flate effekt enn 300 W/m². Her kan
+// det være ubegrenset.» Avklart FØR bygging: ikke ubegrenset — 450 for utendørs, 300 uendret inne.
+//
+// MÅLT: fire steder skriver targetWm2, med FIRE ulike literale tak (500/500/300/300) og TO ulike
+// gulv (30/50/50/100 — sistnevnte i en gren som viser seg å være DØD KODE, se DEL C), og bare ÉN
+// av de to SKRIVEFUNKSJONENE klemte i det hele tatt (setRoomTargetWm2, hardkodet 30–300 uansett
+// modul — _setRoomOrGlobalWm2 satte tallet rått). Fellen dette skaper: et utendørs område satt til
+// 500 via kabelpanelet/produktpanelet (ingen klemming) ble stille klemt til 300 den dagen brukeren
+// rørte SIDEPANELETS felt — ingen melding, ingen av de to modulene visste at det fantes et tak som
+// hørte til DEM, ikke fanen.
+//
+// Løsning: taket er DATA på _moduleContext, lest på SAMME måte _roomTargetWm2 allerede leser
+// wm2Default (_roomModuleType(roomId), ikke aktiv fane — låst 25.08.2026, se _roomModuleType).
+// Én delt klemme-funksjon (_clampTargetWm2, ved _roomTargetWm2 under) brukes av BEGGE
+// skrivefunksjonene, og varsler brukeren når — og KUN når — et tall FAKTISK blir endret av
+// klemmingen. _roomTargetWm2 (les-veien) er URØRT: den returnerer fortsatt den lagrede verdien
+// rått uansett hvor høy den er — et prosjekt med 500 lagret fra før denne fiksen viser fortsatt
+// 500 helt til brukeren selv taster et nytt tall, da klemmes DET til det nye taket. Kunne ikke
+// telle opp faktiske lagrede prosjekter med targetWm2>450 herfra (ingen Supabase-tilgang i dette
+// miljøet, samme begrensning som tidligere InSnow-/margin-rapporter) — koden over garanterer
+// uansett at de ikke endres av seg selv.
+//
+// wm2Min: fire eksisterende verdier (30 sidepanel, 50 upc-wm2, 50 cable-target-wm2 innendørs, 100
+// dødt utendørs-felt). Valgt 50 for BEGGE moduler — IKKE fordi det er lavest (30 er lavere), men
+// fordi 50 er verdien to av de tre REELT nåbare feltene allerede bruker, og fordi et areal under
+// 50 W/m² knapt varmer noe i det hele tatt (samme praktiske gulv-resonnement som Regel 18 bruker
+// for produktavstander — et tall så lavt er nesten alltid en feiltasting, ikke et reelt ønske).
 function _moduleContext(moduleType) {
   const mt = moduleType || _activeModuleType();
   const snow = (mt === 'snow');
@@ -3730,6 +3778,8 @@ function _moduleContext(moduleType) {
     isSnow: snow,
     roomWord: (cap) => snow ? (cap ? 'Område' : 'område') : (cap ? 'Rom' : 'rom'),
     wm2Default: snow ? 300 : (S.varmekabel.targetWm2 || 130),
+    wm2Max: snow ? 450 : 300,   // DEL A: Kenneths avklarte tak — utendørs 450, innendørs uendret 300
+    wm2Min: 50,                  // DEL A: se STEG 0-begrunnelsen over — samme gulv for begge moduler
     wm2Usage: snow ? SNOW_USAGE : null,
     ccMaxCm: snow ? 30 : 3 * (S.varmekabel.screedThicknessCm || 4), // utendørs: 300mm maks CC
     hindringTypes: snow ? HINDRING_TYPES_SNOW : HINDRING_TYPES,
@@ -5783,6 +5833,8 @@ function showUnifiedProductPanel() {
   if (rtDefaults && room.targetWm2 !== defaultWm2) {
     room.targetWm2 = defaultWm2;
   }
+  // DEL A (14.09.2026): min/max fra rommets EGEN modul (_moduleContext), ikke et literalt 50/500.
+  const _wm2Mc = _moduleContext(_roomModuleType(roomId));
 
   const rtOptions = ROOM_TYPES.map(t =>
     `<option value="${t.id}"${curType === t.id ? ' selected' : ''}>${t.icon} ${t.label} (${t.targetWm2} W/m²)</option>`
@@ -5830,9 +5882,9 @@ function showUnifiedProductPanel() {
         <div style="flex:1">
           <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px">Flateeffekt</label>
           <div style="display:flex;align-items:center;gap:4px;margin-top:2px">
-            <input type="number" id="upc-wm2" value="${defaultWm2}" min="50" max="500" step="10"
+            <input type="number" id="upc-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
               style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface2);color:var(--text);font-family:inherit"
-              onchange="_upcWm2Changed(parseInt(this.value)||130)">
+              onchange="_upcWm2Changed(parseInt(this.value)||${_wm2Mc.wm2Default})">
             <span style="font-size:12px;color:var(--dim)">W/m²</span>
           </div>
         </div>
@@ -12259,17 +12311,27 @@ function showCablePlacePanel(familyName, categoryId) {
   const isSnow = _isSnowModule();
   const areaLabel = isSnow ? 'Område' : 'Rom';
   const defaultWm2 = _roomTargetWm2(roomId);
+  // DEL A (14.09.2026): min/max fra rommets EGEN modul (_moduleContext), ikke et literalt tak.
+  const _wm2Mc = _moduleContext(_roomModuleType(roomId));
 
   if (isSnow) {
+    // DEL C (spec-utendors-flateeffekt-tak-450.md, 14.09.2026, MÅLT): denne grenen er DØD KODE —
+    // showCablePlacePanel returnerer allerede tidlig (linjen over «Snow module: consolidated…»)
+    // så snart _isSnowModule() er sann, FØR isSnow her i det hele tatt regnes ut — den kan derfor
+    // aldri bli sann på dette punktet. cable-target-wm2 sin id deles likevel med else-grenens
+    // input under, men siden denne grenen aldri kjører, kan de to elementene aldri sameksistere i
+    // DOM-en samtidig — id-kollisjonen spec'en fryktet er ikke utløsbar. Ikke fjernet (utenfor
+    // omfang, og å slette dødt innhold uten å bli bedt om det er ikke denne rundens jobb) —
+    // min/max fra samme kilde likevel, for parity med de tre andre feltene.
     section.innerHTML = `
       <div class="rwp-section-label"><svg class="ic ic-plug" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 22v-5M9 8V2M15 8V2M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4z"/></svg> ${esc(familyName)}</div>
       <div style="display:flex;flex-direction:column;gap:6px;padding:0 2px">
         <div style="font-size:11px;color:var(--dim)">${areaLabel}: ${nettoM2.toFixed(1)} m² netto</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <label style="font-size:11px;white-space:nowrap">Ønsket W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="100" max="500" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
             style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
-            onchange="_setRoomOrGlobalWm2(parseInt(this.value)||300);_updateCableSelection(${sq(familyName)},${categoryId})">
+            onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <label style="font-size:11px;white-space:nowrap">Ønsket CC cm</label>
           <input type="number" id="cable-target-cc" value="" min="5" max="30" step="0.5" placeholder="Auto"
             style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
@@ -12297,9 +12359,9 @@ function showCablePlacePanel(familyName, categoryId) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <label style="font-size:11px;white-space:nowrap">W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="50" max="300" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
             style="width:60px;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
-            onchange="_setRoomOrGlobalWm2(parseInt(this.value)||130);_updateCableSelection(${sq(familyName)},${categoryId})">
+            onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <button onclick="_savePersonalWm2Override()" title="Lagre som din standard for denne romtypen" style="font-size:10px;padding:2px 6px;border:1px solid var(--brd);border-radius:4px;background:var(--bg);color:var(--dim);cursor:pointer;white-space:nowrap"><svg class="ic ic-save" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Min std</button>
         </div>
         <div id="cable-selection-results" style="font-size:12px;max-height:300px;overflow-y:auto"></div>
@@ -33095,7 +33157,10 @@ function setRoomTargetWm2(roomId, val) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return;
   pushUndo();
-  room.targetWm2 = Math.max(30, Math.min(300, val || 100));
+  // DEL A+B (14.09.2026): taket var FØR hardkodet 30–300 uansett modul — et utendørs område
+  // (tak 450) ble stille klemt ned til 300 herfra. _clampTargetWm2 leser nå rommets EGEN modul
+  // (se STEG 0-rapporten ved _moduleContext).
+  room.targetWm2 = _clampTargetWm2(roomId, val);
   renderSidebar(); render();
 }
 function setRoomFloorType(roomId, val) {
@@ -34166,11 +34231,14 @@ function _renderDetailPanel(roomId) {
   // Room actions
   const _rtOpts = ROOM_TYPES.map(t => `<option value="${t.id}"${room.roomType===t.id?' selected':''}>${t.icon} ${t.label}</option>`).join('');
   const _twVal = room.targetWm2 != null ? room.targetWm2 : '';
+  // DEL A (14.09.2026): min/max fra rommets EGEN modul (_roomModuleType — samme mønster
+  // _roomTargetWm2 allerede bruker), ikke et literalt 30/300.
+  const _wm2McSb = _moduleContext(_roomModuleType(roomId));
   h += `<div class="sb-detail-actions">
     <select style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:10px;flex:1;min-width:0" onchange="setRoomType(${roomId},this.value)">
       <option value="">${_isSnowModule() ? 'Områdetype' : 'Romtype'}...</option>${_rtOpts}
     </select>
-    <input type="number" min="30" max="300" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
+    <input type="number" min="${_wm2McSb.wm2Min}" max="${_wm2McSb.wm2Max}" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
     <button class="sb-detail-act" onclick="_showDupeRoomMenu(event,${roomId})">Dupliser</button>
     <button class="sb-detail-act danger" onclick="delRoom(${roomId})">Slett</button>
   </div>`;
