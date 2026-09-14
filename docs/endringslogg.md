@@ -4,6 +4,40 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Utendørs flateeffekt-tak hevet til 450 W/m², ett felles tak per modul — 2026-09-14
+
+Kenneth: «for utendørs, så får jeg ikke satt inn høyere ønsket flate effekt enn 300 W/m². Her kan
+det være ubegrenset.» Avklart før bygging: ikke ubegrenset — 450 for utendørs, 300 uendret inne.
+
+Rotårsak, MÅLT (STEG 0-kommentar over `_moduleContext`): fire steder skrev `targetWm2` med FIRE
+ulike literale tak (500/500/300/300), og bare ÉN av de to skrivefunksjonene klemte i det hele
+tatt — `setRoomTargetWm2` hardkodet 30–300 uansett modul, mens `_setRoomOrGlobalWm2` satte tallet
+rått. Fellen: et utendørs område satt til 500 via kabelpanelet/produktpanelet ble stille klemt ned
+til 300 den dagen brukeren rørte sidepanelets felt — ingen melding, og taket fulgte fanen, ikke
+rommet.
+
+- **`7cc97ee`** — `_moduleContext` har nå `wm2Max` (snø 450, inne 300) og `wm2Min` (50 for begge,
+  begrunnet i kildekommentaren — valgt fordi det er verdien flest av de fire eksisterende feltene
+  faktisk brukte, ikke bare «laveste»). Ny delt `_clampTargetWm2(roomId, val)` leser taket fra
+  ROMMETS modul (`_roomModuleType`, samme mønster `_roomTargetWm2` allerede bruker) og brukes av
+  BEGGE skriveveiene. Varsler («Maks/Min N W/m² for utendørs/innendørs — satt til X.») kun når
+  klemmingen faktisk endrer tallet — kalt utelukkende fra skrivefunksjonene, aldri fra rendering,
+  så en lagret verdi over taket står urørt til brukeren selv taster et nytt tall. Alle fire
+  `<input>`-feltene leser nå min/max fra samme kilde. **DEL C** (funnet underveis): de to
+  `cable-target-wm2`-feltene deler DOM-id, men målt til å ikke kunne kollidere — den ene grenen er
+  død kode (`showCablePlacePanel` returnerer tidlig til `showUnifiedProductPanel` før den nås).
+  Dokumentert i kildekommentar, ikke fjernet.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt. `_matBench(42,64)` bit-for-bit uendret (denne
+runden rører ingen geometri). Live verifisert: 450/451→450 og 300/301→300 med riktig melding;
+fellen (500 satt via kabelpanelet) klemmer nå umiddelbart; et snø-rom i et ellers innendørs
+prosjekt får riktig utendørstak (taket følger rommet, ikke fanen); alle nåbare felt viser samme
+min/max for samme rom; en lagret verdi på 500 rendres urørt ved åpning av produktpanelet.
+
+**Fil:** index.html.
+
+---
+
 ## Avstand-knappen og Sentrer på et auto-utlegg med flere matter — 2026-09-12
 
 Kenneth, sak 2: «velger en matte etter auto-utlegg, sentrer og avstand-knapp dukker opp, men det
