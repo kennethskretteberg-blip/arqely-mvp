@@ -42936,7 +42936,14 @@ function _wfSendToMonter() {
   if (typeof showDocPanel === 'function') showDocPanel(room.id);
   else if (typeof _docFromRoom === 'function') _docFromRoom(room.id);
 }
-// Lettvekts «Kunde & prosjektinfo»-modal (kunde/kontakt/adresse) — redigerer i editoren.
+// Lettvekts «Kunde & prosjektinfo»-modal (kontakt/adresse/prosjektert av) — redigerer i
+// editoren. DEL F (spec-topbar-logo-arbeidsflyt-prosjektinfo.md): kundefeltet er fjernet
+// herfra — det var FRITEKST og skrev kun S.project.customer, uten å koble prosjektet til
+// kunderegisteret (customer_id). Det ga to veier til «samme» handling med ulikt resultat:
+// et Visma-eksport henter kundenummeret fra customer_id-KOBLINGEN, ikke fra teksten, så et
+// prosjekt kunne vise riktig kundenavn på skjermen og likevel eksportere med feil/tomt
+// kundenummer. Kunde settes nå ETT sted: sidebarens prosjektinfo-blokk → _spiPickCustomer()
+// → samme _quickSetCustomer-velger som prosjektlista alltid har brukt.
 function _wfKundeModal() {
   const old = document.getElementById('wf-kunde-modal'); if (old) old.remove();
   const p = S.project || {};
@@ -42946,7 +42953,6 @@ function _wfKundeModal() {
   wrap.onclick = (e) => { if (e.target === wrap) wrap.remove(); };
   wrap.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,.4)">
     <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:14px">Kunde & prosjektinfo</div>
-    <div class="dash-create-field" style="margin-bottom:10px"><label>Kunde / firma</label><input id="wf-k-cust" class="dash-create-input" value="${_esc(p.customer||'')}"></div>
     <div class="dash-create-field" style="margin-bottom:10px"><label>Kontaktperson</label><input id="wf-k-contact" class="dash-create-input" value="${_esc(p.contact_name||'')}"></div>
     <div class="dash-create-field" style="margin-bottom:16px"><label>Adresse</label><input id="wf-k-addr" class="dash-create-input" value="${_esc(p.description||'')}"></div>
     <div class="dash-create-field" style="margin-bottom:16px"><label>Prosjektert av</label><input id="wf-k-resp" class="dash-create-input" value="${_esc(p.responsible||'')}"></div>
@@ -42955,12 +42961,11 @@ function _wfKundeModal() {
       <button class="dash-create-btn" onclick="_wfKundeSave()">Lagre</button>
     </div></div>`;
   document.body.appendChild(wrap);
-  document.getElementById('wf-k-cust')?.focus();
+  document.getElementById('wf-k-contact')?.focus();
 }
 function _wfKundeSave() {
   const g = id => (document.getElementById(id)?.value || '').trim();
   if (!S.project) S.project = {};
-  S.project.customer = g('wf-k-cust');
   S.project.contact_name = g('wf-k-contact') || null;
   S.project.description = g('wf-k-addr');
   // spec-prosjektert-av-redigerbar-og-kolonne.md DEL A, krav 3: responsible sin egen konvensjon
@@ -42985,14 +42990,25 @@ function _renderSbProjInfo() {
   const rows = document.getElementById('spi-rows');
   if (!rows) return;
   const p = S.project || {};
-  const cust = p.customer || '';
+  let cust = p.customer || '';
+  if (!cust && p.customer_id && Array.isArray(_cachedCustomers)) {
+    const c = _cachedCustomers.find(cc => cc.id === p.customer_id);
+    if (c) cust = c.name;
+  }
   const nm = p.name || 'Prosjekt';
   let h = '';
-  h += `<div class="spi-row spi-customer${cust ? '' : ' spi-placeholder'}" title="${_esc(cust || 'Sett kunde')}">${_esc(cust || 'Sett kunde')}</div>`;
+  h += `<div class="spi-row spi-customer${cust ? '' : ' spi-placeholder'}" onclick="event.stopPropagation();_spiPickCustomer()" title="${_esc(cust || 'Sett kunde')}">${_esc(cust || 'Sett kunde')}</div>`;
   if (p.contact_name) h += `<div class="spi-row" title="${_esc(p.contact_name)}">${_esc(p.contact_name)}</div>`;
   h += `<div class="spi-row spi-name" id="proj-name-disp" onclick="event.stopPropagation();editProjName()" title="${_esc(nm)}">${_esc(nm)}</div>`;
   if (p.responsible) h += `<div class="spi-row" title="Prosjektert av ${_esc(p.responsible)}">Prosjektert av ${_esc(p.responsible)}</div>`;
   rows.innerHTML = h;
+}
+// DEL F: infoblokkens ENESTE inngang til å bytte kunde — samme _quickSetCustomer-velger som
+// prosjektlista alltid har brukt (ikke den gamle fritekst-inputen i _wfKundeModal, fjernet).
+// Uten en lagret sky-id er det ingen databaserad å knytte kunden til ennå.
+function _spiPickCustomer() {
+  if (!_supabaseProjectId) { if (typeof _showToast === 'function') _showToast('Lagre prosjektet først', 'warn'); return; }
+  _quickSetCustomer(_supabaseProjectId);
 }
 
 function _autoReadStart(file){
@@ -55563,6 +55579,23 @@ function _filterQuickCustomers(query) {
 
 async function _applyQuickCustomer(projectId, customerId, customerName) {
   document.getElementById('quick-customer-overlay')?.remove();
+  // DEL F (spec-topbar-logo-arbeidsflyt-prosjektinfo.md): endres kunden på prosjektet som er
+  // ÅPENT i tegneverktøyet akkurat nå (samme id som _supabaseProjectId)? Da skriver vi til
+  // S.project og lar den VANLIGE lagringsveien (_markProjectDirty/_scheduleAutoSave) ta seg av
+  // databasen — IKKE rett til databasen bak redigeringens rygg. Et direkte databaseskriv her
+  // ville enten tapt kappløpet mot editorens egen autolagring (som ville skrevet den gamle
+  // kunden tilbake), eller skrevet over endringer editoren har i minnet som den lagrede raden
+  // ennå ikke kjenner til. Er prosjektet IKKE det åpne (kalt fra prosjektlista på et annet
+  // prosjekt), er det ingen S.project å oppdatere — da skriver vi rett til databasen som før.
+  if (_supabaseProjectId && String(_supabaseProjectId) === String(projectId)) {
+    if (!S.project) S.project = {};
+    S.project.customer = customerName || '';
+    S.project.customer_id = customerId || null;
+    if (typeof _markProjectDirty === 'function') _markProjectDirty();
+    if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
+    if (typeof _renderSbProjInfo === 'function') _renderSbProjInfo();
+    return;
+  }
   try {
     const { data: row } = await _db.from('romtegner_projects').select('data').eq('id', projectId).single();
     if (row?.data?.project) {
