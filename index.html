@@ -19831,11 +19831,45 @@ function _pinCableSeamToCut(cable, dir, seam, loCut, hiCut, room, margin) {
 // e.g. a slanted gable defeats vertical cuts (sub-room 0 → skew/0%) but horizontal top/middle/
 // bottom bands isolate the gable in one band and tile the rest cleanly.
 //
-// ─── STEG 0 (spec-flerkabel-hindringer-usynlige.md, Kenneth 14.09.2026), punkt 1 ─────────────
-// Målt FØR DEL A (fasit: 820×822cm stue/kjøkken-rektangel, to hindringer 120×120cm, to InFloor
-// 10T 2000W/200m): ett-kabel-veien (autoFillCable(room.id,...)) ga 0 krysninger av 15615
-// samplede punkt. Flerkabel-veien (denne funksjonen, via tempRoom.id) ga 420 krysninger PER
-// kabel av 9700 samplede punkt hver (840 totalt) — bekrefter feilen presist.
+// ─── STEG 0-RAPPORT (spec-flerkabel-hindringer-usynlige.md, Kenneth 14.09.2026) ──────────────
+// Målt FØR noen fiks (fasit: 820×822cm stue/kjøkken-rektangel, to hindringer 120×120cm, to
+// InFloor 10T 2000W/200m):
+//   Punkt 1 — synlighet: ett-kabel-veien (autoFillCable(room.id,...)) ga 0 krysninger av 15615
+//   samplede punkt. Flerkabel-veien (denne funksjonen, via tempRoom.id) ga 420 krysninger PER
+//   kabel av 9700 samplede punkt hver (840 totalt) — bekrefter feilen presist.
+//   De ni motor-oppslagene (S.hindrings.filter(h=>h.roomId===roomId) osv.) er alle KORREKTE — de
+//   bruker konsekvent den innsendte id-en, som for et sub-rom ER tempRoom.id. Feilen er at
+//   S.hindrings/S.zones ALDRI inneholder noe tagget med tempRoom.id — denne funksjonen klonte
+//   aldri det virkelige rommets hindringer/soner inn i sub-rommet den selv lager. Fikset i DEL A.
+//
+// Målt ETTER DEL A alene (hindringer/soner klonet, men FØR DEL B sin geometriske split-sjekk):
+//   Punkt 4 — AVHENGIGHET 1 (naiv splitt-telling): kabel 0 sin naive maxSplitFrac (hver bane med
+//   >1 segment telt som hakk) ble 0,3235 — OVER 0,30-grensa. Uten DEL B ville denne retningen (og
+//   trolig begge, siden begge sonene har en hindring) blitt kastet som «invalid», og
+//   _autoFillCableZonesCore ville returnert null — et flerkabel-rom med hindringer kunne slutte å
+//   fungere I DET HELE TATT så snart hindringene ble synlige, stikk i strid med hensikten. Etter
+//   DEL B (geometrisk skille hindring/hakk): maxSplitFrac = 0 for begge retninger på fasit-rommet
+//   (alle bruddene forklares av en hindring, ingen ekte hakk) — invalid:false, som forventet.
+//
+// Målt for AVHENGIGHET 2 (punkt 5, brutto vs. netto areal i covSum/areaSum→score) på fasit-rommet:
+//   Brutto (compArea alene): v-retning vant (score 0,9564 mot h sin 0,9508).
+//   Netto (DEL C, roomAreas().net): h-retning skårer nå HØYEST (0,9626 mot v sin 0,9620) — den
+//   RÅ skåren FLIPPER når hindring-arealet trekkes fra, nøyaktig som forventet (dekningsbrøken
+//   øker mer for retningen som ISOLERER hindringene bedre). Den FAKTISKE valgte retningen i
+//   _autoFillCableZonesCore endrer seg likevel IKKE på dette rommet — differansen (0,0006) er
+//   under den eksisterende 0,02-hysteresen som favoriserer _suggestDirection() sin primærretning
+//   (v her), en uendret, forhåndseksisterende regel. Flippen finnes altså på skår-nivå (bevist),
+//   men treffer ikke terskelen for å endre UTFALLET på nettopp dette rommet.
+//
+// Punkt 5 (DoD 5) — hvor mye av «store buer»-saken forsvinner av seg selv: krysninger falt fra
+// 840 til 60 (-93%) etter DEL A-C; kabel 1 (sonen med hindring H2) ble 100% ren (0 av 9674
+// punkt). De resterende 60 punktene (kabel 0, motor 'v6') er BEVIST å IKKE skyldes hindring-
+// usynlighet: samme posisjon (200,297cm) sendt DIREKTE til _generatePolygonClippedRuns (uten
+// V6 sin celle-inndeling) klipper hindringen korrekt (gir intervallene [7.3,297.5] og
+// [422.5,814.7] — hindringens fulle bredde+margin er borte). Feilen sitter altså oppstrøms, i
+// _v6DecomposeCells/_v6ConnectCells sin celle-/posisjonstildeling — nøyaktig «store buer»-saken
+// spec-en ber om å utsette til en egen runde med fersk STEG 0 mot V6 sin faktiske kode. Tallet
+// 60 av 9620 (0,6%) er utgangspunktet for hvor stor den runden må være.
 function _buildNCableZones(room, products, dir) {
   // products: liste med produkt-objekter (ett per kabel). N×like => alle like; ULIKE
   // kabler => soner ∝ kabellengde (= ∝ effekt for samme familie), felles CC.
@@ -19900,7 +19934,6 @@ function _buildNCableZones(room, products, dir) {
       const prodI = products[i]; const productIdI = prodI.id;
       const sub = _clipPolygonToSlab(room.points, axis, bounds[i], bounds[i + 1]);
       if (!sub) continue;
-      const subAreaM2 = compArea(sub) / 10000;
       // (3) Tight seams: mark which perp edges are shared cuts (not walls) so the engine pins
       // the outermost run half-CC from them → full CC across each seam, no cold stripe. The
       // min cut = bounds[i] (lower perp), max cut = bounds[i+1] (upper perp).
@@ -19924,6 +19957,12 @@ function _buildNCableZones(room, products, dir) {
       // selv om de bruker riktig id. subObstaclePolys beholdes lokalt til DEL B under (klonene
       // fjernes fra S.hindrings/S.zones i finally, før split-sjekken ellers ville nådd dem).
       const subObstaclePolys = _cloneObstaclesForSubRoom(roomId, tempRoom.id, axis, bounds[i], bounds[i + 1]);
+      // DEL C: netto areal (minus hindringer/forbudte+foretrukne soner i DENNE sonen) — samme
+      // begrep roomAreas() allerede bruker for et helt rom, ikke et nytt. Må regnes ETTER klonene
+      // over finnes i S.hindrings/S.zones (roomAreas leser dem via tempRoom.id), og krever at
+      // tempRoom.area (brukt som roomAreas sin «gross») allerede er satt over. Uten hindringer i
+      // sonen er net===gross, bit-for-bit likt den gamle compArea(sub)/10000 (samme tall).
+      const subAreaM2 = roomAreas(tempRoom).net / 10000;
       let cable = null;
       try {
         // (2) Same direction for every sub-room → all strings parallel, cables tile evenly.
