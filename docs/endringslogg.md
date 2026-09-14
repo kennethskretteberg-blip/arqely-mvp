@@ -4,6 +4,52 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kabel: full dekning vinner over stillhet i uregelmessige rom — 2026-09-14 (DEL D + nedskalert A)
+
+Kenneth, L-formet bad (InFloor 17T 1000W/59m, CC 9,6): «appen klarte ikke å legge kabelen ut på
+en god måte. Jeg trodde vi hadde en motor som forstod alle romgeometrier uavhengig?» Svaret er
+nei — tre motorer (matte/folie/kabel), og all romform-jobben i høst er gjort på mattemotoren.
+
+STEG 0 (kildekommentar over `_autoFillCableImpl`) fant at spec'ens egen modell av kabelmotoren var
+utdatert: siden en juni-refaktorering er den en KASKADE av fire separate motorer (skew →
+boustrophedon → V6 → serpentine-fallback), ikke én funksjon. Bygget en representativ kopi av
+Kenneths bad og kjørte kaskaden direkte — V6 (den faktiske vinneren) traff nesten eksakt riktig
+totallengde (5899,9 av 5900cm) men dekket kun 85,7 % av netto areal; 0,82 m² lå kaldt, usett i
+noe tall appen viser. Rapportert til Kenneth, som valgte å bygge DEL D nå og utsette DEL B/C/E
+(V6 sin egen cellelogikk, og fler-kabel-veien) til en egen, fersk STEG 0-runde.
+
+- **`648c1d0` DEL D** — ny `_finishCableAutoFill(cable, room, prod, opts)` kjøres på RESULTATET
+  etter at kaskaden har valgt en vinner, uansett motor. Måler to uavhengige gap et «vellykket»
+  resultat kan skjule: AREAL (Σ banelengde×CC mot netto) og LENGDE (DEL A punkt 2, «undershoot
+  rapporteres ikke» — et testrom brukte kun 44 av 100 meter, usett i materiallista). Moderat gap
+  → varsel; alvorlig gap (>20 %/>0,3 m² eller >25 %/2 m) → AVVIST som standard, med et produkt i
+  samme familie foreslått i riktig retning, og et eksplisitt `confirm()`-overstyr. En første
+  versjon avviste FØR kaskaden fikk prøve seg (basert på den naive areal/lengde-formelen alene) —
+  det brøt `_cableSkewRegressionTest` sine fasit-rom (bevisst urealistisk areal/lengde for å
+  teste vinkel, ikke konsistens) og ble flyttet til ETTER kaskaden, på MÅLT resultat.
+- **`5800dd3` nedskalert DEL A** — kun DoD-krav 3 (kommentarrettelsen), ikke selve kode-fjerningen.
+  DEL A sin egen tekst sier «en vei som ikke går gjennom celler må beholde dagens oppførsel
+  bit-for-bit» — `generateCableSerpentine` sveiper monolittisk, ikke per celle (DEL B, som ville
+  gjort utjevningen overflødig, er utsatt), og CLAUDE.md sin LÅSTE «No Y-splits»-regel forbyr
+  nettopp det manglende utjevning ville skapt der. Kommentaren korrigert til det riktige, BETINGEDE
+  premisset; koden selv urørt til cellemotoren faktisk finnes.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt (inkl. `_cableSkewRegressionTest`, alle fem case
+A-E). `_matBench(42,64)` bit-for-bit uendret. Live verifisert: Kenneths bad gir en 14,3 %-advarsel
+(under avvisningsterskelen — V6 er god nok); en for lang kabel i et lite rom avvises med korrekt
+KORTERE produkt foreslått; en for kort kabel i et hindringstungt rom avvises med korrekt LENGRE
+produkt foreslått; override fungerer; rektangulære rom er bit-for-bit stille.
+
+**Utsatt til egen runde:** DEL B/C (V6 sin egen celle-/tilkoblingslogikk — trenger en fersk STEG 0
+mot V6 sin faktiske kode, ikke mot `_decomposeRoomToRects`, som er en HELT ANNEN, enklere motor
+V6 verken bruker eller deler kode med) og DEL E (fler-kabel-veien, `_buildNCableZones` — Kenneths
+«Rom nr. 2», en stue/kjøkken med to InFloor 10T 2000W/200m, samt de to sonebegrepene bånd/celler
+som må komponeres bevisst).
+
+**Fil:** index.html.
+
+---
+
 ## «Endre status» på flere prosjekter: modal bak lista, stille feil, død advarsel-farge — 2026-09-14
 
 Kenneth: «jeg ønsker å merke mange prosjekter og endre status... det får jeg ikke til nå.»
