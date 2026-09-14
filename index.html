@@ -19618,6 +19618,50 @@ function _clipPolygonToSlab(points, axis, lo, hi) {
   return poly.length >= 3 ? poly : null;
 }
 
+// spec-flerkabel-hindringer-usynlige.md DEL A (Kenneth 14.09.2026): STEG 0 fant at kabelmotorens
+// ni hindring/sone-oppslag (S.hindrings.filter(h=>h.roomId===roomId) osv.) er alle KORREKTE — de
+// bruker konsekvent id-en som ble sendt inn, som for et sub-rom ER tempRoom.id. Feilen er at
+// S.hindrings/S.zones ALDRI inneholder noe tagget med tempRoom.id: _buildNCableZones klonte
+// aldri det virkelige rommets hindringer/soner inn i sub-rommet den selv lager. Målt: et
+// flerkabel-rom med to hindringer ga 420 krysninger PER kabel (9700 samplede punkt), mens samme
+// rom med ÉN kabel ga 0 (15615 punkt) — ett-kabel-veien bruker rommets EKTE id og har derfor
+// alltid sett de ekte hindringene/sonene.
+//
+// Klipper hver kandidat til sonens egen stripe (_clipPolygonToSlab) fremfor å ta med den hele —
+// en hindring som krysser skjøten mellom to soner skal telle riktig (og riktig AREAL, DEL C) i
+// BEGGE sub-rommene, ikke hele i det ene og null i det andre. Returnerer de klippede polygonene
+// (kun de med .points — sirkulære pin-soner har ingen polygon å teste geometri mot) slik at
+// DEL B kan skille et hakk fra en hindring FØR opprydding fjerner klonene fra S.hindrings/S.zones.
+function _cloneObstaclesForSubRoom(realRoomId, subRoomId, axis, lo, hi) {
+  const polys = [];
+  for (const h of S.hindrings) {
+    if (h.roomId !== realRoomId || !h.points || h.points.length < 3) continue;
+    const clipped = _clipPolygonToSlab(h.points, axis, lo, hi);
+    if (clipped) { S.hindrings.push({ ...h, id: 'tmpcabh_' + h.id, roomId: subRoomId, points: clipped }); polys.push(clipped); }
+  }
+  for (const z of S.zones) {
+    if (z.roomId !== realRoomId) continue;
+    if (z.points && z.points.length >= 3) {
+      const clipped = _clipPolygonToSlab(z.points, axis, lo, hi);
+      if (clipped) { S.zones.push({ ...z, id: 'tmpcabz_' + z.id, roomId: subRoomId, points: clipped }); polys.push(clipped); }
+    } else if (z.pinPos && z.sizeCm) {
+      // Sirkulær pin-sone: ingen av de ni motor-oppslagene ser på disse uansett (alle krever
+      // .points.length>=3) — tas kun med for arealregnskapet (DEL C), uklippet.
+      const c = axis === 'x' ? z.pinPos.x : z.pinPos.y;
+      if (c >= lo && c <= hi) S.zones.push({ ...z, id: 'tmpcabz_' + z.id, roomId: subRoomId });
+    }
+  }
+  return polys;
+}
+// Fjerner ALT tagget med et sub-roms id fra S.hindrings/S.zones. Kalles fra samme finally-blokk
+// som allerede fjerner selve tempRoom (linje ~19887) — _buildSaveData filtrerer IKKE bort
+// foreldreløse rom-id-er ved lagring (verifisert), så en glemt klone ville blitt lagret som en
+// ekte hindring på et rom som ikke finnes.
+function _removeSubRoomObstacles(subRoomId) {
+  S.hindrings = S.hindrings.filter(h => h.roomId !== subRoomId);
+  S.zones = S.zones.filter(z => z.roomId !== subRoomId);
+}
+
 /** Generic N-cable fill — Kenneth's model: split the room into N REAL sub-rooms (equal-area
  *  slab cuts of the actual polygon, so L/notch/slant shapes are handled) and run the SAME
  *  good single-cable engine (autoFillCable → boustrophedon/V6, full coverage + corner-to-
@@ -19786,6 +19830,12 @@ function _pinCableSeamToCut(cable, dir, seam, loCut, hiCut, room, margin) {
 // — for irregular rooms (gable/notch) the dominant direction is NOT always the best coverage:
 // e.g. a slanted gable defeats vertical cuts (sub-room 0 → skew/0%) but horizontal top/middle/
 // bottom bands isolate the gable in one band and tile the rest cleanly.
+//
+// ─── STEG 0 (spec-flerkabel-hindringer-usynlige.md, Kenneth 14.09.2026), punkt 1 ─────────────
+// Målt FØR DEL A (fasit: 820×822cm stue/kjøkken-rektangel, to hindringer 120×120cm, to InFloor
+// 10T 2000W/200m): ett-kabel-veien (autoFillCable(room.id,...)) ga 0 krysninger av 15615
+// samplede punkt. Flerkabel-veien (denne funksjonen, via tempRoom.id) ga 420 krysninger PER
+// kabel av 9700 samplede punkt hver (840 totalt) — bekrefter feilen presist.
 function _buildNCableZones(room, products, dir) {
   // products: liste med produkt-objekter (ett per kabel). N×like => alle like; ULIKE
   // kabler => soner ∝ kabellengde (= ∝ effekt for samme familie), felles CC.
@@ -19868,6 +19918,11 @@ function _buildNCableZones(room, products, dir) {
         _forcedSkewAngleDeg: _forcedAngleDeg,
         _forcedSkewDir: _forcedAngleDeg != null ? dir : null };
       S.rooms.push(tempRoom);
+      // DEL A (spec-flerkabel-hindringer-usynlige.md): gi sub-rommet sine EGNE, klippede kopier
+      // av rommets hindringer/forbudte+foretrukne soner FØR autoFillCable kalles — uten dette er
+      // ni motor-oppslag (S.hindrings.filter(h=>h.roomId===...) osv.) alle tomme for et sub-rom,
+      // selv om de bruker riktig id.
+      _cloneObstaclesForSubRoom(roomId, tempRoom.id, axis, bounds[i], bounds[i + 1]);
       let cable = null;
       try {
         // (2) Same direction for every sub-room → all strings parallel, cables tile evenly.
@@ -19884,7 +19939,11 @@ function _buildNCableZones(room, products, dir) {
               totalLength_cm: raw.totalLength_cm || prodI.cable_length_m * 100, lockedEnd: true, _engine: 'serpentine-fallback' };
           }
         }
-      } finally { S.varmefolie.direction = _savedDir; S.rooms = S.rooms.filter(r => r !== tempRoom); }
+      } finally {
+        S.varmefolie.direction = _savedDir;
+        S.rooms = S.rooms.filter(r => r !== tempRoom);
+        _removeSubRoomObstacles(tempRoom.id);   // DEL A: aldri la en klone lekke — S.hindrings/S.zones skal telle nøyaktig likt før og etter kjøringen
+      }
       if (cable && cable.runs && cable.runs.length) {
         // (5) Pin the seam for engines that ignored _cableSeam (V6 on the gable), so the
         // outer zone's shared edge sits half-CC from the cut → one CC over the seam.
