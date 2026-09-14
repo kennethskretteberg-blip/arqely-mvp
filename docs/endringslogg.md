@@ -4,6 +4,34 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Visma GBAO10: merking-feltet uten P-nr/REV, filnavnet uendret — 2026-09-14
+
+Kenneth: «Ved eksport fil til visma, så ønsker jeg at feltet for merking kun skal være merkingen
+jeg har satt inn. Ikke ta med p nr eller rev nr.»
+
+- **`8a90f19`** — `_gbao10DefaultMerking()` bygde standarden som «P0219 Gardermoen elektro REV 2»
+  (prosjektnummer + navn + neste revisjon), rett inn i felt 7 (`f[6]`) med mindre Kenneth skrev
+  noe eget. Returnerer nå kun `proj.name` — feltet er aldri tomt for et navngitt prosjekt, og
+  overstyringen (`proj.gbao10Merking`) er urørt, lagrede prosjekter berøres ikke.
+  **Bivirkning håndtert (DEL B):** samme merking matet også filnavnet — kortere merking ville gitt
+  et kortere filnavn, noe Kenneth ikke ba om. Ny `_gbao10DefaultFilenameMerking()` beholder den
+  gamle, fyldige formelen KUN til filnavnet, via et nytt `built.filenameMerking`-felt. Verifisert:
+  filnavnet for P0219 «Gardermoen elektro» rev. 2 er identisk før/etter (kun tidsstempelet
+  varierer, som før).
+  **DEL C:** `dokumenter/visma-global-tilbudsimport-format.md` beskriver IKKE GBAO10-formatet —
+  den dokumenterer kun «Kopier til Visma»-utklippet (et annet, 2-kolonners format uten
+  merking-begrep). Ingen GBAO10-dokumentasjon finnes i repoet; DEL C sitt betingede krav holder
+  derfor ikke, ingenting å oppdatere. Paste-veien sjekket (utenfor omfang) — har intet
+  merking-begrep, ingen tilsvarende feil der.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt. Live verifisert: felt 7 uten egen merking =
+prosjektnavnet; med egen merking = den teksten uendret i BÅDE felt 7 og filnavnet; uten
+prosjektnavn = tomt felt 7 men fortsatt gyldig 33-felts linje.
+
+**Fil:** index.html.
+
+---
+
 ## Kabel: full dekning vinner over stillhet i uregelmessige rom — 2026-09-14 (DEL D + nedskalert A)
 
 Kenneth, L-formet bad (InFloor 17T 1000W/59m, CC 9,6): «appen klarte ikke å legge kabelen ut på
