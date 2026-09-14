@@ -4,6 +4,57 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Flerkabel-rom: hindringer og forbudte soner er nå synlige for kabelmotoren — 2026-09-14 (DEL A-C)
+
+Kenneth, stue/kjøkken 67,4 m² med to InFloor 10T 2000W/200m (K1+K2): «Kabel legger seg helt
+feil.. den legger seg over hindringer og gjennom vegger.. den går i store buer her og der.»
+
+STEG 0 (målt, kildekommentar over `_buildNCableZones`): kabelmotorens ni hindring/sone-oppslag
+(`S.hindrings.filter(h=>h.roomId===roomId)` osv.) var alle KORREKTE — de bruker konsekvent
+id-en som ble sendt inn, som for et sub-rom ER `tempRoom.id`. Feilen var at `S.hindrings`/
+`S.zones` ALDRI inneholdt noe tagget med `tempRoom.id`: `_buildNCableZones` klonte aldri det
+virkelige rommets hindringer/soner inn i sub-rommet den selv lager. Målt på et fasit-rom (to
+120×120cm hindringer): flerkabel-veien ga 420 krysninger PER kabel (9700 samplede punkt hver),
+ett-kabel-veien (ekte rom-id) ga 0 (15615 punkt).
+
+- **DEL A** — nye `_cloneObstaclesForSubRoom`/`_removeSubRoomObstacles`: kloner hindringer og
+  forbudte+foretrukne soner KLIPPET til sonens egen stripe (`_clipPolygonToSlab`) — en hindring
+  som krysser skjøten mellom to soner telles riktig i BEGGE. Opprydding i samme `finally` som
+  allerede fjerner `tempRoom`; `_buildSaveData` filtrerer ikke bort foreldreløse rom-id-er
+  (verifisert), så en glemt klone ville blitt lagret som en ekte hindring. **Denne commiten
+  alene gjorde fasit-rommet VERRE** — `_autoFillNCables` returnerte null, fordi den gamle
+  splitt-tellingen nå telte ekte hindring-runding som et hakk (`maxSplitFrac` 0,3235 ≥ 0,30) —
+  forventet og fikset i DEL B (AVHENGIGHET 1, varslet i spec-en før noen kode ble skrevet).
+- **DEL B** — splitt-deteksjonen («Sub-rooms carry no hindrings, so a split is always a real
+  notch», sann kun pga. DEL A sin bug) avgjøres nå på geometri: hvert brudds MIDTPUNKT testes
+  mot sub-rommets egne hindring/sone-polygoner (`ptInPoly`) — kun et brudd INGEN hindring
+  forklarer telles som et ekte hakk. Naiv telling ga 0,3235 (ville kastet retningen); geometrisk
+  telling gir 0 på fasit-rommet. Et ekte hakk (testet: U-formet rom, ingen hindring) gir fortsatt
+  0,87 ≥ 0,30 → invalidert som før.
+- **DEL C** — `subAreaM2` var brutto (`compArea(sub)`), uendret av hindring-klonene. Bruker nå
+  `roomAreas(tempRoom).net` — samme begrep `roomAreas()` allerede bruker for et helt rom, ikke
+  et nytt. Målt (AVHENGIGHET 2): brutto-skår ga v-retning vinner (0,9564 mot 0,9508); netto-skår
+  gir h høyest (0,9626 mot 0,9620) — den RÅ skåren flipper som forventet. Selve UTFALLET endres
+  ikke på fasit-rommet: differansen (0,0006) er under den eksisterende 0,02-hysteresen som
+  favoriserer primærretningen (uendret, forhåndseksisterende regel).
+
+**DoD punkt 5 (hvor mye av «store buer» forsvinner av seg selv):** krysninger falt fra 840 til
+60 (-93 %) etter DEL A-C; én av to kabler ble 100 % ren. Restanten (60 av 9620 punkt, motor v6)
+er BEVIST — samme posisjon sendt direkte til `_generatePolygonClippedRuns` uten V6 sin
+celle-inndeling klipper hindringen korrekt — å skyldes `_v6DecomposeCells`/`_v6ConnectCells`,
+uttrykkelig utenfor omfanget her og utsatt til en egen runde med fersk STEG 0 mot V6 sin
+faktiske kode.
+
+**Testmetodikk:** ett-kabel-veien bit-for-bit uendret; flerkabel-rom UTEN hindringer bit-for-bit
+uendret (samme total-lengde); `S.hindrings`/`S.zones` talt likt før/etter kjøring (0 lekkasjer);
+ingen `tmpcab_`-rester i `_buildSaveData()`; hindring som krysser sone-skjøten respekteres av
+begge kabler; ekte hakk invalideres fortsatt. Fullt regresjonsbatteri grønt (`_cableSkewRegressionTest`
+alle fem case A-E), `_matBench(42,64)` bit-for-bit uendret.
+
+**Fil:** index.html.
+
+---
+
 ## Topbar kun logo, arbeidsflyt-stripa fjernet, prosjektinfo i sidebar — 2026-09-14 (DEL A-F)
 
 Kenneth: «Jeg ønsker en enklere måte å sette inn prosjekter av. Øverst til venstre der det står
