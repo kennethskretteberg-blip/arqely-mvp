@@ -54716,17 +54716,28 @@ async function _batchAction(action) {
   _renderProjectList();
 }
 
+// DEL B (14.09.2026, MÅLT — «statuslagringen sier OK uansett hva som skjer»): teller nå opp
+// faktiske utfall i stedet for å anta at alt gikk bra — samme _ok/_fail-mønster _batchAction sin
+// delete-gren allerede bruker for _deleteFromSupabase. _applySalesTransition kaster aldri lenger
+// (se _setProjectStatus), så løkka trenger ikke egen try/catch.
 async function _applyBatchStatus(statusId) {
   closeModal();
   const ids = _pendingBatchStatusIds;
   _pendingBatchStatusIds = [];
   const match = SALES_STATUSES.find(s => s.id === statusId);
   if (!match || ids.length === 0) return;
+  let _ok = 0; const _fail = [];
   for (const id of ids) {
-    try { await _applySalesTransition(id, match.id); }
-    catch(e) { console.warn('Status update error:', e); }
+    const r = await _applySalesTransition(id, match.id);
+    if (r && r.ok) _ok++; else _fail.push(r);
   }
-  _showToast(`Status endret til ${match.label}`);
+  if (_fail.length) {
+    const noPerm = _fail.some(f => f && f.reason === 'no-permission');
+    _showToast(`${_ok} av ${ids.length} prosjekt(er) fikk ny status «${match.label}».` +
+      ` ${_fail.length} feilet` + (noPerm ? ' — du har ikke tilgang til disse.' : '.'), 'warn');
+  } else {
+    _showToast(`Status endret til ${match.label} for ${_ok} prosjekt(er)`);
+  }
   _selectedProjectIds.clear();
   _updateBatchToolbar();
   const allCheck = document.getElementById('pl-check-all');
@@ -55195,8 +55206,17 @@ function _inlineRenameProject(projectId, spanEl) {
 // Sentral skriver: setter felt + status_changed_at. `cond` (valgfri) gjør at
 // oppdateringen kun slår til når et felt har en gitt verdi (null => IS NULL),
 // slik at vi aldri nedgraderer noe brukeren alt har flyttet manuelt.
+// DEL B (spec-modal-bak-prosjektlista-status-toast.md, 14.09.2026, MÅLT — «endre status» sa OK
+// uansett hva som skjedde): Supabase-klienten KASTER ikke, den returnerer {data,error} — try/catch
+// fanget derfor så godt som ingenting, og error ble aldri lest. En RLS-avvisning eller en rad som
+// ikke fantes ga stille retur, og _invalidateProjectCache() kjørte likevel. Returnerer nå SAMME
+// resultatform som _deleteFromSupabase ({ok:true} / {ok:false,reason,message?}) — .select('id')
+// lagt til slik at «0 rader endret» (RLS-blokkert eller ugyldig id, INGEN feil fra PostgREST sin
+// side) skilles fra en ekte feil, nøyaktig samme mønster _deleteFromSupabase sin egen delete-gren
+// allerede bruker. Kallerne (_applySalesTransition → _applyBatchStatus/_quickSetStatus) leser dette
+// nå — se der.
 async function _setProjectStatus(projectId, patch, cond) {
-  if (!_db || !projectId) return;
+  if (!_db || !projectId) return { ok:false, reason:'no-db' };
   try {
     let q = _db.from('romtegner_projects')
       .update({ ...patch, status_changed_at: new Date().toISOString() })
@@ -55204,9 +55224,22 @@ async function _setProjectStatus(projectId, patch, cond) {
     if (cond) for (const [k, v] of Object.entries(cond)) {
       q = (v === null) ? q.is(k, null) : q.eq(k, v);
     }
-    await q;
+    const { data, error } = await q.select('id');
+    if (error) {
+      console.error('Status update failed:', error.message, error.code, error.details);
+      return { ok:false, reason:'error', message:error.message };
+    }
+    if (!data || data.length === 0) {
+      // `cond` gjorde nettopp DETTE til et gyldig, forventet utfall («traff ikke betingelsen» —
+      // f.eks. prosjektet var ikke lenger under_arbeid) — ikke bland det sammen med en ekte
+      // RLS-avvisning, som er en reell feil et bedre-formulert kall (uten cond) ville avslørt.
+      const reason = cond ? 'cond-not-met' : 'no-permission';
+      console.warn(`Status update affected 0 rows (${reason}):`, projectId);
+      return { ok:false, reason };
+    }
     _invalidateProjectCache();
-  } catch (e) { console.warn('Auto-status feilet:', e.message); }
+    return { ok:true };
+  } catch (e) { console.error('Status update error:', e.message); return { ok:false, reason:'error', message:e.message }; }
 }
 // Kalles når et prosjekt settes 'vunnet' (chip/batch). Kenneth (21.08.2026, «når bruker trykker
 // prosjekt vunnet, så er vi ferdige... ønsker ikke et nytt valg for prosjekt levert»): Vunnet er nå
@@ -55218,10 +55251,12 @@ async function _setProjectStatus(projectId, patch, cond) {
 // hele tatt. _deliveryCellHtml (under) viser derfor aldri lenger noe for nye vunne prosjekter;
 // eldre prosjekter med allerede satt delivery_status fra FØR denne endringen berøres ikke av selve
 // dataen (kun skjult i UI, se _deliveryCellHtml).
+// DEL B (14.09.2026): returnerer nå _setProjectStatus sitt {ok,reason}-resultat i stedet for å
+// kaste det bort — _applyBatchStatus/_quickSetStatus leser dette for å vite om noe faktisk skjedde.
 async function _applySalesTransition(projectId, newStatus) {
   const patch = { sales_status: newStatus, delivery_status: null };
   if (newStatus !== 'tapt') patch.lost_reason = null;         // rydd tapt-årsak
-  await _setProjectStatus(projectId, patch);
+  return _setProjectStatus(projectId, patch);
 }
 
 // Kenneth (21.08.2026, «vunnet = ferdig, ingen leveranse-sporing»): akse B sin manuelle
@@ -55271,22 +55306,31 @@ async function _convertToProsjektering(projectId) {
   if (typeof addPart === 'function') addPart('indoor');
 }
 
+// DEL B (14.09.2026, MÅLT — samme hull som _applyBatchStatus): koblet select-styling om
+// UBETINGET, uansett om oppdateringen faktisk lyktes. Sjekker nå _applySalesTransition sitt
+// {ok,reason}-resultat (samme kilde _applyBatchStatus bruker) — feiler den, tilbakestilles raden
+// til den FAKTISKE (uendrede) statusen via _renderProjectList (samme mønster 'tapt'-grenen under
+// allerede bruker), i stedet for å la den valgte-men-aldri-lagrede verdien stå igjen i selecten.
 async function _quickSetStatus(projectId, newStatus, selectEl) {
-  try {
-    const statusObj = SALES_STATUSES.find(s => s.id === newStatus) || SALES_STATUSES[0];
-    await _applySalesTransition(projectId, newStatus);
-    // Update select styling
-    if (selectEl) {
-      selectEl.style.background = statusObj.color + '22';
-      selectEl.style.color = statusObj.color;
-      selectEl.style.borderColor = statusObj.color + '44';
-    }
-    // STEG 6: ved 'tapt' — spør etter (valgfri) årsak, og fjern raden fra aktiv-lista.
-    if (newStatus === 'tapt') {
-      _promptLostReason(projectId);
-      _renderProjectList();
-    }
-  } catch(e) { console.warn('Status update failed:', e.message); }
+  const statusObj = SALES_STATUSES.find(s => s.id === newStatus) || SALES_STATUSES[0];
+  const r = await _applySalesTransition(projectId, newStatus);
+  if (!r || !r.ok) {
+    console.warn('Status update failed:', r && r.reason, r && r.message);
+    _showToast('Kunne ikke endre status' + (r && r.reason === 'no-permission' ? ' — du har ikke tilgang.' : '.'), 'warn');
+    _renderProjectList();
+    return;
+  }
+  // Update select styling
+  if (selectEl) {
+    selectEl.style.background = statusObj.color + '22';
+    selectEl.style.color = statusObj.color;
+    selectEl.style.borderColor = statusObj.color + '44';
+  }
+  // STEG 6: ved 'tapt' — spør etter (valgfri) årsak, og fjern raden fra aktiv-lista.
+  if (newStatus === 'tapt') {
+    _promptLostReason(projectId);
+    _renderProjectList();
+  }
 }
 
 // STEG 6: valgfri hurtigvalg-årsak når et prosjekt tapes → lagres i lost_reason.
