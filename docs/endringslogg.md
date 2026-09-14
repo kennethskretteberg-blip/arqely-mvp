@@ -4,6 +4,68 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Topbar kun logo, arbeidsflyt-stripa fjernet, prosjektinfo i sidebar — 2026-09-14 (DEL A-F)
+
+Kenneth: «Jeg ønsker en enklere måte å sette inn prosjekter av. Øverst til venstre der det står
+varmeplan / prosjektnavn, i dette feltet ønsker jeg kun logo. Ta bort linjen under som viser
+kunde - tegning - produkter — denne er i veien. I toppen av venstre bar ønsker jeg
+prosjektinformasjon som vises: kundenavn, kontaktperson, prosjektnavn, prosjektert av, lagret
+status med grønn eller rød indikator [...] ta bort «lagret», man kan heller føre musen over for
+å få opp forklarende tekst.» Tillegg (14.09, etter avklaring): kunde kan ikke bare åpne
+Kunde-dialogen, den må kunne bytte kunde på ordentlig — DEL F ble forutsetningen for at DEL C i
+det hele tatt løste det Kenneth ba om.
+
+- **`f4558d7` (DEL B)** — fjernet arbeidsflyt-stripa (`#workflow-stripe`, STEG 7) over canvas:
+  HTML-diven, hele CSS-blokken, og de tre funksjonene kun stripa brukte
+  (`_wfStripeSig`/`_wfStripeVisible`/`_renderWorkflowStripe`/`_wfGoStep`), pluss kallet i
+  `render()`-halen. `_wfFirstRoom`/`_wfKundeModal`/`_wfSendToMonter` beholdt (nye inngangspunkter
+  i senere commits), `_projectProgress`/`_openProjectData` beholdt (fortsatt i bruk fra
+  `_buildSaveData`).
+- **`47fa218` (DEL A+C, slått sammen — funksjonelt avhengige)** — topbaren er nå KUN logoen;
+  `tb-sep`, `.tb-proj` (prosjektnavn+blyant) og `save-indicator` flyttet til en ny
+  `#sb-proj-info`-blokk øverst i sidebaren (samme id-er, så eksisterende skrivere fungerer
+  uendret). Blokka viser kundenavn, kontaktperson, prosjektnavn, prosjektert av og
+  lagret-status — tomme felt gir ingen rad (unngår «Prosjektert av —»-mønsteret fra tidligere).
+  Hele blokka åpner `_wfKundeModal()`; prosjektnavnet har egen klikk (`editProjName()`,
+  `stopPropagation`). `_renderSbProjInfo()` bygger kun `#spi-rows`, aldri `#save-indicator` —
+  den ligger som en stabil søsken-node slik at hyppige `renderSidebar()`-kall aldri visker ut
+  `_updateSaveIndicator`s egen tilstand. Alle 7 skrivere til `proj-name-disp` bekreftet
+  fungerende uendret; alle 4 skrivere til `sb-proj-lbl` fjernet — den er nå en statisk
+  seksjonstittel («Etasjer») over etasje/rom-treet, ikke lenger et duplikat av prosjektnavnet.
+  Presentasjonsmodus dekkes automatisk (`#sidebar` var allerede i `body.present-mode`-lista).
+- **`495f18d` (DEL D)** — «Send til montør» flyttet til topbarens fil/eksport-knappegruppe, med
+  `data-modules="indoor"` på selve knappen (gjenskaper stripas gamle regel om at den kun vises i
+  hovedarbeidsflyten — ikke i trapp/snø-modul).
+- **`6d41d61` (DEL E)** — lagre-status er nå en farget prikk + klokkeslett i stedet for hele
+  setninger («Lagrer…» osv. flyttet til `title`, vises på hover). Gjenbruker de fire eksisterende
+  `.tb-save`-fargeklassene (kun `.saving` byttet fra cyan til gult, for å matche Kenneths kart:
+  grønn=lagret, gult=lagrer/frakoblet, rødt=feil).
+- **`13623c4` (DEL F)** — kunde settes nå ETT sted. Før fantes to veier med ulikt resultat:
+  fritekstfeltet «Kunde / firma» i `_wfKundeModal` skrev kun `S.project.customer` og koblet
+  ALDRI prosjektet til kunderegisteret, mens `_gbao10Build()` henter Visma-kundenummeret fra
+  `customer_id`-KOBLINGEN — et prosjekt kunne altså vise riktig kundenavn på skjermen og likevel
+  eksportere med feil/tomt kundenummer. Fjernet fritekstfeltet; infoblokkens kunderad åpner nå
+  `_spiPickCustomer()` → samme `_quickSetCustomer`-velger prosjektlista alltid har brukt.
+  `_applyQuickCustomer` oppdaterer nå BÅDE databasen og `S.project` når prosjektet som endres er
+  det ÅPNE (samme id som `_supabaseProjectId`) — via den vanlige lagreveien
+  (`_markProjectDirty`/`_scheduleAutoSave`), ikke et direkte databaseskriv bak redigeringens
+  rygg. Uendret sti når prosjektet IKKE er det åpne (kalt fra prosjektlista på et annet
+  prosjekt). Eksisterende prosjekter med gammel fritekst-kunde røres ikke ved innlasting.
+
+**Testmetodikk:** fullt regresjonsbatteri grønt (`_matRegressionTest`, `_matZoneRegressionTest`,
+`_matFreeRegressionTest`, `_cableSkewRegressionTest`, `_foilRegressionTest`) — denne runden
+rører ingen geometri. Live verifisert: topbar viser kun logo; infoblokk viser riktig felt og
+skjuler tomme; klikk på navn/kunde stopper propagation korrekt; kunde satt fra infoblokka på et
+åpent prosjekt ga riktig kundenummer i `_gbao10Build()` i samme økt uten reload; kunde satt fra
+prosjektlista på et IKKE-åpent prosjekt lot `S.project` urørt; «— Ingen kunde —» nullstiller
+`customer_id`; alle fire lagre-tilstander (lagrer/lagret/frakoblet/feil) viser riktig farge;
+presentasjonsmodus og trapp/snø-modul skjuler riktig ting; `#workflow-stripe` bekreftet borte
+fra DOM, canvas fyller ut det frigjorte rommet uten dødt mellomrom.
+
+**Fil:** index.html.
+
+---
+
 ## Visma GBAO10: merking-feltet uten P-nr/REV, filnavnet uendret — 2026-09-14
 
 Kenneth: «Ved eksport fil til visma, så ønsker jeg at feltet for merking kun skal være merkingen
