@@ -202,6 +202,36 @@ fra DOM, canvas fyller ut det frigjorte rommet uten dødt mellomrom.
 
 ---
 
+## Topbar-oppfølging: to regresjoner + manglende lagre-tidspunkt — 2026-09-14/15
+
+Oppdaget live i produksjon rett etter forrige topbar-push (Kenneth testet direkte på
+varmeplan.no) — tre små, raskt pushede fiks, aldri tidligere loggført.
+
+- **`7287790` — Dashboard-navet forsvant ved åpning av prosjekt.** Rotårsak: `_renderSbProjInfo()`
+  (forrige commits DEL C) bygde `proj-name-disp` INNI en dynamisk `innerHTML`-ombygging — samme
+  mønster `save-indicator` bevisst UNNGIKK, men ikke fulgt konsekvent for navnet. Flere eldre
+  steder (bl.a. `_restoreProject()`) skriver `proj-name-disp`s `.textContent` FØR
+  `renderSidebar()` i det hele tatt kjører — elementet fantes ikke der ennå, `.textContent=` på
+  `null` kastet en exception som stanset hele åpne-prosjekt-kjøringen midt i, inkludert
+  `updateTopbarForModule()` (Dashboard/Inne/Liste/Ute/Trapp forsvant). Fiks: `proj-name-disp` er
+  nå et STATISK element fra første tegning, akkurat som `save-indicator`; `_renderSbProjInfo()`
+  toggler kun tekst/display på eksisterende elementer, bygger aldri om via `innerHTML`.
+- **`e74dc51` — lagre-indikatoren var tom (fargeløs) ved åpning.** DEL E ga statusen farge, men
+  ingenting kalte `_updateSaveIndicator()` bare ved å ÅPNE et prosjekt — kun ekte
+  lagre-hendelser gjorde det. `_restoreProject()` kaller nå `_updateSaveIndicator('saved', true)`
+  rett etter `_projectDirty=false` (der prosjektet BLIR «lagret» per definisjon); `silent`-
+  flagget unngår et falskt «lagret nå»-klokkeslett.
+- **`b2d66a8` — Kenneth ønsket et klokkeslett, ikke bare en bar prikk.** `_updateSaveIndicator`
+  tar nå `{silent}` ELLER `{at: Date}`. `_openCloudProject()` (den faktiske åpne-fra-lista-
+  flyten) HAR databasens ekte `updated_at` (`_loadFromSupabase` bruker `select('*')`) og viser nå
+  det ekte lagretidspunktet i stedet for en bar prikk. Ny `_saveTimeLabel()`: klokkeslett med
+  sekunder hvis i dag, ellers dato+klokkeslett («11.09 13:03») — et bart «Lagret 14:23» ville
+  vært tvetydig for et prosjekt sist lagret for tre dager siden.
+
+**Fil:** index.html.
+
+---
+
 ## Visma GBAO10: merking-feltet uten P-nr/REV, filnavnet uendret — 2026-09-14
 
 Kenneth: «Ved eksport fil til visma, så ønsker jeg at feltet for merking kun skal være merkingen
