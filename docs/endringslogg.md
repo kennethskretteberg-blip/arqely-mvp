@@ -4,6 +4,50 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Hurtig prosjektering: valgfritt «Bygg»-nivå over etasje — 2026-09-15 (DEL A-D)
+
+Kenneth: kunden definerer «Bolig A» og «Bolig B», begge med varmekabler i underetasje og
+1. etasje. Ønsket et valg FØR etasje som heter Bygg, med fritekst, satt via en «+»-knapp —
+«det er sjelden vi har behov for å sette Bygg, så jeg ønsker ikke at dette blir et valg jeg
+må innom for hver linje».
+
+Rotårsak: etasjer i Hurtig prosjektering opprettes på behov, nøkkelen var `(partId, name)`
+alene — «Underetasje» i Bolig A og «Underetasje» i Bolig B ville blitt SAMME etasje-objekt
+(og likeens «Plan 1»-kollisjonen mellom to bygg, det vanligste tilfellet).
+
+- **DEL A** — nøkkelen er nå `(partId, building, name)`. Nytt felt `floor.building`
+  (fritekst, `null`/`''` = ingen bygg — dagens tilstand, additiv, ingen migrering: gamle
+  etasjer mangler feltet, leses som null). Ny delt `_listMoveRoomToFloor` brukt av BÅDE
+  `_listEditFloor` (endrer navn, beholder bygg) og ny `_listEditBuilding` (endrer bygg,
+  beholder navn). Opprydningen av tomme etasjer sjekker fortsatt kun rom-referanser, ikke
+  building.
+- **DEL B** — «+ Bygg»-knapp foran Etasje i utkastkortet, kun synlig som knapp når intet
+  bygg er satt. Klikk avslører et vanlig fritekstfelt (samme `li-field`-mekanisme som
+  resten av kortet — tastaturnavigasjonen fungerer uendret). Byggnavnet arves til NESTE
+  rad via samme mekanisme `_listDraftRoom` allerede bruker for varmetype — Kenneth setter
+  bygg én gang per bolig, ikke per rom. Tomt felt → tilbake til «+».
+- **DEL C** — ny Bygg-kolonne foran Etasje i tabellen, vises KUN når minst én rad faktisk
+  har et bygg satt — uten bygg er tabellen bit-for-bit lik i dag. Rader uten bygg i et
+  prosjekt som ellers har bygg får en tom celle, ikke em dash.
+- **DEL D** — Romoversikt (PDF) grupperer nå Bygg → Etasje → Rom i BÅDE
+  Prosjektoversikt-siden og A-L-tabellen, men KUN når minst ett rom har et bygg — verifisert
+  bit-for-bit uendret ellers (samme kolonneposisjoner, ingen «Bygg»-tekst). A-L-tabellen
+  bruker hele den trykte bredden allerede, så Bygg-kolonnen tar plass fra Rom/Produkt/
+  Gruppe/Type/W-m²/CC — IKKE fra Etasje, som først ble krympet for mye og avkuttet
+  «Underetasje» til «Underetasj» i en tidlig forsøksversjon (fanget opp med en jsPDF-
+  instans-proxy som logger hvert `doc.text()`-kall, siden `exportPDF()` ellers laster ned
+  filen og ikke lar seg inspisere automatisk).
+
+**Testmetodikk:** Kenneths tilfelle (Bolig A + Bolig B, hver med Underetasje + 1. etasje)
+ga fire distinkte etasje-objekter, ikke to. Prosjekt uten bygg bit-for-bit uendret i alle
+tre flatene (kort, tabell, PDF) — testet FØRST og eksplisitt. Gammelt lagret prosjekt
+(`floor.building` helt fraværende, ikke bare tom) åpner uendret, ingen feil i konsollen.
+Fullt regresjonsbatteri grønt, `_matBench(42,64)` bit-for-bit uendret.
+
+**Fil:** index.html.
+
+---
+
 ## Flerkabel-rom: hindringer og forbudte soner er nå synlige for kabelmotoren — 2026-09-14 (DEL A-C)
 
 Kenneth, stue/kjøkken 67,4 m² med to InFloor 10T 2000W/200m (K1+K2): «Kabel legger seg helt
