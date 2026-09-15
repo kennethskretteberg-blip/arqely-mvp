@@ -4,6 +4,47 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Prosjektoversikt (PDF): etasjerekkefølge, brutto/netto og ratet effekt — 2026-09-15 (DEL A-D)
+
+Kenneth, om Prosjektoversikt-siden i Romoversikt-PDF-en: (1) «Plan 1 kommer øverst etterfulgt
+av Plan 0. Riktig blir at laveste etasje kommer øverst.» (2) «Det vises kun netto areal uten å
+fortelle om det er brutto eller netto.» (3) «…med hver sin flateeffekt. Brutto W/m² (effekt-
+behovet) og flateeffekt W/m² (overflatetemperaturen).» (4) «På kolonne for W vises effekter
+som ikke er effekten på kabelen. F.eks. er det valgt 450 W varmekabel, da bør det ikke stå
+459 W.» Tre av de fire delte samme rotårsak: PDF-en regnet selv i stedet for å bruke tallene
+appen allerede har.
+
+- **DEL A** — Prosjektoversikten (KPI-kort, per-etasje-tabell, forhåndsvisningen FØR eksport)
+  bruker nå `_roomRatedEffectW(room)` (produktets ratede effekt) i stedet for `stats.totalW`
+  (geometri-utledet — en kabel tegnet litt lengre enn nominelt ga et høyere tall enn produktets
+  spesifikasjon). Hurtig prosjektering sitt eget utkastkort brukte allerede denne funksjonen —
+  PDF-en viste et ANNET tall for samme rom enn skjermen. `stats.totalW` er urørt der det faktisk
+  betyr «hva som er lagt ut» (status-symbolet, rom-detaljsidenes egen dekningsberegning).
+- **DEL D** — sortering er nå på etasjens NIVÅ (første tall i navnet, stigende), ikke
+  opprettelsesrekkefølge (`floor.order`, som aldri kan endres av brukeren). STEG 0 kartla de
+  faktiske etasjenavnene i kodebasen (Plan -2…8, «1. etasje», «Uteareal», «Plan 1», pluss fritt
+  brukerskrevne navn) før regelen ble skrevet. Navn uten tall («Uteareal») legges sist. Kun ett
+  sted i kodebasen sorterer etasjer for PDF-en — fikset der er nok til at Prosjektoversikt og
+  Romoversikt viser identisk rekkefølge, siden begge leser samme `floorSummaries`.
+- **DEL B+C** (slått sammen — samme kolonne-layout) — «m²» delt i Brutto/Netto m²; «W/m²» delt
+  i Brutto (ratet÷brutto, effektbehov) og Flate (ratet÷netto, overflatetemperatur) — SAMME to
+  formler utkastkortet bruker, verifisert tall-likt live for samme rom. STEG 0 avklarte at et
+  TEGNET roms egen kabel-etikett bruker to ANDRE formler (geometri-utledet effekt ÷ dekket
+  areal/brutto) og derfor uunngåelig vil vise andre tall — bevisst valgt likevel, for å matche
+  Hurtig prosjektering sin skjerm. Sju kolonner på 175mm (ikke hele 180mm trykte bredden, siden
+  bygg-gruppering fra forrige runde indenterer tabellen 5mm) — verifisert at ingenting
+  overskrider papirkanten (maks x=195mm=W-M), selv med et langt romnavn.
+
+**Testmetodikk:** en 450W-kabel tegnet 60m (nominelt 59m) viser 450 i KPI-kort, per-rom
+W-kolonne og etasjesum — der det før viste 458. Plan 1 opprettet før Plan 0 → PDF-en viser
+Plan 0 øverst i begge seksjoner. Et rom uten hindringer viser brutto=netto, begge synlige. De
+to W/m²-kolonnene ga nøyaktig samme tall (38/41) som et Hurtig prosjektering-utkastkort for
+samme rom. Fullt regresjonsbatteri grønt, `_matBench(42,64)` bit-for-bit uendret.
+
+**Fil:** index.html.
+
+---
+
 ## Hurtig prosjektering: valgfritt «Bygg»-nivå over etasje — 2026-09-15 (DEL A-D)
 
 Kenneth: kunden definerer «Bolig A» og «Bolig B», begge med varmekabler i underetasje og
