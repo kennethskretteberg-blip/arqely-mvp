@@ -14788,6 +14788,120 @@ function _rotateSelectedStrip() {
   _showToast('Folie rotert ' + (strip.direction === 'h' ? 'horisontalt' : 'vertikalt'), 'ok');
 }
 
+// F0 (Kenneth 17.09.2026, plan-folie-skra-vegger-gruppering-batch.md punkt 4b): dupliser
+// markerte folier rett ved siden av, med rommets gap. Én markert → én kopi. Flere markerte →
+// hele markeringen som blokk, forskjøvet med blokkens bredde + gap. Kopien(e) blir det nye
+// valget, så Ctrl+D ×N gir N på rad.
+//
+// STEG 0-funn: _neighborSnapCandidates gir IKKE «de to posisjonene for én gitt stripe» — den gir
+// 2 kandidater PER EKSISTERENDE stripe i rommet (bekreftet live: 2 striper i et testrom ga 4
+// kandidater). Kandidatene under regnes derfor DIREKTE ut fra kilden(e) (blokkens bredde + gap),
+// ikke ved å kalle den funksjonen.
+//
+// Samme kollisjons-/klippe-mønster som _stripDropCandidate (:21613) bruker internt: for hver
+// kandidatside beregnes den EKTE, klipte utstrekningen først via _dropAlongExtentAt (samme
+// withFoilAvoid → computeClippedSegments → _segAtSweep-kjede), og kollisjonssjekken kjøres MOT
+// den klipte utstrekningen — ikke originalens rå lengde. Det er slik en original som ligger
+// under en hindring og et duplikat som havner delvis over den kan vurderes riktig i ett steg,
+// uten to separate (og potensielt uenige) sjekker.
+//
+// STEG 0 punkt 3 (feltvalg): zoneId kopieres (samme sone som originalen). labelPos/
+// labelRotation/labelScale/labelColor kopieres IKKE — Kenneths eget forslag: en manuelt flyttet
+// label på originalen skal ikke gi en feilplassert label på kopien.
+function _duplicateStrips() {
+  const ids = [...S.ui.selectedStripIds];
+  if (!ids.length && S.ui.selectedStripId != null) ids.push(S.ui.selectedStripId);
+  if (!ids.length) return;
+  const src = ids.map(id => S.strips.find(s => s.id === id)).filter(Boolean);
+  if (!src.length) return;
+
+  // Alle må ha samme rom og retning for at «ved siden av» skal bety noe.
+  const roomId = src[0].roomId, dir = src[0].direction;
+  if (src.some(s => s.roomId !== roomId || s.direction !== dir)) {
+    _showToast('Dupliser: marker folier i samme rom og retning', 'warn');
+    return;
+  }
+
+  // Samme starthjørne-utledning som _stripDropCandidate (:21639) bruker for tiebreak.
+  const corner = (S.varmefolie && S.varmefolie.startCorner) || 'bl';
+  const preferLow = dir === 'v' ? corner.charAt(1) === 'l' : corner.charAt(0) === 't';
+
+  // Blokkens tverr-utstrekning (én markert = blokk på bredde 1) og strengeste gap blant kildene.
+  const minPos = Math.min(...src.map(s => s.pos_cm));
+  const maxEdge = Math.max(...src.map(s => s.pos_cm + _stripNettoCm(s)));
+  const gap = Math.max(...src.map(s => _effectiveGapCmPair(s.productId, s.productId, roomId)));
+  const blockWidth = maxEdge - minPos;
+  const highOffset = blockWidth + gap;
+  const lowOffset = -highOffset;
+
+  // Prøv å plassere HELE blokken forskjøvet med `offset` — ALLE kildene må få plass (klippet,
+  // ekte utstrekning, ingen kollisjon) for at denne siden godtas.
+  //
+  // MÅLT LIVE (STEG 0-oppfølging, funnet under bygging): _dropAlongExtentAt/computeClippedSegments
+  // gir den STØRST MULIGE ledige lengden ved posisjonen — designet for drop/magnet, der målet ER
+  // å fylle mest mulig plass. Brukt rått ga et duplikat av en 400cm original 595cm langt i et tomt
+  // rom (hele romhøyden), ikke en «identisk kopi». Riktig lengde er originalens EGNE along-område
+  // (start_cm..start_cm+length_cm) SKJÆRT MOT det klipte segmentet — identisk når ingenting er i
+  // veien, kortere når en hindring/vegg tar en bit av akkurat det området (test 5).
+  const tryOffset = (offset) => {
+    const placements = [];
+    for (const s of src) {
+      const pos = s.pos_cm + offset;
+      // MÅLT LIVE (samme funn-runde): computeClippedSegments klipper KUN langs sveipeaksen
+      // (vegger/hindringer) — den sjekker ikke om pos_cm selv (den TVERRGÅENDE posisjonen) i det
+      // hele tatt holder stripen innenfor rommets bredde/høyde. Uten denne sjekken landet et
+      // duplikat delvis UTENFOR rommet (pos_cm=-51 i et rom som starter på x=0). Samme
+      // grense-sjekk som _snapStripToNearest (:28422) allerede bruker for nabomagneten.
+      const nc = _stripNettoCm(s);
+      const bounds = _stripRoomBounds(s);
+      if (!bounds) return null;
+      const minB = dir === 'v' ? bounds.minX : bounds.minY;
+      const maxB = dir === 'v' ? bounds.maxX : bounds.maxY;
+      if (pos < minB + 0.01 || pos + nc > maxB - 0.01) return null;
+      const rawStart = s.start_cm, rawEnd = s.start_cm + s.length_cm;
+      const sweep = rawStart + s.length_cm / 2;
+      const seg = _dropAlongExtentAt(roomId, dir, pos, s.productId, sweep);
+      if (!seg) return null;
+      const segStart = seg.start_cm, segEnd = seg.start_cm + seg.length_cm;
+      const newStart = Math.max(rawStart, segStart), newEnd = Math.min(rawEnd, segEnd);
+      const newLen = newEnd - newStart;
+      if (newLen <= 0.5) return null; // ingen reell overlapp mellom originalens område og segmentet her
+      const extent = { start_cm: newStart, length_cm: newLen };
+      const tmp = { id: -999, roomId, direction: dir, pos_cm: pos, productId: s.productId, start_cm: extent.start_cm, length_cm: extent.length_cm };
+      if (_stripOverlapsAny(tmp)) return null;
+      placements.push({ src: s, pos_cm: pos, extent });
+    }
+    return placements;
+  };
+
+  const offsets = preferLow ? [lowOffset, highOffset] : [highOffset, lowOffset];
+  let placements = null;
+  for (const off of offsets) { placements = tryOffset(off); if (placements) break; }
+  if (!placements) { _showToast('Ikke plass til duplikat', 'warn'); return; }
+
+  pushUndo();
+  const newIds = [];
+  let shortenedM = null;
+  for (const pl of placements) {
+    const s = pl.src;
+    const newStrip = {
+      id: S.counters.nextStripId++,
+      roomId, productId: s.productId, direction: dir,
+      pos_cm: pl.pos_cm, start_cm: pl.extent.start_cm, length_cm: pl.extent.length_cm
+    };
+    if (s.zoneId != null) newStrip.zoneId = s.zoneId;
+    S.strips.push(newStrip);
+    newIds.push(newStrip.id);
+    if (pl.extent.length_cm < s.length_cm - 0.5) shortenedM = (pl.extent.length_cm / 100).toFixed(1);
+  }
+  _invalidateStripCache();
+  // Kopien(e) blir det nye valget — Ctrl+D ×N gir N på rad, hver dupliserer den forrige.
+  S.ui.selectedStripIds = new Set(newIds);
+  S.ui.selectedStripId = newIds[newIds.length - 1];
+  renderSidebar(); updateObjInfo(); render();
+  if (shortenedM != null) _showToast(`Duplikat lagt — kortet ned til ${shortenedM} m av hindring`);
+}
+
 // NOTE: The old `autoFillRoom` wrapper (greedy/beam/zone/obstacle scoring rollup)
 // was removed as dead code — it was only reachable via the deleted
 // startAutoFill/confirmAutoFill pipeline. The live folie auto-fill path uses the
@@ -29273,7 +29387,9 @@ function stripCtxMenu(e, id) {
   const anyManualLabel = selIds.some(sid => { const s = S.strips.find(st => st.id === sid); return s && (s.labelPos || s.labelRotation != null || s.labelScale != null); });
   document.getElementById('ctx-menu').innerHTML = `
     ${_angreItem()}
-    ${multiSel ? `<div class="ctx-item" onclick="promptCreateGroup();hideCtx()"><svg class="ic ic-package" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg> Lag gruppe (${selIds.length} striper)</div><div class="ctx-sep"></div>` : ''}
+    ${multiSel ? `<div class="ctx-item" onclick="promptCreateGroup();hideCtx()"><svg class="ic ic-package" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg> Lag gruppe (${selIds.length} striper)</div>` : ''}
+    <div class="ctx-item" onclick="_duplicateStrips();hideCtx()">⧉ Dupliser${multiSel ? ' (' + selIds.length + ')' : ''}</div>
+    <div class="ctx-sep"></div>
     ${anyManualLabel ? `<div class="ctx-item" onclick="resetStripLabel();hideCtx()">↩ Tilbakestill label til auto</div>` : ''}
     <div class="ctx-item danger" onclick="${multiSel ? 'deleteMultiStrips()' : 'deleteStrip('+id+')'};hideCtx()">✕ Slett ${multiSel ? selIds.length+' striper' : 'stripe'}</div>`;
   showCtxAt(e.clientX, e.clientY);
@@ -41019,6 +41135,14 @@ document.addEventListener('keydown', e=>{
   // Edit 6: Ctrl+R = rotate mode, Ctrl+F = move mode
   if ((e.ctrlKey||e.metaKey)&&e.key==='r') { e.preventDefault(); setTransformMode('rotate'); return; }
   if ((e.ctrlKey||e.metaKey)&&e.key==='f') { e.preventDefault(); setTransformMode('move'); return; }
+  // F0 (Kenneth 17.09.2026): Ctrl/Cmd+D dupliserer markerte folier rett ved siden av. Skjermet
+  // mot tekstfelt av den blanke vakten helt øverst i denne handleren (:40919, INPUT/TEXTAREA) —
+  // samme beskyttelse alle andre snarveier her allerede får, ingen egen vakt lagt til for dette.
+  if ((e.ctrlKey||e.metaKey)&&e.key==='d' && (S.ui.selectedStripId!==null || S.ui.selectedStripIds.size)) {
+    e.preventDefault(); // ellers åpner nettleseren «Legg til bokmerke»
+    _duplicateStrips();
+    return;
+  }
   // R key: rotate selected strip 90° (without Ctrl — Ctrl+R is room rotate mode)
   if (e.key==='r' && !e.ctrlKey && !e.metaKey && S.ui.selectedStripId!==null) { _rotateSelectedStrip(); e.preventDefault(); return; }
   // R key during manual placement: toggle direction
