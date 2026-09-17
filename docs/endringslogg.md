@@ -4,6 +4,170 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Rett opp etter vegg» — 2026-09-17
+
+Kenneth, om et loft der alle vegger står ~15° skrått mot canvas (D1-300/301/302): å legge folie
+parallelt med en skrå vegg fantes for kabel (`_skEngineCore` prøver hver vegg som kandidat-
+vinkel) men ikke for folie — å bygge om folie-motoren for vilkårlig vinkel er en stor jobb
+(`room.points` leses 225 steder i fila, alt antar akseparallelt). Billigere vei: rett opp
+PLANTEGNINGEN i stedet, siden hele bygget er skrått som helhet — da virker hver eksisterende
+motor uendret.
+
+- Ny knapp i bakgrunnens «⋯»-meny: «Rett opp etter vegg». To klikk langs en vegg på tegningen →
+  vinkelen måles råtte (bevisst ingen angle-snap på forhåndsvisningen — det ville jo nullstilt
+  nettopp den skjeve vinkelen som skal måles) → nærmeste 90° (vannrett/loddrett) beregnes →
+  differansen legges til `bg.rotation`.
+- Finnes det rom på etasjen, roteres rom/hindringer/soner (inkl. vegger og mål-linjer) MED
+  bildet, om bildets eget senter. Folie/kabel/matte/plater kan ikke roteres (aksebasert
+  v/h-modell) og slettes derfor — etter en tydelig bekreftelse med faktiske antall, f.eks.
+  «1 rom, 1 hindring, 1 sone roteres — 1 folie slettes (kan ikke roteres). Fortsette?» (Kenneths
+  eget valg, fremfor å bare nekte når rom finnes). Tom etasje → roterer stille.
+- Ikke håndtert i denne runden, rapportert eksplisitt: trapper (egen geometrimodell) og globale
+  mål-linjer (`S.floatingDims`) roteres ikke — kan ende visuelt feilplassert på en rotert etasje.
+- STEG 0-funn (pre-eksisterende, ikke introdusert her): `pushUndo()`/`undo()` snapshotter aldri
+  bakgrunnstilstand — bekreftet at selv den eksisterende «Roter 90°»-knappen har akkurat samme
+  hull. Rom-/hindring-/sone-rotasjonen og folie/kabel/matte-slettingen ER angrbare; selve
+  `bg.rotation`-endringen er det ikke, uendret fra før.
+
+**Fil:** index.html.
+
+---
+
+## Batch-lengde for markerte folier — 2026-09-17
+
+Kenneth: gruppering og felles flytting av folier fantes allerede (Ctrl-klikk, gruppe-gizmo,
+høyreklikk «Lag gruppe»), men å taste en ny lengde som gjelder ALLE markerte fantes ikke. STEG 0
+avdekket at enkelt-strip-redigering (`editStripLen`) verken klipper mot vegg/hindring eller
+pusher undo i dag — batch-varianten gjør derfor nøyaktig det samme (ingen ny klippe-regel
+oppfunnet), pluss `pushUndo()` siden en handling som rammer flere striper samtidig bør være
+angrbar.
+
+- `updateObjInfo()`: ny redigerbar Lengde-rad i multi-select-panelet, men KUN når alle markerte
+  allerede har lik lengde (0,01cm toleranse mot flyttallsavrunding) — ellers vises et låst
+  «ulike lengder»-felt (Kenneths eget valg, trygt fremfor et fritt felt).
+- Ny `editStripLenBatch()`: setter lengden på alle markerte striper i ett samlet
+  `pushUndo()`-steg.
+
+**Fil:** index.html.
+
+---
+
+## Modulknappene på én rad, sidebar-bredde huskes — 2026-09-17
+
+Kenneth: «Ønsker bredere bar på venstre side slik at Inne, Liste, Ute og Trapp står ved siden av
+hverandre... Bruker kan justere bredden som den vil, sett minne på dette samt
+tilbakestillingsknapp.» STEG 0 målte 3 rader ved BÅDE 180px og 272px sidebar-bredde med det
+gamle flex-wrap-oppsettet (de fire knappene trengte 274px, kun 252px tilgjengelig ved 272px
+bredde).
+
+- `.tb-module-nav`: Dashboard i full bredde over, de fire modulknappene i et nytt
+  4-kolonners grid under — alltid én rad, uansett etikettlengde. `overflow:hidden` på knappene
+  (IKKE fjerning av `flex-shrink:0` som først antatt — flex-shrink har ingen effekt på
+  grid-items, verifisert direkte) hindrer at «Trapp» (bredeste etikett) sprenger kolonnen.
+- Under 200px sidebar-bredde vises kun ikon (etikett skjult) — målt at tekstavkutting inntreffer
+  ved akkurat 180px (sidebarens absolutte minimum), 200px valgt som sikkerhetsmargin mot
+  fontmetrikk-variasjon mellom OS/nettlesere.
+- Sidebar-bredde huskes: nytt `sidebarWidth`-felt i `_savePrefs()`/`_applyPrefs()` (samme
+  `PREFS_KEY`, urørt — se advarsel i koden), lagres på mouseup (ikke mousemove).
+  Tilbakestillingsknapp lagt til under Innstillinger («Visning»-seksjon).
+
+**Fil:** index.html.
+
+---
+
+## «Bytt kunde» finner nå også kunder fra Visma-registeret — 2026-09-17
+
+Kenneth: «her får jeg ikke byttet til kunde som ligger med Visma kundenummer, kun interne
+kunder. Ønsker å kunne bytte til alle kunder.» STEG 0 bekreftet: `_quickSetCustomer()` kalte kun
+`_loadCustomers()` (Varmeplans egne kunder, `customers`-tabellen) — ingen kode refererte
+`erp_customers` i det hele tatt, selv om dashbordets kundesøk (`_searchCustomers`) allerede
+hadde akkurat dette to-register-mønsteret.
+
+- Samme to-seksjons-mønster som dashbordets kundesøk gjenbrukt: Varmeplan-kunder alltid først,
+  Visma-registeret bygges KUN ved søk (aldri ved åpning — unngår å male 3130 rader inn i DOM-en
+  for hvert kall), skjuler rader som allerede er hentet inn som Varmeplan-kunde, samme
+  tokenbaserte søk («bravida ålesund» treffer «Bravida Norge avd Ålesund»).
+- Gjenbruker `_insertCustomerFromErpRow()` uendret (setter Vismas skrivemåte, ikke det brukeren
+  tastet) og fører videre gjennom den eksisterende `_applyQuickCustomer` — ingen ny
+  databaseskriving.
+- Rapportert, ikke fikset (egen sak): `esc()`/`_esc()` escaper HTML men ikke apostrof i
+  `onclick`-attributter — bekreftet 5 kallsteder i kodebasen der en kunde/kontakt med apostrof i
+  navnet (f.eks. «O'Brien AS») får en rad som ikke gjør noe ved klikk (attributten kompilerer
+  ikke engang).
+
+**Fil:** index.html.
+
+---
+
+## Romoversikt viser lengde per foliebredde, ikke bare antall — 2026-09-17
+
+Kenneth: «Det kan være at f.eks. 100 cm-bredden er lagt som 7 stk, men de kan alle ha
+forskjellig lengde, da må de settes opp på hver sin linje.» `_roomProductBreakdown()` grupperte
+tidligere alle folie-varianter i et rom kun på `productId` — sju striper av samme bredde men
+ulik lengde ble én rad med «Ant 7», lengden usynlig.
+
+- Ny map-nøkkel for folie spesifikt: `productId + lengde`, rundet til én desimal i meter FØR
+  gruppering (samme presisjon som vises, slik at 3,24m og 3,19m ikke ender som to rader som
+  begge viser «3,2 m»). To striper med identisk bredde OG lengde slås fortsatt sammen til én rad
+  med økt antall. Kabel/Matte/Plate/Aluboard er urørt (nøkkel fortsatt kun `productId`).
+- Ny «Lengde»-kolonne i PDF Romoversikt-tabellen (begge kolonneoppsett, med/uten Bygg — verifisert
+  å fortsatt summere til nøyaktig 180mm; Etasje-kolonnens 14mm urørt, jf. tidligere
+  «Underetasj»-avkuttingen ved 12mm) og i Excel «Per rom»-arket, samme radrekkefølge.
+
+**Fil:** index.html.
+
+---
+
+## Folie-labels for små i store rom — 2026-09-17
+
+Kenneth, Storkmoen #0238 (Stue/kjøkken 63,9 m², 1:50-tegning): labelstørrelsen er en konstant
+verdens-cm-størrelse (riktig for PDF-troskap — identisk label:rom-forhold på skjerm og i PDF),
+men store rom trenger lavere zoom for å få plass på skjermen, og dermed ble etikettene uleselig
+små der. Den eksisterende skjerm-only-gulvet (6px) var langt under en liten roms naturlige
+størrelse.
+
+- Ny konstant `LABEL_MIN_PX = 13` erstatter det gamle 6px-gulvet på tre steder: hoved-folie-
+  labelen, frihånds-matte-labelen, og en tredje, ikke opprinnelig nevnt mat-rektangel-label-plass
+  som deler samme begrunnelse («Størrelse lik folie-label»). To kabel-label-steder med samme
+  mønster ble bevisst IKKE endret (utenfor scope). PDF-modus er helt urørt — gulvet evalueres
+  aldri der.
+
+**Fil:** index.html.
+
+---
+
+## Folie kan legges i samme bane over en hindring — 2026-09-17
+
+Kenneth, Storkmoen #0238 (Stue/kjøkken med kjøkkenøy): etter å ha lagt folie under en
+kjøkkenøy, nektet appen å legge ny folie i SAMME bane over øya — tvang posisjonen sidelengs i
+stedet.
+
+- Rotårsak: `_stripDropCandidate` målte kollisjon mot rommets FULLE akseparallelle utstrekning
+  (`aLo`/`aHi`), ikke den faktiske utstrekningen en ny stripe ville fått ved akkurat den
+  dropp-posisjonen — selve klippe-logikken (`computeClippedSegments`, `_segAtSweep`,
+  `_stripOverlapsAny`) var allerede riktig, den fikk bare feil inndata fra pre-sjekken. Ny
+  `_dropAlongExtentAt()` gir kollisjonssjekken riktig, posisjonsspesifikk utstrekning i stedet.
+
+**Fil:** index.html.
+
+---
+
+## Hindring-avstand 0cm nullstilles ikke lenger til 25mm ved gjenåpning — 2026-09-17
+
+Kenneth, Storkmoen #0238: satte en hindrings klaring til 0cm, men verdien hoppet tilbake til
+25mm ved gjenåpning av prosjektet (en tilhørende folie-varsel som forsvant ved 0cm dukket
+tilsvarende opp igjen).
+
+- Rotårsak: en engangs-datavask fra 10.09.2026 (commit 795171c) som skulle rette opp gamle
+  `'none'`-verdier fra en tidligere feil manglet en vakt og kjørte på ALLE prosjektåpninger —
+  overskrev dermed også bevisste, nye 0cm-valg brukeren nettopp hadde gjort. Løkken er fjernet
+  helt (ingen flagg, dato-sjekk eller per-prosjekt-markør innført i stedet, etter Kenneths
+  eksplisitte ønske).
+
+**Fil:** index.html.
+
+---
+
 ## Prosjektoversikt (PDF): etasjerekkefølge, brutto/netto og ratet effekt — 2026-09-15 (DEL A-D)
 
 Kenneth, om Prosjektoversikt-siden i Romoversikt-PDF-en: (1) «Plan 1 kommer øverst etterfulgt
