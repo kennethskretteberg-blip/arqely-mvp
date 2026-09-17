@@ -4,6 +4,57 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## F0: dupliser folie — identisk kopi rett ved siden av — 2026-09-17
+
+Kenneth: «Kan man velge folien (høyreklikk) og duplisere med mus eller hurtigtast slik at det vil
+legge seg en ny 100 cm like lang rett ved siden av med innstilt verdi som avstand?» — muliggjør
+arbeidsflyten dupliser→dupliser→dupliser→marker alle→grupper→rediger.
+
+- Ny `_duplicateStrips()`: én markert → én kopi; flere markerte (samme rom+retning) → hele
+  markeringen som blokk, forskjøvet med blokkens bredde+gap. Gap = `_effectiveGapCmPair` (samme
+  regel som drag-and-drop og auto bruker — produktets minimum vinner over en lavere
+  romsinnstilling). Rekkefølge på kandidatsider følger `S.varmefolie.startCorner`. Kopien(e) blir
+  det nye valget (Ctrl+D ×N gir N på rad). Høyreklikk → «⧉ Dupliser (N)», eller Ctrl/Cmd+D.
+- To funn underveis, fanget av testene før noe ble antatt riktig: (1) `_dropAlongExtentAt` gir
+  den størst mulige ledige lengden ved en posisjon (designet for drop/magnet) — brukt rått ga et
+  duplikat av en 400cm original 595cm langt i et tomt rom. Rettet ved å skjære det klipte
+  segmentet mot originalens EGET lengdeområde — identisk når ingenting er i veien, kortere (med
+  informasjonstoast) kun når en hindring faktisk tar en bit av akkurat det området. (2)
+  `computeClippedSegments` validerer aldri at selve tverrposisjonen holder stripen innenfor
+  romgrensene — et duplikat landet delvis utenfor rommet før en egen grense-sjekk ble lagt til
+  (samme sjekk `_snapStripToNearest` allerede bruker).
+- `zoneId` kopieres til duplikatet (samme sone); label-overstyringer (`labelPos`/
+  `labelRotation`/`labelScale`/`labelColor`) kopieres bevisst ikke.
+
+**Fil:** index.html.
+
+---
+
+## Sak 6b: prosjektlista — hele kundenavnet, typeikoner, initialer — 2026-09-17
+
+Kenneth: «Prosjektlisten må bli mer oversiktlig, vi ser ikke hele kundenavnet.» 200px var
+flaskehalsen, ikke mangel på plass totalt — Type brukte ~130px tekst og Prosjektert av 150px for
+et fullt navn.
+
+- Firma: `max-width` 200px → 380px (plassen Type+Prosjektert av frigjorde).
+- Type: tekst fjernet, kun ikon (18px, full etikett i tooltip). To nye ikoner tegnet
+  (`home-heat-in`/`home-heat-out`, varmebølger inne i vs. utenfor huset) i en EGEN tabell
+  (`_PL_TYPE_ICON`) — ikke `_MOD_ICON`, som deles med sidebarens modul-nav (sak 6a) og ikke skal
+  få husmotiv der. STEG 0 bekreftet at `S.project.type` kun kan være seks bestemte verdier
+  (indoor/stair/snow/roof/frost/snowcalc) — `list` er en inndata-metode, aldri en egen
+  prosjekttype.
+- Prosjektert av: initialer («Kenneth Skretteberg» → «KS», maks 4 tegn) i stedet for fullt navn,
+  med tooltip som viser hele navnet. Nytt «Initialer»-felt i Innstillinger lar brukeren sette
+  egne initialer som vinner over de automatiske — men KUN når prosjektets «Prosjektert
+  av»-fritekst er lik brukerens eget fulle navn (STEG 0 bekreftet: andre medlemmers profiler
+  lastes ikke i vanlig bruk, kun i org-admin-panelet). Ny additiv migrasjon
+  `supabase-migration-profile-initials.sql` (`profiles.initials`, kjørt).
+- PDF-forsiden og sidebarens «Prosjektert av» er urørt — begge viser fortsatt fullt navn.
+
+**Fil:** index.html, supabase-migration-profile-initials.sql (kjørt).
+
+---
+
 ## «Rett opp etter vegg» — 2026-09-17
 
 Kenneth, om et loft der alle vegger står ~15° skrått mot canvas (D1-300/301/302): å legge folie
