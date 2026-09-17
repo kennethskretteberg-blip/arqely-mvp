@@ -4,6 +4,80 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## F4a: «fri folie» — objektet (S.foilFree) — 2026-09-17
+
+Kenneth: «I noen tilfeller ønsker jeg å rotere noen enkle foliebredder. Legge ut en folie, rotere
+den og endre lengden samt flytte på den.» Første av tre steg (planens egen inndeling) — flytt/
+roter/endre lengde er en senere, egen prompt (F4b). F4a alene gir derfor begrenset nytteverdi:
+opprette, se og slette, ikke justere ennå.
+
+- Ny objekttype `S.foilFree` — egen liste ved siden av `S.strips` (samme mønster som `matPaths`
+  ved siden av `mats`), IKKE et vinkelfelt lagt til på vanlige striper. Ingen av de 225 leserne av
+  `room.points`/stripe-koordinater i den aksebaserte folie-motoren trenger dermed en vakt.
+  `{ id, roomId, productId, cx_cm, cy_cm, angle_deg, length_cm }` — bredde fra produktet.
+  angle_deg=0 ⇒ langs X (som en 'h'-stripe), 90 ⇒ langs Y (som 'v') — verifisert med regnestykke
+  at en konvertert stripes hjørner blir eksakt identiske med originalens, ikke bare «samme areal».
+- Full persistens (lagre/laste/undo/foreldreløs-opprydding/egen id-teller), tegning (rotert
+  rektangel), klikk-treff (invers-rotert punkt-i-boks), slett (tast/kontekstmeny/knapp), egen rad
+  i sidebar.
+- «Gjør fri (vinkel)» i høyreklikkmenyen — én vei, kun enkeltvalg. Fjerner samtidig stripen fra
+  enhver gruppe den var medlem av (eget funn under bygging — ellers en henvisning til intet).
+- Ny «Fri (vinkel)»-bryter i den manuelle paletten, synlig kun for folie (ikke matte/snø, som
+  deler samme boks). Slipp med bryteren på lager en `S.foilFree` uten klipping/kollisjon/magnet —
+  brukerens ansvar, som planen ba om.
+
+**Fil:** index.html.
+
+---
+
+## Hurtigtast-panel: én oversikt over alle taster og musegrep — 2026-09-17
+
+Kenneth: «Kan man få en liten meny hvor man ser alle hurtigtaster og funksjoner?» Ingen slik
+oversikt fantes. STEG 0 leste alle fire keydown-håndterere linje for linje (to var irrelevante —
+wbw-piltaster egen sak, innlogging kun Enter). Utvikler-brytere (Ctrl+Shift+M/P/D) bevisst utelatt.
+
+- To funn Kenneth ikke visste om: (1) planens eget eksempel om folie sin pilnavigasjon var feil —
+  det er bakgrunnens pil-nudging (25cm, Shift=5cm); folie sin egen er 10cm fast, og Shift+Opp/Ned
+  blar i romets folieliste i stedet for å flytte. (2) Shift betyr «ingen snap, fri vinkel» nesten
+  overalt — UNNTATT ved rotering av bakgrunnen, der Shift gjør det motsatte (slår PÅ 15°-snap).
+- Ny `_SHORTCUTS`-kildetabell (38 rader, 12 grupper, hver kommentert med linjenummer) og
+  `_openShortcutsPanel()`/`_closeShortcutsPanel()` (overlegg i samme stil som «Velg kunde»). Tre
+  innganger: `?`-tasten (bekreftet ledig), en «?»-brikke i verktøylinja, og en rad i
+  Innstillinger. `_kbd()` (F0-oppfølging) brukt for Mac/Windows-riktige taster.
+- Manuell liste, ikke lest fra håndtererne selv — samme regel lagt til i CLAUDE.md: «Ny
+  hurtigtast → ny rad i `_SHORTCUTS`.»
+
+**Fil:** index.html, CLAUDE.md.
+
+---
+
+## Dupliser folie mister opptil ett kuttintervall — 2,9 m ble 2,8 m — 2026-09-17
+
+Kenneth: «Jeg dupliserte en folie som er 2,9 meter lang. De dupliserte ble 2,8 meter lange.»
+
+- Rotårsak: `computeClippedSegments` rundet det ledige segmentet ned til produktets kuttintervall
+  FØR `_duplicateStrips` skar det mot originalens eget område — avrundingen tok opptil ett helt
+  intervall av halen, tilfeldig avhengig av hvor originalen lå i det ledige området. STEG 0
+  bekreftet formelen med reelle tall (d=7.5, e=2, cut=10cm → tap 4.5cm, traff eksakt).
+- Nytt `opts.noCutRounding`-flagg i `computeClippedSegments` (samme `opts`-objekt som allerede
+  fantes for `marginCm`/`clipPoly`), ført gjennom en ny valgfri parameter på
+  `_dropAlongExtentAt`, satt av `_duplicateStrips`. Drop/magnet/auto uendret (sender ikke flagget).
+
+**Fil:** index.html.
+
+---
+
+## Vis hurtigtasten bak «Dupliser» i høyreklikkmenyen — 2026-09-17
+
+Kenneth: «Er det noen hurtigtast for å duplisere en foliebredde? ønsker at det står i parentes
+bak "Dupliser".» Ny plattformbevisst `_kbd(key)`-hjelper (⌘ på Mac, «Ctrl+» ellers) — første bruk
+i appen, ment som mønster for senere menyvalg. Antallet ved flervalg skrives som ord («3
+striper»), ikke nakent tall, for å unngå «Dupliser (3) (Ctrl+D)».
+
+**Fil:** index.html.
+
+---
+
 ## F0: dupliser folie — identisk kopi rett ved siden av — 2026-09-17
 
 Kenneth: «Kan man velge folien (høyreklikk) og duplisere med mus eller hurtigtast slik at det vil
