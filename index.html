@@ -55959,7 +55959,11 @@ async function _applyLostReason(projectId, reasonId) {
 async function _quickSetCustomer(projectId) {
   // Load customers
   const customers = await _loadCustomers();
-  if (!customers || !customers.length) {
+  // Sak 5 (Kenneth 17.09.2026): «ingen kunder» stoppet FØR overlegget i det hele tatt åpnet — men
+  // en gbao10-org kan ha null Varmeplan-kunder ennå og likevel ha treff i Visma-registeret ved
+  // søk (bygges i _filterQuickCustomers). Stopp helt tomhendt kun når det heller ikke er noe
+  // register å falle tilbake på.
+  if ((!customers || !customers.length) && !_orgHasErpFormat('gbao10')) {
     alert('Ingen kunder funnet. Opprett en kunde først.');
     return;
   }
@@ -55967,21 +55971,79 @@ async function _quickSetCustomer(projectId) {
   let html = '<div style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)this.remove()" id="quick-customer-overlay">';
   html += '<div style="background:var(--bg);border:1px solid var(--brd);border-radius:12px;padding:20px 24px;width:min(400px,90vw);max-height:70vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">';
   html += '<h3 style="margin:0 0 12px;font-size:15px;color:var(--text)">Velg kunde</h3>';
-  html += '<input id="quick-cust-search" type="text" placeholder="Søk..." style="width:100%;padding:8px 12px;border:1px solid var(--brd);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px;margin-bottom:10px;box-sizing:border-box" oninput="_filterQuickCustomers(this.value)">';
+  html += '<input id="quick-cust-search" type="text" placeholder="Søk..." style="width:100%;padding:8px 12px;border:1px solid var(--brd);border-radius:6px;background:var(--surface2);color:var(--text);font-size:13px;margin-bottom:10px;box-sizing:border-box" oninput="_filterQuickCustomers(this.value,\'' + projectId + '\')">';
   html += '<div id="quick-cust-list">';
   html += '<div class="qc-item" style="padding:8px 12px;cursor:pointer;border-radius:6px;font-size:13px;color:var(--dim)" onclick="_applyQuickCustomer(\'' + projectId + '\',null,\'\')">— Ingen kunde —</div>';
-  for (const c of customers) {
+  for (const c of (customers || [])) {
     html += `<div class="qc-item" style="padding:8px 12px;cursor:pointer;border-radius:6px;font-size:13px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="_applyQuickCustomer('${projectId}','${c.id}','${esc(c.name)}')">${esc(c.name)}${c.address ? '<span style="color:var(--dim);font-size:11px;margin-left:8px">' + esc(c.address) + '</span>' : ''}</div>`;
   }
-  html += '</div></div></div>';
+  html += '</div>';
+  // Sak 5: Visma-registeret bygges KUN ved søk (se _filterQuickCustomers under) — ikke her ved
+  // åpning. 3130 rader i DOM-en fra start ville gjort overlegget tregt (samme krav som
+  // dashbordets _searchCustomers); tom container her koster praktisk talt ingenting.
+  html += '<div id="quick-cust-erp-section"></div>';
+  html += '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
   setTimeout(() => document.getElementById('quick-cust-search')?.focus(), 50);
 }
 
-function _filterQuickCustomers(query) {
+function _filterQuickCustomers(query, projectId) {
   const items = document.querySelectorAll('#quick-cust-list .qc-item');
   const q = query.toLowerCase();
   items.forEach(el => { el.style.display = el.textContent.toLowerCase().includes(q) || !q ? '' : 'none'; });
+  _fillQuickCustErpSection(query, projectId);
+}
+
+// Sak 5 (Kenneth 17.09.2026): «Bytt kunde» manglet helt veien til Visma-registeret
+// (erp_customers, 3130 rader hos Cenika) — _quickSetCustomer listet kun _loadCustomers()
+// (Varmeplans egne kunder, et par hundre). Samme to-seksjons-mønster som dashbordets
+// _searchCustomers (:50629): Varmeplan-kunder ALLTID først (uendret over), registeret kun ved
+// søk og kun for gbao10-org-er — bygges her, IKKE ved åpning, ellers ville hele registeret måtte
+// males inn i DOM-en for hvert kall (treg, minnetung for 3130 rader).
+async function _fillQuickCustErpSection(query, projectId) {
+  const box = document.getElementById('quick-cust-erp-section');
+  if (!box) return;
+  const raw = (query || '').trim();
+  if (!raw || !_orgHasErpFormat('gbao10')) { box.innerHTML = ''; return; }
+  const q = raw.toLowerCase();
+  try {
+    const reg = await _erpCustomersForOrg();
+    // Krav: en kunde som allerede er hentet inn til Varmeplan skal ikke også vises som et
+    // registertreff — den treffer i seksjonen over i stedet.
+    const usedNos = new Set((_cachedCustomers || []).map(c => c.erp_customer_no).filter(Boolean));
+    // Samme tokensøk som dashbordet — .includes() alene bommer på «bravida ålesund» mot
+    // «bravida norge avd ålesund».
+    const qNorm = _custNoNormalize(raw);
+    const qTokens = qNorm.split(' ').filter(Boolean);
+    const regMatches = reg.filter(r => r.active && !usedNos.has(r.erp_no) &&
+      (r.erp_no.toLowerCase().includes(q) || (qTokens.length && qTokens.every(t => r.name_norm.includes(t)))));
+    if (!regMatches.length) { box.innerHTML = ''; return; }
+    const sq = s => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    const header = `<div style="padding:5px 12px;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px">I Visma-registeret — opprettes ved klikk</div>`;
+    const rows = regMatches.slice(0, 8).map(r => `<div class="qc-item" style="padding:8px 12px;cursor:pointer;border-radius:6px;font-size:13px" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''" onclick="_quickCreateAndApplyErpCustomer(${sq(r.erp_no)},'${projectId}')">
+      <span style="font-weight:500;color:var(--text)">${esc(r.name)}</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:8px">${esc(r.erp_no)}</span>
+    </div>`).join('');
+    const more = regMatches.length > 8 ? `<div style="padding:6px 12px;font-size:11px;color:var(--dim)">… ${regMatches.length - 8} flere treff — skriv mer for å avgrense</div>` : '';
+    box.innerHTML = header + rows + more;
+  } catch (e) {
+    // spec-1000-raders-taket.md: en feilet henting skal aldri se ut som «ingen treff».
+    box.innerHTML = `<div style="padding:6px 12px;font-size:11px;color:#f87171">Kunne ikke laste Visma-registeret: ${esc(e.message || e)}</div>`;
+  }
+}
+
+// Oppretter en Varmeplan-kunde fra en registerrad (Vismas skrivemåte, via den delte
+// _insertCustomerFromErpRow) og setter den på prosjektet med samme _applyQuickCustomer-vei som
+// et vanlig klikk i seksjon 1 — lukker overlegget og lar den vanlige autolagringen ta seg av
+// databasen når prosjektet er det åpne.
+async function _quickCreateAndApplyErpCustomer(erpNo, projectId) {
+  const box = document.getElementById('quick-cust-erp-section');
+  try {
+    const data = await _insertCustomerFromErpRow(erpNo);
+    await _applyQuickCustomer(projectId, data.id, data.name);
+  } catch (e) {
+    if (box) box.innerHTML = `<div style="padding:6px 12px;font-size:11px;color:#f87171">Kunne ikke opprette kunde: ${esc(e.message || e)}</div>`;
+  }
 }
 
 async function _applyQuickCustomer(projectId, customerId, customerName) {
