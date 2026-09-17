@@ -28,6 +28,10 @@ The entire application lives in a single HTML file:
 When modifying code, respect that this is a single-file architecture.
 Do not split into multiple files unless explicitly requested.
 
+Ny hurtigtast → ny rad i `_SHORTCUTS` (hurtigtast-panelet, `?`-tasten). Panelet er en manuell
+liste, ikke lest fra tastehåndtererne selv — det finnes ingen automatisk sjekk som fanger en
+glemt rad.
+
 ---
 
 # Core Design Philosophy
