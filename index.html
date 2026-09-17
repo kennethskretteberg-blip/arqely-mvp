@@ -21511,6 +21511,19 @@ function _segAtSweep(segments, sweep) {
   return best;
 }
 
+// spec-folie-magnet-ghost-manuell-plassering.md, sak 2 (Kenneth 17.09.2026, «folie kan ikke
+// slippes i samme bane over en hindring»): den along-utstrekningen folien FAKTISK ville fått på
+// posisjon p, med pekeren på sweep — SAMME kjede (_withFoilAvoid → computeClippedSegments →
+// _segAtSweep) som selve plasseringen lenger ned i _stripDropCandidate bruker, så
+// kollisjons-forhåndssjekken og det faktiske resultatet aldri kan være uenige om hvor stripen
+// egentlig ender opp. Returnerer null når det ikke finnes NOEN plass der i det hele tatt
+// (kalleren behandler det som en kollisjon, akkurat som før denne funksjonen fantes).
+function _dropAlongExtentAt(roomId, dir, p, productId, sweep) {
+  const segs = _withFoilAvoid(roomId, [], () => computeClippedSegments(roomId, dir, p, productId));
+  const s = _segAtSweep(segs, sweep);
+  return s ? { start_cm: s.start_cm, length_cm: s.length_cm } : null;
+}
+
 // Siste peker-verdenposisjon under manuell drag — brukes til å oppdatere ghosten når retningen
 // byttes med 'r'-snarveien (dragover fyrer kun ved pekerbevegelse, ikke ved tastetrykk, så uten
 // dette står ghosten igjen i gammel retning til brukeren rører musa).
@@ -21542,32 +21555,53 @@ function _stripDropCandidate(wp, productId, altKey) {
   const minB = dir === 'v' ? Math.min(...xs) : Math.min(...ys);
   const maxB = dir === 'v' ? Math.max(...xs) : Math.max(...ys);
   const margin = _effectiveMarginCm(prod.id);
-  // Sonens along-akse-utstrekning — kun brukt til en konservativ kollisjons-forhåndssjekk av
-  // kandidater (før faktisk klipping mot hindringer), ikke til selve plasseringen.
-  const aLo = dir === 'v' ? Math.min(...ys) : Math.min(...xs);
-  const aHi = dir === 'v' ? Math.max(...ys) : Math.max(...xs);
 
   // Fri posisjon: rå peker minus halv bredde, klemt mot romboks ⊖ margin (dagens oppførsel).
   const rawPointer = dir === 'v' ? wp.x : wp.y;
   const freePos = Math.max(minB + margin, Math.min(rawPointer - nc / 2, maxB - nc - margin));
+  // Sak 2 (spec-folie-magnet-ghost-manuell-plassering.md, Kenneth 17.09.2026): sweep flyttet HIT
+  // fra rett før segments0 lenger ned, slik at BÅDE kollisjons-forhåndssjekken under OG selve
+  // plasseringen deler samme verdi — verdien er uendret, kun tidspunktet den regnes ut på.
+  const sweep = dir === 'v' ? wp.y : wp.x;
 
   let pos = freePos, snapped = null;
   if (!altKey) {
     const corner = (S.varmefolie && S.varmefolie.startCorner) || 'bl';
     // Tiebreak ved like nære kandidater: foretrekk den som bygger ut fra starthjørnet.
     const preferLow = dir === 'v' ? corner.charAt(1) === 'l' : corner.charAt(0) === 't';
+    // Sak 2: forhåndssjekken målte tidligere mot HELE romlengden (aLo..aHi) i stedet for den
+    // ekte along-utstrekningen folien ville fått på posisjon p — en folie liggende under en
+    // hindring midt i rommet ble dermed regnet som en kollisjon over HELE rommets høyde/bredde,
+    // selv rett over den samme hindringen der den ikke fysisk er i nærheten. Målt live (STEG 0):
+    // freePos=165, sweep=300, én eksisterende folie på pos_cm=165 (start_cm=2.5, length_cm=145,
+    // altså UNDER hindringen) — collidingNeighbors fanget den naboen selv om målposisjonen (over
+    // hindringen, start_cm=252.5) ligger 105cm unna langs sveipeaksen. _dropAlongExtentAt gir nå
+    // den EKTE utstrekningen (samme kjede som selve plasseringen bruker), så forhåndssjekk og
+    // resultat aldri kan være uenige.
     const collides = p => {
-      const tmp = { id: -999, roomId: room.id, direction: dir, pos_cm: p, productId, start_cm: aLo, length_cm: aHi - aLo };
+      const extent = _dropAlongExtentAt(room.id, dir, p, productId, sweep);
+      if (!extent) return true;   // ingen plass i det hele tatt her → ugyldig, som før
+      const tmp = { id: -999, roomId: room.id, direction: dir, pos_cm: p, productId, start_cm: extent.start_cm, length_cm: extent.length_cm };
       return _stripOverlapsAny(tmp);
     };
-    // Hvilke SAMME-retnings naboer kolliderer den frie (rå) posisjonen faktisk med? En folie på
+    // Hvilke SAMME-retnings naboer kolliderer den frie (rå) posisjonen faktisk med, PÅ DEN EKTE
+    // along-utstrekningen folien ville fått der (freeExtent) — ikke hele romlengden. En folie på
     // TVERS (motsatt retning) fanges ikke her med vilje — den løses av foil-avoid sin ordinære
     // along-akse-klipping nedenfor, ikke av en sidelengs magnet-flytting.
+    const freeExtent = _dropAlongExtentAt(room.id, dir, freePos, productId, sweep);
     const collidingNeighbors = _stripsForRoomDir(room.id, dir).filter(o => {
       const onc = _stripNettoCm(o);
       const gapReq = _effectiveGapCmPair(productId, o.productId, room.id);
       const perpGap = freePos >= o.pos_cm ? freePos - (o.pos_cm + onc) : o.pos_cm - (freePos + nc);
-      return perpGap < gapReq - 0.01;
+      if (perpGap >= gapReq - 0.01) return false;   // vid nok på tvers — greit
+      if (!freeExtent) return true;                 // ingen plass i det hele tatt her → fortsatt en kollisjon
+      // Perp-overlapp funnet. Sjekk along-aksen, samme mønster som _stripOverlapsAny allerede
+      // bruker: to folier i samme sveipe-bånd som dekker ULIKE along-områder (f.eks. delt rundt
+      // en hindring) ligger ende-mot-ende, ikke side om side — det er IKKE en kollisjon.
+      const aStart = freeExtent.start_cm, aEnd = freeExtent.start_cm + freeExtent.length_cm;
+      const alongOverlap = Math.min(aEnd, o.start_cm + o.length_cm) - Math.max(aStart, o.start_cm);
+      if (alongOverlap <= 0.01) return false;        // ende-mot-ende, ikke side om side
+      return true;
     });
 
     let candidates, unconditional;
@@ -21627,8 +21661,8 @@ function _stripDropCandidate(wp, productId, altKey) {
 
   const segments0 = _withFoilAvoid(room.id, [], () => computeClippedSegments(room.id, dir, pos, prod.id));
   // Manual placement: keep ONLY the segment under the pointer (the piece the user points at),
-  // so dropping over a hindring previews/places only the over-piece.
-  const sweep = dir === 'v' ? wp.y : wp.x;
+  // so dropping over a hindring previews/places only the over-piece. (sweep now computed above,
+  // shared with the collision pre-check — see sak 2 kommentaren.)
   const seg = _segAtSweep(segments0, sweep);
   const segments = seg ? [seg] : [];
   const invalid = segments.length === 0;
