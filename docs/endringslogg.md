@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## F4b: rotasjonsgizmo for fri folie (Ctrl+R / høyreklikk «Roter») — 2026-09-17
+
+Kenneth: «jeg ønsker å kunne markere folien, trykke ctrl + r eller høyreklikk og roter, da skal
+det komme opp rotasjon gizmo... rotere trinnløst, evt om den hoper 45 grader, men blir trinnløs
+ved å holde shift inne.» Modellert på mattas eksisterende rotasjonsmønster (samme 45°-snap-med-
+mindre-Shift-regel), men gizmoen er bevisst IKKE alltid synlig som mattas — den vises kun etter
+Ctrl+R eller høyreklikk «Roter», og skjules igjen med samme snarvei eller en Escape.
+
+- Nytt `S.ui.foilFreeRotateActive`-flagg. Håndtaket sitter i verdenskoordinater langs folien sin
+  egen lengdeakse (roterer/skalerer med objektet), ikke på et fast skjerm-piksel-offset.
+- To reelle funn under bygging, fanget FØR commit: (1) `_buildCycleCandidates` (systemet som
+  avgjør hvilket objekt et klikk treffer) kjente ikke til `foilFree` i det hele tatt — et klikk
+  på en fri folie ble luket bort av selve rom-kandidaten. F4a sin klikk-for-å-velge hadde derfor
+  ALDRI fungert via et ekte museklikk (kun testet via direkte funksjonskall forrige gang).
+  Rettet i tre steder (`_buildCycleCandidates`, `CYCLE_INLINE_TYPES`, `_applyCycleSelection`).
+  (2) Mattas egen rotasjonskode blander skjerm-visningskoordinater med canvasets interne
+  koordinater — riktig kun når canvas ligger i vinduets hjørne (målt: gjør det ikke, 277/56px
+  forskjøvet i denne appens layout). Egen kode for fri folie unngår avviket i stedet for å arve
+  det; mattas egen kode er urørt, rapportert som egen sak.
+
+**Fil:** index.html.
+
+---
+
 ## F4a: «fri folie» — objektet (S.foilFree) — 2026-09-17
 
 Kenneth: «I noen tilfeller ønsker jeg å rotere noen enkle foliebredder. Legge ut en folie, rotere
