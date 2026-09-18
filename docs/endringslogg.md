@@ -4,6 +4,36 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## F4c: fri folie — flytt, endre lengde (endehåndtak), tast Lengde/Vinkel — 2026-09-18
+
+Kenneth: «Legge ut en folie, rotere den og endre lengden samt flytte på den.» Siste bit av det
+opprinnelige F4-ønsket — F4a (objektet), F4b (rotasjon) og F4d (telling) var allerede inne.
+
+- STEG 0 avklarte at endehåndtakene IKKE trengte noen endring i `_buildCycleCandidates`/
+  `CYCLE_INLINE_TYPES` — de er dedikerte hit-tester sjekket FØR kropp-klikket, uavhengig av
+  cycle-kandidat-systemet (samme grunn som F4b sin rotasjonsknapp allerede fungerte). Bekreftet
+  live med ekte museklikk direkte på håndtak-pikslene, ikke bare direkte funksjonskall.
+- **Flytt:** klikk på kroppen velger OG starter flytting i samme gest (som vanlig stripe), ren
+  verdensakse via `_evToCanvas`/`s2w` — ingen snap/klipp (4c-avklaringen: brukerens ansvar, rød
+  kant varsler i stedet).
+- **Lengde:** to nye endehåndtak (`_foilFreeEndWorldPos`/`hitFoilFreeEndHandle`), vist når folien
+  er markert (ingen egen på/av-modus, ulikt rotasjonen). Den FASTE enden regnes ut én gang ved
+  draget-start; hver mousemove projiserer musepunktet på folien sin egen akse derfra, klemt til
+  `FOIL_FREE_MIN_LEN_CM` (5 cm). Verifisert ved 0° og 37° at motsatt ende står bokstavelig
+  stille (målt avvik 2,8×10⁻¹⁴ cm — flyttallspresisjon).
+- **Felt:** Lengde/Vinkel i egenskapspanelet er nå klikkbare (`editFoilFreeLen`/
+  `editFoilFreeAngle`), samme mønster som `editStripLen`, med `pushUndo()` per bekreftet endring.
+- **Piltaster:** markert fri folie + piltast flytter 10 cm, ren verdensakse.
+- Ny gruppe «Fri folie markert» i hurtigtast-panelet — F4b sin egen Ctrl+R-rad manglet fra før
+  (CLAUDE.md-regelen ikke fulgt den gangen), rettet samtidig som F4c sine nye rader ble lagt til.
+- Ny headless-nettleser-eiendommelighet funnet under testing: `.blur()`-metoden fyrer ikke et
+  ekte `'blur'`-event i test-miljøet — måtte dispatche `FocusEvent('blur')` direkte for å
+  verifisere felt-redigeringen (ikke en produktbug).
+
+**Fil:** index.html.
+
+---
+
 ## F4d: fri folie teller på vanlig måte — areal, effekt, PDF, Excel, materialliste, varsler — 2026-09-18
 
 Kenneth: «uten denne er fri folie kosmetikk» — F4a/F4b ga et objekt man kunne plassere og rotere,
