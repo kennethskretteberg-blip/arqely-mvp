@@ -4,6 +4,49 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## F4d: fri folie teller på vanlig måte — areal, effekt, PDF, Excel, materialliste, varsler — 2026-09-18
+
+Kenneth: «uten denne er fri folie kosmetikk» — F4a/F4b ga et objekt man kunne plassere og rotere,
+men det talte ikke med noe sted. STEG 0 kartla 37 lesesteder (31 `_stripsForRoom`-kall + 6 direkte
+`S.strips`-iterasjoner), klassifiserte hver som TELLING/GEOMETRI/TEGNING/ANNET og leverte tabellen
+til Kenneth FØR bygging startet, per hans eksplisitte krav. Kun TELLING-stedene er endret —
+GEOMETRI (klipping/kollisjon/snap/drag) og TEGNING (dimensjonskjeder) er urørt, siden fri folie
+mangler `pos_cm`/`start_cm`.
+
+- Ny delt helper `_foilCountItemsForRoom(roomId)` unifiserer `S.strips` + `S.foilFree` for TELLING
+  (aldri geometri). Byttet inn i `_computeRoomStats`, `_roomRatedEffectW`, `_roomDominantProduct`,
+  `_roomProductBreakdown` (Romoversikt), PDF sine `_roomStatus`/`_roomProductFamily`/
+  `_specRowCount`/Spesifikasjon, `_collectMaterialItems` (Visma-lim + XLSX-bestilling), pluss en
+  håndfull mindre presentasjons-/UI-steder.
+- **PDF-tegningen av fri folie krevde ingen ny kode** — `_renderRoomToImage` bruker allerede samme
+  delte `render()`-pipeline som skjermen (F4a koblet `drawFoilFree()` inn der), så PDF-en var
+  allerede riktig.
+- Ny `_drawFoilFreeLabel(ff)`: to-linjers label rotert MED folien (erstatter F4as enkle vannrette
+  tekst), snus 180° i (90°,270°) så teksten aldri står opp-ned, samme font/skjerm-gulv som vanlig
+  folie-label.
+- Ny `_foilFreeWarnings(ff)`: «Utenfor rommet», «Over hindring» (respekterer clearance:'none'),
+  «Overlapper folie» (SAT mot både vanlig stripe og annen fri folie). Varsler ALDRI plassering —
+  kun rød stiplet kant på lerretet + ⚠ i sidepanel/egenskapspanel, matcher 4c-avklaringen fra
+  planen. Begge `_roomStatus`-funksjonene (global + PDF-lokal) utvidet til å telle dette som
+  rombrudd.
+- Reelt funn underveis, fikset (ikke bare rapportert): `ROOM_PRODUCT_KEYS` og tre søster-registre
+  manglet `foilFree` — «Dupliser rom» kopierte derfor ALDRI fri folie, og «Slett rom» ryddet den
+  ALDRI, uten at appens eget selvsjekk-varsel (`_assertRoomFullyDeleted`) fanget lekkasjen. Lagt
+  til i alle fire, verifisert live at begge nå fungerer riktig.
+- Testet live (syntetisk produkt+rom, uten Supabase-innlogging): 2 vanlige striper (300 cm) + 1 fri
+  folie (samme produkt+lengde) → `_computeRoomStats` går fra 480 W/3 m² til 720 W/4,5 m² (nøyaktig
+  ett folie-bidrag, ingen dobbelttelling); `_roomProductBreakdown` slår alle tre sammen til ÉN rad
+  (Ant 3); alle tre varseltyper verifisert + at clearance:'none' aldri varsler; lagre→gjenopprett-
+  rundtur beholder `S.foilFree` uendret; `_foilRegressionTest()` OK både før og etter.
+- Rapportert, ikke fikset (utenfor omfang): `commitSkillevegg` flytter ikke fri folie til riktig
+  romhalvdel ved deling; rom-gizmo-drag/roter flytter ikke fri folie med rommet; minimap og
+  bg-straighten-bekreftelsen mangler fri folie (kosmetisk); `varmeplan-app` sin `prefill.ts`
+  (garantiflyten) leser fortsatt kun `data.strips[]`, ikke `data.foilFree[]` — egen sak, annet repo.
+
+**Fil:** index.html.
+
+---
+
 ## F4b: rotasjonsgizmo for fri folie (Ctrl+R / høyreklikk «Roter») — 2026-09-17
 
 Kenneth: «jeg ønsker å kunne markere folien, trykke ctrl + r eller høyreklikk og roter, da skal
