@@ -3994,8 +3994,11 @@ function _newBgObj() {
 }
 // Delt av _buildSaveData for BÅDE S.bgs (aktiv) og S.bgRefs (DEL C, referanser) — samme
 // feltsett lagres for begge, siden en referanse er en tidligere aktiv bakgrunn som bare mistet
-// rollen sin, ikke formen. img/calibrating/calPts/_needsCalibration er bevisst utelatt: img er et
-// DOM-objekt (lastes på nytt fra dataUrl), resten er forbigående interaksjonstilstand.
+// rollen sin, ikke formen. img/calibrating/calPts er bevisst utelatt: img er et DOM-objekt
+// (lastes på nytt fra dataUrl), calibrating/calPts er forbigående interaksjonstilstand.
+// Kenneth 18.09.2026 («PDF med flere sider»): _needsCalibration derimot er IKKE forbigående — en
+// bakgrunn som ikke er kalibrert ennå er en varig egenskap ved prosjektet (Feil 1: manglet her,
+// så en ukalibrert bakgrunn ble LÅST med en tilfeldig auto-tilpasset størrelse ved gjenåpning).
 function _serializeBgFields(bg) {
   return {
     dataUrl: bg.dataUrl, fileName: bg.fileName,
@@ -4006,6 +4009,7 @@ function _serializeBgFields(bg) {
     opacity: bg.opacity, visible: bg.visible,
     locked: bg.locked || false, rotation: bg.rotation || 0,
     flipX: bg.flipX || false, flipY: bg.flipY || false,
+    needsCalibration: !!bg._needsCalibration,
   };
 }
 function activeBg() {
@@ -33743,6 +33747,31 @@ function setActiveBgFloor(id) {
   if (lbl) lbl.textContent = fl ? fl.name : 'Global';
   updateCtxBar();
 }
+// Kenneth 18.09.2026 («PDF med flere sider… kan man få skalere en og en tegning/plan»): finn
+// NESTE etasje i samme del (sirkulært, starter rett etter aktiv) som har en bakgrunn og fortsatt
+// trenger kalibrering — lar Kenneth gå U.etg → 1. etg → 2. etg uten å lete i sidebaren.
+function _nextUncalibratedFloorId() {
+  const partId = S.ui.activePartId;
+  const floors = S.floors.filter(f => f.partId === partId).sort((a, b) => a.order - b.order);
+  if (floors.length < 2) return null;
+  const curIdx = floors.findIndex(f => f.id === S.ui.activeFloorId);
+  for (let i = 1; i <= floors.length; i++) {
+    const f = floors[(curIdx + i + floors.length) % floors.length];
+    if (f.id === S.ui.activeFloorId) continue;
+    const bg = S.bgs[f.id];
+    if (bg && bg.img && bg._needsCalibration) return f.id;
+  }
+  return null;
+}
+function _goToNextUncalibratedFloor() {
+  const id = _nextUncalibratedFloorId();
+  if (id == null) return;
+  _activateFloor(id);
+  renderSidebar(); updateCtxBar();
+  const bg = S.bgs[id];
+  if (bg) _fitViewToBg(bg);
+  render();
+}
 function openBgImportPanel() {
   const bg = activeBg();
   if (!bg.img) {
@@ -33897,29 +33926,29 @@ async function _pdfShowPagePicker(pdf, file, fileName) {
   _pdfPagePickerShowModal(pdf, file, fileName, pages);
 }
 
+// Kenneth 18.09.2026 («PDF med flere sider: huk av sidene, gi hver sin etasje et navn»): «Alle
+// sidene må vises som ikke valgt, slik at man fysisk må trykke på de sidene man ønsker å
+// importere.» Nedtrekksmenyen (+ Ny etasje/Ikke importer/Global/eksisterende etasje) er fjernet
+// helt — STEG 0.4 fant ingen annen kodesti avhengig av at «Global»/«eksisterende etasje» kunne
+// velges HER (_installBgImageForFloor tar en generisk floorId uansett, brukt andre steder også).
+// Hver avkrysset side blir nå alltid sin egen NYE etasje, med et navn brukeren skriver selv.
 function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
-  // STEG 3 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): en etasje som ALLEREDE har en
-  // bakgrunn kan ikke være mål lenger — det ville lagt et nytt lag på den, nøyaktig det bgLayers-
-  // fjerningen gjør umulig. «+ Ny etasje» er standardvalget: Kenneths egen test («tre sider gir
-  // tre etasjer») er nettopp dette.
-  const emptyFloors = (S.floors || []).filter(f => !(S.bgs[f.id] && S.bgs[f.id].img));
-  const floorOpts = emptyFloors.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
+  const partId = S.ui.activePartId;
+  const reusable = _findReusableEmptyFloor(partId);   // STEG 2c
+  const totalFloors = S.floors.filter(f => f.partId === partId).length;
+  const baseFloorCount = reusable ? totalFloors - 1 : totalFloors;
   const rows = pages.map(p => {
     const label = _pdfPaperLabel(p.paperWidthCm, p.paperHeightCm);
     const titleHtml = p.title ? `<div style="font-size:11px;color:var(--dim)">${esc(p.title)}</div>` : '';
-    return `<div style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px">
+    return `<div class="_pdf-page-row" data-page="${p.num}" onclick="_pdfPageRowClick(event,${p.num})" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
+      <input type="checkbox" class="_pdf-page-chk" data-page="${p.num}" onclick="event.stopPropagation()" onchange="_pdfPageRowToggle(this)" style="width:16px;height:16px;flex-shrink:0;cursor:pointer">
       <img src="${p.dataUrl}" style="width:70px;height:auto;max-height:90px;object-fit:contain;border:1px solid var(--border);border-radius:4px;flex-shrink:0;background:#fff">
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;font-size:13px;color:var(--text)">Side ${p.num}</div>
         <div style="font-size:12px;color:var(--muted)">${label}</div>
         ${titleHtml}
       </div>
-      <select class="_pdf-page-target" data-page="${p.num}" style="padding:5px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px">
-        <option value="__new__" selected>+ Ny etasje</option>
-        <option value="">Ikke importer</option>
-        <option value="__global__">Global</option>
-        ${floorOpts}
-      </select>
+      <input type="text" class="_pdf-page-name" data-page="${p.num}" disabled placeholder="" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();const b=document.getElementById('_pdf-page-picker-go');if(!b.disabled)b.click();}" style="width:130px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;flex-shrink:0;opacity:0.5">
     </div>`;
   }).join('');
 
@@ -33927,58 +33956,111 @@ function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
   if (old) old.remove();
   const ov = document.createElement('div');
   ov.id = '_pdf-page-picker-ov';
+  ov._pdfBaseFloorCount = baseFloorCount;
+  ov._pdfReusableFloorId = reusable ? reusable.id : null;
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center';
   ov.innerHTML = `
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;width:480px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:12px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;width:520px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:12px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-size:16px;font-weight:700;color:var(--text)">Velg side(r) fra PDF</div>
         <button onclick="_pdfPagePickerClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
       </div>
-      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Hver side blir bakgrunn for sin egen etasje (én plantegning per etasje) — velg «+ Ny etasje», en tom etasje, «Global», eller «Ikke importer».</div>
+      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Huk av sidene du vil importere — hver blir bakgrunn for sin egen nye etasje. Sett navnet planet skal ha i Varmeplan, ellers får det et standardnavn du kan endre etterpå.</div>
       <div>${rows}</div>
       <div style="display:flex;justify-content:flex-end;gap:10px">
         <button onclick="_pdfPagePickerClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
-        <button id="_pdf-page-picker-go" style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Importer</button>
+        <button id="_pdf-page-picker-go" disabled style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:default;opacity:0.5">Importer 0 sider</button>
       </div>
     </div>`;
   document.body.appendChild(ov);
   document.getElementById('_pdf-page-picker-go').onclick = () => _pdfPagePickerRun(pdf, fileName, ov);
 }
 
+// Radklikk (unntatt i selve avkrysningsboksen/navnefeltet, som har sin egen stopPropagation)
+// veksler avkrysningen — «man skal fysisk måtte trykke», men trykket kan lande hvor som helst
+// på raden, ikke bare på det vesle boks-ikonet.
+function _pdfPageRowClick(e, page) {
+  if (e.target.closest('input')) return;
+  const cb = document.querySelector(`._pdf-page-chk[data-page="${page}"]`);
+  cb.checked = !cb.checked;
+  _pdfPageRowToggle(cb);
+}
+function _pdfPageRowToggle(cb) {
+  const row = cb.closest('._pdf-page-row');
+  const nameInp = row.querySelector('._pdf-page-name');
+  row.style.borderColor = cb.checked ? 'var(--accent)' : 'var(--border)';
+  row.style.borderWidth = cb.checked ? '2px' : '1px';
+  nameInp.disabled = !cb.checked;
+  nameInp.style.opacity = cb.checked ? '1' : '0.5';
+  _pdfPagePickerRefresh();
+  if (cb.checked) { nameInp.focus(); nameInp.select(); }
+}
+// Teller avkryssede rader i sidenes rekkefølge (ikke klikkerekkefølge) og setter standardnavnet
+// som PLACEHOLDER — så det som faktisk vises alltid er det som faktisk blir brukt hvis feltet
+// står tomt. Kjøres på nytt ved hver av/på-huking siden et endret valg lenger opp i lista
+// forskyver nummereringen på alt under.
+function _pdfPagePickerRefresh() {
+  const ov = document.getElementById('_pdf-page-picker-ov'); if (!ov) return;
+  let n = 0;
+  for (const row of ov.querySelectorAll('._pdf-page-row')) {
+    const cb = row.querySelector('._pdf-page-chk');
+    const nameInp = row.querySelector('._pdf-page-name');
+    if (cb.checked) { n++; nameInp.placeholder = (ov._pdfBaseFloorCount + n) + '. etasje'; }
+  }
+  const btn = document.getElementById('_pdf-page-picker-go');
+  btn.textContent = `Importer ${n} side${n === 1 ? '' : 'r'}`;
+  btn.disabled = n === 0;
+  btn.style.opacity = n === 0 ? '0.5' : '1';
+  btn.style.cursor = n === 0 ? 'default' : 'pointer';
+}
+
 function _pdfPagePickerClose() { const ov = document.getElementById('_pdf-page-picker-ov'); if (ov) ov.remove(); }
 
-// STEG 2: importerer alle tildelte sider i ÉN operasjon. Kalibrering skjer aldri automatisk her
+// STEG 2: importerer alle avkryssede sider i ÉN operasjon. Kalibrering skjer aldri automatisk her
 // (se _pdfRenderPageToBg sin showCalibration:false) — bortsett fra det ene unntaket der brukeren
 // kom via «klikk et kjent mål»-hurtigimporten (_bgAutoStartTwoPoint) OG bare tildelte ÉN side; da
 // videreføres den flyten uendret, siden den forutsetter nøyaktig én bakgrunn å kalibrere mot.
 async function _pdfPagePickerRun(pdf, fileName, ov) {
-  const selects = [...ov.querySelectorAll('._pdf-page-target')];
-  const assignments = selects.map(s => ({ page: +s.dataset.page, target: s.value })).filter(a => a.target !== '');
+  const checkedRows = [...ov.querySelectorAll('._pdf-page-row')].filter(row => row.querySelector('._pdf-page-chk').checked);
+  if (!checkedRows.length) { _bgAutoStartTwoPoint = false; ov.remove(); return; }
+  const assignments = checkedRows.map(row => {
+    const nameInp = row.querySelector('._pdf-page-name');
+    return { page: +row.dataset.page, name: nameInp.value.trim() || nameInp.placeholder };
+  });
+  let reusableId = ov._pdfReusableFloorId;
   ov.remove();
-  if (!assignments.length) { _bgAutoStartTwoPoint = false; return; }
   const singleTwoPoint = assignments.length === 1 && _bgAutoStartTwoPoint;
   if (!singleTwoPoint) _bgAutoStartTwoPoint = false;
-  // STEG 3 (etasje-vanntett): «+ Ny etasje» oppretter én NY etasje per side som velger det — «tre
-  // sider gir tre etasjer», Kenneths egen test. Alle nye etasjer havner i samme del (aktiv del).
+  // STEG 3 (etasje-vanntett): hver avkrysset side oppretter én NY etasje i aktiv del — «tre sider
+  // gir tre etasjer», Kenneths egen test — bortsett fra STEG 2c-unntaket for den første, som
+  // gjenbruker den ENESTE fortsatt-urørte «1. etasje» (se _findReusableEmptyFloor) i stedet for å
+  // la den stå tom over f.eks. «U.etg».
   const partId = S.ui.activePartId;
-  let lastFloorId = null;
+  let firstFloorId = null;
   for (const a of assignments) {
     let floorId;
-    if (a.target === '__global__') floorId = '__global__';
-    else if (a.target === '__new__') {
-      const partFloorCount = S.floors.filter(f => f.partId === partId).length;
-      floorId = _addFloorToPart(partId, (partFloorCount + 1) + '. etasje').id;
-    } else floorId = parseInt(a.target, 10);
+    if (reusableId != null) {
+      const fl = S.floors.find(f => f.id === reusableId);
+      fl.name = a.name;
+      floorId = reusableId;
+      reusableId = null;
+    } else {
+      floorId = _addFloorToPart(partId, a.name).id;
+    }
     await _pdfRenderPageToBg(pdf, a.page, fileName, floorId, { showCalibration: singleTwoPoint });
-    lastFloorId = floorId;
+    if (firstFloorId == null) firstFloorId = floorId;
   }
-  if (!singleTwoPoint && lastFloorId != null) {
-    setActiveBgFloor(lastFloorId === '__global__' ? null : lastFloorId);
+  if (!singleTwoPoint && firstFloorId != null) {
+    // Kenneth 18.09.2026: aktiv etasje = FØRSTE importerte (ikke siste som før) — «start med
+    // U.etg», ikke den siste siden som tilfeldigvis ble tegnet sist i lista.
+    setActiveBgFloor(firstFloorId);
     updateCtxBar(); renderSidebar();
-    _fitViewToBg(S.bgs[lastFloorId]);   // STEG 1: bakgrunnen ligger nå fast — vis den, ikke et tomt lerret
+    _fitViewToBg(S.bgs[firstFloorId]);   // STEG 1: bakgrunnen ligger nå fast — vis den, ikke et tomt lerret
     render();
   }
-  if (typeof _showToast === 'function') _showToast(`${assignments.length} side${assignments.length>1?'r':''} importert`, 'ok');
+  if (typeof _showToast === 'function') {
+    _showToast(`${assignments.length} etasje${assignments.length > 1 ? 'r' : ''} importert. Sett målestokk på hver plantegning — start med ${assignments[0].name}.`, 'ok');
+  }
 }
 
 // ─── STEG 1-RAPPORT (bg-nullpunkt, Kenneth 25.08.2026) ────────
@@ -34886,6 +34968,20 @@ function _addFloorToPart(partId, name) {
   const fl = { id: S.counters.nextFloorId++, name, order: S.floors.length, collapsed: false, partId };
   S.floors.push(fl);
   return fl;
+}
+// Kenneth 18.09.2026 («PDF med flere sider»), STEG 2c: et helt nytt prosjekt får automatisk en
+// tom «1. etasje» før noen import (bekreftet i STEG 0.2) — uten dette unntaket ville den blitt
+// stående urørt over f.eks. «U.etg» etter en flerside-import. Gjenbrukes KUN når den er den
+// ENESTE etasjen i delen, fortsatt uten rom/bakgrunn, og fortsatt har standardnavnet — enhver
+// endring brukeren selv har gjort (tegnet noe, endret navn) gjør den IKKE lenger et gjenbrukbart mål.
+function _findReusableEmptyFloor(partId) {
+  const floors = S.floors.filter(f => f.partId === partId);
+  if (floors.length !== 1) return null;
+  const f = floors[0];
+  if (f.name !== '1. etasje') return null;
+  if (S.rooms.some(r => r.floorId === f.id)) return null;
+  if (S.bgs[f.id] && S.bgs[f.id].img) return null;
+  return f;
 }
 function _addBgToFloor(floorId) {
   // STEG 3 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): fortsatt kun ÉN AKTIV
@@ -35807,10 +35903,17 @@ function renameFloor(id) {
   if (n?.trim()) { f.name=n.trim(); renderSidebar(); }
 }
 function delFloor(id) {
-  if (!confirm('Slett etasje? Rommene beholdes.')) return;
+  // Kenneth 18.09.2026 (Feil 2, «PDF med flere sider»): delFloor slettet FØR kun S.floors-raden —
+  // S.bgs[id]/S.bgRefs[id] ble værende, usynlig, for alltid (en 200-500 KB base64-plantegning per
+  // feilimportert etasje). Bekreftelsesteksten sier fra når det faktisk er en plantegning å miste.
+  const hasBg = !!(S.bgs[id] && S.bgs[id].img);
+  const msg = hasBg ? 'Slett etasje? Rommene beholdes, plantegningen slettes.' : 'Slett etasje? Rommene beholdes.';
+  if (!confirm(msg)) return;
   pushUndo();
   S.rooms.filter(r=>r.floorId===id).forEach(r=>r.floorId=null);
   S.floors=S.floors.filter(f=>f.id!==id);
+  delete S.bgs[id];
+  delete S.bgRefs[id];
   if (S.ui.activeFloorId===id) {
     S.ui.activeFloorId=S.floors.length>0?S.floors[0].id:null;
   }
@@ -42992,10 +43095,18 @@ function _ctxBarItems() {
 
     // BG imported but not calibrated — force calibration first (kun når vi ikke alt tegner)
     if (notCalibrated && !ui.drawMode) {
+      // Kenneth 18.09.2026 («PDF med flere sider»): «Neste ukalibrerte →» vises kun når det
+      // faktisk finnes en ANNEN etasje i samme del som også venter på kalibrering — borte når
+      // den siste er kalibrert, uten at brukeren må lete i sidebaren mellom hver.
+      const nextUncalId = _nextUncalibratedFloorId();
+      const nextUncalBtn = nextUncalId != null
+        ? `<button class="snap-chip" onclick="_goToNextUncalibratedFloor()" title="Gå til neste etasje som også venter på kalibrering">Neste ukalibrerte →</button>`
+        : '';
       return `<span class="ctxbar-lbl" style="color:#ff9900;border-color:rgba(255,153,0,0.3)">⚠️ Sett målestokk</span>
         <span style="font-size:11px;color:var(--dim);padding:0 6px">Bakgrunnstegningen må kalibreres før du kan tegne ${_roomWord(false)}</span>
         <button class="snap-chip" onclick="startBgCalibrate()" style="color:#ff9900;border-color:rgba(255,153,0,0.4)"><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Sett målestokk</button>
         <button class="snap-chip" onclick="showFixedScaleModal()" title="Sett fast målestokk (f.eks. 1:100)"><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Fast målestokk</button>
+        ${nextUncalBtn}
         <span class="tc-sep"></span>
         <button class="snap-chip" onclick="removeBgImage()" style="color:var(--dim)">✕ Fjern bakgrunn</button>`;
     }
@@ -45611,7 +45722,11 @@ function _restoreProject(data) {
     const bImg = new Image();
     bImg.onload = () => {
       if (_myBgGen !== _bgRestoreGen) return;   // a newer project was opened → ignore stale load
-      S.bgs[k] = Object.assign(_newBgObj(), bgData, { img: bImg, calibrating: false, calPts: [] });
+      // Kenneth 18.09.2026 («PDF med flere sider»): needsCalibration er lagt til ETTER bgData i
+      // Object.assign — _newBgObj() sin standard (false) skal IKKE vinne over en lagret ukalibrert
+      // bakgrunn, og eldre prosjekter uten feltet (bgData.needsCalibration === undefined) faller
+      // tilbake til false — dagens oppførsel («kalibrert»), ingen migrasjon.
+      S.bgs[k] = Object.assign(_newBgObj(), bgData, { img: bImg, calibrating: false, calPts: [], _needsCalibration: bgData.needsCalibration === true });
       // A calibrated underlay defaults to LOCKED so canvas clicks pass THROUGH it (you draw rooms
       // instead of re-selecting the drawing every click → «henger i plantegning-baren»). Makes
       // existing projects with an unlocked calibrated bg click-safe. Unlock via the lock toggle.
@@ -45635,7 +45750,7 @@ function _restoreProject(data) {
       rImg.onload = () => {
         if (_myBgGen !== _bgRestoreGen) return;
         if (!S.bgRefs[k]) return;   // floor's ref list could've been cleared/promoted-away already
-        S.bgRefs[k][idx] = Object.assign(_newBgObj(), refData, { img: rImg, calibrating: false, calPts: [] });
+        S.bgRefs[k][idx] = Object.assign(_newBgObj(), refData, { img: rImg, calibrating: false, calPts: [], _needsCalibration: refData.needsCalibration === true });
         renderSidebar(); render();
       };
       rImg.src = refData.dataUrl;
