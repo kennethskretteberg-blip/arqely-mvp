@@ -4,6 +4,75 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Folie: Ctrl+R = rotere, Ctrl+F = flytte — fri folie forsvinner som begrep — 2026-09-18
+
+Kenneth: «Da trenger vi egentlig ikke "fri modus"? Kun endre fra flytte til rotere. Ctrl+R =
+rotere, Ctrl+F = flytte.» Brukeren skal aldri møte ordet «fri» — markerer en folie, trykker
+Ctrl+R, drar rotasjonshåndtaket, trykker Ctrl+F. Konvertering `S.strips` → `S.foilFree` skjer
+stille internt, første gang folien faktisk roteres.
+
+- STEG 0 bekreftet: `S.ui.transformMode` (rommets flytt/roter-flagg) hadde null tilknytning til
+  en markert stripe fra før — trygt å la folie DELE dette flagget med rommet i stedet for et
+  eget per-objekt-flagg. `w2s()` har ingen akse-speiling, så en verdens-vinkel kan brukes direkte
+  som skjerm-rotasjonsvinkel. Escape på et rom nullstiller ikke `transformMode` (kun UI-chipsene
+  skjules) — folie følger nå samme ett-trinns mønster.
+- Ny delt `_selectedFolieGeom()`: senter/endepunkter/akse-vinkel for BÅDE vanlig folie
+  (`S.strips`) og roterbar folie (`S.foilFree`), null ved flervalg (gruppe-gizmoen uendret).
+  `hitStripGizmo`/`hitStripEndArrow` generalisert til å bruke denne — ingen endring i faktisk
+  drag-kode for vanlig folie.
+- Ny `drawFolieGizmo` (erstatter `drawStripGizmo` + `drawFoilFreeGizmo` + `drawFoilFreeEndHandles`):
+  Flytt-modus = eksakt gammelt utseende (skjermfast ⊕/rød/grønn pil), Roter-modus = rommets
+  oransje pivot/håndtak/sirkel sentrert på folien i stedet for rommets hjørne. Lengdepilene i
+  endene vises i BEGGE moduser og roterer med objektet.
+- Rotasjonshåndtak-treff på en VANLIG folie: `_makeFoilFree()` (egen `pushUndo()` FØR
+  `angle_deg` endres) + start rotasjon i samme mousedown — konvertering+rotasjon blir ETT
+  undo-steg. Kun Ctrl+R/Ctrl+F uten å dra håndtaket konverterer ingenting.
+- Ny senter-gizmo (⊕+X/Y) for roterbar folie i Flytt-modus — X/Y-pilene begrenser flyttingen til
+  én skjermakse, som vanlig folies eget mønster.
+- Dobbel-gizmo-vakt: rommets `drawTransformGizmo` hoppes nå også over når en folie er markert —
+  samme unntak hindring alt hadde.
+- Fjernet: `S.ui.foilFreeRotateActive`, `_toggleFoilFreeRotate`, `hitFoilFreeRotHandle`,
+  `_rotateStripFreely`, «Fri (vinkel)»-bryteren i manuell-paletten (hele stien). Ordet «fri»
+  fjernet fra kontekstmenyer, egenskapspanel (badge «rotert N°», knapp «Slett folie»),
+  sidebar-fallback («Folie»), hurtigtast-panelet («Fri folie markert» slått sammen inn i «Folie
+  markert»).
+- Testet live (ekte museklikk/keydown/høyreklikk-dispatch): full flyt (marker → Ctrl+R → dra
+  håndtak → konvertert+rotert+toast, ett undo-steg tilbake), Ctrl+R+Ctrl+F uten å dra konverterer
+  ingenting, vanlig folies senter-/endehåndtak uendret (regresjon bekreftet), ny X/Y-begrensning,
+  rotasjon av allerede-roterbar folie, flervalg viser fortsatt gruppe-gizmoen, dobbel-gizmo-vakt
+  bekreftet, Escape ett-trinns, F4d-telling uendret, lagre→gjenopprette-rundtur +
+  `_foilRegressionTest()` OK.
+
+**Fil:** index.html.
+
+---
+
+## Roter fritt rett på vanlig folie — uten å velge «Gjør fri» først — 2026-09-18
+
+Kenneth: «Jeg høyreklikker og forventer å få opp "Roter"... Hvorfor kan jeg ikke bare velge Roter
+på en folie uten å først måtte gjøre den fri?» To objekttyper (`S.strips`/`S.foilFree`) var
+appens problem, ikke brukerens — han tenkte «roter», ikke «konverter, så roter».
+
+- STEG 0 bekreftet: `_makeFoilFree` gjorde allerede `pushUndo()` (udo ga stripa tilbake i ett
+  steg); Ctrl+R på en markert vanlig folie gjorde `setTransformMode('rotate')`, men det flagget
+  leses kun av rommets egen transform-gizmo — ingen synlig effekt på en markert stripe, trygt å
+  avskjære. `_makeFoilFree` manglet en returverdi — lagt til `return ff.id`.
+- Ny `_rotateStripFreely(id)`: kaller `_makeFoilFree` (uendret) + viser rotasjonsgizmoen med én
+  gang + toast om at folien nå er fri (snapper/klipper ikke lenger). Koblet til `stripCtxMenu`
+  («↻ Roter fritt» øverst, «↗ Gjør fri (vinkel)» beholdt under) og Ctrl+R ved nøyaktig én
+  markert folie (flervalg faller gjennom til rom-modus som før).
+- Rettet samtidig: `_makeFoilFree` sin egen toast sa fortsatt «kommer i neste runde» (feil siden
+  F4b/F4c var levert), og F4b sin Ctrl+R-hurtigtast manglet en rad i hurtigtast-panelet.
+- **Merk:** denne saken ble senere samme dag erstattet av «Ctrl+R = rotere, Ctrl+F = flytte —
+  fri folie forsvinner som begrep» (over) — `_rotateStripFreely` og «Gjør fri (vinkel)»-menypunktet
+  finnes ikke lenger.
+- Testet live: Kenneths scenario, Ctrl+R samme resultat, Ctrl+Z uendret, flervalg uendret,
+  eksisterende fri-folie-meny uendret, lagre→gjenopprette-rundtur + `_foilRegressionTest()` OK.
+
+**Fil:** index.html.
+
+---
+
 ## F4c: fri folie — flytt, endre lengde (endehåndtak), tast Lengde/Vinkel — 2026-09-18
 
 Kenneth: «Legge ut en folie, rotere den og endre lengden samt flytte på den.» Siste bit av det
