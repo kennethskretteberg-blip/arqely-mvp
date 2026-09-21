@@ -4,6 +4,93 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Tall på canvas: bytt tallfont fra IBM Plex Mono til Space Grotesk (ren null) — 2026-09-18
+
+Kenneth: «Jeg synes 0 og 8 er for like på målene i canvas. Kan du ta bort streken inne i 0 slik
+at det ikke kan se ut som 8-tall?» IBM Plex Mono har en bevisst strek i nullen (vanlig i
+programmeringsfonter) — på 9–11px, som mål/lengder/watt tegnes i, kollapser streken inn i ovalen
+og 0 ser ut som 8. Canvas 2D kan ikke slå av OpenType-features, så løsningen er en annen font for
+TALL på canvas.
+
+- STEG 0: bygget en dedikert testside (Space Grotesk/Courier Prime/Azeret Mono mot IBM Plex Mono),
+  lastet i en ekte nettleser, blåst opp 5x uten glatting — IBM Plex Mono sin null har et tydelig
+  diagonalt strøk (nøyaktig symptomet), Space Grotesk sin null er ren/lukket. Valgte Space Grotesk
+  siden den allerede lastes i appen (ingen nytt Google Fonts-kall). Bekreftet at ingen canvas-sted
+  er avhengig av lik tegnbredde (alle bruker `ctx.textAlign` per streng, font-agnostisk).
+- Ny konstant `CANVAS_NUM_FONT = "'Space Grotesk',sans-serif"` ved `LABEL_FONT_*`. Alle 42
+  `ctx.font`-steder med `'IBM Plex Mono',monospace` byttet mekanisk — `grep -n "ctx.font.*Plex
+  Mono"` gir 0 treff etterpå.
+- CSS-bruken av Plex Mono (sidebar, badges, tabeller, `.floor-badge`, `.soi-v`, m.fl.) er UENDRET
+  — dette er stylesheet/HTML-attributter, ikke `ctx.font`, og lå aldri i omfanget.
+- **Merk, funn utenfor omfang (ikke fikset):** flere HTML number-input-felt (trappebyggerens
+  neseavstand/kant-/repos-marg/CC/kabelantall, kalibreringsdialogens avstandsfelt, m.fl.) bruker
+  også `'IBM Plex Mono'` via CSS og har trolig samme 0/8-forveksling — egen sak om ønskelig.
+- Testet live: skjermbilde-sammenligning (selve beviset), ekte apprendering av veggmål/romareal/
+  skalalinje/folie-labler med ulik sifferlengde — ingen kolonneforskyvning, `_foilRegressionTest()`
+  OK.
+
+**Fil:** index.html.
+
+---
+
+## PDF med flere sider: huk av sidene, gi hver sin etasje et navn — kalibrering overlever lagring — 2026-09-18
+
+Kenneth: «Jeg ønsker helst å kunne bare huke av sidene jeg ønsker importert samtidig som jeg kan
+sette navnet på hver side som blir hvert sitt plan... Alle sidene må vises som ikke valgt.» Fant
+selv to konkrete feil ved å lese koden før bygging.
+
+- STEG 0: reprodusert live at `_needsCalibration` falt bort ved lagring (aldri skrevet av
+  `_serializeBgFields`) — en kalibrert/ukalibrert bakgrunn ble alltid `false` etter
+  gjenoppretting, som låste bakgrunnen ved tilfeldig auto-tilpasset størrelse. Bekreftet at et
+  nytt prosjekt alltid oppretter én tom «1. etasje» før import (STEG 2c-gjenbruk er reelt), talt
+  ~14 lesesteder av feltet (ingen endret), og bekreftet at ingen kodesti trenger
+  «Global»/eksisterende-etasje-valget i nedtrekksmenyen som fjernes.
+- **Feil 1 fikset:** `_serializeBgFields` skriver nå `needsCalibration`; gjenoppretting (S.bgs OG
+  S.bgRefs) setter feltet fra lagret verdi ETTER `_newBgObj()` — eldre prosjekter uten feltet
+  faller tilbake til dagens `false` (ingen migrasjon).
+- **Ny sidevelger:** avkrysningsboks (alltid av som standard) + navnefelt (deaktivert til raden
+  hukes av) per side, i stedet for en nedtrekksmeny. Standardnavn vises som placeholder og telles
+  i PDF-rekkefølge blant KUN de avkryssede. STEG 2c: den ene urørte auto-etasjen gjenbrukes for
+  første avkryssede side i stedet for å opprette enda en tom etasje. «Importer 0 sider»
+  (deaktivert) → «Importer N sider» live. Etter import: aktiv etasje = FØRSTE importerte. Ny
+  «Neste ukalibrerte →»-knapp i ⚠️-varselet når flere etasjer venter.
+- **Feil 2 fikset:** `delFloor` rydder nå `S.bgs`/`S.bgRefs` for den slettede etasjen — en
+  200–500 KB base64-plantegning ble før liggende usynlig for alltid i lagringsdataene. Bevisst
+  IKKE lagt i undo-snapshotet (samme presedens som `removeBgImage`, som heller aldri har kalt
+  `pushUndo`).
+- Testet live (ekte checkbox-dispatch): full 3-siders import med STEG 2c-gjenbruk, av/på-huking
+  forskyver nummerering riktig, full lagre→gjenopprette-rundtur bekrefter Feil 1 tallfestet,
+  `delFloor` rydder bakgrunnen, `_foilRegressionTest()` OK.
+
+**Fil:** index.html.
+
+---
+
+## Rotasjonsgizmo: hele sirkelen er gripbar, og markøren viser det — 2026-09-18
+
+Kenneth: «Det kommer opp en sirkel. Jeg tenker markør kan endre seg når den treffer sirkelen slik
+at bruker forstår at han da kan trykke og holde inne for å rotere.» Sirkelen var før ren dekor —
+bare det lille håndtaket var treffbart.
+
+- STEG 0: bekreftet at ring-treff allerede sjekkes FØR endepil-treff (ringen vinner alltid), og
+  at `drawFolieGizmo`/`_selectedFolieGeom` mangler `_pdfMode`-vakt for roterbar folie (
+  `selectedFoilFreeId` nullstilles aldri under PDF-capture, i motsetning til `selectedStripId`) —
+  et pre-eksisterende hull fra F4a/F4b, rapportert men ikke fikset (utenfor denne sakens omfang).
+- `hitFolieRotHandle` utvidet: treff enten <13px fra håndtaket (som før) ELLER innenfor 60±8px
+  fra senteret (selve ringen). Ingen endring i selve rotasjonsdraget.
+- Ny `FOLIE_ROT_CURSOR`: egen ↻-SVG-markør (sort underlinje + oransje strøk, synlig i begge
+  tema), brukt på hover og under drag. Ny `_folieRingHover` tegner ringen i full styrke ved
+  hover/drag i stedet for dempet — nullstilt ved modusbytte/avvalg.
+- Hurtigtast-panelet: raden for rotasjon sier nå «dra sirkelen» i stedet for «dra ↻-håndtak».
+- Testet live (ekte hover/mousedown/mousemove-dispatch): hit-test-sonen verifisert punkt for
+  punkt, hover 90° rundt ringen gir ↻-markør + lyser opp ringen uten render-storm, nøyaktig ett
+  render-kall ved faktisk tilstandsendring, konvertering+rotasjon fungerer uansett gripepunkt på
+  ringen, Flytt-modus uendret, skjermbilde i lys/mørk tema, `_foilRegressionTest()` OK.
+
+**Fil:** index.html.
+
+---
+
 ## Folie: Ctrl+R = rotere, Ctrl+F = flytte — fri folie forsvinner som begrep — 2026-09-18
 
 Kenneth: «Da trenger vi egentlig ikke "fri modus"? Kun endre fra flytte til rotere. Ctrl+R =
