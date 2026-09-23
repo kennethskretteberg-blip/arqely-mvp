@@ -12916,8 +12916,21 @@ function _cablePreviewFooterHtml(roomId, familyName, categoryId, targetWm2) {
   const badge = _cableEffectBadge(st.cableWm2, targetWm2);
   const dev = targetWm2 ? Math.abs(st.cableWm2 - targetWm2) / targetWm2 : 0;
   const targetTxt = (targetWm2 && dev > 0.08) ? ` (mål ${targetWm2})` : '';
-  const nTxt = m.nCables > 1 ? m.nCables + '× ' : '';
+  // Kenneth 23.09.2026: antallet leses fra de kablene som FAKTISK ligger i rommet
+  // (st.cableCount), aldri fra m.nCables alene — det var nettopp derfor panelet kunne si «2×»
+  // mens bare én kabel var lagt. Samme prinsipp som tallene rett under allerede følger
+  // («aldri fra forslaget som ble klikket»).
+  const nAct = st.cableCount || 0;
+  const nTxt = nAct > 1 ? nAct + '× ' : '';
   const nameTxt = st.cableProductName ? esc(st.cableProductName) : '';
+  const mismatch = m.nCables > 1 && nAct !== m.nCables
+    ? `<div style="font-size:11px;color:#f59e0b;font-weight:600">⚠ Ba om ${m.nCables}, fikk ${nAct}</div>` : '';
+  // Motoren klarte ikke å tegne sonene — si det rett ut, og si hva brukeren kan gjøre.
+  const dirHint = m.splitDir ? '' : ' eller prøv Horisontalt/Vertikalt';
+  const fallbackMsg = m.labelFallback ? `<div style="font-size:11px;color:#f59e0b;line-height:1.35">
+      ⚠ Klarte ikke å tegne ${m.labelFallback} soner i dette rommet. Lagt inn som
+      ${m.labelFallback} × label uten tegning — tallene er riktige, men utlegget må tegnes manuelt,
+      eller del rommet i to${dirHint}.</div>` : '';
   return `<div style="display:flex;flex-direction:column;gap:3px;background:rgba(34,211,238,0.12);border:1px solid var(--accent);border-radius:7px;padding:7px 9px;margin:6px 0">
     <div style="display:flex;gap:6px;align-items:center">
       <span style="flex:1;font-size:11px;color:var(--accent);font-weight:600">● Forhåndsvises — ${nTxt}${nameTxt}</span>
@@ -12926,6 +12939,7 @@ function _cablePreviewFooterHtml(roomId, familyName, categoryId, targetWm2) {
       <button class="floor-choice-btn" style="font-size:11px;padding:3px 9px" onclick="_cancelCablePreview(${sq(familyName)},${categoryId})">✕ Avbryt</button>
     </div>
     <div style="font-size:11px;color:var(--dim)">${st.cableWm2} W/m²${targetTxt} ${badge} · CC ${st.cableCcCm.toFixed(1)} cm · ${st.cableLenM.toFixed(1)} m kabel</div>
+    ${mismatch}${fallbackMsg}
   </div>`;
 }
 
@@ -12960,16 +12974,45 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
   if (sessionStart) _beginProductSwapSession(roomId, ['cables']);
   _removeCablePreview();
   const newIds = [];
+  // Kenneth 23.09.2026 («aldri stille fallback til én»): ba man om N kabler og sonemotoren gir opp,
+  // ble det FØR lagt ÉN tegnet kabel mens panelet fortsatt sa «N×» — tallene (CC/W/m²/meter) gjaldt
+  // da én kabel over HELE rommet. Nå: aldri feil ANTALL. Klarer ikke motoren å tegne N soner,
+  // legges N «kun label»-kabler i stedet (riktig CC per element via _cableLabelOnlyStats), og
+  // brukeren får beskjed om at tegningen mangler — tallene er uansett riktige i panel, romkort,
+  // materialliste og PDF. Gjelder BEGGE veiene inn i autoFillMultiCable: sonemotoren (som kan
+  // returnere null når ingen retning er gyldig) og korridor-modus (fire egne null-veier, bl.a.
+  // produkter uten fast kabellengde).
+  let labelFallback = 0;
   if (nCables > 1) {
     const cables = autoFillMultiCable(roomId, productId, nCables, splitDir || undefined);
-    if (cables && cables.length >= 2) { for (const c of cables) { S.cables.push(c); newIds.push(c.id); } S.ui.selectedCableId = cables[0].id; }
-    else { const c = autoFillCable(roomId, productId); if (c) { S.cables.push(c); newIds.push(c.id); S.ui.selectedCableId = c.id; } }
+    if (cables && cables.length === nCables) {
+      for (const c of cables) { S.cables.push(c); newIds.push(c.id); }
+      S.ui.selectedCableId = cables[0].id;
+    } else {
+      // Rydd bort et delvis resultat (f.eks. 2 soner når det ble bedt om 3) — et halvt utlegg med
+      // feil antall er nettopp det denne saken handler om.
+      if (cables) for (const c of cables) S.cables = S.cables.filter(x => x !== c);
+      const st = _cableLabelOnlyStats(roomId, productId, nCables);
+      if (st) {
+        const groupId = S.counters.nextCableId;
+        for (let i = 0; i < nCables; i++) {
+          const c = { id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
+            spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
+            totalLength_cm: st.totalLength_cm, runs: [],
+            multiCableIndex: i, multiCableGroup: groupId };
+          S.cables.push(c); newIds.push(c.id);
+        }
+        S.ui.selectedCableId = newIds[0];
+        labelFallback = nCables;
+      }
+    }
   } else {
     const c = autoFillCable(roomId, productId); if (c) { S.cables.push(c); newIds.push(c.id); S.ui.selectedCableId = c.id; }
   }
   _invalidateCableCache();
   room._cablePreviewIds = newIds;
-  room._cablePreviewMeta = { productId, nCables: nCables > 1 ? nCables : 1, familyName, categoryId, splitDir: splitDir || null };
+  room._cablePreviewMeta = { productId, nCables: nCables > 1 ? nCables : 1, familyName, categoryId,
+    splitDir: splitDir || null, labelFallback };
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);   // re-render with confirm footer
 }
@@ -13030,39 +13073,53 @@ function _cableLabelOnlyStats(roomId, productId, count) {
   return { spacing_cm: Math.round(spacing * 10) / 10, totalLength_cm: (prod.cable_length_m || 0) * 100 };
 }
 
-/** Place a "label-only" cable in the selected room: product + computed stats, no drawn geometry. */
-function _placeCableLabelOnly(productId, familyName, categoryId) {
+/** Place `count` "label-only" cables in the selected room: product + computed stats, no drawn
+ *  geometry. Kenneth 23.09.2026: leste FØR aldri antallet — «Kun label» med 2 valgt ga én kabel,
+ *  og da regnet _cableLabelOnlyStats CC ut fra HELE nettoarealet (som for én kabel). Samme
+ *  N-objekt-mønster som hurtigprosjekteringen (_listSetRoomProduct) allerede bruker. */
+function _placeCableLabelOnly(productId, familyName, categoryId, count) {
   const roomId = S.ui.selectedRoomId; if (!roomId) return;
   const prod = HEATING_PRODUCTS.find(p => p.id === productId);
   if (!prod) { console.warn('_placeCableLabelOnly: ukjent produkt'); return; }
-  const st = _cableLabelOnlyStats(roomId, productId);
+  const n = Math.max(1, Math.min(16, parseInt(count, 10) || 1));
+  const st = _cableLabelOnlyStats(roomId, productId, n);
   if (!st) return;
   pushUndo();
   _removeCablePreview();
   // labelOnly er et alternativ til et tegnet utlegg → erstatt evt. kabler i rommet.
   S.cables = S.cables.filter(c => c.roomId !== roomId);
-  const cable = {
-    id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
-    spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
-    totalLength_cm: st.totalLength_cm, runs: []
-  };
-  S.cables.push(cable);
+  const groupId = S.counters.nextCableId;
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const cable = {
+      id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
+      spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
+      totalLength_cm: st.totalLength_cm, runs: [],
+      // Samme to feltene sonemotoren setter, så romkort/materialliste/PDF grupperer «N×» likt.
+      multiCableIndex: i, multiCableGroup: groupId
+    };
+    S.cables.push(cable); ids.push(cable.id);
+  }
   _invalidateCableCache();
   if (typeof _trackProductUsage === 'function') _trackProductUsage(productId);
-  S.ui.selectedCableId = cable.id;
+  S.ui.selectedCableId = ids[0];
   const room = S.rooms.find(r => r.id === roomId);
   if (room) { room._cablePreviewMeta = null; room._cablePreviewIds = []; }
-  if (typeof _showToast === 'function') _showToast('Kun label lagt til (ikke tegnet)', 'ok');
+  if (typeof _showToast === 'function') {
+    _showToast(n > 1 ? `${n} × label lagt til (ikke tegnet)` : 'Kun label lagt til (ikke tegnet)', 'ok');
+  }
   renderSidebar(); updateCtxBar(); render();
   _refreshCablePanel(familyName, categoryId);
 }
 
-/** Read the manual product dropdown in the cable picker and place it as a label-only object. */
+/** Read the manual product dropdown + antall in the cable picker and place them as label-only. */
 function _cableLabelOnlyFromManual(familyName, categoryId) {
   const sel = document.getElementById('cable-manual-prod');
   const pid = sel ? parseInt(sel.value, 10) : NaN;
   if (isNaN(pid)) return;
-  _placeCableLabelOnly(pid, familyName, categoryId);
+  const cntEl = document.getElementById('cable-manual-count');
+  const n = cntEl ? Math.max(1, Math.min(16, parseInt(cntEl.value, 10) || 1)) : 1;
+  _placeCableLabelOnly(pid, familyName, categoryId, n);
 }
 
 // Snow mat preview (mirrors the cable preview): packed mats live in S.mats so they render,
