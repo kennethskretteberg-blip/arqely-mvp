@@ -4,6 +4,102 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Manuelt antall kabler: aldri stille fallback til én — og «Kun label» teller antallet — 2026-09-23
+
+Kenneth: «Jeg legger inn manuelt 2 stk kabler, virker som appen kun legger inn 1 stk kabel. Samme
+skjer hvis jeg velger "Kun label", da beregner den kun 1 stk kabel.» To uavhengige feil.
+
+- STEG 0: reprodusert at `_cablePreviewPlace` ba om 2, la 1, mens `_cablePreviewMeta.nCables` sto
+  igjen som 2 — panelet sa «2×» med tall som gjaldt ÉN kabel over HELE rommet. **Den geometriske
+  årsaken prompten beskrev var allerede borte** etter rektangel-kjeden (samme dag): fasit-rommet
+  gir nå 2 soner, og sonemotoren ga ikke opp på noen av seks testformer. Men null er fortsatt
+  nåbart — produkter uten fast kabellengde, og korridor-modusens fire egne `return null`-veier.
+- `_computeRoomStats` trengte INGEN endring. Målt med 1/2/3 label-kabler: dekning = netto ÉN gang
+  (62 m² i alle tre, ikke doblet), effekt/lengde/antall skalerer N×. Hurtigprosjekteringen
+  (`_listSetRoomProduct`) var også allerede riktig — brukt som mønster i stedet for et nytt.
+- **Feil 1:** `_cablePreviewPlace` krever nå NØYAKTIG `nCables` fra motoren; et delvis resultat
+  (2 soner når det ble bedt om 3) ryddes bort. Klarer den ikke det, legges N `labelOnly`-kabler med
+  riktig CC per element + `multiCableIndex`/`multiCableGroup` — antall, effekt, meter og CC blir
+  riktige i panel/romkort/materialliste/PDF, bare tegningen mangler. Nytt
+  `_cablePreviewMeta.labelFallback` driver en ⚠-melding. Meldingen navngir bevisst IKKE en
+  spesifikk geometrisk årsak — STEG 0 viste at årsakene varierer, og å gjette feil årsak er samme
+  klasse løgn som saken handler om.
+- Forhåndsvisningsteksten leser «N×» fra `st.cableCount` (det som FAKTISK ligger i rommet), aldri
+  fra `m.nCables`. Avvik vises som «⚠ Ba om N, fikk M».
+- **Feil 2:** `_placeCableLabelOnly(..., count=1)` oppretter `count` objekter;
+  `_cableLabelOnlyFromManual` leser `#cable-manual-count` (verifisert at kun ÉN slik input finnes
+  i DOM-en av gangen — duplikat-id-fella slår ikke inn).
+- Testet live med ekte panel-render og ekte DOM-felt: fallback gir 2600 W / 260 m / CC 23,8 /
+  42 W/m² + synlig ⚠, «Kun label» med 3 → 3 kabler, rektangelrom med Manuelt 2 tegnes fortsatt som
+  2 soner, 3 kabler som lykkes er uendret, Avbryt/Ctrl+Z rydder alt, materiallisten gir 1/2/3 stk,
+  alle tre regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
+## Flerkabel i rom med mange hjørner: kjedefylling av en sone i rektangler — 2026-09-23
+
+Kenneth: «Fortsatt ikke bra når jeg velger 2 stk kabler i et stort rom med mange hjørner.» Fasit:
+«101 + 108 Entré / Gang», 12 hjørner, trapp som hindring, 2 × InFloor 10T. Ett pent og ett rotete
+utlegg i samme rom.
+
+- **STEG 0 fant en annen rotårsak enn prompten antok** — like-areal-båndkuttet er ikke skurken:
+  1. `generateCableBoustrophedon` avviser hele utlegget når en celle-overgang ikke lander på en
+     delt båndkant (`openLen > 1.0`), avgjort av PARITETEN på antall baner per celle. Målt: 47 %
+     av CC-området forkastet, null-hullene få cm brede (kutt x=720 og x=730 OK, x=724,2 forkastet).
+     Enkeltkabel-veien overlever fordi den SKANNER CC-området; flerkabel-veien har tvungen felles
+     CC (lik W/m², låst) og prøver nøyaktig ÉN verdi.
+  2. En hindring i sonen gjør boustrophedon umulig uansett — K1 traff v6 ved ALLE kuttposisjoner
+     640–820, så ingen kuttjustering kunne fikset den.
+  Hjørne-snappingen («plasteret») ble dessuten avvist i begge retninger (12 % og 21,9 % avvik).
+- Fasit-rommet lot seg ikke bygge fra veggtallene: oddetallsgruppen summerer til 1545, og en
+  fortegnssum på null krever partall. Minste retting V9 139→140, da følger V4=884 entydig.
+- Kenneths designidé validert ved måling: fylt PER REKTANGEL lyktes 61/61 CC-verdier mot ~53 % for
+  hele sonen samlet. Hindringen må IKKE drive kuttene (5 rektangler/0 slivere uten, mot 8/3 med).
+  Nabolista er en STI → kun 4 grupperinger, 0,1 ms (5000-taket unødvendig).
+- Bygget (etter Kenneths valg: kun kjedefylling, båndkuttet beholdt): `_zoneRectCells` (minimalt
+  rektangelsett, null for skrå kanter OG stablede biter — samme vakt boustrophedon har),
+  `_fillZoneAsRectChain` (søm-bevisst banerutenett, `_generatePolygonClippedRuns` håndterer
+  hindringen INNE i rektanglet, koblet med gjenbrukt `_v6ConnectCells`), og `_chainBreaks` (ren
+  array — overlever JSON-rundturen) som hindrer at spøkelses-U-svinger tegnes og telles.
+- Kjeden er REDNINGSVEI, ikke ny standard: prøves kun når kaskaden ikke ga et koblingsfritt utlegg,
+  og vinner kun på måling. En sone som fikk ren boustrophedon røres aldri.
+- Resultat: K1 7 → 1 kobling og 173,6 → 142 m (var 23,6 m OVER produktets 150 m), K2 6 → 3
+  koblinger. Buene rundt trappa er borte. Ny `_cableZoneRegressionTest()` (12 sjekker) —
+  sømavstand målt eksakt = CC, rektangelrom uendret som regresjonsvakt.
+- IKKE gjort (avklart): rektangel-oppdeling av HELE rommet + gruppering + glidesnitt (båndkuttet
+  var ikke rotårsaken), og «dra i sømmen» (egen sak).
+
+**Fil:** index.html.
+
+---
+
+## Hindring: Ctrl+R = Roter-modus, Ctrl+F = Flytt-modus — samme gizmo som rom og folie — 2026-09-21
+
+Kenneth: «Jeg kunne ikke bruke Ctrl+R for å rotere en hindring.» Hindringen var det siste objektet
+med sin egen rotasjonsløsning — et lite fast håndtak som ikke brydde seg om `S.ui.transformMode`.
+
+- STEG 0 fant TO feil i det gamle rotasjonsdraget: startvinkelen ble målt fra gizmoens hjørne-anker
+  mens draget målte fra boksens senter (to nullpunkter), OG startvinkelen brukte canvas-koordinater
+  mens draget brukte client-koordinater (to koordinatsystemer). Målt: **~36° rått vinkelhopp ved
+  1 px museflytt**, som med 45°-snap ble et umiddelbart hopp til 45°. Etter fiksen <1°.
+  `hitMatRotHandle` har samme koordinatsystem-mismatch (men felles nullpunkt) — rapportert, egen sak.
+- Ny delt `_hindringCenterWorld()` brukt av hit-test, tegning og drag (var beregnet tre steder).
+- `hitHindringGizmoX/Y/Free` fikk `transformMode==='move'`-gate; `hitHindringRotHandle` erstattet
+  med ring-treffet fra folie (<13 px fra håndtaket ELLER 60±8 px fra senteret), kun i Roter-modus.
+- `drawHindringMoveGizmo` fikk to grener; den gamle «rotasjonssirkel under aktiv rotasjon» er
+  FJERNET (samme dashede ring som nå alltid vises — to overlappende ringer ellers).
+- Ny `_hindRingHover` + gjenbrukt `FOLIE_ROT_CURSOR`. Høyreklikkmeny fikk de to modus-punktene,
+  `_SHORTCUTS` fikk gruppa «Hindring markert».
+- Bonusfunn: Escape avvalgte ALDRI en markert hindring fra før (falt gjennom til rom-fallbacken) —
+  ny gren lagt til, ett-trinns avvalg som matcher folies FAKTISKE oppførsel (spec-en beskrev
+  feilaktig et to-trinns mønster verken rom eller folie har).
+
+**Fil:** index.html.
+
+---
+
 ## Tall på canvas: bytt tallfont fra IBM Plex Mono til Space Grotesk (ren null) — 2026-09-18
 
 Kenneth: «Jeg synes 0 og 8 er for like på målene i canvas. Kan du ta bort streken inne i 0 slik
