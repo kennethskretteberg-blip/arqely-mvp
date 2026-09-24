@@ -4,6 +4,48 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Plantegning: «Bytt», «legg i denne etasjen» eller «ny etasje» — ved import og dra-og-slipp — 2026-09-24
+
+Kenneth: «Jeg har slettet plantegning for 1. etasje. Så velger jeg "legg til ny plantegning" —
+tegningen legger seg ikke i den etasjen jeg har opprettet.» **Retter en regresjon fra `5e0d126`**
+(PDF flerside-velgeren): nedtrekksmenyen med eksisterende etasjer ble fjernet der, og
+`_findReusableEmptyFloor` dekket kun helt tomme prosjekter.
+
+- STEG 0.1 målt med 12 rom i etasjen: enkeltside-PDF og JPG gikk allerede riktig (aktiv etasje).
+  **Flerside-PDF** lagde «2. etasje» og lot etasjen med rommene stå uten tegning — regresjonen.
+  Årsaken bekreftet: gjenbruket krever en etasje UTEN rom, så Kenneths tilfelle (etasje MED rom
+  som nettopp mistet tegningen) traff det aldri.
+- STEG 0.2: dra-og-slipp på en etasje som alt har plantegning mistet kalibreringen uten spørsmål,
+  begge veier (målt før/etter: `widthCm`/`originX`/`_needsCalibration` nullstilt). **Verre enn
+  antatt** — `_installBgImageForFloor` har ingen `sameFile`-sjekk i det hele tatt, den nullstiller
+  ALLTID. `_bgReplaceKeepTransform`-grenen i `_installBgImage` var eneste bevarende sti.
+- Ny DELT `_bgTransformCompatible` + `_carryBgTransform`, brukt av BEGGE install-funksjonene.
+  PDF→PDF krever samme papirstørrelse innen 0,5 cm, raster→raster samme pikselmål; ellers
+  ukalibrert + toast. **Strengere enn før:** «Bytt bilde» bevarte tidligere plasseringen uansett
+  format, så en tegning i annet format arvet en målestokk som ikke gjaldt.
+- Sidevelgeren: etasje-nedtrekksmeny per avkrysset rad («+ Ny etasje» + etasjer uten aktiv
+  plantegning — vanntett-regelen står). Første rad forvelges til etasjen importen kom fra, merket
+  «(denne)», via nytt `_bgImportTargetFloorId`. Samme etasje kan bare velges på én rad (gråes ut).
+  Navnefeltet gjelder kun ny etasje. Egen BYTT-modus: radioknapper, én side, ingen navn/etasjevalg.
+- Nytt `_replaceFloorBg(floorId)` + menyoppføringer i etasjens høyreklikkmeny, bakgrunnens
+  ctx-meny og begge ctxbar-variantene. Menyen sier forskjellen rett ut: «Bytt plantegning
+  (erstatter)» vs. «Legg til som ny versjon (gammel blir referanse)». «Bytt bilde» het misvisende
+  det samme som et rent bildebytte — heter nå «Bytt plantegning» overalt.
+- Dra-og-slipp på etasje MED plantegning: dialog med Bytt / Ny versjon / Ny etasje FØR noe skjer.
+  Etasje uten plantegning: rett inn som før. Slipp-banneret sier «(erstatter)» på forhånd.
+- `_srcW`/`_srcH` settes ved gjenoppretting fra det lastede bildet (ikke serialisert), så
+  raster-bytte beholder kalibreringen også etter lagre→åpne — ingen migrasjon av gamle prosjekter.
+- Rommene røres ikke noe sted (`S.rooms`/`floorId`/kalibreringspunkter urørt).
+- Testet live: Kenneths flyt gir tegning i 1. etasje uten ny etasje og med 12 rom urørt; bytte med
+  samme A1 bevarer plassering eksakt, A3 gir ⚠ + toast; flerside i bytt-modus erstatter side 2 med
+  målestokk beholdt; blandet mål (side 1 → eksisterende, side 2 → ny) med riktig utgråing og
+  nummerering; alle tre slipp-valg; gammelt prosjekt uten `needsCalibration` uendret; alle tre
+  regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
 ## Manuelt antall kabler: aldri stille fallback til én — og «Kun label» teller antallet — 2026-09-23
 
 Kenneth: «Jeg legger inn manuelt 2 stk kabler, virker som appen kun legger inn 1 stk kabel. Samme
