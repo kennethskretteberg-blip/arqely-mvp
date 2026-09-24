@@ -6,9 +6,45 @@
 | 002 | **ferdig** | `7c5c331` | varmeplan-roof | `/roof/locate`, 21 tester grønne · **INSPIRE er oppe, men dekker ikke Oslo** |
 | 003 | **ferdig** | `b858c0d` | varmeplan-roof | `/roof/background`, 39 tester grønne · ferdig skyggerelieff fra Kartverket |
 | 004 | **ferdig** | `dd05eb1` | varmeplan-roof | `/roof/slope` + `/roof/model` + DOM1-omriss, 58 tester grønne |
-| 005 | ikke startet | | arqely-mvp | |
+| 005 | **ferdig** | `d40d3e5` | arqely-mvp | «Hent fra kart», bg.geo, ny `_geoRegressionTest` (14 sjekker) |
 | 006 | ikke startet | | arqely-mvp | |
 | 007 | ikke startet | | arqely-mvp | |
+
+---
+
+## 005 — «Hent fra kart» · commit `d40d3e5` · 24.09.2026
+
+**Gjort:** Kartutsnitt fra Kartverket installeres som **ferdig kalibrert** bakgrunn
+(`widthCm = width_m × 100`, origo SV-hjørne, låst). `_roofApi` med egen URL-oppløsning,
+`_geoToWorld`/`_worldToGeo`, tre-stegs dialog, `bg.geo` + `S.geo[floorId]` lagret og gjenopprettet,
+egen ctxbar for kart. Ny `_geoRegressionTest()` (14 sjekker).
+
+**Koordinatbeviset:** arealet regnet fra de lagrede verdens-cm gir **105,2 m²** — nøyaktig samme
+tall INSPIRE oppgir — og omrisset ligger 0,9 m fra kartsenteret. Målestokken er altså riktig hele
+veien fra EPSG:25833 til canvas, uten at noen har kalibrert noe.
+
+### Tre reelle problemer funnet underveis
+
+1. **Zoom-gulvet 0,2 er tunet for plantegninger.** Et 80 m-kart trenger ~0,076 for å få plass —
+   kartet kunne verken tilpasses skjermen *eller* zoomes ut til, og brukeren så ~40 % av utsnittet
+   uten vei ut. Nytt `_minZoom()` senker gulvet til 0,05 **kun** når aktiv etasje har kart-bakgrunn.
+2. **Kaldstart-ventingen ga 21,7 s spinner** når den lokale tjenesten bare var stoppet — før
+   nøyaktig samme feilmelding. Ventes nå kun i produksjon: **21,7 s → 0,1 s**.
+3. **`_invalidateBgCache` finnes ikke** — jeg gjettet navnet. En udeklarert identifikator kaster
+   `ReferenceError` selv med `&&`-vakt. Fant det i konsollen, fjernet.
+
+**STEG 0-funn:** `S.project.address.representasjonspunkt` er **EPSG:4258-grader** (klienten kaller
+adresse-API-et uten `utkoordsys`), så lat/lon-veien inn i `/roof/locate` er riktig. Deler ligger på
+`S.project.parts`, ikke `S.parts`.
+
+**Bytt-dialogen fra `8bdf684`** ble IKKE gjenbrukt: kart-bakgrunner har sin egen «Hent nytt
+utsnitt» i ⋯-menyen i stedet, fordi Bytt/Ny versjon-dialogen handler om plantegninger man
+importerer — et kartutsnitt hentes alltid på nytt fra tjenesten.
+
+**Nøkkelen** ligger i `localStorage.varmeplan_roof_key` + `window.VARMEPLAN_ROOF_KEY` (som foreslått
+i SPØRSMÅL). Ikke i Supabase ennå — se SPØRSMÅL.
+
+**Tid:** ~50 min.
 
 ---
 
