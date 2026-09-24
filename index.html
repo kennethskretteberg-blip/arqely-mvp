@@ -1830,6 +1830,7 @@ body.present-mode #render-stats{display:none !important}
     <span class="tb-grp" data-modules="indoor snow">
       <button class="snap-chip on" id="chip-show-grid" onclick="_toggleGridVisible()" title="Vis/skjul rutenett"><span class="snap-dot"></span>Raster</button>
       <button class="snap-chip" id="chip-grid" onclick="toggleSnap('grid')" title="Rutenettsnap 50cm"><span class="snap-dot"></span>Snap</button>
+      <button class="snap-chip" id="chip-geo" onclick="toggleSnap('geo')" title="Snap til bygningsomriss fra kartet (kun på kart-etasjer)" style="display:none"><span class="snap-dot"></span>Bygg</button>
       <button class="snap-chip on" id="chip-90" onclick="toggleSnap('a90')" title="90° vinkelsnap"><span class="snap-dot"></span>90°</button>
       <button class="snap-chip" id="chip-45" onclick="toggleSnap('a45')" title="45° vinkelsnap"><span class="snap-dot"></span>45°</button>
     </span>
@@ -3784,7 +3785,7 @@ const S = {
     outerWallLiveThickness: 20,
     outerWallLiveSide: 'out'
   },
-  snap     : { grid:false, a90:true, a45:false },
+  snap     : { grid:false, a90:true, a45:false, geo:true },   // 006: geo = snap til bygningsomriss
   counters : { nextPartId:1, nextFloorId:1, nextRoomId:1, nextWallId:1, nextHindringId:1, nextDimId:1, nextStripId:1, nextGroupId:1, nextCableId:1, nextZoneId:1, nextMatId:1, nextMatPathId:1, nextPlateId:1, nextAluboardId:1, nextStairId:1, nextFoilFreeId:1 },
   shiftHeld: false,
   varmefolie: { direction: 'v', startCorner: 'bl', pendingProductId: null, gapCm: 1.0 },
@@ -4130,6 +4131,7 @@ document.body.classList.toggle('light-theme', S.ui.theme === 'light');
 document.getElementById('chip-grid')?.classList.toggle('on', S.snap.grid);
 document.getElementById('chip-90')?.classList.toggle('on', S.snap.a90);
 document.getElementById('chip-45')?.classList.toggle('on', S.snap.a45);
+document.getElementById('chip-geo')?.classList.toggle('on', S.snap.geo !== false);
 // Sync theme chip
 const _tc = document.getElementById('chip-theme');
 if (_tc) _tc.innerHTML = S.ui.theme === 'light' ? IC('moon',16) : IC('sun',16);
@@ -4284,13 +4286,26 @@ function getWorldPos(e) {
     return p;
   }
 
-  // polygon: grid-snap → angle-snap → re-grid to lock to discrete points
+  // polygon: grid-snap → angle-snap → GEO-snap → re-grid to lock to discrete points
   if (S.ui.drawMode === 'polygon') {
     let p = s2w(sx, sy);
     if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
     const pts = S.drawing.points;
     if (pts.length > 0) p = angleSnap(p.x, p.y, pts[pts.length - 1]);
+    // 006: «lås akse, så snap til vegg» — samme rekkefølge skillevegg bruker. Traff geo-snappen,
+    // hopper vi over re-grid: rasteret skal ikke trekke punktet vekk fra husets hjørne igjen.
+    const g = _geoSnap(p);
+    if (g) return g;
     if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
+    return p;
+  }
+
+  // rect2 / lshape og øvrige: geo-snap etter grid, før retur. Samme radius og Shift-regel.
+  if (S.ui.drawMode === 'rect2' || S.ui.drawMode === 'lshape') {
+    let p = s2w(sx, sy);
+    if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
+    const g = _geoSnap(p);
+    if (g) return g;
     return p;
   }
 
@@ -4319,6 +4334,8 @@ function getWorldPos(e) {
     if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
     const ref = getSnapRef();
     if (ref) p = angleSnapAlways(p.x, p.y, ref);
+    const g = _geoSnap(p);   // 006: samme regel som polygon — se der
+    if (g) return g;
     if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
     return p;
   }
@@ -4399,6 +4416,7 @@ function render() {
   _recomputeViolationsIfDirty();
   _recomputeCableViolationsIfDirty();
   drawBgImage();
+  drawGeoFeatures();   // 006: bygningsomriss som vektor oppå kartet, under rommene
   if (S.ui.showGrid !== false) drawGrid();
   drawRooms();
   if (S.ui.present) drawPresentFloorTextures();   // subtil gulvtekstur UNDER leggemønsteret
@@ -4887,6 +4905,13 @@ function drawRoomCard(room) {
     rows.push(['Forbudte soner',  '−' + stats.zoneM2.toFixed(2) + ' m²']);
   }
   rows.push(['Netto areal',     stats.nettoM2.toFixed(2)  + ' m²']);
+  // 006: terrenghelning fra DTM1 — bare når vi faktisk har hentet den for dette rommet.
+  if (room.terrain && room.terrain.slope_pct_mean != null) {
+    rows.push(['Helning (terreng)', room.terrain.slope_pct_mean.toFixed(1).replace('.', ',') + ' %']);
+  }
+  if (room.geoDistanceM != null) {
+    rows.push(['Avstand til bygning', room.geoDistanceM.toFixed(1).replace('.', ',') + ' m']);
+  }
   if (stats.stripM2 > 0) {
     rows.push(['Dekket av VF',    stats.stripM2.toFixed(2)  + ' m²']);
   }
@@ -14849,6 +14874,53 @@ function _geoRegressionTest() {
     check('koordinatene stemmer etter rundtur', '(2500,-2500)',
           Math.abs(wAfter.x - 2500) < 1e-6 && Math.abs(wAfter.y + 2500) < 1e-6,
           `(${wAfter.x},${wAfter.y})`);
+
+    // ── 006: snapping ────────────────────────────────────────────────────────────────────────
+    const savedFloor = S.ui.activeFloorId, savedShift = S.shiftHeld, savedSnap = { ...S.snap };
+    const savedView = { ...S.view };
+    try {
+      S.bgs = { 77: installed }; S.ui.activeFloorId = 77;
+      S.view.zoom = 1; // 14 px / (1 × BASE_SCALE) ≈ 9,3 cm radius
+      const kvadrat = [{x:1000,y:-1000},{x:2000,y:-1000},{x:2000,y:-2000},{x:1000,y:-2000}];
+      S.geo = { 77: { chosen: { bygningsnr:'1', footprintWorld: kvadrat }, candidates: [] } };
+      S.snap.geo = true; S.shiftHeld = false;
+      const R = _geoSnapRadiusCm();
+
+      const nær = _geoSnap({ x: 1000 + R * 0.4, y: -1000 - R * 0.4 });
+      check('snapper til hjørne innenfor radius', '(1000,-1000)',
+            nær && nær.x === 1000 && nær.y === -1000, JSON.stringify(nær));
+
+      const langtUnna = _geoSnap({ x: 1000 + R * 4, y: -1000 - R * 4 });
+      check('snapper IKKE utenfor radius', 'null', langtUnna === null, JSON.stringify(langtUnna));
+
+      // Midt på en kant, litt utenfor: skal falle på linja, ikke på et hjørne.
+      const kant = _geoSnap({ x: 1500, y: -1000 + R * 0.5 });
+      check('snapper til kant (punkt på linja)', 'y = −1000',
+            kant && Math.abs(kant.y + 1000) < 1e-6 && Math.abs(kant.x - 1500) < 1e-6,
+            JSON.stringify(kant));
+
+      S.shiftHeld = true;
+      check('Shift slår av snapping', 'null', _geoSnap({ x: 1001, y: -1001 }) === null,
+            JSON.stringify(_geoSnap({ x: 1001, y: -1001 })));
+      S.shiftHeld = false;
+      S.snap.geo = false;
+      check('bryteren slår av snapping', 'null', _geoSnap({ x: 1001, y: -1001 }) === null,
+            JSON.stringify(_geoSnap({ x: 1001, y: -1001 })));
+      S.snap.geo = true;
+
+      // Etasje UTEN geo: tegning skal være bit-for-bit uendret.
+      S.bgs = {}; S.geo = {};
+      check('ingen snapping uten kart-bakgrunn', 'null', _geoSnap({ x: 1000, y: -1000 }) === null,
+            JSON.stringify(_geoSnap({ x: 1000, y: -1000 })));
+
+      // Avstand hus → område: 1 m gap mellom to kvadrater.
+      const omrade = [{x:2100,y:-1000},{x:3000,y:-1000},{x:3000,y:-2000},{x:2100,y:-2000}];
+      const d = _polyDistanceCm(omrade, kvadrat);
+      check('avstand hus → område', '100 cm', Math.abs(d - 100) < 1e-6, d);
+    } finally {
+      S.ui.activeFloorId = savedFloor; S.shiftHeld = savedShift;
+      S.snap = savedSnap; S.view = savedView;
+    }
   } finally {
     S.bgs = savedBgs; S.geo = savedGeo;
   }
@@ -33432,6 +33504,8 @@ function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=n
     dims: [], dimSnap: false, stripDimSnap: false, annotOffsets: {}
   };
   room.walls = compWalls(room.points);
+  // 006: ligger rommet på en kart-etasje, hent terrenghelning (debounced — se _geoScheduleSlope).
+  if (_bgIsGeo(S.bgs && S.bgs[room.floorId])) _geoScheduleSlope(room.id);
   if (shape === 'outer-wall') {
     if (wallConfigs && wallConfigs.length > 0) {
       // Apply per-wall configs from interactive drawing
@@ -36341,6 +36415,7 @@ function _renderDetailPanel(roomId) {
     ${_isSnowModule() ? '' : `<span>Veggtykkelse: ${thickInput}</span>`}
     <span style="text-align:right">${_calcNetArea(room)} m² tilgj.</span>
     ${hasHind?`<span>Hindringer: −${(areas.hindArea/10000).toFixed(2)} m²</span><span></span>`:''}
+    ${_geoTerrainSummaryHtml(room)}
     </div>
     </div>
   </div>`;
@@ -43309,7 +43384,7 @@ function toggleSnap(type) {
     return;
   }
   S.snap[type]=!S.snap[type];
-  const ids={grid:'chip-grid',a90:'chip-90',a45:'chip-45'};
+  const ids={grid:'chip-grid',a90:'chip-90',a45:'chip-45',geo:'chip-geo'};
   const el=document.getElementById(ids[type]); if(el) el.classList.toggle('on',S.snap[type]);
   _savePrefs();
   renderSnapWidget();
@@ -43467,6 +43542,7 @@ function updateCtxBar() {
   bar.classList.toggle('show', !!html);
   _updateVfDirVisibility();
   _updateStairSettingsPanel();
+  _updateGeoSnapChip();   // 006: «Bygg»-snap finnes bare på kart-etasjer
   updHint();
   _positionCtxBar();   // fast toppsentrert (DEL A) — kun kalt her, ikke fra render()
   markDirty();   // ctx bar updates correlate with selection state — canvas often needs refresh
@@ -43603,7 +43679,22 @@ function _bgSelMore(e) {
   // målestokken og koblingen til EPSG:25833 — de valgene finnes derfor ikke her. «Bytt
   // plantegning» blir «Hent nytt utsnitt».
   if (_bgIsGeo(_ctxBg())) {
-    let g = I(`_roofOpenDialog(S.ui.activeFloorId)`, IC('map',14)+' Hent nytt utsnitt');
+    let g = '';
+    // 006: bytt bygg uten å hente kartet på nytt. Ligger i menyen, ikke som klikk i lerretet:
+    // hit-test-kaskaden der er ømfintlig (rom tegnes oppå bygget), og et nytt deltakende lag
+    // der ville vært en reell regresjonsrisiko for lite vunnet. Se STATUS.
+    const _gd = _activeGeo();
+    const _andre = _gd ? (_gd.candidates || []).filter(c =>
+      c.footprintWorld && (!_gd.chosen || c.bygningsnr !== _gd.chosen.bygningsnr)) : [];
+    if (_andre.length) {
+      g += `<div class="ctx-sub-lbl">Bytt bygg</div>`;
+      for (const c of _andre.slice(0, 6)) {
+        g += I(`_geoChooseCandidate('${c.bygningsnr}')`,
+               `${esc(c.type || 'Bygning')} <span style="color:var(--dim);font-size:11px">· ${c.distance_m.toFixed(0)} m</span>`);
+      }
+      g += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
+    }
+    g += I(`_roofOpenDialog(S.ui.activeFloorId)`, IC('map',14)+' Hent nytt utsnitt');
     g += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
     g += I(`removeBgImage()`, IC('trash',14)+' Fjern kart', true);
     showProduktDropdown(g, e.clientX, e.clientY);
@@ -43677,6 +43768,7 @@ function _ctxBarItems() {
         <span class="tc-sep"></span>
         <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul"><input type="checkbox" ${bg.visible!==false?'checked':''} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
         <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
+        <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis bygningsomriss som vektor oppå kartet"><input type="checkbox" ${S.ui.geoHideFootprint?'':'checked'} onchange="S.ui.geoHideFootprint=!this.checked;render()" onclick="event.stopPropagation()"> Omriss</label>
         <span class="tc-sep"></span>
         <button class="snap-chip more" onclick="_bgSelMore(event)" title="Hent nytt utsnitt, fjern">⋯</button>`;
     }
@@ -45267,6 +45359,203 @@ function _worldToGeo(bg, wx, wy) {
 /** Er dette en kart-bakgrunn (ikke en importert plantegning)? Styrer ctxbar og lås. */
 function _bgIsGeo(bg) { return !!(bg && bg.geo && bg.geo.epsg); }
 
+// ═══ 006: BYGNINGSOMRISS SOM VEKTORLAG, SNAPPING, HELNING ═════════════════════════════════════
+// Omrisset tegnes som VEKTOR oppå kartbildet (ikke brent inn i bildet, med vilje) — da kan det
+// snappes til, klikkes på og vises i riktig farge etter kilde/sikkerhet.
+
+/** Geo-data for aktiv etasje, eller null. */
+function _activeGeo() {
+  const fid = S.ui.activeFloorId;
+  if (!_bgIsGeo(S.bgs && S.bgs[fid])) return null;
+  return (S.geo && S.geo[fid]) || null;
+}
+/** Omrisset til det VALGTE bygget, i verdens-cm — eller null. */
+function _chosenFootprintWorld() {
+  const g = _activeGeo();
+  return (g && g.chosen && g.chosen.footprintWorld && g.chosen.footprintWorld.length >= 3)
+    ? g.chosen.footprintWorld : null;
+}
+
+// Samme 14-piksel-regel som frihånds-matta bruker (_matFreeStartSlide) — én snap-følelse i hele
+// appen, ikke en ny konstant per funksjon.
+function _geoSnapRadiusCm() { return 14 / Math.max(0.0001, S.view.zoom * BASE_SCALE); }
+
+let _geoSnapHit = null;   // siste treff, for å tegne ringen
+
+/** Snap til omrissets hjørne (først) eller kant (deretter). Returnerer null når ingenting traff. */
+function _geoSnap(p) {
+  _geoSnapHit = null;
+  if (S.shiftHeld || !S.snap.geo) return null;
+  const fp = _chosenFootprintWorld();
+  if (!fp) return null;
+  const R = _geoSnapRadiusCm();
+  // Hjørner vinner over kanter: et hushjørne er et mer meningsfullt festepunkt enn et
+  // vilkårlig punkt langs veggen, og brukeren sikter som regel på det.
+  let best = null, bestD = R;
+  for (const v of fp) {
+    const d = Math.hypot(p.x - v.x, p.y - v.y);
+    if (d < bestD) { bestD = d; best = { x: v.x, y: v.y, kind: 'corner' }; }
+  }
+  if (best) { _geoSnapHit = best; return { x: best.x, y: best.y }; }
+  const e = _nearestPtOnPolyBoundary(p, fp);
+  if (e && e.d <= R) { _geoSnapHit = { x: e.x, y: e.y, kind: 'edge' }; return { x: e.x, y: e.y }; }
+  return null;
+}
+
+/** Korteste avstand (cm) fra et polygon til et annet — punkt-til-segment over alle kantpar. */
+function _polyDistanceCm(a, b) {
+  if (!a || !b || a.length < 2 || b.length < 2) return null;
+  const segDist = (pt, s0, s1) => {
+    const dx = s1.x - s0.x, dy = s1.y - s0.y, L = dx * dx + dy * dy;
+    let tt = L ? ((pt.x - s0.x) * dx + (pt.y - s0.y) * dy) / L : 0;
+    tt = Math.max(0, Math.min(1, tt));
+    return Math.hypot(pt.x - (s0.x + tt * dx), pt.y - (s0.y + tt * dy));
+  };
+  let best = Infinity;
+  for (const pt of a) for (let i = 0; i < b.length; i++) best = Math.min(best, segDist(pt, b[i], b[(i + 1) % b.length]));
+  for (const pt of b) for (let i = 0; i < a.length; i++) best = Math.min(best, segDist(pt, a[i], a[(i + 1) % a.length]));
+  return best;
+}
+
+function drawGeoFeatures() {
+  const g = _activeGeo();
+  if (!g || S.ui.geoHideFootprint) return;
+  const chosen = _chosenFootprintWorld();
+  ctx.save();
+  // Andre kandidater: tynn grå, så brukeren ser at de KAN velges uten at de stjeler blikket.
+  for (const c of (g.candidates || [])) {
+    if (!c.footprintWorld || c.footprintWorld.length < 3) continue;
+    if (chosen && c.bygningsnr === (g.chosen && g.chosen.bygningsnr)) continue;
+    ctx.beginPath();
+    c.footprintWorld.forEach((pt, i) => { const s = w2s(pt.x, pt.y); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(90,100,110,0.55)'; ctx.lineWidth = 1; ctx.setLineDash([]); ctx.stroke();
+  }
+  if (chosen) {
+    const src = g.chosen.footprintSource;
+    const lavTillit = (g.chosen.footprintConfidence ?? 1) <= 0.5;
+    ctx.beginPath();
+    chosen.forEach((pt, i) => { const s = w2s(pt.x, pt.y); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+    ctx.closePath();
+    // DOM1-avledet omriss tegnes STIPLET: det er utledet fra et 1 m-raster, ikke målt vektordata,
+    // og brukeren skal kunne se forskjellen uten å åpne noe panel.
+    ctx.setLineDash(src === 'DOM1' ? [7, 5] : []);
+    ctx.strokeStyle = 'rgba(29,78,216,0.95)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.setLineDash([]);
+    if (lavTillit && !S.ui?._pdfMode && S.view.zoom > 0.08) {
+      const xs = chosen.map(q => q.x), ys = chosen.map(q => q.y);
+      const s = w2s(Math.max(...xs), Math.min(...ys));
+      ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(245,158,11,0.95)'; ctx.fillText('⚠', s.x + 4, s.y - 4);
+    }
+  }
+  // Snap-ring mens man tegner — samme visuelle språk som romtegningens første-punkt-ring.
+  if (_geoSnapHit && S.ui.drawMode && !S.ui?._pdfMode) {
+    const s = w2s(_geoSnapHit.x, _geoSnapHit.y);
+    ctx.beginPath(); ctx.arc(s.x, s.y, _geoSnapHit.kind === 'corner' ? 7 : 5, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(29,78,216,0.95)'; ctx.lineWidth = 2; ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Klikk på et annet omriss enn det valgte → bytt bygg (ingen ny kart-henting). */
+function _geoHitCandidate(wx, wy) {
+  const g = _activeGeo(); if (!g) return null;
+  for (const c of (g.candidates || [])) {
+    if (!c.footprintWorld || c.footprintWorld.length < 3) continue;
+    if (g.chosen && c.bygningsnr === g.chosen.bygningsnr) continue;
+    if (ptInPoly(wx, wy, c.footprintWorld)) return c;
+  }
+  return null;
+}
+function _geoChooseCandidate(bygningsnr) {
+  const g = _activeGeo(); if (!g) return;
+  const c = (g.candidates || []).find(x => x.bygningsnr === bygningsnr);
+  if (!c) return;
+  g.chosen = { bygningsnr: c.bygningsnr, type: c.type,
+               footprintWorld: c.footprintWorld || null,
+               footprintSource: c.footprintSource || null,
+               footprintConfidence: c.footprintConfidence ?? null };
+  _showToast && _showToast('Bygg byttet til ' + (c.type || 'bygning'), 'ok');
+  renderSidebar(); updateObjInfo(); render();
+  _scheduleAutoSave && _scheduleAutoSave();
+}
+
+// ── Helning fra terrenget ─────────────────────────────────────────────────────────────────────
+// Debounced: et rom endres mange ganger i sekundet mens det dras, og hvert kall treffer Kartverket.
+const _slopeTimers = {};
+function _geoScheduleSlope(roomId) {
+  const g = _activeGeo(); if (!g) return;
+  clearTimeout(_slopeTimers[roomId]);
+  _slopeTimers[roomId] = setTimeout(() => _geoFetchSlope(roomId), 600);
+}
+async function _geoFetchSlope(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const bg = S.bgs && S.bgs[room && room.floorId];
+  if (!room || !_bgIsGeo(bg) || !room.points || room.points.length < 3) return;
+  try {
+    const poly = room.points.map(pt => { const q = _worldToGeo(bg, pt.x, pt.y); return [q.east, q.north]; });
+    const r = await _roofApi.slope(poly);
+    room.terrain = {
+      slope_pct_mean: r.slope_pct_mean, slope_pct_max: r.slope_pct_max,
+      aspect_deg: r.aspect_deg, prov: r.prov, fetchedAt: new Date().toISOString(),
+    };
+    // Avstand hus → område: rent geometrisk, ingen tjeneste involvert.
+    const fp = _chosenFootprintWorld();
+    room.geoDistanceM = fp ? Math.round(_polyDistanceCm(room.points, fp)) / 100 : null;
+    renderSidebar(); updateObjInfo(); render();
+  } catch (err) {
+    // Tjeneste nede → ingen linje, ingen feil. Helning er en bonus, ikke et krav.
+    if (!(err && err.roof)) console.warn('helning:', err);
+  }
+}
+/** «Bygg»-snapchipen vises kun når aktiv etasje faktisk har et omriss å snappe til. */
+function _updateGeoSnapChip() {
+  const el = document.getElementById('chip-geo'); if (!el) return;
+  const vis = !!_chosenFootprintWorld();
+  el.style.display = vis ? '' : 'none';
+  el.classList.toggle('on', S.snap.geo !== false);
+}
+
+/** Kompakt helning/avstand for rominfo-rutenettet (to kolonner). Tom når vi ikke vet noe. */
+function _geoTerrainSummaryHtml(room) {
+  if (!room) return '';
+  const t = room.terrain; let h = '';
+  if (t && t.slope_pct_mean != null) {
+    const bratt = t.slope_pct_mean >= 6;
+    h += `<span title="Fra terrengdata (DTM1, Kartverket)">Helning: ${t.slope_pct_mean.toFixed(1).replace('.', ',')} %${bratt ? ' ⚠' : ''}</span>`;
+    h += `<span style="text-align:right">maks ${t.slope_pct_max.toFixed(0)} %</span>`;
+  }
+  if (room.geoDistanceM != null) {
+    h += `<span title="Korteste avstand fra bygningsomrisset">Til bygning: ${room.geoDistanceM.toFixed(1).replace('.', ',')} m</span><span></span>`;
+  }
+  return h;
+}
+
+/** Én linje om helning + avstand, til rompanelet. Tom streng når vi ikke vet noe. */
+function _geoTerrainPanelHtml(room) {
+  if (!room) return '';
+  const t = room.terrain;
+  let h = '';
+  if (t && t.slope_pct_mean != null) {
+    const bratt = t.slope_pct_mean >= 6;
+    const retn = t.aspect_deg != null ? ` · fall mot ${Math.round(t.aspect_deg)}°` : '';
+    h += `<div class="soi-row"><span class="soi-k">Helning</span><span class="soi-v">
+      ${t.slope_pct_mean.toFixed(1).replace('.', ',')} %
+      <span style="color:var(--dim);font-size:11px">(maks ${t.slope_pct_max.toFixed(0)} %)${retn}</span>
+      <span title="Fra terrengdata (DTM1, Kartverket)" style="font-size:10px;color:#3b82f6;border:1px solid #3b82f6;border-radius:4px;padding:0 4px;margin-left:4px">Fra data</span>
+      </span></div>`;
+    if (bratt) h += `<div class="soi-row"><span class="soi-k"></span><span class="soi-v" style="color:var(--warn);font-size:11px">Bratt — vurder høyere W/m²</span></div>`;
+  }
+  if (room.geoDistanceM != null) {
+    h += `<div class="soi-row"><span class="soi-k">Avstand til bygning</span><span class="soi-v">
+      ${room.geoDistanceM.toFixed(1).replace('.', ',')} m
+      <span title="Fra bygningsomriss" style="font-size:10px;color:#3b82f6;border:1px solid #3b82f6;border-radius:4px;padding:0 4px;margin-left:4px">Fra data</span>
+      </span></div>`;
+  }
+  return h;
+}
+
 // ── «Hent fra kart» ───────────────────────────────────────────────────────────────────────────
 // Installerer kartutsnittet som en FERDIG KALIBRERT bakgrunn. Poenget med hele serien: et bilde
 // med kjent utstrekning i meter ER en kalibrert bakgrunn — widthCm = width_m × 100, origo i
@@ -45441,9 +45730,14 @@ async function _roofFetchBackground() {
         footprintSource: cand.footprint ? cand.footprint.source : null,
         footprintConfidence: cand.footprint ? cand.footprint.prov.confidence : null,
       } : null,
+      // 006 trenger OMRISSET på hver kandidat, ikke bare punktet — både for å tegne naboene grått
+      // og for at «klikk på et annet bygg» skal kunne bytte uten å hente kartet på nytt.
       candidates: d.candidates.map(c => ({
         bygningsnr: c.bygningsnr, type: c.type, distance_m: c.distance_m,
         pointWorld: _geoToWorld(bg, c.point.east, c.point.north),
+        footprintWorld: c.footprint ? c.footprint.polygon.map(([e, n]) => _geoToWorld(bg, e, n)) : null,
+        footprintSource: c.footprint ? c.footprint.source : null,
+        footprintConfidence: c.footprint ? c.footprint.prov.confidence : null,
       })),
     };
     setActiveBgFloor(d.floorId);
@@ -48438,6 +48732,20 @@ async function exportPDF(opts) {
         dekningNettoPct + ' %',
       ],
     );
+    // 006: terrengdata fra kart-etasjer. Bare når de faktisk finnes — en rad med «—» hjelper
+    // ingen, og montøren skal kunne stole på at et tall her ER målt.
+    if ((room.terrain && room.terrain.slope_pct_mean != null) || room.geoDistanceM != null) {
+      const tr = room.terrain;
+      drawStatRow(
+        ['Helning (terreng, DTM1)', 'Maks helning', 'Fallretning', 'Avstand til bygning'],
+        [
+          tr && tr.slope_pct_mean != null ? tr.slope_pct_mean.toFixed(1).replace('.', ',') + ' %' : '\u2014',
+          tr && tr.slope_pct_max != null ? tr.slope_pct_max.toFixed(0) + ' %' : '\u2014',
+          tr && tr.aspect_deg != null ? Math.round(tr.aspect_deg) + '\u00b0' : '\u2014',
+          room.geoDistanceM != null ? room.geoDistanceM.toFixed(1).replace('.', ',') + ' m' : '\u2014',
+        ],
+      );
+    }
     _line(y); y += 4;
 
     // \u2500\u2500 Spec table \u2014 full width, Antall and Lengde as separate columns \u2500\u2500
