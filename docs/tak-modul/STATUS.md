@@ -4,11 +4,48 @@
 |---|---|---|---|---|
 | 001 | **ferdig** | `50461f7` | varmeplan-roof | skjelett, nøkkel, 9 tester grønne, ruff rent |
 | 002 | **ferdig** | `7c5c331` | varmeplan-roof | `/roof/locate`, 21 tester grønne · **INSPIRE er oppe, men dekker ikke Oslo** |
-| 003 | ikke startet | | varmeplan-roof | |
+| 003 | **ferdig** | `b858c0d` | varmeplan-roof | `/roof/background`, 39 tester grønne · ferdig skyggerelieff fra Kartverket |
 | 004 | ikke startet | | varmeplan-roof | |
 | 005 | ikke startet | | arqely-mvp | |
 | 006 | ikke startet | | arqely-mvp | |
 | 007 | ikke startet | | arqely-mvp | |
+
+---
+
+## 003 — `/roof/background` · commit `b858c0d` · 24.09.2026
+
+**Gjort:** Ett georeferert PNG per utsnitt — topokart + eiendomsgrenser + valgfritt
+DOM1-skyggerelieff, kreditering brent inn. `widthCm = width_m × 100` → ingen kalibrering.
+39 tester grønne, ruff rent. Eksempelbilde i `varmeplan-roof/docs/eksempler/`.
+
+**STEG 0-funn som forenklet oppgaven:** WCS har en coverage `nhm_dom_topo_25833_skyggerelieff` —
+et **ferdig rendret skyggerelieff**. Prompten ba om «GeoTIFF → rasterio → egen hillshade»; det er
+unødvendig. Kartverkets eget er like raskt, ¼ så tungt, og holder rasterio ute av bildeveien.
+Rå høyde ligger klar i `dom1.fetch_dom_tiff` til 004.
+
+**Andre funn:** TileMatrixSet for 25833 heter **`utm33n`** (ikke «EPSG:25833»); nivå 16/17/18 =
+0,3306/0,1653/0,0826 m/px; eiendomsgrense-laget heter `eiendomsgrense`; WMS maks 8192 px.
+
+**Feil funnet av testene, som også ville rammet ekte klienter:** `X-Roof-Geo`-headeren inneholder
+«©». HTTP-headere er latin-1/ASCII og Pydantic skriver rå UTF-8 → headeren lot seg ikke kode.
+Rettet med `ensure_ascii=True`.
+
+**Avvik fra prompten (bevisst):** WMTS-nivået låses ikke til 17–18 — `pick_level()` velger
+groveste nivå som fortsatt er fint nok, så et 200 m-utsnitt henter ¼ så mange fliser.
+
+### Målte svartider (80 m, 1600 px)
+
+| Tilfelle | Tid |
+|---|---|
+| Kaldt, topo + eiendom + hillshade | 3,67 s |
+| Varmt (flis-cache), med hillshade | 2,23 s |
+| **Varmt, topo + eiendom (standard)** | **0,59 s** |
+| Kaldt, 200 m-utsnitt | 4,03 s |
+
+Hillshade koster ~1,6 s ved 1600 px (mitt første 0,5 s-tall var målt ved 400 px — korrigert) og
+er ikke cachet. **Av som standard** er derfor riktig, som antatt i SPØRSMÅL.
+
+**Tid:** ~40 min.
 
 ---
 
