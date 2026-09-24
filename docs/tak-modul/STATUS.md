@@ -8,7 +8,7 @@
 | 004 | **ferdig** | `dd05eb1` | varmeplan-roof | `/roof/slope` + `/roof/model` + DOM1-omriss, 58 tester grønne |
 | 005 | **ferdig** | `d40d3e5` | arqely-mvp | «Hent fra kart», bg.geo, ny `_geoRegressionTest` (14 sjekker) |
 | 006 | **ferdig** | `e93e612` | arqely-mvp | vektorlag, snapping, helning + avstand |
-| 007 | **ferdig** | (denne) | arqely-mvp | PDF-kreditering, hurtigtaster, dokumentasjon |
+| 007 | **ferdig** | `65b4241` | arqely-mvp | PDF-kreditering, hurtigtaster, dokumentasjon |
 
 ---
 
