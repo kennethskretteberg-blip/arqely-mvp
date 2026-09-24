@@ -4,6 +4,53 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Frihånd matte: glidbart startpunkt langs veggen — og alltid en vei ut av frihånd — 2026-09-24
+
+Kenneth: «Når jeg skal legge ut en til, starter den på samme sted som den første. Kan jeg få sette
+inn startpunkt der jeg selv ønsker?» + «Den henger seg litt opp … jeg kommer ikke ut av menyen.»
+
+**To av arbeidsordrens hypoteser holdt IKKE — begge etterprøvd i STEG 0:**
+
+- **Labelen.** Hypotesen var at `_matFreeCatalog(mp).product` blir null for InSnow 300T, så hele
+  labelblokka hoppes stille over. Målt: `product` er ALDRI null når produktraden finnes —
+  `tooShort`-grenen faller allerede tilbake til `cands[0] || fam`. Bygget tre kataloger (EcoMat
+  innendørs, InSnow med og uten rulldata) og committet ekte frihåndsmatter i hver: labelen tegnes
+  i alle tre, materiallista får linje i alle tre. **Manglende label lot seg ikke reprodusere.**
+  Det som DERIMOT degraderer er data — mangler `mat_area_m2`/`mat_total_length_mm`, blir linje 2
+  bare «CC 8.0 cm», effekten 0 W, og materiallista teller tegnede meter i stedet for ruller. Er
+  det dette Kenneth ser, ligger fiksen i Supabase, ikke i koden. Rapportert, ikke gjettet.
+- **«Henger».** Målt: matte 2 fikk nøyaktig samme startpunkt (30, 595) som matte 1, overlappvakten
+  avviste, `drawMode` ble stående i `'mat-freehand'` → **avvist commit**, ingen kastet feil.
+
+Bygget:
+- Ny **startfase** (`_matFree.phase='start'`): markøren glir innsettingspunktet langs den av
+  hjørnets to vegger som er nærmest musa (`_matFreeStartSlide`), klemt til polygonets eget
+  intervall med samme marginer `_matFreeStartFor` bruker (uendret — regresjonstesten kaller den
+  fortsatt direkte). Veggen bestemmer første akse: bunn/topp → `'v'`, venstre/høyre → `'h'`. Snap
+  til (a) eksisterende mattekant + gap, (b) 10 cm-raster, (c) hjørnet. Markøren tegnes i
+  mesh-bredden i produktets farge med «fra hjørne: N cm».
+- **Standardpunkt uten musebevegelse:** første ledige plass etter eksisterende matter — målt til
+  x=90 for matte 2 (30 + NET 50 + gap 10), nøyaktig som STEG 0.3 forutsa. Ingen matter → hjørnet.
+- Hjørne-forankringen ved `moves.length===0` hopper nå over i fase `'draw'` — ellers ville den
+  overskrevet brukerens eget valg.
+- `_matFreeExit` pakket i `try/catch`: en uventet feil nullstiller ALLTID modus/markør (+ toast
+  «intern feil»). Avvist commit beholder fortsatt tegningen (DEL B FEIL 4, uendret).
+- Nytt `_matFree.lastReject`: varig, synlig grunn i BÅDE ctxbar og hintlinje («⚠ Kan ikke lagres:
+  overlapper en annen matte»), ikke bare en toast som forsvinner. Ny ctxbar-status under hele
+  frihånd: «Frihånd · «produkt» · [✓ Ferdig] [↶ Angre siste] [✕ Avbryt]».
+- **Klikk utenfor frihånds-rommet er nå en utvei:** ingen baner → avbryt; gyldig bane → commit;
+  begge lar klikket gå videre til rommet man traff. Ugyldig bane → modus beholdes MED ⚠-grunn.
+- Label og materialliste faller tilbake til familieraden når segmentets produktrad mangler — var
+  reelt mulig å miste linja stille i materiallista (`if (!seg.product) continue`).
+- Testet live: markøren glir og bytter akse; matte 2 starter på x=90 og committer uten
+  overlappvarsel; snap treffer raster/mattekant/hjørne; Escape i startfasen; innendørs EcoMat
+  uendret; avvist commit gir ⚠ med tre utveier; simulert kastet feil nullstiller modusen; klikk på
+  et annet rom committer og velger det rommet; alle fire regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
 ## Plantegning: «Bytt», «legg i denne etasjen» eller «ny etasje» — ved import og dra-og-slipp — 2026-09-24
 
 Kenneth: «Jeg har slettet plantegning for 1. etasje. Så velger jeg "legg til ny plantegning" —
