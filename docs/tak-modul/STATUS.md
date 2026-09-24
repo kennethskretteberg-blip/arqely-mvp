@@ -3,12 +3,69 @@
 | # | Status | Commit | Repo | Notat |
 |---|---|---|---|---|
 | 001 | **ferdig** | `50461f7` | varmeplan-roof | skjelett, nøkkel, 9 tester grønne, ruff rent |
-| 002 | pågår | | varmeplan-roof | |
+| 002 | **ferdig** | `7c5c331` | varmeplan-roof | `/roof/locate`, 21 tester grønne · **INSPIRE er oppe, men dekker ikke Oslo** |
 | 003 | ikke startet | | varmeplan-roof | |
 | 004 | ikke startet | | varmeplan-roof | |
 | 005 | ikke startet | | arqely-mvp | |
 | 006 | ikke startet | | arqely-mvp | |
 | 007 | ikke startet | | arqely-mvp | |
+
+---
+
+## 002 — `/roof/locate` · commit `7c5c331` · 24.09.2026
+
+**Gjort:** Adresse/lat-lon/east-north → adressepunkt i EPSG:25833 + bygningspunkt fra Matrikkelen
+innen 40 m (sortert på avstand, SOSI-koder oversatt til tekst) + omriss fra INSPIRE der det
+finnes. Disk-cache, delt httpx-klient, `resolve_footprint()` som eier kilde-kjeden. 21 tester
+grønne, ruff rent. Full kildedokumentasjon i `varmeplan-roof/docs/datakilder.md`.
+
+### To funn som endrer premissene i prompten
+
+**1. INSPIRE-WFS er oppe.** Prompten (og research-notatet fra 21.09) sier den ikke svarte — to
+timeouts på 55 s. Målt 24.09: GetCapabilities svarer på **0,13–1,2 s**, hver gang. Ingen syntetisk
+fixture var nødvendig; alle fixtures er ekte svar.
+
+**2. Men dekningen utelukker Oslo — og det er den viktige nyheten.** GetCapabilities oppgir
+WGS84-bbox **9,73–29,07 °Ø / 60,03–70,68 °N**. Oslo ligger på 59,91 °N, altså *under* sørgrensa.
+
+| Adresse | Bygg fra INSPIRE |
+|---|---|
+| Storgata 1, 0155 Oslo (59,91 °N) | **0** |
+| Steinliveien 3, 3518 Hønefoss (60,19 °N) | **20** |
+
+Konsekvenser, i rekkefølge etter hvor mye de betyr:
+- **`footprint: null` er normalt, ikke en feil.** Det blir utfallet for en stor del av landets
+  befolkning (hele Oslo/Sørlandet/Vestlandet sør for 60 °N) inntil 004 leverer DOM1-omriss.
+- **004 sin DOM1-fallback er ikke en reserveløsning — den er hovedveien i Sør-Norge.** Det bør
+  prege hvor mye arbeid som legges i den.
+- Promptens foreslåtte testadresse (Storgata 1) kan ikke brukes til omriss-testen. Den er i
+  stedet den *naturlige* null-fixturen — ekte svar, ikke konstruert.
+- E-posten til Kartverket er derfor verdt å sende: finnes en produksjonsvariant med nasjonal
+  dekning? Utkast ligger klart i `varmeplan-roof/docs/epost-kartverket-inspire.md`.
+
+### Andre målte funn
+
+- **Adresse-API-felle:** med `utkoordsys=25833` heter feltene fortsatt `lat`/`lon`, men inneholder
+  **nord/øst i meter**. Koden leser `epsg`-feltet og tolker deretter — aldri navnene.
+- Klienten (`_addrFetch` i index.html) kaller *uten* `utkoordsys` → lagrer EPSG:4258-grader.
+  Derfor tar endepunktet imot `{lat, lon}` i grader. Det er veien 005 skal bruke.
+- Matrikkel: `typeNames=app:Bygning`, **kun GML** (ingen GeoJSON). `numberReturned` står som `0`
+  selv når svaret har features — vi teller elementene selv.
+- `bygningstype`/`bygningsstatus` er SOSI-koder (`111`, `TB`), ikke tekst. Oversettelsestabell i
+  `matrikkel_wfs.py`; ukjent kode gir «Bygningstype 999» (finnes i ekte Oslo-data), aldri tomt.
+
+### Avvik fra prompten (bevisste)
+
+1. **Testadresse byttet** til Steinliveien 3, Hønefoss for omriss-veien (se over). Storgata 1
+   beholdt som null-fixture.
+2. **Omriss hentes kun for de 5 nærmeste** kandidatene, ikke alle — ett WFS-kall per kandidat, og
+   lista blir lang i tett bebyggelse (Oslo ga 7, Hønefoss 8). De øvrige har `footprint: null`.
+3. **Kandidater filtreres til radius**, ikke bare bbox — et kvadrat på ±40 m har hjørner 56 m ute.
+
+**Røyktest (live):** Steinliveien 3 → 8 kandidater, enebolig 105,2 m² / garasje 59,1 m², alle med
+INSPIRE-omriss. Storgata 1 → 7 kandidater, 0 omriss, 200. Ugyldig adresse → 404. Cache: 16 ms.
+
+**Tid:** ~45 min.
 
 ---
 

@@ -17,8 +17,17 @@ bare trenger å si «ok» eller «nei, gjør X».
 - [x] Bygningsomriss-kilde: **avgjort 24.09** — kun CC BY 4.0: INSPIRE → DOM1-avledet (004) →
       brukeren tegner. OSM (ODbL) brukes ikke. *(Gjenstår: send e-posten til Kartverket om
       INSPIRE-status — utkast i `varmeplan-roof/docs/epost-kartverket-inspire.md` etter 002.)*
-- [ ] Ble INSPIRE-WFS verifisert live under 002, eller kjørte testene på syntetisk fixture?
-      *(Claude Code fyller ut.)*
+- [x] Ble INSPIRE-WFS verifisert live under 002? **Ja — den er oppe** (0,13–1,2 s, 24.09).
+      Ingen syntetisk fixture; alle fixtures er ekte svar. **MEN:** dekningen er 60,03–70,68 °N,
+      så **Oslo er ikke dekket** (0 bygg på Storgata 1; 20 i Hønefoss). Se neste punkt.
+- [ ] **VIKTIGST NÅ — INSPIRE dekker ikke Sør-Norge under 60 °N.** Det betyr at `footprint: null`
+      blir utfallet for en stor del av landets befolkning, og at **004 sin DOM1-avledede omriss
+      ikke er en reserveløsning, men hovedveien** i Oslo/Sørlandet/store deler av Vestlandet.
+      Midlertidig valg: bygger 003–004 som planlagt og lar 004 bære omriss-byrden i sør.
+      **Spørsmål til deg:** (a) send e-posten til Kartverket (utkast klart i
+      `varmeplan-roof/docs/epost-kartverket-inspire.md`) — finnes en nasjonal variant?
+      (b) Skal vi samtidig hente pris på FKB-Bygning via Norkart/Geodata, gitt at den er den
+      eneste kilden med ekte nasjonal dekning?
 - [ ] Standard utsnitt rundt adressen: *(valg: 80 × 80 m, valg 60/80/120 i dialogen)*.
 - [ ] Skal eiendomsgrenser tegnes som standard? *(valg: ja, tynn oransje, kan skjules)*.
 - [ ] Skal DOM1-hillshade (skyggelagt høydemodell) ligge i kartbildet? *(valg: av som standard,
