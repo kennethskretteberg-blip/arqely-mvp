@@ -2577,6 +2577,10 @@ const _SHORTCUTS = [
   { group: 'Hindring markert',      keys: [_kbd('R')],             what: 'Roter-modus' },
   { group: 'Hindring markert',      keys: [_kbd('F')],             what: 'Flytt-modus' },
   { group: 'Hindring markert',      keys: ['dra sirkelen'],        what: 'Roter (45° trinn, Shift = fritt)' },
+  // 007, serien «Stedfestet tegneflate»: kart-etasjer har egne tegneregler.
+  { group: 'Kart (snø)',            keys: ['Shift'],               what: 'Tegn uten snapping til bygningsomriss' },
+  { group: 'Kart (snø)',            keys: ['Bygg'],                what: 'Slå omriss-snapping av/på (verktøylinja)' },
+  { group: 'Kart (snø)',            keys: ['⋯ på kartet'],         what: 'Bytt bygg · hent nytt utsnitt' },
   { group: 'Dra folie fra lista',   keys: ['Alt'],                 what: 'Slipp uten magnet til nabofolie/vegg' },              // :21901, :21945
   { group: 'Manuell utlegging',     keys: ['R'],                   what: 'Bytt retning (v/h)' },                                // :41171
   { group: 'Rom / vegg valgt',      keys: [_kbd('F')],             what: 'Flyttemodus' },                                       // :41159
@@ -14917,6 +14921,25 @@ function _geoRegressionTest() {
       const omrade = [{x:2100,y:-1000},{x:3000,y:-1000},{x:3000,y:-2000},{x:2100,y:-2000}];
       const d = _polyDistanceCm(omrade, kvadrat);
       check('avstand hus → område', '100 cm', Math.abs(d - 100) < 1e-6, d);
+
+      // 007: hele geo-tilstanden må overleve lagring — bg.geo, S.geo OG room.terrain.
+      const savedRooms = S.rooms;
+      try {
+        S.geo = { 77: { address: 'Testveien 1', chosen: { bygningsnr: '1', footprintWorld: kvadrat },
+                        candidates: [] } };
+        S.rooms = [{ id: 9001, name: 'Oppkjørsel', floorId: 77, points: omrade, walls: [], dims: [],
+                     terrain: { slope_pct_mean: 8.7, slope_pct_max: 14.2, aspect_deg: 212,
+                                prov: { source: 'DOM_RASTER', confidence: 0.8 },
+                                fetchedAt: '2026-09-24T10:00:00Z' },
+                     geoDistanceM: 1.0 }];
+        const data = JSON.parse(JSON.stringify(_buildSaveData()));
+        check('S.geo lagres', 'Testveien 1', data.geo && data.geo['77'] && data.geo['77'].address === 'Testveien 1',
+              data.geo && data.geo['77'] && data.geo['77'].address);
+        const r0 = (data.rooms || []).find(r => r.id === 9001);
+        check('room.terrain lagres', 8.7, r0 && r0.terrain && r0.terrain.slope_pct_mean === 8.7,
+              r0 && r0.terrain && r0.terrain.slope_pct_mean);
+        check('room.geoDistanceM lagres', 1, r0 && r0.geoDistanceM === 1, r0 && r0.geoDistanceM);
+      } finally { S.rooms = savedRooms; }
     } finally {
       S.ui.activeFloorId = savedFloor; S.shiftHeld = savedShift;
       S.snap = savedSnap; S.view = savedView;
@@ -45939,7 +45962,11 @@ function _updateEmptyState() {
   if (t) t.textContent = importMode ? 'Slipp tegningen her' : 'Hvordan vil du begynne?';
   if (s) s.textContent = importMode
     ? `PDF, bilde eller DWG/DXF — appen lager ${mc.isSnow ? 'områdene' : 'rommene'} for deg.`
-    : `Importer en tegning, tegn ${mc.isSnow ? 'området' : 'rommet'}, eller legg ${mc.roomWord()} i liste.`;
+    // 007: i snø er «Hent fra kart» som regel raskeste vei i gang — adressen gir kart med riktig
+    // målestokk uten kalibrering. Nevnes først der, ikke i innendørs (der finnes den ikke).
+    : mc.isSnow
+      ? 'Hent kart fra adressen, importer en tegning, tegn området, eller legg områder i liste.'
+      : `Importer en tegning, tegn ${mc.isSnow ? 'området' : 'rommet'}, eller legg ${mc.roomWord()} i liste.`;
   const dt = document.getElementById('ces-draw-t');
   if (dt) dt.textContent = `Tegn opp ${mc.roomWord()}`;
   const lt = document.getElementById('ces-list-t');
@@ -47987,6 +48014,9 @@ function _pdfCoverMetaRows(nextRev, prevDateStr) {
   // skriver riktig til S.project.responsible — lesingen her var aldri feil felt). Utelat raden helt
   // når den er tom, i stedet for å late som Kunde/Prosjektnr sine «—»-fallbacker gjelder likt her.
   if (proj.responsible) rows.push(['', ''], ['Prosjektert av', proj.responsible]);
+  // 007: bruker prosjektet kartdata, skal kilden stå på forsiden — samme lisenskrav som
+  // linja under hver romtegning.
+  if (Object.values(S.bgs || {}).some(_bgIsGeo)) rows.push(['Kartgrunnlag', 'Kartverket (CC BY 4.0)']);
   return rows;
 }
 
@@ -48678,7 +48708,21 @@ async function exportPDF(opts) {
           imgX = M + (pw - imgW2) / 2;             // center horizontally
         }
         doc.addImage(imgRes.url, 'JPEG', imgX, y, imgW2, imgH);
-        y += imgH + 6;
+        y += imgH + 3;
+        // 007: CC BY 4.0 KREVER kreditering der dataene vises — også på papir. Liten grå linje
+        // rett under tegningen, kun når etasjen faktisk har et kartutsnitt.
+        const _geoBg = S.bgs && S.bgs[room.floorId];
+        if (_bgIsGeo(_geoBg)) {
+          const _hentet = _geoBg.geo.fetchedAt
+            ? new Date(_geoBg.geo.fetchedAt).toLocaleDateString('nb-NO')
+            : null;
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5);
+          doc.setTextColor(130, 140, 155);
+          doc.text((_geoBg.geo.attribution || 'Kartgrunnlag \u00a9 Kartverket (CC BY 4.0)')
+            + (_hentet ? ' \u00b7 hentet ' + _hentet : ''), M, y);
+          y += 3;
+        }
+        y += 3;
       }
     } catch(e) { console.warn('PDF room image failed:', e); }
 

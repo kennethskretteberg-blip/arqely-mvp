@@ -21,6 +21,13 @@ The entire application lives in a single HTML file:
   so the app is served from `/`, not `/romtegner.html` (see `vercel.json` for the redirect).
 - **Server:** `serve-varmeplan.js` (minimal Node.js static server, port 4000)
 - **Backend:** Supabase (product catalog, project storage)
+- **Karttjeneste:** `~/Code/varmeplan-roof` (FastAPI) — Kartverket-data. Klientlaget er `_roofApi`;
+  **aldri direkte Kartverket-kall fra nettleseren** (nøkkel, CORS, caching og høflighetsgrenser
+  bor i tjenesten). Kjøres lokalt på port 4100. Se `docs/kart-lag.md`.
+- **Kartbakgrunn:** et vanlig `S.bgs`-objekt med `bg.geo` — altså ingen egen rendering-vei.
+  **Kalibrer, roter, speilvend eller skaler aldri en geo-bakgrunn**: målestokken kommer fra
+  georeferansen, og endres den, blir alle koordinater feil uten at noe ser galt ut
+  (`_bgIsGeo(bg)` er sjekken).
 - **No build step.** No npm, no bundler. Pure HTML/JS/CSS.
 - **Launch config:** `.claude/launch.json` — start with preview server name `varmeplan`
 - **Backup:** Claude config files are backed up in `docs/claude/` in the repo.

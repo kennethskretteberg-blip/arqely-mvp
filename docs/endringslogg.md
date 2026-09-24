@@ -4,6 +4,58 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kart-lag: «Hent fra kart» — stedfestet tegneflate for snø — 2026-09-24
+
+Serien «Stedfestet tegneflate» (prompt 001–007, `docs/tak-modul/prompter/`). Adresse → kartutsnitt
+fra Kartverket → tegn området rett på kartet, med riktig målestokk **uten kalibrering**. Kart-laget
+er bygget for å gjenbrukes av Tak-modulen senere. Full beskrivelse i `docs/kart-lag.md`.
+
+Ny tjeneste `~/Code/varmeplan-roof` (FastAPI, egen repo) snakker med Kartverket; nettleseren gjør
+aldri Kartverket-kall selv. Fire endepunkter: `/roof/locate`, `/roof/background`, `/roof/slope`,
+`/roof/model?level=quick`.
+
+**Kjerneideen:** et kartutsnitt med kjent utstrekning i meter *er* en kalibrert bakgrunn.
+Kartbildet installeres som et helt vanlig `S.bgs`-objekt med `widthCm = width_m × 100`, origo i
+sørvestre hjørne, låst, `_needsCalibration = false`. Ingen kartbibliotek i nettleseren.
+
+- **Koordinatregel (låst, testet):** SV-hjørne = verdens (0,0), x mot øst, **nord = minkende y**
+  (verdens-Y øker nedover), nordkant på `y = −heightCm`. `_geoToWorld`/`_worldToGeo` er eneste vei.
+- **Bevis på at målestokken stemmer:** arealet regnet fra de lagrede verdens-cm gir **105,2 m²** —
+  nøyaktig samme tall INSPIRE oppgir for bygget — og omrisset ligger 0,9 m fra kartsenteret.
+- **Bygningsomriss som vektorlag** oppå bildet (ikke brent inn): valgt bygg mørkeblått, naboer
+  grå, DOM1-avledet **stiplet** (utledet av 1 m-raster, ikke målt vektordata), ⚠ ved lav
+  confidence. Rom-tegning **snapper** til hjørner og kanter (grid → angle → geo, ingen re-grid),
+  radius 14 px — samme konstant frihånds-matta bruker. Shift eller «Bygg»-chipen slår av.
+- **Helning og avstand** per område: `/roof/slope` (debounced 600 ms) gir `room.terrain`, og
+  avstand til bygningen regnes geometrisk. Vises i rompanel, romkort og PDF, med kilde-badge.
+  **Ingen automatisk endring av W/m²** — ≥ 6 % gir kun «bratt — vurder høyere W/m²».
+- **Kreditering (CC BY 4.0-krav)** følger med fire steder: brent inn i PNG-en, i
+  `bg.geo.attribution`, i ctxbar, og i PDF (rad på forsiden + linje med hentedato under hver
+  romtegning). OpenStreetMap brukes **ikke** — ODbL passer ikke et kommersielt produkt.
+- **Geo-bakgrunner låser geometrien:** roter/speilvend/rett-opp/skaler/kalibrer er skjult for dem.
+  Alle ville brutt koblingen til EPSG:25833 og gjort koordinatene feil uten at noe ser galt ut.
+
+**Tre reelle problemer funnet underveis:**
+1. **Zoom-gulvet 0,2** er tunet for plantegninger; et 80 m-kart trenger ~0,076 og kunne verken
+   tilpasses skjermen eller zoomes ut til. Nytt `_minZoom()` senker gulvet til 0,05 **kun** på
+   kart-etasjer.
+2. **Kaldstart-ventingen** ga 21,7 s spinner når den lokale tjenesten bare var stoppet. Ventes nå
+   kun i produksjon: **21,7 s → 0,1 s**.
+3. **Kandidatene manglet omriss** i `S.geo` (005 lagret bare punktet), så vektorlaget og
+   «bytt bygg» hadde ingenting å jobbe med. Rettet.
+
+**Ny `_geoRegressionTest()` — 24 sjekker:** koordinatkonvensjonen, rundtur < 0,01 cm, at installert
+bakgrunn er ferdig kalibrert og låst, snapping (hjørne innenfor radius, ikke utenfor, kant gir
+punkt på linja, Shift/bryter slår av, ingen snapping uten kart), avstand hus→område, og at
+`bg.geo`, `S.geo` og `room.terrain` overlever lagring. Alle øvrige regresjonstester uendret.
+
+**Ikke verifisert:** PDF-generering end-to-end — jsPDF lar seg ikke konstruere i det hodeløse
+testmiljøet. Vilkårene og verdiene for begge PDF-radene er verifisert direkte i stedet.
+
+**Filer:** index.html, docs/kart-lag.md (ny), CLAUDE.md, samt hele `~/Code/varmeplan-roof`.
+
+---
+
 ## Frihånd matte: glidbart startpunkt langs veggen — og alltid en vei ut av frihånd — 2026-09-24
 
 Kenneth: «Når jeg skal legge ut en til, starter den på samme sted som den første. Kan jeg få sette

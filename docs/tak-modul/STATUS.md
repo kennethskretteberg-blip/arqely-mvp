@@ -7,8 +7,87 @@
 | 003 | **ferdig** | `b858c0d` | varmeplan-roof | `/roof/background`, 39 tester grønne · ferdig skyggerelieff fra Kartverket |
 | 004 | **ferdig** | `dd05eb1` | varmeplan-roof | `/roof/slope` + `/roof/model` + DOM1-omriss, 58 tester grønne |
 | 005 | **ferdig** | `d40d3e5` | arqely-mvp | «Hent fra kart», bg.geo, ny `_geoRegressionTest` (14 sjekker) |
-| 006 | ikke startet | | arqely-mvp | |
-| 007 | ikke startet | | arqely-mvp | |
+| 006 | **ferdig** | `e93e612` | arqely-mvp | vektorlag, snapping, helning + avstand |
+| 007 | **ferdig** | (denne) | arqely-mvp | PDF-kreditering, hurtigtaster, dokumentasjon |
+
+---
+
+# TIL KENNETH — prioritert
+
+**Serien er ferdig kjørt.** Alt virker mot ekte Kartverket-data lokalt. Under er det som gjenstår,
+sortert etter hvor mye det blokkerer.
+
+## 1. Blokkerer produksjon (krever dine hender)
+
+- [ ] **Fly-deploy av `varmeplan-roof`.** Alt er forberedt (`fly.toml`, `Dockerfile`, README):
+      `fly auth login` → `fly launch --no-deploy --copy-config --name varmeplan-roof` →
+      `fly secrets set ROOF_API_KEY=<lang tilfeldig streng>` → `fly deploy`.
+      **Dockerfile er aldri bygget lokalt** (Docker mangler på maskinen) — Fly bygger remote, men
+      første deploy er også første gang den kjøres.
+- [ ] **Nøkkelen inn i klienten.** Midlertidig: `localStorage varmeplan_roof_key` /
+      `window.VARMEPLAN_ROOF_KEY`. Alternativ: kolonne på `organizations` i Supabase, så den
+      følger org-en. Ditt valg.
+
+## 2. Påvirker hvor godt produktet faktisk virker
+
+- [ ] **INSPIRE dekker ikke Norge sør for ~60 °N** (målt: Oslo 0 bygg, Hønefoss 20). Det gjør
+      DOM1-avledet omriss til **hovedveien** i Oslo/Sørlandet/store deler av Vestlandet — og det
+      omrisset er ~26 % større enn veggomrisset (takutstikk) med IoU 0,724 mot fasit.
+      → **Send e-posten** (`varmeplan-roof/docs/epost-kartverket-inspire.md`): finnes en nasjonal
+      variant? Vurder samtidig pris på FKB-Bygning via Norkart/Geodata.
+- [ ] **Helningsregelen er din fagvurdering.** I dag: ≥ 6 % gir kun teksten «bratt — vurder høyere
+      W/m²», ingen automatisk endring. Skal 300 → 350 W/m² foreslås over en viss helning?
+- [ ] **DOM1-omriss: tak vs. bakke.** For takvarme er det ~riktig (det ER taket); for et
+      bakkeareal er det for stort. Skal vi krympe det ~0,4 m når det brukes som bakkeareal?
+- [ ] **400 m²-terskelen** for «kan inneholde vegetasjon» er tunet for eneboliger — i Oslo sentrum
+      fikk alle omriss ⚠ fordi byggene der faktisk er 900–1600 m². Skal terskelen følge
+      `bygningstype`?
+
+## 3. Bør sjekkes, men blokkerer ingenting
+
+- [ ] **Åpne én PDF** og se at 6,5 pt-krediteringslinja under romtegningen er lesbar. Jeg kunne
+      ikke generere PDF i testmiljøet (jsPDF lar seg ikke konstruere hodeløst) — verdiene er
+      verifisert, men ikke det trykte resultatet.
+- [ ] **`ROOF_USER_AGENT`** har en placeholder-e-post. Kartverket kontakter den adressen før de
+      blokkerer, så feil adresse = blokkert uten forvarsel.
+- [ ] Standard utsnitt er **80 m** (valg 60/80/120), eiendomsgrenser **på**, terrengskygge **av**
+      (koster ~1,6 s og er ikke cachet). Si fra om du vil ha andre standarder.
+- [ ] **Eiendomsgrenser finnes kun som raster** i kartbildet — det går ikke å snappe til dem.
+      Skal vi hente Teig-WFS som vektor (ville blitt «003b»)?
+- [ ] **«Bytt bygg» ligger i ⋯-menyen**, ikke som klikk i lerretet. Hit-test-kaskaden er ømfintlig
+      (rom tegnes oppå bygget) og et nytt lag der er reell regresjonsrisiko. `_geoHitCandidate`
+      finnes og er testet hvis du vil ha klikket likevel.
+- [ ] **`mypy` er utelatt** i `varmeplan-roof` (lumelo har det). `ruff` alene holder foreløpig.
+
+## Hvor ting ligger
+
+| Hva | Sti |
+|---|---|
+| Klient-dokumentasjon | `docs/kart-lag.md` |
+| RoofModel-kontrakt (til Tak-editoren) | `~/Code/varmeplan-roof/docs/roof-contract.md` |
+| Alle målinger mot Kartverket | `~/Code/varmeplan-roof/docs/datakilder.md` |
+| Tjenestens README (endepunkt, cache, deploy) | `~/Code/varmeplan-roof/docs/README.md` |
+| Åpne spørsmål med mine midlertidige valg | `docs/tak-modul/SPØRSMÅL.md` |
+
+---
+
+## 007 — PDF-kreditering, hurtigtaster, dokumentasjon · 24.09.2026
+
+**Gjort:** Kreditering i PDF (rad på forsiden + linje med hentedato under hver romtegning),
+`_SHORTCUTS`-gruppa «Kart (snø)», tom-tilstanden for snø nevner «Hent fra kart» først,
+`_geoRegressionTest` utvidet til **24 sjekker** (inkl. lagre→gjenopprett av `bg.geo`, `S.geo` og
+`room.terrain`), og dokumentasjonen: `docs/kart-lag.md` (ny), to avsnitt i `CLAUDE.md`, og
+endepunkt-/cache-/fixture-dokumentasjon i `varmeplan-roof/docs/README.md`.
+
+**Ikke verifisert:** PDF-generering end-to-end. **jsPDF lar seg ikke konstruere i det hodeløse
+testmiljøet** (`new jsPDF(...)` kaster «Cannot read properties of undefined»), så hverken
+krediteringen eller helningsradene kunne måles på papir. Jeg verifiserte i stedet vilkårene og de
+faktiske strengene direkte: forsideraden blir `['Kartgrunnlag', 'Kartverket (CC BY 4.0)']`,
+romside-linja blir `Kartgrunnlag © Kartverket (CC BY 4.0) · hentet 24.9.2026`, og helningsradene
+får verdiene `15,7 %` / `37 %` / `241°` / `1,0 m`. **Kenneth bør åpne én PDF og se at
+6,5 pt-linja er lesbar** — det er det eneste som gjenstår å bekrefte.
+
+**Tid:** ~30 min.
 
 ---
 

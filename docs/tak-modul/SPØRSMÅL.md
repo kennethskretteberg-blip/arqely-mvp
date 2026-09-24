@@ -35,6 +35,22 @@ bare trenger å si «ok» eller «nei, gjør X».
 
 ## Oppdaget underveis
 
+### Fra 005–007
+
+- [ ] **PDF-krediteringen er ikke sett på papir.** jsPDF lar seg ikke konstruere i testmiljøet, så
+      jeg verifiserte strengene og vilkårene i stedet. Åpne én PDF og se at 6,5 pt-linja under
+      romtegningen er lesbar.
+- [ ] **Eiendomsgrenser er kun raster** (i kartbildet) — det går ikke å snappe til dem. Vil du ha
+      dem som vektor, blir det en «003b» mot Teig-WFS. Midlertidig valg: raster holder.
+- [ ] **«Bytt bygg» ligger i ⋯-menyen**, ikke som klikk i lerretet. Midlertidig valg: menyen —
+      hit-test-kaskaden er ømfintlig og et nytt lag der er reell regresjonsrisiko.
+      `_geoHitCandidate` finnes og er testet hvis du vil ha klikket.
+- [x] **Standard utsnitt:** 80 m, med valg 60/80/120 i dialogen. Som foreslått.
+- [x] **Eiendomsgrenser som standard:** ja, på. (Tegnes av Kartverkets egen WMS, grønt — ikke
+      oransje som antydet; det er deres farge, og å overstyre den krever egen vektorkilde.)
+- [x] **Terrengskygge:** av som standard. Målt til ~1,6 s ekstra ved 1600 px, og laget er ikke
+      cachet — antakelsen «1–3 s» i denne lista stemte.
+
 ### Fra 004
 
 - [ ] **400 m²-terskelen for DOM1-omriss er tunet for eneboliger.** I Oslo sentrum fikk ALLE
