@@ -10627,6 +10627,102 @@ function _matFreeStartFor(room, prod, axis) {
   return { x: found.pos, y: bottom ? Math.max(hi - shortM, mid) : Math.min(lo + shortM, mid) };
 }
 
+// ─── STARTFASE: gli innsettingspunktet langs valgt vegg (Kenneth 24.09.2026) ─────────────────
+// «Når jeg skal legge ut en til, starter den på samme sted som den første. Kan jeg få sette inn
+// startpunkt der jeg selv ønsker? Følg retningsvelgeren, men la bruker gli innsettingspunktet på
+// den veggen som er valgt.» STEG 0.3 målte at matte 2 fikk NØYAKTIG samme startpunkt (30, 595)
+// som matte 1 og ble stoppet av overlappvakten. _matFreeStartFor er uendret — den gir fortsatt
+// hjørnet, og brukes både som utgangspunkt her og av regresjonstesten.
+//
+// Hjørnet (retningsvelgeren) har to vegger. Markøren følger musa projisert på DEN av de to som er
+// nærmest, med samme marginer som _matFreeStartFor. Veggen bestemmer første akse: bunn/topp → 'v',
+// venstre/høyre → 'h'.
+function _matFreeStartSlide(room, prod, mouseWp) {
+  const { NET, cc } = _matFreeConsts(prod);
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const marginCm = (prod?.min_wall_margin_mm ?? 50) / 10;
+  const shortM = Math.max(cc / 2, marginCm), longM = marginCm;
+  const { left, bottom } = _matCornerFlags();
+  // Hjørnet gir to kandidat-vegger. 'v' = matta går loddrett fra en vannrett vegg (bunn/topp),
+  // 'h' = vannrett fra en loddrett vegg (venstre/høyre) — samme akse-betydning som _matFreeStartFor.
+  const corner = _matFreeStartFor(room, prod, 'v');
+  const cornerH = _matFreeStartFor(room, prod, 'h');
+  if (!mouseWp) return { start: corner, axis: 'v', wall: bottom ? 'bottom' : 'top', fromCorner: 0, corner };
+  // Avstand fra musa til hver av de to veggene (linja markøren kan gli langs).
+  const dToHoriz = Math.abs(mouseWp.y - corner.y);     // vannrett vegg → glir i x
+  const dToVert  = Math.abs(mouseWp.x - cornerH.x);    // loddrett vegg → glir i y
+  const useHoriz = dToHoriz <= dToVert;
+  const axis = useHoriz ? 'v' : 'h';
+  const base = useHoriz ? corner : cornerH;
+  // Klem til polygonets faktiske intervall på den veggen (samme primitiv _matFreeStartFor bruker),
+  // med kortside-marginen i begge ender — markøren kan aldri gli utenfor rommet.
+  const scanKind = useHoriz ? 'x' : 'y';
+  const scanPos = useHoriz ? base.y : base.x;
+  let lo = useHoriz ? minX : minY, hi = useHoriz ? maxX : maxY;
+  try {
+    const ivs = clipScanlineToPolygon(scanKind, scanPos, room.points);
+    if (ivs && ivs.length) { const iv = ivs.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a)); lo = iv[0]; hi = iv[1]; }
+  } catch (e) { /* bbox-fallback, som _matFreeStartFor */ }
+  // Mesh-bredden må få plass innenfor intervallet: markørens senter kan ikke nærmere enn NET/2+longM.
+  const halfLane = NET / 2 + longM;
+  const aLo = lo + Math.max(shortM, halfLane), aHi = hi - Math.max(shortM, halfLane);
+  const cornerAlong = useHoriz ? base.x : base.y;
+  let along = useHoriz ? mouseWp.x : mouseWp.y;
+  along = Math.max(Math.min(aLo, aHi), Math.min(Math.max(aLo, aHi), along));
+  // Snap: (a) eksisterende mattekant + gap, (b) 10 cm-raster, (c) hjørnet selv. Nærmeste vinner.
+  const SNAP_PX = 14 / Math.max(0.0001, S.view.zoom * BASE_SCALE);   // ~14 skjermpiksler i cm
+  const cands = [cornerAlong, Math.round(along / 10) * 10];
+  for (const edge of _matFreeExistingEdges(room, prod, useHoriz)) cands.push(edge);
+  let best = along, bestD = Infinity;
+  for (const c of cands) {
+    if (c < Math.min(aLo, aHi) - 0.01 || c > Math.max(aLo, aHi) + 0.01) continue;
+    const d = Math.abs(c - along);
+    if (d < bestD && d <= SNAP_PX) { bestD = d; best = c; }
+  }
+  along = best;
+  const start = useHoriz ? { x: along, y: base.y } : { x: base.x, y: along };
+  return { start, axis, wall: useHoriz ? (bottom ? 'bottom' : 'top') : (left ? 'left' : 'right'),
+    fromCorner: Math.abs(along - cornerAlong), corner, alongLo: Math.min(aLo, aHi), alongHi: Math.max(aLo, aHi) };
+}
+// Kantene til matter som ALT ligger i rommet, projisert på gli-aksen, + gap — så matte 2 kan
+// snappe rett inntil matte 1 (STEG 0.3: mesh-kant + gapCm er det nye standardpunktet).
+function _matFreeExistingEdges(room, prod, useHoriz) {
+  const { NET } = _matFreeConsts(prod);
+  const gapCm = _roomModuleType(room.id) === 'snow' ? 10 : 0;
+  const out = [];
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== room.id) continue;
+    for (const r of _matFreeDeriveRuns(mp)) {
+      const R = _matFreeLaneRectWorld(r, _matFreeConsts(_matFreeProdOf(mp) || prod).NET);
+      const lo = useHoriz ? R.x0 : R.y0, hi = useHoriz ? R.x1 : R.y1;
+      // Senterlinja for en NY bane som legger seg inntil denne, på hver side.
+      out.push(hi + gapCm + NET / 2);
+      out.push(lo - gapCm - NET / 2);
+    }
+  }
+  return out;
+}
+// Standardpunkt uten at brukeren har rørt musa: første ledige plass etter eksisterende matter
+// langs den valgte veggen. Ingen matter → hjørnet, som i dag.
+function _matFreeDefaultStart(room, prod) {
+  const base = _matFreeStartSlide(room, prod, null);
+  const edges = _matFreeExistingEdges(room, prod, true);
+  if (!edges.length) return base;
+  const cornerAlong = base.corner.x;
+  // Velg kanten som ligger lengst fra hjørnet i «innover»-retning, men fortsatt innenfor rommet.
+  const slide = _matFreeStartSlide(room, prod, { x: cornerAlong, y: base.corner.y });
+  const lo = slide.alongLo ?? cornerAlong, hi = slide.alongHi ?? cornerAlong;
+  const { left } = _matCornerFlags();
+  let pick = cornerAlong, bestD = -Infinity;
+  for (const e of edges) {
+    if (e < lo - 0.01 || e > hi + 0.01) continue;
+    const d = left ? (e - cornerAlong) : (cornerAlong - e);
+    if (d > 0 && d > bestD) { bestD = d; pick = e; }
+  }
+  return _matFreeStartSlide(room, prod, { x: pick, y: base.corner.y });
+}
+
 // Start frihånds-modus for et produkt: start i rommets nedre-venstre indre hjørne (+margin).
 function _matFreeStart(productId) {
   const roomId = S.ui.selectedRoomId;
@@ -10636,19 +10732,26 @@ function _matFreeStart(productId) {
   // Start i nedre-venstre hjørne. Plasseringen avhenger av første banes retning (settes
   // på nytt ved første mus-bevegelse/klikk): ½ cc fra vegg mot mattas KORTSIDE (bane-enden),
   // ≥5 cm fra vegg mot mattas LANGSIDE (den 50 cm brede kanten).
-  const start = _matFreeStartFor(room, prod, 'v');   // foreløpig (loddrett); oppdateres av ghost
+  // Kenneth 24.09.2026: standardpunktet er nå første LEDIGE plass langs veggen (etter eksisterende
+  // matter), ikke alltid hjørnet — så matte 2 ikke lenger starter oppå matte 1 (STEG 0.3).
+  const slide = _matFreeDefaultStart(room, prod);
+  const start = slide.start;
   // Gap mellom baner: snø-standard 10 cm (min 5), innendørs 0 — samme regel som gap-panelet
   // (openMatGapPanel/setMatGap), så ghosten ikke endrer figur ved commit.
   const snowGap = _roomModuleType(roomId) === 'snow';
   const startGapCm = snowGap ? 10 : 0;
-  _matFree = { roomId, productId, start, moves: [], ghost: null, gapCm: startGapCm, offX: 0, offY: 0 };
+  _matFree = { roomId, productId, start, moves: [], ghost: null, gapCm: startGapCm, offX: 0, offY: 0,
+    // Ny STARTFASE: brukeren glir innsettingspunktet langs veggen og klikker for å låse det.
+    // Går over til 'draw' ved første klikk — resten av tegneflyten er uendret.
+    phase: 'start', startAxis: slide.axis, startWall: slide.wall, startFromCorner: slide.fromCorner,
+    lastReject: null };
   S.ui.drawMode = 'mat-freehand'; S.ui.selectedMatId = null;
   // Sikre at canvas-backing er i takt med visningsstørrelsen før tegning, så STOPP-treffet
   // (skjerm↔verden) alltid stemmer gjennom hele frihånds-økta.
   if (typeof resizeCanvas === 'function') resizeCanvas();
   if (canvas) canvas.style.cursor = 'crosshair';
   if (typeof updMode === 'function') updMode();
-  if (typeof _showToast === 'function') _showToast('Frihånd: klikk der matta snur/stopper. Klikk det grønne stopp-punktet i enden for å avslutte.', 'info');
+  if (typeof _showToast === 'function') _showToast('Frihånd: velg startpunkt langs veggen, klikk. Klikk så der matta snur/stopper — det grønne stopp-punktet avslutter.', 'info');
   render();
 }
 // STEG 3 («Én mattemotor for alle», Kenneth 19.08.2026): vakt mot regelbrudd ved commit — samme
@@ -10836,8 +10939,27 @@ function _matFreeSliceMoves(mp, fromCm, toCm) {
   }
   return start ? { start, moves } : null;
 }
+// Kenneth 24.09.2026 («Den henger seg litt opp … jeg kommer ikke ut av menyen»): STEG 0.3 målte
+// at årsaken han traff var en AVVIST COMMIT (overlappvakten stoppet matte 2, som startet oppå
+// matte 1) — ikke en kastet feil. Modusen beholdes fortsatt bevisst ved avvisning (DEL B FEIL 4:
+// tegningen skal ikke forsvinne), men grunnen er nå SYNLIG og varig (ctxbar + hintlinje), ikke
+// bare en toast som forsvinner. I tillegg: en UVENTET feil i commit-veien skal aldri kunne
+// etterlate brukeren i modusen — derfor try/finally rundt hele committen.
 function _matFreeExit(commit) {
   if (!S.matPaths) S.matPaths = [];   // eldre prosjekt lastet uten feltet
+  try {
+    return _matFreeExitInner(commit);
+  } catch (err) {
+    console.error('_matFreeExit: uventet feil i commit-veien — frihånd nullstilles', err);
+    if (typeof _showToast === 'function') _showToast('Frihånd avbrutt: intern feil — tegningen er forkastet', 'error');
+    _matFree = null; S.ui.drawMode = null; if (canvas) canvas.style.cursor = 'default';
+    if (typeof updMode === 'function') updMode();
+    if (typeof renderSidebar === 'function') renderSidebar();
+    if (typeof updateCtxBar === 'function') updateCtxBar();
+    render();
+  }
+}
+function _matFreeExitInner(commit) {
   if (_matFree && commit && _matFree.moves.length >= 1) {
     const mpNew = { id: S.counters.nextMatPathId++, roomId: _matFree.roomId, productId: _matFree.productId,
       start: { ..._matFree.start }, moves: _matFree.moves.map(m => ({ ...m })), gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 };
@@ -10855,6 +10977,12 @@ function _matFreeExit(commit) {
     if (!guardResult.ok) {
       console.error('_matFreeExit: frihånds-matte brøt regelverket — avbrutt', { mpNew, reason: guardResult.reason });
       if (typeof _showToast === 'function') _showToast('Frihånd avbrutt: ' + guardResult.reason, 'error');
+      // Kenneth 24.09.2026: varig, synlig grunn — toasten forsvinner, dette gjør den ikke.
+      // Leses av hintlinja (updMode) og ctxbar-statusen, og nullstilles så snart brukeren gjør
+      // noe som kan endre utfallet (angrer en bane, eller setter i gang et nytt forsøk).
+      _matFree.lastReject = guardResult.reason || 'ugyldig plassering';
+      if (typeof updMode === 'function') updMode();
+      if (typeof updateCtxBar === 'function') updateCtxBar();
       // DEL B FEIL 4 (Kenneth 19.08.2026, «frihånd starter utenfor rommet» — «trykker jeg stopp,
       // skjer det ikke stort»): FØR denne fiksen nullstilte en avvist commit HELE tegningen
       // (_matFree=null, drawMode=null) — alt Kenneth hadde tegnet forsvant tyst, og «ikke stort
@@ -10921,7 +11049,15 @@ function _matFreeExit(commit) {
   if (typeof _matPathPanel === 'function') _matPathPanel();
   render();
 }
-function _matFreeUndoMove() { if (_matFree && _matFree.moves.length) { _matFree.moves.pop(); render(); } }
+function _matFreeUndoMove() {
+  if (_matFree && _matFree.moves.length) {
+    _matFree.moves.pop();
+    _matFree.lastReject = null;   // ny sjanse — fjern ⚠-statusen fra forrige forsøk
+    if (typeof updMode === 'function') updMode();
+    if (typeof updateCtxBar === 'function') updateCtxBar();
+    render();
+  }
+}
 
 // ─── FRIHÅND-REGRESJONSTEST (STEG 3, «frihånd starter utenfor rommet», Kenneth 19.08.2026) ─────
 // «1108 Garderobe» — låst fasit for FEIL 1-4: bbox-hjørnet på et uregelmessig rom kan ligge utenfor
@@ -12217,7 +12353,13 @@ function _drawMatPathObj(mp, active) {
   // _stripLabelGeom), så hitMatLabel/drawMatLabelHandles/resetMatLabel fortsatt virker som før.
   if (!active) {
     const cat2 = cat || _matFreeCatalog(mp);
-    if (cat2.product) {
+    // Kenneth 24.09.2026 («ønsker også at mattene får normal label slik de andre får»): STEG 0.1
+    // målte at cat2.product ALDRI er null når produktraden finnes (tooShort-grenen faller allerede
+    // tilbake til cands[0] || fam) — labelen forsvant altså ikke av DEN grunnen. Men manglet
+    // produktraden helt (slettet/inaktiv rad), hoppet hele blokka stille over. Faller nå tilbake
+    // til familieraden, og i verste fall en navnløs plassholder — labelen skal ALLTID vise noe.
+    const _labProd = cat2.product || cat2.fam || { name: 'Matte' };
+    if (_labProd) {
       // Mat-bbox (verdensromkoordinater) for auto-plassering/klamping — samme bane-utstrekning
       // som tidligere ble brukt kun til default-senter.
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -12233,7 +12375,7 @@ function _drawMatPathObj(mp, active) {
       // DEL A STEG 2 (Kenneth 19.08.2026): flere ruller (cat2.segments) → navnet skal vise ALLE,
       // gruppert på produkt («2 × EcoMat 0,5x26m»), ikke bare det første. Samme mønster som toasten
       // i _matFreeExit og _matPathPanel over.
-      let name = cat2.product.name;
+      let name = _labProd.name || "Matte";
       if (cat2.segments && cat2.segments.length > 1) {
         const byProd = {};
         for (const seg of cat2.segments) {
@@ -12246,7 +12388,7 @@ function _drawMatPathObj(mp, active) {
       // Linje 2 (som kabel/rektangulær matte, Kenneths beslutning): flateeffekt · effekt pr BTA ·
       // CC — delt bygger (_matLabelInfoLine) med rektangulær matte. «Tegnet X m · rull Y m» er
       // lengdeinformasjon og hører hjemme i materiallista.
-      const infoLine = _matLabelInfoLine(mp.roomId, cat2.product);
+      const infoLine = _matLabelInfoLine(mp.roomId, _labProd);
 
       // DEL A (Kenneth 21.08.2026): «labelen til hver matte skal ha samme farge som matta si».
       // _matPathSegColor(mp,0) — segIdx 0, siden et committet Modell A-objekt alltid har nøyaktig
@@ -12366,8 +12508,55 @@ function resetMatLabel() {
 function drawMatPaths() {
   _matLabelBounds = {}; _matLabelGeom = {};   // rebuild per render (v2)
   for (const mp of (S.matPaths || [])) _drawMatPathObj(mp, false);
-  if (_matFree) _drawMatPathObj(_matFree, true);
+  // Kenneth 24.09.2026: i STARTFASEN finnes ingen bane ennå — tegn startmarkøren i stedet for
+  // ghosten, i samme pass (samme sted ghosten ellers ville blitt tegnet).
+  if (_matFree && _matFree.phase === 'start') _drawMatFreeStartMarker(_matFree);
+  else if (_matFree) _drawMatPathObj(_matFree, true);
   drawMatLabelHandles();   // v2: håndtak for låst matte-label
+}
+// Startmarkør: mesh-bredden (NET) × en kort strek i produktets farge, dempet, med avstand fra
+// hjørnet og en kort instruksjon. Viser NØYAKTIG bredden matta får, så brukeren ser om den får
+// plass ved siden av en eksisterende matte før han klikker.
+function _drawMatFreeStartMarker(mf) {
+  const room = S.rooms.find(r => r.id === mf.roomId), prod = _matFreeProdOf(mf);
+  if (!room || !prod || !mf.start) return;
+  const { NET } = _matFreeConsts(prod);
+  const axis = mf.startAxis || 'v';
+  // Markøren står PÅ veggen: bredden på tvers av første banes retning, en kort stubb langs den.
+  const half = NET / 2, stub = Math.max(30, NET * 0.7);
+  const a = mf.start;
+  const rect = axis === 'v'
+    ? { x0: a.x - half, x1: a.x + half, y0: Math.min(a.y, a.y - stub), y1: Math.max(a.y, a.y - stub) }
+    : { x0: Math.min(a.x, a.x + stub), x1: Math.max(a.x, a.x + stub), y0: a.y - half, y1: a.y + half };
+  const p0 = w2s(rect.x0, rect.y0), p1 = w2s(rect.x1, rect.y1);
+  const x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y);
+  const w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
+  const col = (typeof _matPathSegColor === 'function' ? _matPathSegColor(mf, 0) : null) || '#22d3ee';
+  ctx.save();
+  ctx.globalAlpha = 0.45;
+  ctx.fillStyle = col; ctx.fillRect(x, y, w, h);
+  ctx.globalAlpha = 0.95;
+  ctx.setLineDash([6, 4]); ctx.lineWidth = 2; ctx.strokeStyle = col;
+  ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+  // Selve innsettingspunktet
+  const sp = w2s(a.x, a.y);
+  ctx.beginPath(); ctx.arc(sp.x, sp.y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+  // Avstand fra hjørnet + instruksjon
+  if (S.view.zoom > 0.25) {
+    const txt = `fra hjørne: ${Math.round(mf.startFromCorner || 0)} cm`;
+    const hint = 'Klikk for å sette startpunkt';
+    ctx.font = `bold 11px ${CANVAS_NUM_FONT}`;
+    const tw = Math.max(ctx.measureText(txt).width, ctx.measureText(hint).width);
+    const bx = sp.x + 12, by = sp.y - 30;
+    ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(bx, by, tw + 12, 32);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(txt, bx + 6, by + 10);
+    ctx.font = '10px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillText(hint, bx + 6, by + 23);
+  }
+  ctx.restore();
 }
 
 function showVfPlacePanel(familyName, categoryId) {
@@ -37559,7 +37748,17 @@ function updHint() {
   // FEIL 2 (Kenneth 19.08.2026, \u00abfrih\u00e5nd kan ikke avsluttes med Enter\u00bb): synlig hint mens man
   // tegner, s\u00e5 de nye tastene faktisk oppdages \u2014 ikke bare stopp-punktet/dobbeltklikk.
   else if(m==='mat-freehand') {
-    h = (typeof _matFree !== 'undefined' && _matFree && _matFree.moves && _matFree.moves.length >= 1)
+    const _mf = (typeof _matFree !== 'undefined') ? _matFree : null;
+    // Kenneth 24.09.2026: ble siste commit-fors\u00f8k AVVIST, skal hintlinja si HVORFOR \u2014 ikke
+    // fortsette \u00e5 si \u00abEnter = ferdig\u00bb, som var nettopp det som fikk det til \u00e5 f\u00f8les som at appen
+    // hang (brukeren trodde matta var lagt, og alt annet virket d\u00f8dt).
+    if (_mf && _mf.lastReject) {
+      h = '\u26a0 Kan ikke lagres: ' + _mf.lastReject + ' \u00b7 Backspace = angre siste \u00b7 Esc = avbryt';
+    }
+    else if (_mf && _mf.phase === 'start') {
+      h = 'Velg startpunkt langs veggen, klikk for \u00e5 sette det \u00b7 Esc avbryt';
+    }
+    else h = (_mf && _mf.moves && _mf.moves.length >= 1)
       ? 'Enter = ferdig \u00b7 Esc = avbryt \u00b7 dobbeltklikk = ferdig'
       : 'Klikk for \u00e5 starte f\u00f8rste bane \u00b7 Esc avbryt';
   }
@@ -39508,6 +39707,20 @@ canvas.addEventListener('mousedown', e=>{
   // (dobbeltklikkets første klikk la til en bane → angre den før commit).
   if (S.ui.drawMode === 'mat-freehand' && _matFree) {
     if (e.button !== 0) return;
+    // Kenneth 24.09.2026, STARTFASE: første klikk LÅSER startpunktet og går over til tegning.
+    // Ingen bane legges av dette klikket — det er nettopp poenget («sett inn startpunkt der jeg
+    // selv ønsker»), og det holder start-forankringen unna hjørne-overskrivingen etterpå.
+    if (_matFree.phase === 'start') {
+      const room = S.rooms.find(r => r.id === _matFree.roomId), prod = _matFreeProdOf(_matFree);
+      if (room && prod) {
+        const sl = _matFreeStartSlide(room, prod, getWorldPos(e));
+        _matFree.start = sl.start; _matFree.startAxis = sl.axis;
+        _matFree.startWall = sl.wall; _matFree.startFromCorner = sl.fromCorner;
+      }
+      _matFree.phase = 'draw'; _matFree.ghost = null;
+      if (typeof updMode === 'function') updMode();
+      updateCtxBar(); render(); e.preventDefault(); return;
+    }
     const now = performance.now();
     // Klikk på det grønne STOPP-punktet i fri ende → avslutt (ghost blir IKKE med).
     // FEIL 2 (Kenneth 19.08.2026): treffsonen er DELT med ikonets faktiske tegnede radius
@@ -39525,8 +39738,38 @@ canvas.addEventListener('mousedown', e=>{
       e.preventDefault(); return;
     }
     const wp = getWorldPos(e);
+    // Kenneth 24.09.2026 («jeg ønsker å trykke på rommet slik at jeg får valgt legg til produkt»):
+    // klikk UTENFOR frihånds-rommet er en utvei, ikke et forsøk på å tegne enda en bane.
+    //  - ingen baner ennå → avbryt (som Escape) og la klikket gå videre til det man traff
+    //  - gyldig bane → commit (som Enter) og la klikket gå videre
+    //  - ugyldig bane → behold modus, men vis ⚠-grunnen (aldri stille)
+    {
+      const _fr = S.rooms.find(r => r.id === _matFree.roomId);
+      const _inside = _fr && _fr.points && _fr.points.length >= 3 && ptInPoly(wp.x, wp.y, _fr.points);
+      if (!_inside) {
+        if (!_matFree.moves.length) { _matFreeExit(false); }
+        else {
+          const _chk = _matPathMoveValid({ id: -1, roomId: _matFree.roomId, productId: _matFree.productId,
+            start: { ..._matFree.start }, moves: _matFree.moves.map(x => ({ ...x })),
+            gapCm: _matFree.gapCm || 0, centered: false, offX: 0, offY: 0 });
+          if (_chk.ok) { _matFree.ghost = null; _matFreeExit(true); }
+          else {
+            _matFree.lastReject = _chk.reason || 'ugyldig plassering';
+            if (typeof _showToast === 'function') _showToast('Kan ikke lagres: ' + _matFree.lastReject, 'error');
+            if (typeof updMode === 'function') updMode();
+            updateCtxBar(); render();
+            e.preventDefault(); return;   // behold modus — men brukeren VET nå hvorfor
+          }
+        }
+        // Modusen er ute: la klikket falle gjennom til vanlig valg (rom/objekt) under.
+      }
+    }
+    if (S.ui.drawMode !== 'mat-freehand' || !_matFree) { /* frihånd avsluttet over — fall gjennom */ }
+    else {
     let m = _matFreeCandidate(_matFree, wp);
-    if (_matFree.moves.length === 0) {   // forankre start ut fra første banes retning
+    // Kenneth 24.09.2026: samme vakt som i mousemove — et brukervalgt startpunkt (phase 'draw')
+    // skal ALDRI overskrives av hjørne-forankringen.
+    if (_matFree.moves.length === 0 && _matFree.phase !== 'draw') {   // forankre start ut fra første banes retning
       const room = S.rooms.find(r => r.id === _matFree.roomId), prod = _matFreeProdOf(_matFree);
       if (room && prod) { _matFree.start = _matFreeStartFor(room, prod, m.axis); m = _matFreeCandidate(_matFree, wp); }
     }
@@ -39548,9 +39791,15 @@ canvas.addEventListener('mousedown', e=>{
     if (_matFree.moves.length >= 1 && m.len <= 0) {
       _matFree.ghost = null; _matFreeExit(true); e.preventDefault(); return;
     }
-    if (m.len > 0) { _matFree.moves.push(m); _matFree.ghost = null; if (typeof updHint === 'function') updHint(); render(); }
+    if (m.len > 0) {
+      _matFree.moves.push(m); _matFree.ghost = null;
+      _matFree.lastReject = null;   // nytt forsøk — fjern ⚠ fra forrige avvisning
+      if (typeof updHint === 'function') updHint();
+      updateCtxBar(); render();
+    }
     _matFreeLastClick = { t: now, sx: e.clientX, sy: e.clientY };
     e.preventDefault(); return;
+    }
   }
   // Presentasjonsmodus: kun panorering (ingen redigering). Klikk-for-detalj
   // håndteres i mouseup (skiller tap fra drag).
@@ -41007,10 +41256,24 @@ canvas.addEventListener('mousemove', e=>{
   // Frihånds-matte: ghost følger musa (vannrett/loddrett ut fra retning, snappet raster).
   if (S.ui.drawMode === 'mat-freehand' && _matFree) {
     const wp = getWorldPos(e);
+    // Kenneth 24.09.2026, STARTFASE: musa glir innsettingspunktet langs den nærmeste av hjørnets
+    // to vegger. Ingen ghost-bane ennå — kun startmarkøren.
+    if (_matFree.phase === 'start') {
+      const room = S.rooms.find(r => r.id === _matFree.roomId), prod = _matFreeProdOf(_matFree);
+      if (room && prod) {
+        const sl = _matFreeStartSlide(room, prod, wp);
+        _matFree.start = sl.start; _matFree.startAxis = sl.axis;
+        _matFree.startWall = sl.wall; _matFree.startFromCorner = sl.fromCorner;
+      }
+      _matFree.ghost = null;
+      render(); return;
+    }
     let cand = _matFreeCandidate(_matFree, wp);
     // Første bane: forankre start ut fra retningen (½ cc kortside / 5 cm langside), så mattas
     // start alltid ligger riktig i hjørnet — så beregn kandidaten på nytt fra det nye startet.
-    if (_matFree.moves.length === 0) {
+    // Kenneth 24.09.2026: gjelder KUN når brukeren ikke selv har satt startpunktet (phase 'draw'
+    // betyr at det er låst av et klikk i startfasen) — ellers ville hjørnet overskrevet valget.
+    if (_matFree.moves.length === 0 && _matFree.phase !== 'draw') {
       const room = S.rooms.find(r => r.id === _matFree.roomId), prod = _matFreeProdOf(_matFree);
       if (room && prod) { _matFree.start = _matFreeStartFor(room, prod, cand.axis); cand = _matFreeCandidate(_matFree, wp); }
     }
@@ -43271,6 +43534,26 @@ function _ctxBarTransient() {
 function _ctxBarItems() {
   const ui = S.ui;
   const moduleType = _activeModuleType();
+
+  // Kenneth 24.09.2026 («kommer ikke ut av menyen, topbar står bare og viser frihåndsmatte»):
+  // varig, synlig status MED utveier mens frihånd pågår — ikke bare en toast som forsvinner.
+  // Ligger først, så den aldri skjules av et annet valg.
+  if (ui.drawMode === 'mat-freehand' && typeof _matFree !== 'undefined' && _matFree) {
+    const prodF = _matFreeProdOf(_matFree);
+    const navn = prodF ? esc(prodF.name) : 'Matte';
+    const canFinish = _matFree.moves && _matFree.moves.length >= 1;
+    const warn = _matFree.lastReject
+      ? `<span style="font-size:11px;color:var(--warn);padding:0 6px">⚠ Kan ikke lagres: ${esc(_matFree.lastReject)}</span>`
+      : (_matFree.phase === 'start'
+          ? `<span style="font-size:11px;color:var(--dim);padding:0 6px">Velg startpunkt langs veggen</span>`
+          : '');
+    return `<span class="ctxbar-lbl">${IC('pointer',14)} Frihånd</span>
+      <span style="font-size:11px;color:var(--dim);padding:0 4px">${navn}</span>
+      ${warn}
+      <button class="snap-chip" onclick="_matFreeExit(true)" ${canFinish ? '' : 'disabled style="opacity:.45"'} title="Fullfør og legg ut matta (Enter)">✓ Ferdig</button>
+      <button class="snap-chip" onclick="_matFreeUndoMove()" ${canFinish ? '' : 'disabled style="opacity:.45"'} title="Fjern siste bane (Backspace)">↶ Angre siste</button>
+      <button class="snap-chip" onclick="_matFreeExit(false)" title="Avbryt frihånd (Esc)">✕ Avbryt</button>`;
+  }
 
   // Background / floor-plan layer selected — transform + action menu
   if (ui.selectedBg) {
@@ -55484,9 +55767,14 @@ function _collectMaterialItems() {
     // samme kilde (_matFreeCatalog) som HTML/PDF-materiallista bruker allerede. DEL A: én bane kan
     // nå gi FLERE segmenter/ruller — én linje per fysisk produkt, samme mønster som S.mats over.
     (S.matPaths||[]).filter(mp => mp.roomId === room.id).forEach(mp => {
-      for (const seg of _matFreeCatalog(mp).segments) {
-        if (!seg.product) continue;
-        items.push({ product: seg.product, kind: 'Matte', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2: seg.areaM2, lenM: seg.lenCm/100, watt: seg.watt });
+      const _c = _matFreeCatalog(mp);
+      for (const seg of _c.segments) {
+        // Kenneth 24.09.2026: manglet segmentets produktrad, forsvant linja STILLE fra bestillinga
+        // — en matte som er tegnet skal alltid telles. Faller tilbake til familieraden (samme
+        // fallback labelen nå bruker), så linja aldri mangler navn/artikkelnummer.
+        const _p = seg.product || _c.fam;
+        if (!_p) continue;
+        items.push({ product: _p, kind: 'Matte', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2: seg.areaM2, lenM: seg.lenCm/100, watt: seg.watt });
       }
     });
     (S.plates||[]).filter(pl => pl.roomId === room.id).forEach(pl => {
