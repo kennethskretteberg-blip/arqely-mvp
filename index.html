@@ -3795,6 +3795,9 @@ const S = {
   varmematte: { gapCm: null },
   documentation: {},  // keyed by roomId: {checklist, measurements, photos, signature, notes}
   bgs: {},   // keyed by floor id (number) or '__global__' — the ACTIVE plantegning (én per etasje, LÅST regel)
+  // Serie «Stedfestet tegneflate» (005): georeferanse per etasje for kart-bakgrunner —
+  // valgt bygg, omriss i verdens-cm og kandidatliste. Kun for etasjer hentet fra kart.
+  geo: {},   // keyed by floor id
   // DEL C (Kenneth 25.08.2026, «flere plantegninger per etasje»): REFERANSE-tegninger — null eller
   // flere per etasje, samme nøkkel-konvensjon som bgs. Ren visning: aldri kalibreringsgrunnlag,
   // aldri med i PDF, aldri noe et rom kan høre til (se _bgRefsOnActiveFloor/drawBgImage). Regelen
@@ -4016,6 +4019,10 @@ function _serializeBgFields(bg) {
     locked: bg.locked || false, rotation: bg.rotation || 0,
     flipX: bg.flipX || false, flipY: bg.flipY || false,
     needsCalibration: !!bg._needsCalibration,
+    // 005: georeferansen ER kalibreringen for en kart-bakgrunn. Faller den bort ved lagring,
+    // mister utsnittet koblingen til virkeligheten — samme klasse feil som _needsCalibration
+    // hadde før 5e0d126.
+    geo: bg.geo || null,
   };
 }
 function activeBg() {
@@ -14778,6 +14785,78 @@ function _bestFoilOption(results) {
 // toppkanten, 36,00 m² — siden Kenneths ekte prosjekt-koordinater ikke er tilgjengelige her (se
 // spec sine Åpne punkter #3); et hakk i toppkanten reproduserer nøyaktig «horisontal lar en fløy
 // stå udekket»-symptomet (et horisontalt bånd gjennom hakket splittes i to atskilte flater).
+// ─── GEO-REGRESJONSTEST (005, serien «Stedfestet tegneflate») ──────────────────────────────
+// Låser koordinatkonvensjonen som hele serien hviler på: utsnittets SØRVESTRE hjørne er verdens
+// (0,0), x mot øst, nord = MINKENDE y (verdens-Y øker nedover). Bommer denne, havner alt som
+// snappes mot kartet i 006 på feil sted — og feilen ville vært vanskelig å se på skjermen fordi
+// bildet uansett ligger riktig.
+function _geoRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, expected, got, ok: !!cond });
+  const savedBgs = S.bgs, savedGeo = S.geo;
+  try {
+    const geo = { epsg: 25833, east0: 233555.53, north0: 6682335.83,
+                  widthM: 80, heightM: 80, mPerPx: 0.05, layers: ['topo'],
+                  attribution: '© Kartverket (CC BY 4.0)', fetchedAt: '2026-09-24T10:00:00Z' };
+    const bg = { geo };
+
+    // Sørvestre hjørne må bli nøyaktig (0,0).
+    const sw = _geoToWorld(bg, geo.east0, geo.north0);
+    check('SV-hjørne → verdens (0,0)', '(0,0)', Math.abs(sw.x) < 1e-6 && Math.abs(sw.y) < 1e-6,
+          `(${sw.x},${sw.y})`);
+    // Nordøstre hjørne: x = +bredde i cm, y = −høyde i cm.
+    const ne = _geoToWorld(bg, geo.east0 + geo.widthM, geo.north0 + geo.heightM);
+    check('NØ-hjørne → (+8000, −8000) cm', '(8000,-8000)',
+          Math.abs(ne.x - 8000) < 1e-6 && Math.abs(ne.y + 8000) < 1e-6, `(${ne.x},${ne.y})`);
+    // NORD skal gi MINKENDE y — den enkleste måten å ta feil på.
+    const nord = _geoToWorld(bg, geo.east0, geo.north0 + 10);
+    check('10 m nordover → y = −1000 cm (ikke +)', '-1000', Math.abs(nord.y + 1000) < 1e-6, nord.y);
+
+    // Rundtur på 5 punkter, < 0,01 cm.
+    let maxErr = 0;
+    for (const [de, dn] of [[0,0],[12.5,0],[0,37.25],[79.99,79.99],[41.3,7.77]]) {
+      const w = _geoToWorld(bg, geo.east0 + de, geo.north0 + dn);
+      const g = _worldToGeo(bg, w.x, w.y);
+      maxErr = Math.max(maxErr, Math.abs(g.east - (geo.east0 + de)) * 100,
+                                Math.abs(g.north - (geo.north0 + dn)) * 100);
+    }
+    check('rundtur geo→verden→geo', '< 0,01 cm', maxErr < 0.01, maxErr.toFixed(6) + ' cm');
+
+    // Installert bakgrunn ER kalibrert — ingen annen tilstand trengs.
+    S.bgs = {}; S.geo = {};
+    const px1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const installed = _installGeoBackground(9901, {
+      epsg: 25833, east0: geo.east0, north0: geo.north0, width_m: 80, height_m: 80,
+      px: 1600, m_per_px: 0.05, layers: ['topo','eiendom'],
+      attribution: '© Kartverket (CC BY 4.0)', fetched_at: '2026-09-24T10:00:00Z',
+    }, px1, 'Testveien 1');
+    check('widthCm = width_m × 100', 8000, installed.widthCm === 8000, installed.widthCm);
+    check('originY = −heightCm', -8000, installed.originY === -8000, installed.originY);
+    check('originX = 0', 0, installed.originX === 0, installed.originX);
+    check('ferdig kalibrert', false, installed._needsCalibration === false, installed._needsCalibration);
+    check('låst', true, installed.locked === true, installed.locked);
+    check('ingen papirstørrelse (ikke en papirtegning)', 'undefined',
+          installed.paperWidthCm === undefined, String(installed.paperWidthCm));
+    check('_bgIsGeo kjenner den igjen', true, _bgIsGeo(installed) === true, _bgIsGeo(installed));
+
+    // Lagring → gjenoppretting må bevare geo, ellers mister utsnittet koblingen til virkeligheten.
+    const ser = _serializeBgFields(installed);
+    check('geo serialiseres', true, !!(ser.geo && ser.geo.epsg === 25833), JSON.stringify(ser.geo && ser.geo.epsg));
+    const round = Object.assign(_newBgObj(), JSON.parse(JSON.stringify(ser)));
+    check('geo overlever rundtur', geo.east0, round.geo && round.geo.east0 === geo.east0,
+          round.geo && round.geo.east0);
+    const wAfter = _geoToWorld(round, geo.east0 + 25, geo.north0 + 25);
+    check('koordinatene stemmer etter rundtur', '(2500,-2500)',
+          Math.abs(wAfter.x - 2500) < 1e-6 && Math.abs(wAfter.y + 2500) < 1e-6,
+          `(${wAfter.x},${wAfter.y})`);
+  } finally {
+    S.bgs = savedBgs; S.geo = savedGeo;
+  }
+  const ok = results.every(r => r.ok);
+  console[ok ? 'log' : 'error']('_geoRegressionTest: ' + (ok ? 'BESTÅTT' : 'FEILET'), results);
+  return { ok, results };
+}
+
 function _foilRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
   const savedRooms = S.rooms, savedStrips = S.strips, savedHindrings = S.hindrings,
@@ -35930,6 +36009,7 @@ function _renderSnowPartContent(part) {
         <span class="floor-badge">${frooms.length}</span>
         <button class="floor-bg-btn" onclick="event.stopPropagation();renameFloorClick(${fl.id},this.closest('.floor-hdr').querySelector('.floor-name-txt'))" title="Gi nytt navn" style="background:transparent"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
         <button class="floor-bg-btn" onclick="setActiveBgFloor(${fl.id});openBgImportPanel();event.stopPropagation()" title="Bakgrunnsbilde for ${esc(fl.name)}">${S.bgs[fl.id]&&S.bgs[fl.id].img?'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>':'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>'}</button>
+        <button class="floor-bg-btn" onclick="_roofOpenDialog(${fl.id});event.stopPropagation()" title="Hent kartutsnitt fra Kartverket for ${esc(fl.name)}">${IC('map',14)}<span style="font-size:9px;font-weight:700;margin-left:1px">+</span></button>
         <button class="sb-add-sm" onclick="showAddRoomModal(${fl.id});event.stopPropagation()" title="Legg til område">+</button>
       </div>`;
     if (!fl.collapsed) {
@@ -36685,6 +36765,7 @@ function delFloor(id) {
   S.floors=S.floors.filter(f=>f.id!==id);
   delete S.bgs[id];
   delete S.bgRefs[id];
+  delete (S.geo || {})[id];   // 005: georeferansen hører til etasjen — ikke la den ligge igjen
   if (S.ui.activeFloorId===id) {
     S.ui.activeFloorId=S.floors.length>0?S.floors[0].id:null;
   }
@@ -42564,7 +42645,7 @@ canvas.addEventListener('wheel', e=>{
   e.preventDefault();
   _resetCycle();
   const factor=e.deltaY>0?0.9:1.1;
-  const nz=Math.max(0.2,Math.min(8,S.view.zoom*factor));
+  const nz=Math.max(_minZoom(),Math.min(8,S.view.zoom*factor));
   const { x: mx, y: my } = _evToCanvas(e);
   const before=s2w(mx,my);
   S.view.zoom=nz;
@@ -43090,7 +43171,7 @@ document.addEventListener('keyup', e=>{
 // Zoom toward canvas center so the user's working area stays in view —
 // matches the wheel/trackpad handler's zoom-toward-cursor behavior.
 function _zoomBy(factor) {
-  const nz = Math.max(0.2, Math.min(8, S.view.zoom * factor));
+  const nz = Math.max(_minZoom(), Math.min(8, S.view.zoom * factor));
   const cx = canvas.width / 2, cy = canvas.height / 2;
   const before = s2w(cx, cy);
   S.view.zoom = nz;
@@ -43140,10 +43221,19 @@ function fitAll() {
 // på et FAST verdenspunkt (nedre venstre hjørne i origo) i stedet for der visningen tilfeldigvis
 // stod panorert, må visningen selv flyttes dit for at brukeren skal se noe som helst — samme
 // pad/zoom-formel som fitAll() bruker for rom, her for én bakgrunn.
+// 005: zoom-gulvet 0,2 er tunet for PLANTEGNINGER (et rom fyller skjermen ved 0,2). Et
+// kartutsnitt er 10× større: 80 m = 8000 cm trenger ~0,076 for å få plass. Med gulvet på 0,2
+// kunne et kart verken tilpasses skjermen ELLER zoomes ut til — man så ~40 % av utsnittet og
+// kom seg ikke lenger ut. Gulvet senkes derfor KUN når aktiv etasje faktisk har en kart-bakgrunn;
+// for alle andre prosjekter er oppførselen bit-identisk med før.
+function _minZoom() {
+  const bg = S.bgs && S.bgs[S.ui.activeFloorId];
+  return _bgIsGeo(bg) ? 0.05 : 0.2;
+}
 function _fitViewToBg(bg) {
   if (!bg || !(bg.widthCm > 0) || !(bg.heightCm > 0) || !canvas) return;
   const pad = 150, ww = bg.widthCm + pad * 2, wh = bg.heightCm + pad * 2;
-  S.view.zoom = Math.max(0.2, Math.min(8, Math.min(canvas.width / (ww * BASE_SCALE), canvas.height / (wh * BASE_SCALE))));
+  S.view.zoom = Math.max(_bgIsGeo(bg) ? 0.05 : 0.2, Math.min(8, Math.min(canvas.width / (ww * BASE_SCALE), canvas.height / (wh * BASE_SCALE))));
   S.view.panX = bg.originX + bg.widthCm / 2;
   S.view.panY = bg.originY + bg.heightCm / 2;
   updZoomBadge();
@@ -43509,6 +43599,16 @@ let _bgReplaceKeepTransform = false;
 function _bgSelMore(e) {
   e.stopPropagation();
   const I = (onclick, label, danger) => `<div class="ctx-item${danger ? ' danger' : ''}" onclick="hideProduktMenu();${onclick}">${label}</div>`;
+  // 005: en KART-bakgrunn er georeferert. Roter/speilvend/rett-opp/tilpass ville ødelagt
+  // målestokken og koblingen til EPSG:25833 — de valgene finnes derfor ikke her. «Bytt
+  // plantegning» blir «Hent nytt utsnitt».
+  if (_bgIsGeo(_ctxBg())) {
+    let g = I(`_roofOpenDialog(S.ui.activeFloorId)`, IC('map',14)+' Hent nytt utsnitt');
+    g += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
+    g += I(`removeBgImage()`, IC('trash',14)+' Fjern kart', true);
+    showProduktDropdown(g, e.clientX, e.clientY);
+    return;
+  }
   let items = I(`rotateBg(90)`, IC('rotate-cw',14)+' Roter 90°');
   items += I(`flipBg('x')`, IC('move-h',14)+' Speilvend vannrett');
   items += I(`flipBg('y')`, '↕ Speilvend loddrett');
@@ -43566,6 +43666,20 @@ function _ctxBarItems() {
     // å la brukeren gjette hvorfor klikk plutselig treffer tegningen og ikke rommene.
     const unlockedHint = bg.locked ? '' :
       `<span style="font-size:11px;color:var(--accent);padding:0 4px">Ulåst — klikk treffer tegningen</span>`;
+    // 005: KART-bakgrunn. Målestokken kommer fra georeferansen, ikke fra en måling brukeren har
+    // gjort — derfor ingen «Skaler på nytt»/«Målestokk 1:_» (de ville brutt koblingen til
+    // EPSG:25833), og krediteringen står synlig fordi CC BY 4.0 krever det.
+    if (_bgIsGeo(bg)) {
+      const g = bg.geo;
+      return `<span class="ctxbar-lbl">${IC('map',14)} Kart</span>
+        <span style="font-size:11px;color:var(--dim);padding:0 4px;font-family:var(--font-mono)">${g.widthM} × ${g.heightM} m</span>
+        <span style="font-size:11px;color:var(--dim);padding:0 4px">${esc(g.attribution || '© Kartverket')}</span>
+        <span class="tc-sep"></span>
+        <label class="snap-chip" style="gap:4px;cursor:pointer" title="Vis/skjul"><input type="checkbox" ${bg.visible!==false?'checked':''} onchange="toggleBgVisible(this.checked);renderSidebar()" onclick="event.stopPropagation()"> Vis</label>
+        <input type="range" class="ctxbar-slider" min="5" max="100" value="${opVal}" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()" title="Dimming">
+        <span class="tc-sep"></span>
+        <button class="snap-chip more" onclick="_bgSelMore(event)" title="Hent nytt utsnitt, fjern">⋯</button>`;
+    }
     return `<span class="ctxbar-lbl">${IC('map',14)} Plantegning</span>
       ${calHint}
       ${unlockedHint}
@@ -45065,6 +45179,287 @@ function _engineClassifyError(err, url, status){
   return { kind, status, url, message: err && err.message, maybeCors: kind==='network' && !isTrustedOrigin };
 }
 
+// ═══ KARTTJENESTEN (varmeplan-roof) ═══════════════════════════════════════════════════════════
+// Kenneth 24.09.2026, serien «Stedfestet tegneflate» (prompt 005). Samme URL-oppløsnings- og
+// kaldstart-mønster som lumelo-motoren over, men med EGNE konstanter og EGEN cache — de to
+// tjenestene er uavhengige, og en død lumelo-adresse skal ikke kunne blokkere kart-henting.
+const ROOF_FLY_URL = 'https://varmeplan-roof.fly.dev', ROOF_LOCAL_URL = 'http://localhost:4100';
+let _roofResolved = null;
+const ROOF_RESOLVE_CACHE_MS = 15000;
+
+function _roofKey() {
+  return window.VARMEPLAN_ROOF_KEY || localStorage.getItem('varmeplan_roof_key') || '';
+}
+async function _roofResolveUrl(force) {
+  if (window.VARMEPLAN_ROOF_URL) return { url: window.VARMEPLAN_ROOF_URL, source: 'override' };
+  if (!force && _roofResolved && (Date.now() - _roofResolved.ts) < ROOF_RESOLVE_CACHE_MS) return _roofResolved;
+  const stored = (localStorage.getItem('varmeplan_roof_url') || '').trim().replace(/\/+$/, '');
+  const isLocalHost = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname);
+  if (stored && await _engineHealthCheck(stored, 2500)) {
+    _roofResolved = { url: stored, source: 'stored', ts: Date.now() }; return _roofResolved;
+  }
+  if (isLocalHost && await _engineHealthCheck(ROOF_LOCAL_URL, 2500)) {
+    _roofResolved = { url: ROOF_LOCAL_URL, source: 'localhost', ts: Date.now() }; return _roofResolved;
+  }
+  const flyOk = await _engineHealthCheck(ROOF_FLY_URL, 2500);
+  _roofResolved = { url: ROOF_FLY_URL, source: 'fly', reachable: flyOk, ts: Date.now() };
+  return _roofResolved;
+}
+function _roofWarmResolve() { _roofResolveUrl().catch(() => {}); }
+
+// Feil kastes som {kind, message} — kallerne viser `message` direkte. Norsk, én per årsak, og
+// alltid med et neste steg brukeren faktisk kan ta.
+function _roofErr(kind, message) { const e = new Error(message); e.kind = kind; e.roof = true; return e; }
+
+async function _roofFetch(path, opts) {
+  opts = opts || {};
+  const res = await _roofResolveUrl();
+  const url = res.url + path;
+  const init = { method: opts.method || 'GET', headers: { 'X-Varmeplan-Key': _roofKey() } };
+  if (opts.body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(opts.body);
+  }
+  let r;
+  try {
+    // Kaldstart-ventingen (opptil 20 s) gir mening for FLY i produksjon: tjenesten skalerer til
+    // null og trenger et par sekunder på å våkne. Den gir IKKE mening på en utviklermaskin der
+    // den lokale tjenesten bare er stoppet — da er det 20 s spinner før nøyaktig samme
+    // feilmelding (målt: 21,7 s). Derfor: vent kun når vi faktisk er i produksjon.
+    const påLokalMaskin = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname);
+    r = (res.source === 'fly' && !påLokalMaskin)
+      ? await _engineFetchWithRetry(url, init, _roofColdStartToast)
+      : await fetch(url, init);
+  } catch (err) {
+    throw _roofErr('offline', /^(localhost|127\.0\.0\.1)$/i.test(location.hostname)
+      ? 'Karttjenesten svarer ikke. Kjører den lokalt på port 4100?'
+      : 'Karttjenesten svarer ikke. Prøv igjen om litt.');
+  }
+  if (r.status === 401) throw _roofErr('auth', 'Mangler nøkkel til karttjenesten.');
+  if (r.status === 404) throw _roofErr('nodata', 'Fant ikke adressen.');
+  if (r.status === 502) throw _roofErr('nodata', 'Kartverket svarer ikke akkurat nå — prøv igjen om litt.');
+  if (!r.ok) throw _roofErr('http', 'Karttjenesten svarte HTTP ' + r.status + '.');
+  return r.json();
+}
+function _roofColdStartToast(status) {
+  if (typeof _showToast !== 'function') return;
+  if (status === 'coldstart') _showToast('Starter karttjenesten …', 'info');
+  else if (status === 'retrying') _showToast('Karttjenesten er oppe — prøver igjen …', 'info');
+}
+const _roofApi = {
+  locate: (q) => _roofFetch('/roof/locate', { method: 'POST', body: q }),
+  background: (p) => _roofFetch('/roof/background.json?' + new URLSearchParams(p)),
+  slope: (polygon) => _roofFetch('/roof/slope', { method: 'POST', body: { polygon, epsg: 25833 } }),
+  modelQuick: (footprint) => _roofFetch('/roof/model?level=quick', { method: 'POST', body: { footprint, epsg: 25833 } }),
+};
+
+// ── Geo ↔ verden ──────────────────────────────────────────────────────────────────────────────
+// LÅST konvensjon (000-KJØR-MEG): utsnittets SØRVESTRE hjørne er verdens (0,0), x mot øst, og
+// siden verdens-Y øker NEDOVER på skjermen (bekreftet: w2s()/s2w() har ingen fortegnsbytte på Y,
+// og drawBgImage tegner med originY som ØVRE kant) ligger nordkanten på y = −heightCm.
+// Derfor: nord ⇒ minkende y.
+function _geoToWorld(bg, east, north) {
+  return { x: (east - bg.geo.east0) * 100, y: -(north - bg.geo.north0) * 100 };
+}
+function _worldToGeo(bg, wx, wy) {
+  return { east: bg.geo.east0 + wx / 100, north: bg.geo.north0 - wy / 100 };
+}
+/** Er dette en kart-bakgrunn (ikke en importert plantegning)? Styrer ctxbar og lås. */
+function _bgIsGeo(bg) { return !!(bg && bg.geo && bg.geo.epsg); }
+
+// ── «Hent fra kart» ───────────────────────────────────────────────────────────────────────────
+// Installerer kartutsnittet som en FERDIG KALIBRERT bakgrunn. Poenget med hele serien: et bilde
+// med kjent utstrekning i meter ER en kalibrert bakgrunn — widthCm = width_m × 100, origo i
+// sørvestre hjørne. Ingen kalibreringsdialog, ingen to-punkts måling.
+function _installGeoBackground(floorId, geo, pngBase64, label) {
+  const bg = S.bgs[floorId] || _newBgObj();
+  S.bgs[floorId] = bg;
+  const img = new Image();
+  // Ingen egen bg-cache å invalidere (bekreftet: den finnes ikke) — bildet tegnes rett fra
+  // bg.img, så én render når det er lastet er alt som trengs.
+  img.onload = () => { render(); };
+  img.src = 'data:image/png;base64,' + pngBase64;
+
+  bg.img = img;
+  bg.dataUrl = 'data:image/png;base64,' + pngBase64;
+  bg.fileName = 'Kart ' + (label || '');
+  bg.pageNumber = null;
+  bg._srcW = geo.px; bg._srcH = geo.px;
+  delete bg.paperWidthCm; delete bg.paperHeightCm;   // ikke en papirtegning — «Fast målestokk» gjelder ikke
+
+  bg.widthCm = geo.width_m * 100;
+  bg.heightCm = geo.height_m * 100;
+  bg.originX = 0;
+  bg.originY = -bg.heightCm;          // nordkanten (se _geoToWorld)
+  bg.rotation = 0; bg.flipX = false; bg.flipY = false;
+  bg.opacity = 1.0; bg.visible = true;
+  bg.locked = true;                   // kartet skal ikke kunne dras ut av posisjon ved et uhell
+  bg.calibrating = false; bg.calPts = [];
+  bg._needsCalibration = false;       // DETTE er hele poenget
+  bg.geo = {
+    epsg: geo.epsg, east0: geo.east0, north0: geo.north0,
+    widthM: geo.width_m, heightM: geo.height_m, mPerPx: geo.m_per_px,
+    layers: geo.layers, attribution: geo.attribution, fetchedAt: geo.fetched_at,
+  };
+  return bg;
+}
+
+let _roofDlg = null;   // {step, address, candidates, chosen, sizeM, layers, floorId}
+
+function _roofOpenDialog(floorId) {
+  if (!_isSnowModule()) { _showToast && _showToast('«Hent fra kart» finnes bare i snø/utendørs.', 'warn'); return; }
+  const fl = S.floors.find(f => f.id === floorId);
+  if (!fl) return;
+  _roofWarmResolve();
+  const addr = (S.project && S.project.address && S.project.address.text) || '';
+  _roofDlg = { step: 1, floorId, address: addr, candidates: [], chosen: null,
+               sizeM: 80, eiendom: true, hillshade: false, busy: false, error: null };
+  _roofRender();
+}
+function _roofClose() { _roofDlg = null; document.getElementById('_roof-ov')?.remove(); }
+
+function _roofRender() {
+  document.getElementById('_roof-ov')?.remove();
+  if (!_roofDlg) return;
+  const d = _roofDlg;
+  const ov = document.createElement('div');
+  ov.id = '_roof-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
+  ov.onclick = e => { if (e.target === ov) _roofClose(); };
+
+  const err = d.error ? `<div style="font-size:12px;color:var(--warn);background:rgba(245,158,11,.12);border:1px solid var(--warn);border-radius:8px;padding:8px 10px">⚠ ${esc(d.error)}</div>` : '';
+  const spin = d.busy ? `<div style="font-size:12px;color:var(--accent)">${esc(d.busyText || 'Henter …')}</div>` : '';
+  let body = '';
+
+  if (d.step === 1) {
+    body = `<div style="font-size:13px;color:var(--dim)">Søk opp adressen. Vi henter kart, bygningsomriss og eiendomsgrenser fra Kartverket.</div>
+      <input id="_roof-addr" type="text" value="${esc(d.address)}" placeholder="Adresse, f.eks. Storgata 1, 0155 Oslo"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();_roofFindBuildings()}"
+        style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:14px">
+      <div style="display:flex;justify-content:flex-end;gap:10px">
+        <button onclick="_roofClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
+        <button onclick="_roofFindBuildings()" ${d.busy ? 'disabled' : ''} style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Finn bygg</button>
+      </div>`;
+  } else if (d.step === 2) {
+    const rows = d.candidates.map((c, i) => {
+      const fp = c.footprint;
+      const area = fp ? `${fp.area_m2.toFixed(0)} m²` : 'omriss mangler';
+      const warn = fp && fp.prov && fp.prov.confidence <= 0.5
+        ? `<span title="${esc(fp.prov.note || '')}" style="color:var(--warn)"> ⚠</span>` : '';
+      const kilde = fp ? `<span style="font-size:10px;color:var(--dim)"> · ${esc(fp.source)}</span>` : '';
+      return `<div onclick="_roofPick(${i})" style="display:flex;gap:10px;align-items:center;padding:9px 10px;border:${d.chosen === i ? '2px solid var(--accent)' : '1px solid var(--border)'};border-radius:8px;margin-bottom:6px;cursor:pointer">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px;color:var(--text)">${esc(c.type || 'Bygning')}${warn}</div>
+          <div style="font-size:12px;color:var(--muted)">${c.distance_m.toFixed(0)} m unna · ${area}${kilde}</div>
+        </div></div>`;
+    }).join('');
+    const tom = d.candidates.length ? '' :
+      `<div style="font-size:13px;color:var(--dim)">Ingen bygg innen 40 m. Du kan hente kartet likevel og tegne omrisset selv.</div>`;
+    body = `<div style="font-size:13px;color:var(--dim)">Hvilket bygg gjelder det?</div>
+      ${tom}<div style="max-height:40vh;overflow:auto">${rows}</div>
+      <div style="display:flex;justify-content:space-between;gap:10px">
+        <button onclick="_roofDlg.step=1;_roofRender()" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">‹ Tilbake</button>
+        <div style="display:flex;gap:10px">
+          <button onclick="_roofPick(null)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text);cursor:pointer">Fortsett uten bygg</button>
+        </div>
+      </div>`;
+  } else {
+    const chip = (v) => `<button onclick="_roofDlg.sizeM=${v};_roofRender()" style="padding:6px 14px;border-radius:7px;border:1px solid var(--border);cursor:pointer;font-size:13px;background:${d.sizeM === v ? 'var(--accent)' : 'var(--surface2)'};color:${d.sizeM === v ? '#0d0e10' : 'var(--text)'};font-weight:${d.sizeM === v ? 700 : 500}">${v} m</button>`;
+    body = `<div style="font-size:13px;color:var(--dim)">Hvor stort utsnitt?</div>
+      <div style="display:flex;gap:8px">${chip(60)}${chip(80)}${chip(120)}</div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);cursor:pointer">
+        <input type="checkbox" ${d.eiendom ? 'checked' : ''} onchange="_roofDlg.eiendom=this.checked"> Eiendomsgrenser</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);cursor:pointer">
+        <input type="checkbox" ${d.hillshade ? 'checked' : ''} onchange="_roofDlg.hillshade=this.checked"> Terrengskygge <span style="font-size:11px;color:var(--dim)">(tar ~1,5 s ekstra)</span></label>
+      <div style="display:flex;justify-content:space-between;gap:10px">
+        <button onclick="_roofDlg.step=2;_roofRender()" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">‹ Tilbake</button>
+        <button onclick="_roofFetchBackground()" ${d.busy ? 'disabled' : ''} style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Hent kart</button>
+      </div>`;
+  }
+
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface);border:1px solid var(--border);border-radius:16px;width:min(520px,94vw);max-height:88vh;overflow:auto;padding:22px;display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:16px;font-weight:700;color:var(--text)">${IC('map', 16)} Hent fra kart <span style="font-size:12px;font-weight:400;color:var(--dim)">steg ${d.step} av 3</span></div>
+      <button onclick="_roofClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+    </div>
+    ${err}${spin}${body}
+    <div style="font-size:11px;color:var(--dim);border-top:1px solid var(--border);padding-top:8px">Kartgrunnlag © Kartverket (CC BY 4.0)</div>
+  </div>`;
+  document.body.appendChild(ov);
+  if (d.step === 1) setTimeout(() => { const i = document.getElementById('_roof-addr'); if (i) { i.focus(); i.select(); } }, 40);
+}
+
+async function _roofFindBuildings() {
+  const d = _roofDlg; if (!d || d.busy) return;
+  const inp = document.getElementById('_roof-addr');
+  d.address = inp ? inp.value.trim() : d.address;
+  if (!d.address) { d.error = 'Skriv inn en adresse.'; _roofRender(); return; }
+  d.busy = true; d.busyText = 'Søker …'; d.error = null; _roofRender();
+  try {
+    // Har prosjektet allerede et adressepunkt (EPSG:4258-grader, satt av _addrSearch), og teksten
+    // er uendret, bruker vi koordinatene direkte — ett kall spart, og ingen ny adressetolkning.
+    const rp = S.project && S.project.address && S.project.address.representasjonspunkt;
+    const sameText = S.project && S.project.address && S.project.address.text === d.address;
+    const q = (rp && sameText && rp.lat != null && rp.lon != null)
+      ? { lat: rp.lat, lon: rp.lon } : { address: d.address };
+    const res = await _roofApi.locate(q);
+    d.candidates = res.candidates || [];
+    d.query = res.query;
+    d.chosen = d.candidates.length ? 0 : null;
+    d.step = 2;
+  } catch (err) {
+    d.error = err && err.roof ? err.message : 'Uventet feil: ' + (err && err.message);
+  } finally { d.busy = false; _roofRender(); }
+}
+function _roofPick(i) { const d = _roofDlg; if (!d) return; d.chosen = i; d.step = 3; _roofRender(); }
+
+async function _roofFetchBackground() {
+  const d = _roofDlg; if (!d || d.busy) return;
+  d.busy = true; d.busyText = 'Henter kart fra Kartverket …'; d.error = null; _roofRender();
+  try {
+    const cand = (d.chosen != null && d.candidates[d.chosen]) || null;
+    const pt = cand ? cand.point : (d.query && d.query.point);
+    if (!pt) throw _roofErr('nodata', 'Mangler koordinat for utsnittet.');
+    const layers = ['topo'];
+    if (d.eiendom) layers.push('eiendom');
+    if (d.hillshade) layers.push('hillshade');
+    const res = await _roofApi.background({
+      east: pt.east, north: pt.north, size_m: d.sizeM, px: 1600, layers: layers.join(','),
+    });
+    const bg = _installGeoBackground(d.floorId, res.geo, res.png_base64, d.address);
+
+    // Vektorene (omriss/kandidater) lagres i verdens-cm — 006 bruker dem til snapping.
+    if (!S.geo) S.geo = {};
+    S.geo[d.floorId] = {
+      address: d.address,
+      center: { east: pt.east, north: pt.north },
+      chosen: cand ? {
+        bygningsnr: cand.bygningsnr, type: cand.type,
+        footprintWorld: cand.footprint
+          ? cand.footprint.polygon.map(([e, n]) => _geoToWorld(bg, e, n))
+          : null,
+        footprintSource: cand.footprint ? cand.footprint.source : null,
+        footprintConfidence: cand.footprint ? cand.footprint.prov.confidence : null,
+      } : null,
+      candidates: d.candidates.map(c => ({
+        bygningsnr: c.bygningsnr, type: c.type, distance_m: c.distance_m,
+        pointWorld: _geoToWorld(bg, c.point.east, c.point.north),
+      })),
+    };
+    setActiveBgFloor(d.floorId);
+    _fitViewToBg(bg);
+    _roofClose();
+    renderSidebar(); updateCtxBar(); render();
+    _scheduleAutoSave && _scheduleAutoSave();
+    const lagTxt = (res.geo.layers || []).join(' + ');
+    _showToast && _showToast(`Kart hentet — ${res.geo.width_m} × ${res.geo.height_m} m (${lagTxt}) · © Kartverket`, 'ok');
+  } catch (err) {
+    d.busy = false;
+    d.error = err && err.roof ? err.message : 'Uventet feil: ' + (err && err.message);
+    _roofRender();
+  }
+}
+
 // Delt av auto-lesing og verktøylinje-import — begge poster filen til /import/{kind}/layers for
 // å hente lag-listen FØR bruker velger vegger. Kaster et klassifisert feilobjekt (ikke en rå
 // Error) slik at kallerne kan vise samme tilkoblings-dialog (STEG 4).
@@ -46335,6 +46730,7 @@ function _buildSaveData() {
     varmefolie : {...S.varmefolie},
     varmekabel : {...S.varmekabel},
     varmematte : {...S.varmematte},
+    geo: JSON.parse(JSON.stringify(S.geo || {})),
     bgs: Object.fromEntries(
       Object.entries(S.bgs)
         .filter(([,bg]) => bg.dataUrl)
@@ -46611,6 +47007,7 @@ function _restoreProject(data) {
   if (data.varmekabel) Object.assign(S.varmekabel, data.varmekabel);
   if (data.varmematte) Object.assign(S.varmematte, data.varmematte);
   S.documentation = data.documentation || {};
+  S.geo = data.geo || {};   // 005: georeferanse per etasje (kart-bakgrunner)
   S.ui.selectedStripId = null;
   S.ui.selectedCableId = null;
   S.ui.selectedMatId = null;
@@ -46715,6 +47112,9 @@ function _restoreProject(data) {
       S.bgs[k] = Object.assign(_newBgObj(), bgData, { img: bImg, calibrating: false, calPts: [],
         _needsCalibration: bgData.needsCalibration === true,
         _srcW: bImg.naturalWidth, _srcH: bImg.naturalHeight });
+      // 005: en kart-bakgrunn er ferdig kalibrert — geo er kilden, og den skal aldri tape
+      // låsen eller havne i kalibreringsdialogen ved gjenåpning.
+      if (S.bgs[k].geo && S.bgs[k].geo.epsg) { S.bgs[k]._needsCalibration = false; S.bgs[k].locked = true; }
       // A calibrated underlay defaults to LOCKED so canvas clicks pass THROUGH it (you draw rooms
       // instead of re-selecting the drawing every click → «henger i plantegning-baren»). Makes
       // existing projects with an unlocked calibrated bg click-safe. Unlock via the lock toggle.
