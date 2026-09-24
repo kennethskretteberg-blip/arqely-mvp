@@ -5,10 +5,58 @@
 | 001 | **ferdig** | `50461f7` | varmeplan-roof | skjelett, nøkkel, 9 tester grønne, ruff rent |
 | 002 | **ferdig** | `7c5c331` | varmeplan-roof | `/roof/locate`, 21 tester grønne · **INSPIRE er oppe, men dekker ikke Oslo** |
 | 003 | **ferdig** | `b858c0d` | varmeplan-roof | `/roof/background`, 39 tester grønne · ferdig skyggerelieff fra Kartverket |
-| 004 | ikke startet | | varmeplan-roof | |
+| 004 | **ferdig** | `dd05eb1` | varmeplan-roof | `/roof/slope` + `/roof/model` + DOM1-omriss, 58 tester grønne |
 | 005 | ikke startet | | arqely-mvp | |
 | 006 | ikke startet | | arqely-mvp | |
 | 007 | ikke startet | | arqely-mvp | |
+
+---
+
+## 004 — `/roof/slope`, `/roof/model?level=quick`, DOM1-omriss · commit `dd05eb1` · 24.09.2026
+
+**Gjort:** Helning/fallretning for et polygon (DTM1), quick-BuildingModel (gesims, taktype,
+møne-anslag) og DOM1-avledet omriss som nå fyller `resolve_footprint` sin TODO fra 002.
+Kontrakten i `varmeplan-roof/docs/roof-contract.md`, generert fra Pydantic-modellene.
+58 tester grønne, ruff rent.
+
+**STEG 0:** rasterio leste DTM1/DOM1 rett ut (float32, 1 m, 0,32–0,37 s) —
+`tifffile`-reserveplanen var unødvendig. **`nodata` er `None` i headeren**, så det finnes ingen
+markør å stole på; alt under −100 m regnes som hull. Manuell kontrollregning på testbygget ga
+gesims **4,28 m** / møne 7,61 m — endepunktet gir nå 4,3 / 7,5. Innenfor promptens 2,5–9 m.
+
+### Den viktigste målingen: DOM1-omriss mot INSPIRE-fasit
+
+Samme bygg (Steinliveien 3), begge kilder:
+
+| Kilde | Areal | Hjørner | IoU |
+|---|---|---|---|
+| INSPIRE (fasit) | 105,2 m² | 8 | — |
+| DOM1 − DTM1 | 133,0 m² | 28 | **0,724** |
+
+**+26,4 % areal.** Ikke tilfeldig støy: DOM1 ser *taket*, INSPIRE gir *veggen*, og takutstikket
+forklarer mesteparten. For **takvarme er DOM1 strengt tatt riktigere** enn veggomrisset; for et
+**bakkeareal er det for stort**. 1 m-rutenettet gir dessuten 28 trappetrinn-hjørner mot 8 rene.
+Derfor confidence 0,5 og ⚠ til brukeren — og derfor prøver koden `minimum_rotated_rectangle`
+først (IoU ≥ 0,85) for renere snapping i 006.
+
+Dette er verdt å merke seg fordi DOM1 er **hovedveien** til omriss sør for 60 °N (se 002).
+
+**Funn:** i Oslo sentrum fikk ALLE DOM1-omriss confidence 0,3, fordi byggene der faktisk er
+900–1600 m². 400 m²-terskelen fra prompten er tunet for eneboliger → falskt varsel for legitimt
+store bygg. Skrevet i SPØRSMÅL.
+
+**Avvik fra prompten (bevisste):**
+1. **scipy ble ikke lagt til.** Prompten ba om `scipy.ndimage` til morfologisk åpning; den er
+   skrevet i numpy (11 linjer) i stedet — én funksjon rettferdiggjør ikke en tung ny avhengighet.
+2. **Hull-andelen regnes for bygget**, ikke for hele rasteret, ellers ville et skogholt i
+   utsnittet gjort taktypen «unknown» selv om huset er godt dekket.
+3. **Aspekt fra midlere gradientvektor**, ikke middel av vinkler (som gir tull rundt 0/360°).
+
+**Røyktest (live):** `/roof/model` → gesims 4,3 m, møne 7,5 m, `pitched`, 8 eave-kanter,
+105,13 m², terreng 226,93 moh, 0 % hull. `/roof/slope` på hagen → 16,9 % middel, 61,9 % maks,
+fall mot 246,8°, 234 celler. `/roof/locate` i Oslo leverer nå DOM1-omriss.
+
+**Tid:** ~55 min.
 
 ---
 

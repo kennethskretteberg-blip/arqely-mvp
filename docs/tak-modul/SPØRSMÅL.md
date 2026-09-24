@@ -35,6 +35,19 @@ bare trenger å si «ok» eller «nei, gjør X».
 
 ## Oppdaget underveis
 
+### Fra 004
+
+- [ ] **400 m²-terskelen for DOM1-omriss er tunet for eneboliger.** I Oslo sentrum fikk ALLE
+      omriss confidence 0,3 fordi byggene der faktisk er 900–1600 m² — altså falskt varsel for
+      legitimt store bygg. Midlertidig valg: beholdt 400 m² som prompten sa. Alternativ: la
+      terskelen avhenge av Matrikkelens `bygningstype` (enebolig 111 → 400 m², kontor/butikk
+      311/322 → 3000 m²). Si fra om du vil ha det.
+- [ ] **DOM1-omrisset er ~26 % større enn veggomrisset** (takutstikk — målt mot INSPIRE-fasit,
+      IoU 0,724). For TAKvarme er det strengt tatt riktigere enn veggen; for BAKKEareal er det
+      for stort. Midlertidig valg: samme omriss brukes til begge, med ⚠ og confidence 0,5, og
+      brukeren kan rette det i 006. Alternativ: krympe DOM1-omriss med ~0,4 m når det brukes som
+      bakkeareal. Trenger din fagvurdering.
+
 ### Fra 001
 
 - [ ] **Kontakt-e-post i User-Agent.** Kartverket ber om en identifiserbar klient. Midlertidig
