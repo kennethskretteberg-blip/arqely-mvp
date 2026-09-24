@@ -34151,6 +34151,10 @@ function _loadFileAsBackground(file) {
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
     _loadBgPdf(file, fileName); return;
   }
+  // Kenneth 24.09.2026: raster i BYTT-modus går gjennom _installBgImage sin bevarings-gren
+  // (samme flagg «Bytt bilde» alltid har brukt) — den avgjør selv om formatet tillater å beholde
+  // kalibreringen, og varsler hvis ikke.
+  if (_bgReplaceFloorId != null) { _bgReplaceKeepTransform = true; _bgReplaceFloorId = null; _bgImportTargetFloorId = null; }
   const reader = new FileReader();
   reader.onload = ev => {
     const img = new Image();
@@ -34183,12 +34187,23 @@ async function _pdfBgLoad(file, fileName) {
   try {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+    // Kenneth 24.09.2026: i BYTT-modus erstatter siden plantegningen i den valgte etasjen —
+    // plasseringen bæres over når formatet stemmer (_bgTransformCompatible avgjør).
+    const replaceFloorId = _bgReplaceFloorId;
     if (pdf.numPages <= 1) {
-      const floorId = S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__';
-      await _pdfRenderPageToBg(pdf, 1, fileName, floorId, { showCalibration: true });
+      const floorId = replaceFloorId != null ? replaceFloorId
+        : (_bgImportTargetFloorId != null ? _bgImportTargetFloorId
+          : (S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__'));
+      const oldBg = replaceFloorId != null ? S.bgs[replaceFloorId] : null;
+      const hadTransform = !!(oldBg && oldBg.img);
+      _bgReplaceFloorId = null; _bgImportTargetFloorId = null;
+      await _pdfRenderPageToBg(pdf, 1, fileName, floorId, { showCalibration: true, replaceOf: oldBg });
+      if (hadTransform && S.bgs[floorId] && S.bgs[floorId]._needsCalibration && typeof _showToast === 'function') {
+        _showToast('Ny tegning har annen størrelse — sett målestokk på nytt', 'warn');
+      }
       return;
     }
-    await _pdfShowPagePicker(pdf, file, fileName);
+    await _pdfShowPagePicker(pdf, file, fileName, replaceFloorId);
   } catch(err) { alert('Kunne ikke lese PDF: ' + err.message); }
 }
 
@@ -34253,7 +34268,7 @@ function _pdfPaperLabel(wCm, hCm) {
 
 // STEG 1: sidevelger for flerside-PDF. Leser bokmerker/outline for sidetitler når PDF-en har dem
 // («har den ikke det, ikke dikt opp navn» — tittel utelates helt hvis ingen finnes).
-async function _pdfShowPagePicker(pdf, file, fileName) {
+async function _pdfShowPagePicker(pdf, file, fileName, replaceFloorId) {
   let outline = null;
   try { outline = await pdf.getOutline(); } catch (e) { outline = null; }
   const pageTitles = {};
@@ -34274,7 +34289,7 @@ async function _pdfShowPagePicker(pdf, file, fileName) {
     const thumb = await _pdfRenderThumbnail(pdf, i, THUMB_MAX_PX);
     pages.push({ num: i, ...thumb, title: pageTitles[i] || null });
   }
-  _pdfPagePickerShowModal(pdf, file, fileName, pages);
+  _pdfPagePickerShowModal(pdf, file, fileName, pages, replaceFloorId);
 }
 
 // Kenneth 18.09.2026 («PDF med flere sider: huk av sidene, gi hver sin etasje et navn»): «Alle
@@ -34283,23 +34298,49 @@ async function _pdfShowPagePicker(pdf, file, fileName) {
 // helt — STEG 0.4 fant ingen annen kodesti avhengig av at «Global»/«eksisterende etasje» kunne
 // velges HER (_installBgImageForFloor tar en generisk floorId uansett, brukt andre steder også).
 // Hver avkrysset side blir nå alltid sin egen NYE etasje, med et navn brukeren skriver selv.
-function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
+// Kenneth 24.09.2026 («legg til eksisterende etasje eller ny etasje?»): hver avkrysset rad har nå
+// en etasje-nedtrekksmeny. Regresjonen fra 5e0d126 var at ALLE sider alltid ble nye etasjer —
+// _findReusableEmptyFloor dekket kun et helt tomt prosjekt, ikke Kenneths tilfelle (etasje MED rom
+// som nettopp mistet plantegningen). Etasjer som allerede har en aktiv plantegning tilbys ikke
+// (LÅST REGEL: én plantegning per etasje) — de må gå via «Bytt plantegning».
+// replaceFloorId != null → BYTT-modus: radioknapper, nøyaktig én side, ingen navn/etasjevalg.
+function _pdfPagePickerShowModal(pdf, file, fileName, pages, replaceFloorId) {
   const partId = S.ui.activePartId;
-  const reusable = _findReusableEmptyFloor(partId);   // STEG 2c
+  const replacing = replaceFloorId != null;
+  const replaceFloor = replacing ? S.floors.find(f => f.id === replaceFloorId) : null;
+  const reusable = replacing ? null : _findReusableEmptyFloor(partId);   // STEG 2c
   const totalFloors = S.floors.filter(f => f.partId === partId).length;
   const baseFloorCount = reusable ? totalFloors - 1 : totalFloors;
+  // Kandidat-etasjer: i aktiv del, uten aktiv plantegning (vanntett-regelen står).
+  const candidates = replacing ? [] : S.floors.filter(f =>
+    f.partId === partId && !(S.bgs[f.id] && S.bgs[f.id].img));
+  const target = (!replacing && _bgImportTargetFloorId != null)
+    ? candidates.find(f => f.id === _bgImportTargetFloorId) : null;
+  const floorOpts = (pageNum) => {
+    const opts = candidates.map(f => {
+      const isTarget = target && f.id === target.id;
+      return `<option value="${f.id}">${esc(f.name)}${isTarget ? ' (denne)' : ''}</option>`;
+    }).join('');
+    return `<option value="__new__">+ Ny etasje</option>${opts}`;
+  };
   const rows = pages.map(p => {
     const label = _pdfPaperLabel(p.paperWidthCm, p.paperHeightCm);
     const titleHtml = p.title ? `<div style="font-size:11px;color:var(--dim)">${esc(p.title)}</div>` : '';
-    return `<div class="_pdf-page-row" data-page="${p.num}" onclick="_pdfPageRowClick(event,${p.num})" style="display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
-      <input type="checkbox" class="_pdf-page-chk" data-page="${p.num}" onclick="event.stopPropagation()" onchange="_pdfPageRowToggle(this)" style="width:16px;height:16px;flex-shrink:0;cursor:pointer">
+    const chk = replacing
+      ? `<input type="radio" name="_pdf-page-pick" class="_pdf-page-chk" data-page="${p.num}" onclick="event.stopPropagation()" onchange="_pdfPageRowToggle(this)" style="width:16px;height:16px;flex-shrink:0;cursor:pointer">`
+      : `<input type="checkbox" class="_pdf-page-chk" data-page="${p.num}" onclick="event.stopPropagation()" onchange="_pdfPageRowToggle(this)" style="width:16px;height:16px;flex-shrink:0;cursor:pointer">`;
+    const tail = replacing ? '' : `
+      <select class="_pdf-page-floor" data-page="${p.num}" disabled onclick="event.stopPropagation()" onchange="_pdfPagePickerRefresh()" style="width:118px;padding:6px 4px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;flex-shrink:0;opacity:0.5">${floorOpts(p.num)}</select>
+      <input type="text" class="_pdf-page-name" data-page="${p.num}" disabled placeholder="" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();const b=document.getElementById('_pdf-page-picker-go');if(!b.disabled)b.click();}" style="width:110px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;flex-shrink:0;opacity:0.5">`;
+    return `<div class="_pdf-page-row" data-page="${p.num}" onclick="_pdfPageRowClick(event,${p.num})" style="display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer">
+      ${chk}
       <img src="${p.dataUrl}" style="width:70px;height:auto;max-height:90px;object-fit:contain;border:1px solid var(--border);border-radius:4px;flex-shrink:0;background:#fff">
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;font-size:13px;color:var(--text)">Side ${p.num}</div>
         <div style="font-size:12px;color:var(--muted)">${label}</div>
         ${titleHtml}
       </div>
-      <input type="text" class="_pdf-page-name" data-page="${p.num}" disabled placeholder="" onclick="event.stopPropagation()" onkeydown="if(event.key==='Enter'){event.preventDefault();const b=document.getElementById('_pdf-page-picker-go');if(!b.disabled)b.click();}" style="width:130px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:12px;flex-shrink:0;opacity:0.5">
+      ${tail}
     </div>`;
   }).join('');
 
@@ -34309,21 +34350,31 @@ function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
   ov.id = '_pdf-page-picker-ov';
   ov._pdfBaseFloorCount = baseFloorCount;
   ov._pdfReusableFloorId = reusable ? reusable.id : null;
+  ov._pdfReplaceFloorId = replacing ? replaceFloorId : null;
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center';
+  const heading = replacing ? 'Velg siden som erstatter plantegningen' : 'Velg side(r) fra PDF';
+  const intro = replacing
+    ? `${esc(fileName)} — ${pages.length} sider. Velg ÉN side som skal erstatte plantegningen i ${esc(replaceFloor ? replaceFloor.name : 'etasjen')}. Rommene beholdes; er den nye siden like stor som den gamle, beholdes også målestokken.`
+    : `${esc(fileName)} — ${pages.length} sider. Huk av sidene du vil importere, og velg hvilken etasje hver skal ligge i. «+ Ny etasje» bruker navnet du skriver, ellers et standardnavn du kan endre etterpå.`;
   ov.innerHTML = `
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;width:520px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:12px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;width:${replacing ? 480 : 600}px;max-width:94vw;max-height:88vh;overflow:auto;display:flex;flex-direction:column;gap:12px">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <div style="font-size:16px;font-weight:700;color:var(--text)">Velg side(r) fra PDF</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">${heading}</div>
         <button onclick="_pdfPagePickerClose()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
       </div>
-      <div style="font-size:12px;color:var(--muted)">${esc(fileName)} — ${pages.length} sider. Huk av sidene du vil importere — hver blir bakgrunn for sin egen nye etasje. Sett navnet planet skal ha i Varmeplan, ellers får det et standardnavn du kan endre etterpå.</div>
+      <div style="font-size:12px;color:var(--muted)">${intro}</div>
       <div>${rows}</div>
       <div style="display:flex;justify-content:flex-end;gap:10px">
         <button onclick="_pdfPagePickerClose()" style="padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
-        <button id="_pdf-page-picker-go" disabled style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:default;opacity:0.5">Importer 0 sider</button>
+        <button id="_pdf-page-picker-go" disabled style="padding:8px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:default;opacity:0.5">${replacing ? 'Erstatt plantegning' : 'Importer 0 sider'}</button>
       </div>
     </div>`;
   document.body.appendChild(ov);
+  // Forvalg: første rad peker på etasjen importen ble startet fra, resten på «+ Ny etasje».
+  if (target) {
+    const firstSel = ov.querySelector('._pdf-page-floor');
+    if (firstSel) firstSel.value = String(target.id);
+  }
   document.getElementById('_pdf-page-picker-go').onclick = () => _pdfPagePickerRun(pdf, fileName, ov);
 }
 
@@ -34331,20 +34382,28 @@ function _pdfPagePickerShowModal(pdf, file, fileName, pages) {
 // veksler avkrysningen — «man skal fysisk måtte trykke», men trykket kan lande hvor som helst
 // på raden, ikke bare på det vesle boks-ikonet.
 function _pdfPageRowClick(e, page) {
-  if (e.target.closest('input')) return;
+  if (e.target.closest('input') || e.target.closest('select')) return;
   const cb = document.querySelector(`._pdf-page-chk[data-page="${page}"]`);
-  cb.checked = !cb.checked;
+  // Radio (BYTT-modus): klikk velger alltid, aldri veksler av — ellers stod man uten valg.
+  cb.checked = cb.type === 'radio' ? true : !cb.checked;
   _pdfPageRowToggle(cb);
 }
 function _pdfPageRowToggle(cb) {
-  const row = cb.closest('._pdf-page-row');
-  const nameInp = row.querySelector('._pdf-page-name');
-  row.style.borderColor = cb.checked ? 'var(--accent)' : 'var(--border)';
-  row.style.borderWidth = cb.checked ? '2px' : '1px';
-  nameInp.disabled = !cb.checked;
-  nameInp.style.opacity = cb.checked ? '1' : '0.5';
+  const ov = document.getElementById('_pdf-page-picker-ov');
+  // Radio: nettleseren fjerner .checked på de andre uten å fyre onchange for dem — tegn om alle.
+  const rows = cb.type === 'radio' && ov ? [...ov.querySelectorAll('._pdf-page-row')] : [cb.closest('._pdf-page-row')];
+  for (const row of rows) {
+    const c = row.querySelector('._pdf-page-chk');
+    const nameInp = row.querySelector('._pdf-page-name');
+    const selInp = row.querySelector('._pdf-page-floor');
+    row.style.borderColor = c.checked ? 'var(--accent)' : 'var(--border)';
+    row.style.borderWidth = c.checked ? '2px' : '1px';
+    if (selInp) { selInp.disabled = !c.checked; selInp.style.opacity = c.checked ? '1' : '0.5'; }
+    if (nameInp) { nameInp.disabled = !c.checked; nameInp.style.opacity = c.checked ? '1' : '0.5'; }
+  }
   _pdfPagePickerRefresh();
-  if (cb.checked) { nameInp.focus(); nameInp.select(); }
+  const own = cb.closest('._pdf-page-row').querySelector('._pdf-page-name');
+  if (cb.checked && own && !own.disabled) { own.focus(); own.select(); }
 }
 // Teller avkryssede rader i sidenes rekkefølge (ikke klikkerekkefølge) og setter standardnavnet
 // som PLACEHOLDER — så det som faktisk vises alltid er det som faktisk blir brukt hvis feltet
@@ -34352,20 +34411,56 @@ function _pdfPageRowToggle(cb) {
 // forskyver nummereringen på alt under.
 function _pdfPagePickerRefresh() {
   const ov = document.getElementById('_pdf-page-picker-ov'); if (!ov) return;
-  let n = 0;
-  for (const row of ov.querySelectorAll('._pdf-page-row')) {
-    const cb = row.querySelector('._pdf-page-chk');
-    const nameInp = row.querySelector('._pdf-page-name');
-    if (cb.checked) { n++; nameInp.placeholder = (ov._pdfBaseFloorCount + n) + '. etasje'; }
-  }
+  const replacing = ov._pdfReplaceFloorId != null;
   const btn = document.getElementById('_pdf-page-picker-go');
-  btn.textContent = `Importer ${n} side${n === 1 ? '' : 'r'}`;
+  let n = 0;
+  if (replacing) {
+    for (const row of ov.querySelectorAll('._pdf-page-row')) if (row.querySelector('._pdf-page-chk').checked) n++;
+    btn.textContent = 'Erstatt plantegning';
+  } else {
+    // Samme etasje kan bare velges på ÉN rad — grå ut den som alt er tatt (LÅST REGEL: én
+    // plantegning per etasje). «+ Ny etasje» kan velges av så mange rader man vil.
+    const taken = new Set();
+    for (const row of ov.querySelectorAll('._pdf-page-row')) {
+      const cb = row.querySelector('._pdf-page-chk'), sel = row.querySelector('._pdf-page-floor');
+      if (cb.checked && sel && sel.value !== '__new__') taken.add(sel.value);
+    }
+    let newCount = 0;
+    for (const row of ov.querySelectorAll('._pdf-page-row')) {
+      const cb = row.querySelector('._pdf-page-chk');
+      const nameInp = row.querySelector('._pdf-page-name');
+      const sel = row.querySelector('._pdf-page-floor');
+      if (sel) {
+        for (const o of sel.options) {
+          o.disabled = o.value !== '__new__' && o.value !== sel.value && taken.has(o.value);
+        }
+      }
+      const toNewFloor = !sel || sel.value === '__new__';
+      // Navnefeltet gjelder kun «+ Ny etasje» — en eksisterende etasje beholder sitt eget navn.
+      if (nameInp) {
+        const useName = cb.checked && toNewFloor;
+        nameInp.disabled = !useName;
+        nameInp.style.opacity = useName ? '1' : '0.4';
+        if (!useName) nameInp.placeholder = '';
+      }
+      if (cb.checked) {
+        n++;
+        if (toNewFloor) { newCount++; if (nameInp) nameInp.placeholder = (ov._pdfBaseFloorCount + newCount) + '. etasje'; }
+      }
+    }
+    btn.textContent = `Importer ${n} side${n === 1 ? '' : 'r'}`;
+  }
   btn.disabled = n === 0;
   btn.style.opacity = n === 0 ? '0.5' : '1';
   btn.style.cursor = n === 0 ? 'default' : 'pointer';
 }
 
-function _pdfPagePickerClose() { const ov = document.getElementById('_pdf-page-picker-ov'); if (ov) ov.remove(); }
+function _pdfPagePickerClose() {
+  const ov = document.getElementById('_pdf-page-picker-ov'); if (ov) ov.remove();
+  // Kenneth 24.09.2026: nullstill importmålet ved avbryt — ellers ville neste import fra
+  // verktøylinja arvet etasjen en avbrutt import tilfeldigvis pekte på.
+  _bgImportTargetFloorId = null; _bgReplaceFloorId = null;
+}
 
 // STEG 2: importerer alle avkryssede sider i ÉN operasjon. Kalibrering skjer aldri automatisk her
 // (se _pdfRenderPageToBg sin showCalibration:false) — bortsett fra det ene unntaket der brukeren
@@ -34374,12 +34469,35 @@ function _pdfPagePickerClose() { const ov = document.getElementById('_pdf-page-p
 async function _pdfPagePickerRun(pdf, fileName, ov) {
   const checkedRows = [...ov.querySelectorAll('._pdf-page-row')].filter(row => row.querySelector('._pdf-page-chk').checked);
   if (!checkedRows.length) { _bgAutoStartTwoPoint = false; ov.remove(); return; }
+  // Kenneth 24.09.2026, BYTT-modus: nøyaktig én side erstatter plantegningen i den valgte etasjen.
+  const replaceFloorId = ov._pdfReplaceFloorId;
+  if (replaceFloorId != null) {
+    const page = +checkedRows[0].dataset.page;
+    ov.remove();
+    _bgAutoStartTwoPoint = false; _bgReplaceFloorId = null; _bgImportTargetFloorId = null;
+    const oldBg = S.bgs[replaceFloorId];
+    await _pdfRenderPageToBg(pdf, page, fileName, replaceFloorId, { showCalibration: true, replaceOf: oldBg });
+    const nowBg = S.bgs[replaceFloorId];
+    setActiveBgFloor(replaceFloorId); updateCtxBar(); renderSidebar();
+    if (nowBg && nowBg._needsCalibration) { _fitViewToBg(nowBg); }
+    render();
+    if (typeof _showToast === 'function') {
+      _showToast(nowBg && nowBg._needsCalibration
+        ? 'Ny tegning har annen størrelse — sett målestokk på nytt'
+        : 'Plantegningen er byttet — målestokken er beholdt', nowBg && nowBg._needsCalibration ? 'warn' : 'ok');
+    }
+    return;
+  }
   const assignments = checkedRows.map(row => {
     const nameInp = row.querySelector('._pdf-page-name');
-    return { page: +row.dataset.page, name: nameInp.value.trim() || nameInp.placeholder };
+    const sel = row.querySelector('._pdf-page-floor');
+    const floorId = (sel && sel.value !== '__new__') ? sel.value : null;
+    return { page: +row.dataset.page, floorId,
+      name: floorId ? null : (nameInp.value.trim() || nameInp.placeholder) };
   });
   let reusableId = ov._pdfReusableFloorId;
   ov.remove();
+  _bgImportTargetFloorId = null;
   const singleTwoPoint = assignments.length === 1 && _bgAutoStartTwoPoint;
   if (!singleTwoPoint) _bgAutoStartTwoPoint = false;
   // STEG 3 (etasje-vanntett): hver avkrysset side oppretter én NY etasje i aktiv del — «tre sider
@@ -34390,7 +34508,13 @@ async function _pdfPagePickerRun(pdf, fileName, ov) {
   let firstFloorId = null;
   for (const a of assignments) {
     let floorId;
-    if (reusableId != null) {
+    if (a.floorId != null) {
+      // Kenneth 24.09.2026: brukeren pekte ut en EKSISTERENDE etasje (typisk den importen ble
+      // startet fra). Navnet røres ikke — etasjen heter allerede det den skal hete.
+      floorId = S.floors.some(f => String(f.id) === String(a.floorId))
+        ? S.floors.find(f => String(f.id) === String(a.floorId)).id
+        : _addFloorToPart(partId, a.name || 'Ny etasje').id;
+    } else if (reusableId != null) {
       const fl = S.floors.find(f => f.id === reusableId);
       fl.name = a.name;
       floorId = reusableId;
@@ -34410,7 +34534,14 @@ async function _pdfPagePickerRun(pdf, fileName, ov) {
     render();
   }
   if (typeof _showToast === 'function') {
-    _showToast(`${assignments.length} etasje${assignments.length > 1 ? 'r' : ''} importert. Sett målestokk på hver plantegning — start med ${assignments[0].name}.`, 'ok');
+    // Navnet på den første: enten det brukeren skrev (ny etasje) eller etasjens eget navn.
+    const firstFl = S.floors.find(f => f.id === firstFloorId);
+    const firstName = assignments[0].name || (firstFl ? firstFl.name : 'første plantegning');
+    const nNew = assignments.filter(a => a.floorId == null).length;
+    const head = nNew === assignments.length
+      ? `${assignments.length} etasje${assignments.length > 1 ? 'r' : ''} importert.`
+      : `${assignments.length} plantegning${assignments.length > 1 ? 'er' : ''} importert.`;
+    _showToast(`${head} Sett målestokk på hver plantegning — start med ${firstName}.`, 'ok');
   }
 }
 
@@ -34462,15 +34593,39 @@ function _installBgImage(img, dataUrl, fileName, meta) {
   const newPageNumber = (meta && meta.pageNumber != null) ? meta.pageNumber : null;
   const sameFile = (keepTransform && bg.img) || (fileName && bg.fileName && bg.fileName === fileName && bg.img && (bg.pageNumber ?? null) === newPageNumber);
 
+  // Kenneth 24.09.2026: «Bytt plantegning» bærer plasseringen over KUN når den nye tegningen er
+  // fysisk like stor (_bgTransformCompatible, delt med _installBgImageForFloor). Før holdt det at
+  // brukeren valgte «Bytt bilde» — en tegning i annet format arvet da en målestokk som ikke gjaldt.
+  const carryOld = keepTransform ? { originX: bg.originX, originY: bg.originY, widthCm: bg.widthCm,
+    heightCm: bg.heightCm, rotation: bg.rotation, flipX: bg.flipX, flipY: bg.flipY,
+    locked: bg.locked, opacity: bg.opacity, img: bg.img,
+    paperWidthCm: bg.paperWidthCm, paperHeightCm: bg.paperHeightCm,
+    _srcW: bg._srcW, _srcH: bg._srcH } : null;
+  const canCarry = keepTransform && _bgTransformCompatible(carryOld, meta, img);
+
   bg.img      = img;
   bg.dataUrl  = dataUrl;
   bg.fileName = fileName || null;
   bg.pageNumber = newPageNumber;   // STEG 5: hvilken side av fileName denne bakgrunnen kom fra (null = ikke PDF/ukjent)
+  bg._srcW = img.naturalWidth; bg._srcH = img.naturalHeight;
   // Physical paper size (PDF only) for exact «Fast målestokk». Raster images clear it on new file.
   if (meta && meta.paperWidthCm > 0) { bg.paperWidthCm = meta.paperWidthCm; bg.paperHeightCm = meta.paperHeightCm; }
   else if (!sameFile) { delete bg.paperWidthCm; delete bg.paperHeightCm; }
 
-  if (!sameFile) {
+  if (canCarry) {
+    _carryBgTransform(carryOld, bg);
+  } else if (keepTransform) {
+    // Bytte, men annen størrelse → ny tegning må kalibreres på nytt. Si fra (ellers ser det ut som
+    // et stille feilslag at tegningen plutselig ligger feil i forhold til rommene).
+    const sc0 = S.view.zoom * BASE_SCALE;
+    const ratio0 = Math.min(canvas.width * 0.85 / sc0 / img.naturalWidth, canvas.height * 0.85 / sc0 / img.naturalHeight);
+    bg._autoW = img.naturalWidth * ratio0; bg._autoH = img.naturalHeight * ratio0;
+    bg.widthCm = bg._autoW; bg.heightCm = bg._autoH;
+    bg.originX = 0; bg.originY = -bg.heightCm; bg.opacity = 1.0;
+    bg._needsCalibration = true;
+    _fitViewToBg(bg);
+    if (typeof _showToast === 'function') _showToast('Ny tegning har annen størrelse — sett målestokk på nytt', 'warn');
+  } else if (!sameFile) {
     // New file: auto-fit to canvas for display, but mark as uncalibrated
     const sc = S.view.zoom * BASE_SCALE;
     const fitW = canvas.width  * 0.85 / sc;
@@ -34513,6 +34668,37 @@ function _installBgImage(img, dataUrl, fileName, meta) {
   }
 }
 
+// Kenneth 24.09.2026 («Bytt plantegning»): DELT av _installBgImage og _installBgImageForFloor —
+// før fantes bevaringslogikken kun i den første (via _bgReplaceKeepTransform), så en PDF-side som
+// gikk gjennom den andre ALLTID nullstilte origin/størrelse og satte _needsCalibration (målt i
+// STEG 0.2). Bærer over plasseringen fra en gammel plantegning til en ny NÅR de fysisk er like
+// store — da ligger den nye nøyaktig over rommene og kalibreringen er fortsatt gyldig.
+// Returnerer true hvis transformen ble båret over.
+//  - PDF → PDF: samme papirstørrelse innen 0,5 cm (paperWidthCm/HeightCm fra sidens egen viewport)
+//  - raster → raster: samme pikselmål
+//  - blandet, eller ulik størrelse: nei — den nye må kalibreres på nytt
+function _bgTransformCompatible(oldBg, newMeta, img) {
+  if (!oldBg || !oldBg.img) return false;
+  const oldPaper = oldBg.paperWidthCm > 0, newPaper = !!(newMeta && newMeta.paperWidthCm > 0);
+  if (oldPaper !== newPaper) return false;
+  if (newPaper) {
+    return Math.abs(oldBg.paperWidthCm - newMeta.paperWidthCm) < 0.5
+        && Math.abs(oldBg.paperHeightCm - newMeta.paperHeightCm) < 0.5;
+  }
+  return !!img && oldBg._srcW === img.naturalWidth && oldBg._srcH === img.naturalHeight;
+}
+// Kopierer plasseringen (ikke bildet) fra gammel til ny. Kalles KUN når _bgTransformCompatible
+// er sann — ellers ville den nye tegningen arvet en målestokk som ikke gjelder for den.
+function _carryBgTransform(oldBg, bg) {
+  bg.originX = oldBg.originX; bg.originY = oldBg.originY;
+  bg.widthCm = oldBg.widthCm; bg.heightCm = oldBg.heightCm;
+  bg.rotation = oldBg.rotation || 0;
+  bg.flipX = oldBg.flipX || false; bg.flipY = oldBg.flipY || false;
+  bg.locked = oldBg.locked || false;
+  bg.opacity = oldBg.opacity != null ? oldBg.opacity : 1.0;
+  bg._needsCalibration = false;
+}
+
 // STEG 2 (Kenneth 19.08.2026, PDF-bakgrunn flere sider): samme jobb som _installBgImage, men mot
 // en EKSPLISITT etasje (`floorId`) i stedet for alltid «aktiv etasje» — nødvendig for å tildele
 // flere sider til flere etasjer i én operasjon uten å måtte bytte aktiv etasje mellom hver side.
@@ -34525,6 +34711,11 @@ function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
   // ingen «legg til som nytt lag»-gren lenger (det var bgLayers sin rolle, se fjerningen av den).
   // Kallerne (_addBgToFloor, _pdfPagePickerRun) garanterer nå at floorId enten er en HELT NY
   // etasje eller en eksplisitt valgt tom etasje — denne funksjonen fyller alltid samme slot.
+  // Kenneth 24.09.2026 («Bytt plantegning»): opts.replaceOf = den gamle plantegningen denne
+  // erstatter. Er den fysisk like stor, bæres plasseringen over (ny tegning lander nøyaktig over
+  // rommene, ingen ny kalibrering) — ellers markeres den ukalibrert og kalleren varsler.
+  const oldBg = opts.replaceOf || null;
+  const canCarry = _bgTransformCompatible(oldBg, meta, img);
   const bg = S.bgs[floorId] || _newBgObj();
   S.bgs[floorId] = bg;
 
@@ -34532,23 +34723,28 @@ function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
   bg.dataUrl = dataUrl;
   bg.fileName = fileName || null;
   bg.pageNumber = (meta && meta.pageNumber != null) ? meta.pageNumber : null;   // STEG 5
+  bg._srcW = img.naturalWidth; bg._srcH = img.naturalHeight;   // for raster-sammenligning ved neste bytte
   if (meta && meta.paperWidthCm > 0) { bg.paperWidthCm = meta.paperWidthCm; bg.paperHeightCm = meta.paperHeightCm; }
   else { delete bg.paperWidthCm; delete bg.paperHeightCm; }
 
-  const sc = S.view.zoom * BASE_SCALE;
-  const fitW = canvas.width * 0.85 / sc;
-  const fitH = canvas.height * 0.85 / sc;
-  const ratio = Math.min(fitW / img.naturalWidth, fitH / img.naturalHeight);
-  bg._autoW = img.naturalWidth * ratio;
-  bg._autoH = img.naturalHeight * ratio;
-  bg.widthCm = bg._autoW;
-  bg.heightCm = bg._autoH;
-  // STEG 1 (Kenneth 25.08.2026): samme kanoniske plassering som _installBgImage — se rapporten
-  // over den funksjonen. Gjelder også PDF-sidevelgeren, som kaller hit via _pdfRenderPageToBg.
-  bg.originX = 0;
-  bg.originY = -bg.heightCm;
-  bg.opacity = 1.0;
-  bg._needsCalibration = true;
+  if (canCarry) {
+    _carryBgTransform(oldBg, bg);
+  } else {
+    const sc = S.view.zoom * BASE_SCALE;
+    const fitW = canvas.width * 0.85 / sc;
+    const fitH = canvas.height * 0.85 / sc;
+    const ratio = Math.min(fitW / img.naturalWidth, fitH / img.naturalHeight);
+    bg._autoW = img.naturalWidth * ratio;
+    bg._autoH = img.naturalHeight * ratio;
+    bg.widthCm = bg._autoW;
+    bg.heightCm = bg._autoH;
+    // STEG 1 (Kenneth 25.08.2026): samme kanoniske plassering som _installBgImage — se rapporten
+    // over den funksjonen. Gjelder også PDF-sidevelgeren, som kaller hit via _pdfRenderPageToBg.
+    bg.originX = 0;
+    bg.originY = -bg.heightCm;
+    bg.opacity = 1.0;
+    bg._needsCalibration = true;
+  }
   bg.visible = true;
   bg.calibrating = false;
   bg.calPts = [];
@@ -34556,7 +34752,9 @@ function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
   // STEG 2: kalibrering er ALDRI automatisk for en flerside-batch (se _pdfPagePickerRun) — «hver
   // side kalibreres for seg», ikke i en kjede av popup-er rett etter hverandre. Enkeltside-
   // importen (opts.showCalibration=true) beholder den ORIGINALE oppførselen uendret.
-  if (opts.showCalibration) {
+  // Ble plasseringen båret over (bytte av like stor tegning), er den ferdig kalibrert — da skal
+  // verken kalibrerings-overlayet eller to-punkts-flyten starte. Kalleren gir beskjed i stedet.
+  if (opts.showCalibration && !canCarry) {
     if (S.ui.activeFloorId !== floorId) setActiveBgFloor(floorId === '__global__' ? null : floorId);
     showBgPanel();
     updateCtxBar();
@@ -34564,6 +34762,10 @@ function _installBgImageForFloor(img, dataUrl, fileName, meta, floorId, opts) {
     render();
     if (_bgAutoStartTwoPoint) { _bgAutoStartTwoPoint = false; if (typeof startBgCalibrate === 'function') startBgCalibrate(); }
     else { const ov = document.getElementById('bg-calib-overlay'); if (ov) ov.style.display = 'flex'; }
+  } else if (opts.showCalibration && canCarry) {
+    if (S.ui.activeFloorId !== floorId) setActiveBgFloor(floorId === '__global__' ? null : floorId);
+    _bgAutoStartTwoPoint = false;
+    showBgPanel(); updateCtxBar(); render();
   }
   // Batch-import (flere sider → flere etasjer, opts.showCalibration=false): _pdfPagePickerRun
   // navigerer til SISTE etasje og tilpasser visningen dit etter at hele batchen er ferdig — å
@@ -35334,6 +35536,14 @@ function _findReusableEmptyFloor(partId) {
   if (S.bgs[f.id] && S.bgs[f.id].img) return null;
   return f;
 }
+// Kenneth 24.09.2026 («tegningen legger seg ikke i den etasjen jeg har opprettet»): hvilken etasje
+// importen ble startet FRA. _addBgToFloor satte riktig AKTIV etasje fra før, men flerside-velgeren
+// leste aldri den informasjonen og lagde alltid nye etasjer (regresjon fra 5e0d126). Nullstilles
+// når velgeren er ferdig/avbrutt, så en senere import fra menylinja ikke arver et gammelt mål.
+let _bgImportTargetFloorId = null;
+// Samme, men for «Bytt plantegning»: etasjen hvis plantegning skal ERSTATTES (gammel slettes,
+// plasseringen bæres over når formatet er likt).
+let _bgReplaceFloorId = null;
 function _addBgToFloor(floorId) {
   // STEG 3 (LÅST REGEL «etasjen er vanntett», Kenneth 19.08.2026): fortsatt kun ÉN AKTIV
   // plantegning per etasje — den regelen er urørt.
@@ -35349,6 +35559,17 @@ function _addBgToFloor(floorId) {
     delete S.bgs[floorId];                  // tom slot — neste import fyller den på nytt
   }
   setActiveBgFloor(floorId);
+  _bgImportTargetFloorId = floorId; _bgReplaceFloorId = null;
+  renderSidebar();
+  document.getElementById('bg-file-inp')?.click();
+}
+// Kenneth 24.09.2026: «bytt plantegning» — den gamle ERSTATTES (slettes, ikke degraderes til
+// referanse slik «Legg til» gjør). Plasseringen bæres over når den nye har samme format.
+function _replaceFloorBg(floorId) {
+  const bg = S.bgs[floorId];
+  if (!bg || !bg.img) { _addBgToFloor(floorId); return; }
+  setActiveBgFloor(floorId);
+  _bgReplaceFloorId = floorId; _bgImportTargetFloorId = floorId;
   renderSidebar();
   document.getElementById('bg-file-inp')?.click();
 }
@@ -36221,7 +36442,17 @@ function roomCtxMenu(e, id) {
 
 function floorCtxMenu(e, id) {
   e.preventDefault(); e.stopPropagation();
-  document.getElementById('ctx-menu').innerHTML=`
+  // Kenneth 24.09.2026: «to valg — bytt plantegning, og slette + legge til ny». Forskjellen sies
+  // rett ut i menyen, siden ordene ellers er lette å blande: BYTT sletter den gamle, LEGG TIL
+  // beholder den som referanse (DEL C-oppførselen, uendret).
+  const hasBg = !!(S.bgs[id] && S.bgs[id].img);
+  const bgItems = hasBg
+    ? `<div class="ctx-item" onclick="_replaceFloorBg(${id});hideCtx()">${IC('camera',14)} Bytt plantegning (erstatter)</div>
+       <div class="ctx-item" onclick="_addBgToFloor(${id});hideCtx()">${IC('map',14)} Legg til som ny versjon (gammel blir referanse)</div>
+       <div class="ctx-sep"></div>`
+    : `<div class="ctx-item" onclick="_addBgToFloor(${id});hideCtx()">${IC('map',14)} Legg til plantegning</div>
+       <div class="ctx-sep"></div>`;
+  document.getElementById('ctx-menu').innerHTML=bgItems+`
     <div class="ctx-item" onclick="renameFloor(${id});hideCtx()"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> Gi nytt navn</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item danger" onclick="delFloor(${id});hideCtx()">✕ Slett etasje</div>`;
@@ -42094,6 +42325,7 @@ function _bgCtxMenuItems() {
   if (bg._needsCalibration) {
     return `<div class="ctx-sub-lbl">Plantegning</div>
       <div class="ctx-item" onclick="startBgCalibrate();hideCtx()" style="color:#ff9900">${IC('ruler',14)} Sett målestokk</div>
+      <div class="ctx-item" onclick="_replaceFloorBg(S.ui.activeFloorId);hideCtx()">${IC('camera',14)} Bytt plantegning</div>
       <div class="ctx-item danger" onclick="removeBgImage();hideCtx()">${IC('trash',14)} Fjern bakgrunn</div>`;
   }
   const vis = bg.visible !== false;
@@ -42104,7 +42336,7 @@ function _bgCtxMenuItems() {
       <input type="range" min="5" max="100" value="${opVal}" style="flex:1;min-width:70px" oninput="setBgOpacity(this.value)" onclick="event.stopPropagation()"></div>
     <div class="ctx-item" onclick="selectBgLayer(_activeBgLayer());hideCtx()">${IC('move',14)} Velg / flytt plantegning</div>
     <div class="ctx-item" onclick="startBgCalibrate();hideCtx()">${IC('ruler',14)} Sett målestokk på nytt</div>
-    <div class="ctx-item" onclick="_bgReplaceKeepTransform=true;document.getElementById('bg-file-inp').click();hideCtx()">${IC('camera',14)} Bytt bilde</div>
+    <div class="ctx-item" onclick="_replaceFloorBg(S.ui.activeFloorId);hideCtx()">${IC('camera',14)} Bytt plantegning</div>
     <div class="ctx-item" onclick="toggleBgLock();renderSidebar();hideCtx()">${IC(bg.locked?'lock-open':'lock',14)} ${bg.locked?'Lås opp':'Lås'} underlag</div>
     <div class="ctx-item danger" onclick="removeBgImage();hideCtx()">${IC('trash',14)} Fjern bakgrunn</div>`;
 }
@@ -43003,7 +43235,7 @@ function _bgCtxMore(e) {
   const I = (onclick, label, danger) => `<div class="ctx-item${danger ? ' danger' : ''}" onclick="hideProduktMenu();${onclick}">${label}</div>`;
   let items = I(`_bgStartMove()`, IC('move',14)+' Flytt underlag');
   items += I(`startBgCalibrate()`, '<svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Sett målestokk på nytt');
-  items += I(`_bgReplaceKeepTransform=true;document.getElementById('bg-file-inp').click()`, IC('camera',14)+' Bytt bilde');
+  items += I(`_replaceFloorBg(S.ui.activeFloorId)`, IC('camera',14)+' Bytt plantegning');
   items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
   items += I(`removeBgImage()`, '<svg class="ic ic-trash" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M18.5 6l-1 14a2 2 0 0 1-2 1.8H8.5a2 2 0 0 1-2-1.8L5.5 6"/></svg> Fjern bakgrunn', true);
   showProduktDropdown(items, e.clientX, e.clientY);
@@ -43022,7 +43254,7 @@ function _bgSelMore(e) {
   items += I(`startBgStraighten()`, IC('ruler',14)+' Rett opp etter vegg');
   items += I(`fitBgToView()`, IC('map',14)+' Tilpass til visning');
   items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
-  items += I(`_bgReplaceKeepTransform=true;document.getElementById('bg-file-inp').click()`, IC('camera',14)+' Bytt bilde');
+  items += I(`_replaceFloorBg(S.ui.activeFloorId)`, IC('camera',14)+' Bytt plantegning');
   items += I(`_addBgToFloor(S.ui.activeFloorId)`, IC('plus',14)+' Last inn ny');
   items += `<div class="ctx-sep" style="height:1px;background:var(--border);margin:4px 6px"></div>`;
   items += I(`removeBgImage()`, IC('trash',14)+' Fjern', true);
@@ -44791,7 +45023,10 @@ function _updateFileDropBanner() {
   if (!el) return;
   if (!_fileDragActive) { el.style.display = 'none'; return; }
   const fl = S.floors.find(f => f.id === S.ui.activeFloorId);
-  el.innerHTML = `<span>Slipp plantegning her — ${esc(fl ? fl.name : 'aktiv etasje')}</span>`;
+  // Kenneth 24.09.2026: si fra FØR slippet at etasjen alt har en plantegning — ellers ser man
+  // først etterpå at noe ble byttet ut. (Selve slippet spør uansett, se _dropTargetChoice.)
+  const hasBg = !!(fl && S.bgs[fl.id] && S.bgs[fl.id].img);
+  el.innerHTML = `<span>Slipp plantegning her — ${esc(fl ? fl.name : 'aktiv etasje')}${hasBg ? ' (erstatter)' : ''}</span>`;
   el.style.display = 'flex';
 }
 // Slipp-sonen (klikk): fil-velger for ALLE støttede typer → felles dispatcher.
@@ -44819,7 +45054,73 @@ function _startImportFile(file){
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
     : ((S.floors[0] && S.floors[0].id) ?? null);
   if (_importKind(file) === 'dwg') { _autoReadStart(file); return; }   // vektor → auto, ingen spørsmål
+  // Kenneth 24.09.2026: har aktiv etasje ALLEREDE en plantegning, fylte slippet før samme slot og
+  // nullstilte origin/størrelse — kalibreringen gikk tapt uten spørsmål (målt i STEG 0.2). Spør nå
+  // FØR noe skjer. Etasje uten plantegning: rett inn, som før.
+  const fl = S.floors.find(f => f.id === S.ui.activeFloorId);
+  if (fl && S.bgs[fl.id] && S.bgs[fl.id].img) { _dropTargetChoice(file, fl); return; }
   _rasterMethodChoice(file);
+}
+// Slipp på en etasje som alt har plantegning: bytt / ny versjon / ny etasje / avbryt.
+let _dropChoiceFile = null, _dropChoiceFloorId = null;
+function _dropTargetChoice(file, fl){
+  _dropChoiceFile = file; _dropChoiceFloorId = fl.id;
+  document.getElementById('_drop-target-ov')?.remove();
+  const ov = document.createElement('div'); ov.id = '_drop-target-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
+  ov.onclick = e => { if (e.target === ov) { ov.remove(); _dropChoiceFile = null; } };
+  const card = 'display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:12px;background:var(--surface2,#1d1f26);color:var(--text);padding:13px 15px;cursor:pointer;margin-bottom:9px;font-family:inherit';
+  const hov = `onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'"`;
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(500px,92vw);padding:24px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <div style="font-size:17px;font-weight:700;color:var(--text)">${esc(fl.name)} har allerede en plantegning</div>
+      <button onclick="document.getElementById('_drop-target-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">×</button>
+    </div>
+    <div style="font-size:13px;color:var(--dim);margin-bottom:15px">Hva skal skje med ${esc(file.name)}?</div>
+    <button style="${card}" ${hov} onclick="_dropTargetChoose('replace')">
+      <div style="font-weight:700;font-size:14px">${IC('camera',15)} Bytt plantegning i ${esc(fl.name)}</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:3px">Den gamle slettes. Er den nye like stor, beholdes målestokken — rommene ligger urørt.</div>
+    </button>
+    <button style="${card}" ${hov} onclick="_dropTargetChoose('version')">
+      <div style="font-weight:700;font-size:14px">${IC('map',15)} Legg til som ny versjon</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:3px">Den gamle beholdes som referanse (dempet visning), den nye blir aktiv.</div>
+    </button>
+    <button style="${card};margin-bottom:0" ${hov} onclick="_dropTargetChoose('newfloor')">
+      <div style="font-weight:700;font-size:14px">${IC('plus',15)} Ny etasje</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:3px">Oppretter en ny etasje for tegningen. ${esc(fl.name)} røres ikke.</div>
+    </button>
+  </div>`;
+  document.body.appendChild(ov);
+}
+function _dropTargetChoose(mode){
+  document.getElementById('_drop-target-ov')?.remove();
+  const file = _dropChoiceFile, floorId = _dropChoiceFloorId;
+  _dropChoiceFile = null; _dropChoiceFloorId = null;
+  if (!file) return;
+  if (mode === 'replace') {
+    // Samme vei som menyens «Bytt plantegning», men filen er alt valgt — sett målet og last.
+    _bgReplaceFloorId = floorId; _bgImportTargetFloorId = floorId;
+    _startMethod = null; _emptyStateDismissed = true;
+    _loadFileAsBackground(file);
+  } else if (mode === 'version') {
+    // DEL C-oppførselen, uendret: gammel degraderes til referanse, slot tømmes for den nye.
+    const existing = S.bgs[floorId];
+    if (existing && existing.img) {
+      if (!S.bgRefs[floorId]) S.bgRefs[floorId] = [];
+      S.bgRefs[floorId].unshift(existing);
+      delete S.bgs[floorId];
+    }
+    _bgImportTargetFloorId = floorId; _bgReplaceFloorId = null;
+    _startMethod = null; _emptyStateDismissed = true;
+    _loadFileAsBackground(file);
+  } else {
+    const fl = _addFloorToPart(S.ui.activePartId, `${S.floors.filter(f => f.partId === S.ui.activePartId).length + 1}. etasje`);
+    setActiveBgFloor(fl.id);
+    _bgImportTargetFloorId = fl.id; _bgReplaceFloorId = null;
+    renderSidebar();
+    _startMethod = null; _emptyStateDismissed = true;
+    _loadFileAsBackground(file);
+  }
 }
 // Raster (PDF/bilde): utvetydig valg om HVEM som lager geometrien.
 let _rasterChoiceFile = null;
@@ -46125,7 +46426,12 @@ function _restoreProject(data) {
       // Object.assign — _newBgObj() sin standard (false) skal IKKE vinne over en lagret ukalibrert
       // bakgrunn, og eldre prosjekter uten feltet (bgData.needsCalibration === undefined) faller
       // tilbake til false — dagens oppførsel («kalibrert»), ingen migrasjon.
-      S.bgs[k] = Object.assign(_newBgObj(), bgData, { img: bImg, calibrating: false, calPts: [], _needsCalibration: bgData.needsCalibration === true });
+      // Kenneth 24.09.2026 («Bytt plantegning»): _srcW/_srcH (pikselmålene) avgjør om et BYTTE av
+      // en raster-plantegning kan beholde kalibreringen. Leses fra det ferdiglastede bildet her,
+      // så eldre prosjekter uten feltene også får dem — ingen migrasjon nødvendig.
+      S.bgs[k] = Object.assign(_newBgObj(), bgData, { img: bImg, calibrating: false, calPts: [],
+        _needsCalibration: bgData.needsCalibration === true,
+        _srcW: bImg.naturalWidth, _srcH: bImg.naturalHeight });
       // A calibrated underlay defaults to LOCKED so canvas clicks pass THROUGH it (you draw rooms
       // instead of re-selecting the drawing every click → «henger i plantegning-baren»). Makes
       // existing projects with an unlocked calibrated bg click-safe. Unlock via the lock toggle.
