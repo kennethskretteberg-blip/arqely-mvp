@@ -4,6 +4,55 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Sone som rom, del 3: plasseringen skjer nå faktisk I sonen — 2026-09-25
+
+Kenneth etter 008: «funker ikke enda — jeg ønsker at en sone blir behandlet som et separat rom.»
+Skjermbildet viste én kabel som startet i sone 2 og gikk ned gjennom hele sone 1. Commit `528fdc7`.
+
+**STEG 0 — 008 bygde gjerdet, men flyttet aldri gjerningen inn i sonen.** Alt målt:
+- Med sonen VALGT i sidebar slapp `_upcPlaceCable` gjennom gaten og la kabel over HELE rommet med
+  `zoneId: undefined`.
+- `_clearRoomProductCollections` slettet FØRST nabosonens kabel (id 2 forsvant, erstattet av id 3
+  uten zoneId) — derfor bare én kabel igjen i skjermbildet.
+- `_placeMultiCableProduct` med sone-mål: to kabler, begge uten `zoneId`, og flagget var nullet
+  FØR plasseringen.
+- 008 sin «sone valgt → lov»-snarvei i gaten **var hullet**: den slapp kallet gjennom uten at
+  plasseringen faktisk skjedde i sonen.
+
+**Én regel, ingen unntak: er en sone aktiv, ER sonen rommet.**
+- `_placeTarget()` er ÉN kilde til målet — aktiv sone = `fillTargetZoneId ?? selectedZoneId`, rett
+  type, og må tilhøre valgt rom. `_activeFillSone()` er nå bare `_placeTarget().zone`, så 008 sitt
+  sone-scopede regnestykke dekker endelig også «sone valgt i sidebar».
+- `_placeInTarget(productId, fn)` kjører `fn` mot sonens midlertidige rom (synkront, via
+  `_withSoneAsRoom`), rydder KUN sonen (`_clearZoneProductCollections`) og adopterer resultatet
+  tilbake med `_adoptSoneProducts` → `roomId` = rommet, `zoneId` = sonen. Generalisert fra halen i
+  `_fillSoneCable`. `fillTargetZoneId` nulles ett sted: i `finally`.
+- `_clearRoomProductCollections` rører ikke lenger sonenes utlegg når rommet har soner — kun
+  `zoneId == null`. Det var feilen som spiste nabosonen.
+- Gaten er nå enkel: blokker når `_placeTarget().zone == null` og rommet har soner.
+- Fem veier gjennom `_placeInTarget`; `_placeCableLabelOnly` regner CC på sonens areal og stempler
+  `zoneId`. `_placeCableProduct` sin gamle `fillTargetZoneId`-gren er fjernet — innpakningen gjør
+  det samme for alle. Folie-«Automatisk» med aktiv sone rutes til `_fillSoneFoil`.
+- Ny `_soneTempRoomId(zone)` — formelen var duplisert og kunne drifte.
+
+**Flerstegs-veier gates ærlig, ikke halvveis.** Manuell utlegging, folie-breddevelger og manuell
+plate lever over mange klikk og et panel; sonen måtte vært båret på selve modusen og hvert klikk
+klippet mot `_zoneFillablePolygon`. Ny `_soneMultiStepBlocked` sier «… i sone kommer» i stedet for
+å legge utlegget stille over hele rommet. Egen sak.
+
+**Ny `_soneRegressionTest()` — 22 sjekker.** Måler det som FAKTISK BLE LAGT, ikke at en funksjon
+ble kalt: eierskap (roomId = rommet, zoneId = sonen), at ALL geometri ligger innenfor sonens
+polygon (`_cableWorldSegments` + `ptInPoly` per punkt), at nabosonen er urørt (id-er før/etter),
+at ingen kabel står igjen uten `zoneId`, at gaten blokkerer uten aktiv sone, at rom uten soner er
+uendret, at rom-rydding sparer sonene, og at ingen temp-rom lekker til `S.rooms`.
+
+Kenneths flyt målt ende-til-ende: sone 1 → 1 kabel, sone 2 → «Flere kabler» 2× → 2 kabler, alle
+med riktig `zoneId`/`roomId`, begge soner intakte. Alle sju regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
 ## Sone som rom: navn, egne innstillinger, sone-scopet produktpanel, gate på alle veier — 2026-09-25
 
 Kenneth: «Jeg ønsker at et rom som deles i to soner skal behandles som to separate rom … med
