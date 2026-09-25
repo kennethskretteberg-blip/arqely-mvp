@@ -4,6 +4,53 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Én GODKJENN-knapp under produktvalget — og forhåndsvisning i sone finner det ekte rommet — 2026-09-25
+
+Kenneth: «Jeg får ikke noe valg om GODKJENN, slik at jeg ikke får opp etasje/rom-listen. Jeg ønsker
+som standard kun én GODKJENN-knapp rett under der jeg velger kabel for rommet.» Commit `d09088d`.
+
+**STEG 0 — tre feil som forsterket hverandre til en blindvei, alle målt:**
+
+| Målt | Resultat |
+|---|---|
+| Footer for det midlertidige sone-rommet | **0 tegn** (1185 for det ekte rommet) |
+| FERDIG-knappen | `disabled: true` |
+| `_computeRoomStats(temp)` | **0 W** (mot 878 W på rommet) |
+
+Panelet tegnes inne i `_withSoneAsRoom`, så footeren slo opp temp-rommet og fant ingen
+`_cablePreviewMeta` — den bor på det EKTE rommet. Samtidig låste `_syncRwpDoneEnabled` FERDIG
+nettopp fordi det ekte rommet HADDE en ventende forhåndsvisning. Begge veier ut borte samtidig.
+Stats ga 0 W fordi kablene etter adopsjonen i 009 har det ekte rommets `roomId`.
+
+**Funn utenfor arbeidsordren:** `showCablePlacePanel` har sin EGEN inline-gate som fortsatt bare så
+`fillTargetZoneId`. 009 rettet `_soneGateBlocks` til `_placeTarget()`, men ikke denne — så med
+sonen VALGT i sidebar (uten ＋-knappen) viste panelet «velg en sone» i stedet for produktlista, og
+da fantes aldri `#cable-selection-results` der footeren skal inn. Den bruker nå samme kilde.
+
+- `_soneTempRoom` bærer `_parentRoomId` + `_zoneId`; ny `_realRoomFor(roomId)` brukes av kabel- og
+  matte-footeren. Footeren slår opp TILSTANDEN på det ekte rommet, men regner TALLENE på rommet vi
+  står i (sonen) — `statRoom` er bevisst noe annet enn `room`.
+- `_computeRoomStats` er sone-bevisst for kabler, folie og matter: temp-rom med `_zoneId` teller
+  bare den sonens objekter; ekte rom teller alt (summen).
+- **Én knapp:** «✓ GODKJENN» i full bredde → `_confirmCablePreviewAndFinish` (bekreft, så
+  `finishRoomWorkflow` — rekkefølgen står). Under: tekstlenka «Angre forhåndsvisning».
+  «✓ Bruk» / «✓ Bruk og ferdig» / «✕ Avbryt» er borte. Tallraden beholdt, og footeren sier hvilken
+  sone forhåndsvisningen gjelder. Samme i matte-footeren.
+- **Sikkerhetsnett:** `_syncRwpDoneEnabled` skjuler FERDIG kun når `[data-godkjenn]` faktisk finnes
+  i DOM — og deaktiverer den aldri. Finnes ingen GODKJENN, er FERDIG alltid tilgjengelig, så
+  «ingen vei videre» kan ikke oppstå igjen uansett hvilken ny panelvei som legges til senere.
+- `_previewZoneId` i meta: `_reapplyCableDirection` gjenoppretter sonen før den kjører
+  forhåndsvisningen på nytt — ellers ville en retningsendring flyttet utlegget ut i hele rommet.
+
+`_soneRegressionTest` utvidet 22 → **31 sjekker** (gruppe G og H). Testet live gjennom det EKTE
+panelet: sonens tall (14,7 m², 61 W/m², CC 16,5 cm), GODKJENN + Angre, FERDIG skjult; GODKJENN
+committer og kabelen består i sonen; Angre rydder og viser FERDIG; rom uten soner samme knapp.
+Alle sju regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
 ## Sone som rom, del 3: plasseringen skjer nå faktisk I sonen — 2026-09-25
 
 Kenneth etter 008: «funker ikke enda — jeg ønsker at en sone blir behandlet som et separat rom.»
