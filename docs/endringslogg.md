@@ -4,6 +4,68 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Sone som rom: navn, egne innstillinger, sone-scopet produktpanel, gate på alle veier — 2026-09-25
+
+Kenneth: «Jeg ønsker at et rom som deles i to soner skal behandles som to separate rom … med
+undernavn Stue sone 1 og Stue sone 2 — eller at vi kan døpe om sone 1 til valgfritt romnavn.»
+Skjermbildet viste kabel lagt over HELE rommet etter at det var delt i to soner.
+To commits: `ca7a06f` (del 1) og `c672484` (del 2).
+
+**STEG 0 — gaten lå i feil lag, og det var verre enn antatt.** `showCablePlacePanel` blokkerte bare
+PANELET, ikke plasseringen — og unified-panelet, som er hovedveien nå, går helt utenom. Målt på et
+rom delt i to soner la **alle** kabelveier ut over hele rommet med `zoneId: null`. Motsatt
+rekkefølge (kabel først, så deling) lot kabelen bli liggende med `zoneId: undefined` **uten ett
+eneste varsel** — stille dobbelttelling mot sone-utlegget.
+
+- **Navn:** `_soneDefaultName(room, n)` → «Stue sone 1». `_soneHasDefaultName` godtar BÅDE nytt og
+  gammelt («Sone 1») format, så soner laget før dette også følger med når rommet døpes om.
+  `_renameSonesWithRoom` henger på `startRename`: soner med standardnavn følger rommet, soner
+  brukeren selv har navngitt («Entré») røres ikke.
+- **Omdøping som et rom:** `renameSone` bruker ikke lenger `prompt()`. `startRenameSone` er
+  inline-felt i sidebar-raden, speilet fra `startRenameStair`. Tomt navn → standardnavnet tilbake.
+- **Egne innstillinger:** `roomType`, `targetWm2`, `control` på sone-objektet, arvet fra rommet ved
+  oppretting. `_soneTempRoom` leser sonens verdier med `??`-fallback, så eldre soner er uendret.
+- **Gate på PLASSERINGS-laget:** ny `_soneGateBlocks` + `_soneGateToast`, kalt fra **ni** veier —
+  `_cablePreviewPlace`, `_placeCableLabelOnly`, `_placeMultiCableProduct`, `_upcPlaceCable/Mat/
+  Foil/Plate`, `startManualPlace`, `_placeCableProduct`. Den siste hadde allerede en gren for «sone
+  VALGT», men ikke for det motsatte (rom med soner, ingen valgt) — og slapp derfor kabel gjennom.
+- **Deling av rom som alt har utlegg** spør nå FØR delingen: fjern, eller behold og merk
+  `_legacyWholeRoom` (⚠-rad i sidebar). Rom uten utlegg spør ikke.
+- **Panelvalget (del 2) ble avgjort ved måling.** Prompten foreslo et midlertidig rom i `S.rooms`
+  mens panelet er åpent; jeg målte at et slikt rom **havner i prosjektfila** ved lagring og gir en
+  ekstra sidebar-rad. Løsningen ble samme idé, men **strengt synkront**: `_withSoneAsRoom` pusher,
+  kjører, rydder i `finally`. Fordi alt panelet regner slår opp rommet via `roomId`, ble hele
+  panelet sone-scopet uten å endre `roomAreas`/`selectCableByPower`/`selectMultiCables`.
+  `_updateCableSelection` og `_upcRenderCableResults` er splittet i wrapper + `…Inner`, der
+  kroppene er ord for ord uendret.
+- **Sidebar:** `_soneRowsHtml` gir innrykkede sone-rader (navn · areal · meter · styring) med
+  blyant og ＋.
+
+**Beviset** — samme rom (40 m², delt 30/10), ønsket 100 W/m²: rommet foreslår 2000W/200m med
+CC 20,0 cm; «Stue sone 1» (9,5 m²) foreslår 1000W/100m med CC 9,5 cm; «Stue sone 2» (29,1 m²)
+foreslår 2000W/200m med CC 14,6 cm. Hver sone regnes på sitt eget areal.
+
+**Ikke gjort (egen runde):** per-sone-rader i romkort/PDF/materialliste, redigerbart sone-panel for
+romtype/W-m²/styring (feltene finnes og brukes, men settes programmatisk), og sone-valg ved klikk
+på lerretet.
+
+**Fil:** index.html.
+
+---
+
+## Tom-tilstand (snø): «Hent fra kart» som kort — 2026-09-25
+
+Kenneth fant ikke kartfunksjonen: «finner ikke roof på varmeplan?» Med rette — 007 endret
+tom-tilstandens UNDERTEKST til «Hent kart fra adressen, importer en tegning, …», men la aldri inn
+en knapp. Eneste vei inn var et lite kartikon i etasjeraden i sidepanelet, praktisk talt
+uoppdagelig. Nytt kort `ces-map` i `.ces-secondary`, vist kun i snø og ikke i import-modus.
+Ny `_emptyMapImport()` finner aktiv etasje som `_startImportFile` gjør; hele flyten eies fortsatt
+av `_roofOpenDialog`. Commit `5c487cf`.
+
+**Fil:** index.html.
+
+---
+
 ## Kart-lag: «Hent fra kart» — stedfestet tegneflate for snø — 2026-09-24
 
 Serien «Stedfestet tegneflate» (prompt 001–007, `docs/tak-modul/prompter/`). Adresse → kartutsnitt
