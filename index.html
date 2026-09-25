@@ -4504,7 +4504,8 @@ function _effectiveActiveFloorId() {
 }
 /** Floor a new hindring should belong to (parent room → active floor → null). */
 function _hindringFloorId(roomId) {
-  const rm = roomId != null ? S.rooms.find(r => r.id === roomId) : null;
+  // 011: tåler et midlertidig sone-rom — det arver etasjen fra det ekte rommet.
+  const rm = roomId != null ? (_realRoomFor(roomId) || S.rooms.find(r => r.id === roomId)) : null;
   return rm?.floorId ?? _effectiveActiveFloorId() ?? null;
 }
 /** Returns true if a room belongs to the active floor (or no floors exist at all). */
@@ -12835,8 +12836,12 @@ function showCablePlacePanel(familyName, categoryId) {
   // 008 del 2: er en sone målet, regnes areal/W-m² på SONEN, ikke rommet (Kenneth: «behandles som
   // to separate rom»). Scopet er synkront — se _withSoneAsRoom om hvorfor.
   const _sone = _activeFillSone();
-  const _soneRom = _sone ? _withSoneAsRoom(_sone, null, t => t) : null;
-  const areas = _soneRom ? roomAreas(_soneRom) : (room ? roomAreas(room) : null);
+  // 011 (FUNN): arealet MÅ regnes INNE i scopet. Å hente temp-rommet ut og kalle `roomAreas`
+  // etterpå ga sonens BRUTTO — skyggehindringene er da allerede ryddet bort, så trappa talte som
+  // varmbart gulv (målt: 14,7 m² i stedet for 11,6 m²).
+  const areas = _sone
+    ? _withSoneAsRoom(_sone, null, t => roomAreas(t))
+    : (room ? roomAreas(room) : null);
   const nettoM2 = areas ? (areas.net / 10000) : 0;
   const isSnow = _isSnowModule();
   const areaLabel = _sone ? esc(_sone.name) : (isSnow ? 'Område' : 'Rom');
@@ -21375,6 +21380,60 @@ function _soneRegressionTest() {
       S.ui.selectedZoneId = null;
     }
 
+    // ── I (011): sonen tar hensyn til rommets hindringer ──
+    // Kenneths feil: kabelen gikk rett over trappa. MÅLT før fiksen: 352 av 1964 punkter inne i
+    // hindringen (17,9 %). Skyggene i `_withSoneAsRoom` gir motorene hindringen uten at noen
+    // motor endres.
+    {
+      const soner = nytt();
+      const z1 = soner.reduce((a,b)=>Math.abs(compArea(a.points))<Math.abs(compArea(b.points))?a:b);
+      // 1 × 1 m hindring midt i den minste sonen
+      const zx = z1.points.map(p=>p.x), zy = z1.points.map(p=>p.y);
+      const cx = (Math.min(...zx)+Math.max(...zx))/2, cy = (Math.min(...zy)+Math.max(...zy))/2;
+      const HP = [{x:cx-50,y:cy-50},{x:cx+50,y:cy-50},{x:cx+50,y:cy+50},{x:cx-50,y:cy+50}];
+      S.hindrings = [{ id: 993001, type:'annet', label:'Test', roomId: RID, floorId: null,
+        points: HP, clearance: 'wall' }];
+      // Skyggen synlig INNE i scopet, og netto trukket fra
+      const inne = _withSoneAsRoom(z1, prod.id, t => ({
+        n: S.hindrings.filter(h=>h.roomId===t.id).length,
+        hind: roomAreas(t).hindArea, net: roomAreas(t).net, gross: roomAreas(t).gross }));
+      check('I: skyggehindring synlig i sonen', '1', inne.n === 1, inne.n);
+      check('I: hindringsarealet trekkes fra sonens netto', '1 m² = 10000 cm²',
+        Math.abs(inne.hind - 10000) < 1, inne.hind);
+      check('I: netto = brutto − hindring', String(Math.round(inne.gross-10000)),
+        Math.abs(inne.net - (inne.gross - 10000)) < 1, Math.round(inne.net));
+      // Ryddet etterpå
+      check('I: ingen skygge igjen etter scopet', '0',
+        !S.hindrings.some(h=>h._soneShadow), S.hindrings.filter(h=>h._soneShadow).length);
+      // …også når fn KASTER
+      try { _withSoneAsRoom(z1, prod.id, () => { throw new Error('med vilje'); }); } catch (e) { /* forventet */ }
+      check('I: ingen skygge igjen når fn kaster', '0',
+        !S.hindrings.some(h=>h._soneShadow), S.hindrings.filter(h=>h._soneShadow).length);
+      // Selve poenget: kabelen skal IKKE gå gjennom hindringen
+      S.ui.selectedZoneId = z1.id;
+      _placeCableProduct(prod.id, 'SONETEST', 9500);
+      S.ui.selectedZoneId = null;
+      const cab = S.cables.find(c=>c.zoneId===z1.id);
+      let inni = 0, tot = 0;
+      if (cab) for (const sg of _cableWorldSegments(cab)) {
+        const L = Math.hypot(sg.x2-sg.x1, sg.y2-sg.y1), n = Math.max(1, Math.ceil(L/5));
+        for (let i=0;i<=n;i++){ const t=i/n; tot++;
+          if (ptInPoly(sg.x1+(sg.x2-sg.x1)*t, sg.y1+(sg.y2-sg.y1)*t, HP)) inni++; }
+      }
+      check('I: ingen kabelpunkt inne i hindringen (målt langs banen)', '0',
+        tot > 0 && inni === 0, `${inni}/${tot}`);
+      // Hindring laget i sone-modus eies av ROMMET
+      S.ui.selectedZoneId = z1.id;
+      startHindringMode();
+      check('I: modalen husker sonen', String(z1.id), S.ui.hindringZoneId === z1.id, S.ui.hindringZoneId);
+      check('I: modalen peker på det EKTE rommet', String(RID),
+        S.ui.hindringRoomId === RID, S.ui.hindringRoomId);
+      S.ui.hindringZoneId = null; S.ui.selectedZoneId = null;
+      check('I: _hindringSone finner sonen', z1.name,
+        (_hindringSone(S.hindrings.find(h=>h.id===993001))||{}).name === z1.name,
+        (_hindringSone(S.hindrings.find(h=>h.id===993001))||{}).name);
+    }
+
     // ── H (010): rom UTEN soner — footeren har samme ÉNE knapp ──
     {
       nytt(); S.zones = [];
@@ -27266,15 +27325,70 @@ function _soneGateBlocks(roomId){
 // Alt panelet regner (`roomAreas`, `_roomTargetWm2`, `selectCableByPower`, `selectMultiCables`)
 // slår opp rommet via `roomId`, så dette ene grepet gjør hele panelet sone-scopet uten å endre
 // en eneste av de funksjonene.
+// 011: SKYGGEHINDRINGER. Kenneth 25.09.2026: «Varmekabel tar ikke hensyn til hindringen jeg lagde
+// i rommet før jeg opprettet sone.» MÅLT: alle motorene finner hindringer via `h.roomId === room.id`,
+// og temp-rommet har en syntetisk id — så sonen var bokstavelig talt TOM for hindringer
+// (`hindArea: 0`), mens kabelen la 352 av 1964 målte punkter rett inne i trappa.
+// Samme grep `_buildNCableZones` allerede bruker for sine delrom: kopier rommets hindringer med
+// delrommets id, og fjern dem etterpå. Da arver ALLE veier (kabel, flerkabel, folie, matte, plate,
+// forhåndsvisning, panelets netto-tall) hindringene gratis — ingen motor endres.
+//
+// KLIPPES IKKE: STEG 0 fant ingen generell polygon-mot-polygon-klipper i fila
+// (`_splitPolygonByChord` deler på en korde, `clipStripToRoom` klipper en stripe), og soner fra
+// «Del i soner» kan ha skrå delelinje. Målt at motorene TÅLER en uklippet hindring som stikker
+// utenfor rommet: verken en 2×2 m hindring på et 1×1 m rom eller en halvveis utenfor kastet feil —
+// de subtraherer/klipper mot rommet selv. En hindring som dekker begge soner blir derfor respektert
+// i BEGGE, som er riktig: den er fysisk der.
+// 011: hvilken sone en hindring ligger i (sentroide-regelen, samme som skilleveggen bruker ved
+// omfordeling). Vises som suffiks i sidebar så Kenneth ser hvilken sone trappa hører til.
+// Hindringen EIES fortsatt av rommet — dette er kun en avlesning av geometri.
+function _hindringSone(h){
+  if (!h || !h.points || h.points.length < 3) return null;
+  const cx = h.points.reduce((a,p)=>a+p.x,0)/h.points.length;
+  const cy = h.points.reduce((a,p)=>a+p.y,0)/h.points.length;
+  return _sonesForRoom(h.roomId).find(z => z.points && ptInPoly(cx, cy, z.points)) || null;
+}
+function _hindringSoneSuffix(h){
+  const z = _hindringSone(h);
+  return z ? ` · i ${esc(z.name)}` : '';
+}
+function _soneShadowHindrings(zone, room, tid){
+  const zx = zone.points.map(p=>p.x), zy = zone.points.map(p=>p.y);
+  const zMinX = Math.min(...zx), zMaxX = Math.max(...zx);
+  const zMinY = Math.min(...zy), zMaxY = Math.max(...zy);
+  const out = [];
+  for (const h of S.hindrings) {
+    if (h.roomId !== room.id || !h.points || h.points.length < 3) continue;
+    const hx = h.points.map(p=>p.x), hy = h.points.map(p=>p.y);
+    // Bbox-overlapp: en hindring i den ANDRE enden av rommet skal ikke skygge her.
+    if (Math.max(...hx) < zMinX || Math.min(...hx) > zMaxX) continue;
+    if (Math.max(...hy) < zMinY || Math.min(...hy) > zMaxY) continue;
+    out.push({ ...h, id: 'tmpsoneh_' + h.id, roomId: tid, _soneShadow: true,
+      points: h.points.map(p=>({x:p.x, y:p.y})) });
+  }
+  return out;
+}
 function _withSoneAsRoom(zone, productId, fn){
   const room = S.rooms.find(r=>r.id===zone.roomId); if(!room) return fn();
   const tmp = _soneTempRoom(zone, room, productId);
   if(!tmp) return fn();                       // for liten sone → fall tilbake til rommet
   const TID = tmp.id, savedSel = S.ui.selectedRoomId;
   S.rooms = S.rooms.filter(r=>r.id!==TID); S.rooms.push(tmp);
+  // `tmp.area` blir stående som BRUTTO, med vilje: `roomAreas()` trekker fra hindringsarealet
+  // selv (via `h.roomId`), så når skyggene ligger inne gir `roomAreas(tmp).net` riktig netto —
+  // målt 11,35 brutto → 8,27 netto med trappa. Å skrive netto inn i `area` ville gitt DOBBEL
+  // subtraksjon ved neste `roomAreas`-kall, og panelene leser uansett `.net`, ikke `.area`.
+  const shadows = _soneShadowHindrings(zone, room, TID);
+  if (shadows.length) S.hindrings.push(...shadows);
   S.ui.selectedRoomId = TID;
   try { return fn(tmp); }
-  finally { S.rooms = S.rooms.filter(r=>r.id!==TID); S.ui.selectedRoomId = savedSel; }
+  finally {
+    S.rooms = S.rooms.filter(r=>r.id!==TID);
+    // Ubetinget opprydding — også når `fn` kaster. En skygge som blir liggende ville dukket opp
+    // som en ekte hindring på et rom som ikke finnes.
+    if (shadows.length) S.hindrings = S.hindrings.filter(h => !h._soneShadow);
+    S.ui.selectedRoomId = savedSel;
+  }
 }
 // ── 009: «er en sone aktiv, ER sonen rommet» ──────────────────────────────────────────────────
 // Kenneth 25.09.2026: «funker ikke enda — jeg ønsker at en sone blir behandlet som et separat
@@ -37124,7 +37238,7 @@ function _renderDetailPanel(roomId) {
           <span class="hindring-ico">⬛</span>
           <span class="hindring-nm" ondblclick="renameHindringInline(${hi.id},this);event.stopPropagation()" title="${esc(hi.label)}">${esc(hi.label)}</span>
           <button onclick="event.stopPropagation();renameHindringInline(${hi.id},this.closest('.hindring-item').querySelector('.hindring-nm'))" title="Gi nytt navn" style="width:18px;height:18px;border:none;border-radius:3px;background:transparent;color:var(--dim);cursor:pointer;font-size:10px;padding:0;flex-shrink:0;margin-left:auto"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
-          <span class="hindring-sz">${hw}×${hh2}</span>
+          <span class="hindring-sz">${hw}×${hh2}${_hindringSoneSuffix(hi)}</span>
         </div>${hwallsHtml}`;
       }).join('') +
       `</div></div>`;
@@ -38306,11 +38420,17 @@ function _tagPartitionWalls(room, polyline, thicknessCm) {
 
 // ─── HINDRING ─────────────────────────────────────────────────
 function startHindringMode() {
-  if (!S.ui.selectedRoomId) return; // chip only works with selected room
-  showHindringModal(S.ui.selectedRoomId);
+  // 011: virker nå også når en SONE er valgt — hindringen eies fortsatt av rommet (den er fysisk
+  // og skal telle for rommet), men modalen sentrerer i sonen og sonen tar hensyn til den via
+  // skyggemekanismen i `_withSoneAsRoom`.
+  const { room, zone } = _placeTarget();
+  const rid = zone ? zone.roomId : S.ui.selectedRoomId;
+  if (!rid) return;
+  showHindringModal(rid, zone ? zone.id : null);
 }
-function showHindringModal(roomId) {
+function showHindringModal(roomId, zoneId) {
   S.ui.hindringRoomId=roomId; S.ui.hindringType='annet';
+  S.ui.hindringZoneId = zoneId != null ? zoneId : null;
   const grid=document.getElementById('hindring-grid');
   const hTypes = _isSnowModule() ? HINDRING_TYPES_SNOW : HINDRING_TYPES;
   grid.innerHTML=hTypes.map(t=>
@@ -38338,19 +38458,30 @@ function confirmHindring() {
   S.ui.hindringCustomName=customName;
   closeModal();
   if (hw>0 && hh>0) {
-    // Dimension mode: place centered in room
+    // Dimension mode: place centered in room — 011: eller i SONEN når modalen ble åpnet derfra
+    // (Kenneth: «får heller ikke mulighet til å lage hindring i en valgt sone»). Hindringen eies
+    // fortsatt av rommet; kun plasseringen følger sonen.
     const rm=S.rooms.find(r=>r.id===S.ui.hindringRoomId);
-    if (rm) {
-      const cx=rm.points.reduce((a,p)=>a+p.x,0)/rm.points.length;
-      const cy=rm.points.reduce((a,p)=>a+p.y,0)/rm.points.length;
+    const _hz = S.ui.hindringZoneId != null
+      ? S.zones.find(z=>z.id===S.ui.hindringZoneId && z.type==='sone') : null;
+    const _senterPoly = (_hz && _hz.points && _hz.points.length>=3) ? _hz.points : (rm && rm.points);
+    if (rm && _senterPoly) {
+      const cx=_senterPoly.reduce((a,p)=>a+p.x,0)/_senterPoly.length;
+      const cy=_senterPoly.reduce((a,p)=>a+p.y,0)/_senterPoly.length;
       const pts=[{x:cx-hw/2,y:cy-hh/2},{x:cx+hw/2,y:cy-hh/2},{x:cx+hw/2,y:cy+hh/2},{x:cx-hw/2,y:cy+hh/2}];
       const hType=HINDRING_TYPES.find(t=>t.id===S.ui.hindringType)||HINDRING_TYPES[4];
       // spec-hindring-avstand-hoyreklikk.md DEL B: avstandskravet er ikke lenger et valg ved
       // tegning — alle hindringer opprettes med 'wall', endres etterpå via høyreklikk.
       S.hindrings.push({id:S.counters.nextHindringId++,type:S.ui.hindringType,
         label:customName||hType.name,roomId:S.ui.hindringRoomId,floorId:_hindringFloorId(S.ui.hindringRoomId),points:pts,
-        clearance:'wall'});
+        clearance:'wall', ...(_hz ? { _createdInZone: _hz.id } : {})});
+      // Har sonen alt utlegg som nå krysser hindringen, sier vi fra — ingen automatisk
+      // re-utlegging (samme prinsipp som for rom).
+      if (_hz && (_cablesForZone(_hz.id).length || _stripsForZone(_hz.id).length)) {
+        _showToast && _showToast(`Hindring lagt til i ${_hz.name} — legg ut produktet på nytt`, 'warn');
+      }
     }
+    S.ui.hindringZoneId = null;
   } else {
     // Free draw mode
     S.ui.drawMode='hindring';
@@ -44567,6 +44698,7 @@ function _ctxBarItems() {
         <span style="font-size:12px;color:var(--dim);padding:0 4px">${_st.areaM2.toFixed(1)} m²${(_st.nStrips||_st.nCables)?` · ${_st.powerW} W · ${_st.coveragePct}%`:''}</span>
         <span class="tc-sep"></span>
         <button class="snap-chip primary" onclick="_openSoneProdukt(event, ${_sz.id})" title="Legg folie i denne sonen">+ Produkt</button>
+        <button class="snap-chip" onclick="startHindringMode()" title="Tegn en hindring i ${esc(_sz.name)} — den eies av rommet, men sonen tar hensyn til den">+ Hindring</button>
         <button class="snap-chip" onclick="toggleSoneDirection(${_sz.id})" title="Bytt utleggingsretning for sonen">${arrow} ${dir}</button>
         ${_isSnowModule() && !_roomHasSlantedWall(_sz) ? `<button class="snap-chip" onclick="showMatWholeBandPanel('zone', ${_sz.id})" title="Del sonen i bånd der en hel matte går opp, uten rest">${IC('grid4',14)} Del så matta går opp</button>` : ''}
         ${_isSnowModule() && _roomHasSlantedWall(_sz) ? `<button class="snap-chip" onclick="showMatWedgePanel(${_sz.id})" title="Fyll den skrå kilen med en trapp av smale matter, som varmefolie gjør mot skråvegger">${IC('grid4',14)} Fyll kilen (trapp)</button>` : ''}
