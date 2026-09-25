@@ -6817,25 +6817,27 @@ function _upcPlaceCable(productId, mode, nCables) {
   // over HELE rommet. Sone valgt (fillTargetZoneId/selectedZoneId) slipper gjennom.
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }
   pushUndo();
-  // Clear existing products from room (STEG 1, Kenneth 19.08.2026 — kanonisk liste, se ROOM_PRODUCT_KEYS)
-  _clearRoomProductCollections(roomId);
-
-  if (mode === 'auto' || !productId) {
-    const { familyName, categoryId } = _upcState;
-    autoPlaceCable(familyName, categoryId);
-  } else if (mode === 'multi') {
-    const cables = autoFillMultiCable(roomId, productId, nCables);
-    if (cables && cables.length >= 2) {
-      S.cables.push(...cables);
-      S.ui.selectedCableId = cables[0].id;
+  // 009: hele kroppen kjøres mot MÅLET (sone hvis aktiv, ellers rommet). `_placeInTarget` rydder
+  // selv — sonens egne produkter når en sone er målet, rommets når den ikke er det.
+  _placeInTarget(productId, tid => {
+    if (tid === roomId) _clearRoomProductCollections(roomId);
+    if (mode === 'auto' || !productId) {
+      const { familyName, categoryId } = _upcState;
+      autoPlaceCable(familyName, categoryId);
+    } else if (mode === 'multi') {
+      const cables = autoFillMultiCable(tid, productId, nCables);
+      if (cables && cables.length >= 2) {
+        S.cables.push(...cables);
+        S.ui.selectedCableId = cables[0].id;
+      }
+    } else {
+      const cable = autoFillCable(tid, productId);
+      if (cable) {
+        S.cables.push(cable);
+        S.ui.selectedCableId = cable.id;
+      }
     }
-  } else {
-    const cable = autoFillCable(roomId, productId);
-    if (cable) {
-      S.cables.push(cable);
-      S.ui.selectedCableId = cable.id;
-    }
-  }
+  });
   _invalidateMatCache();
   renderSidebar(); updateCtxBar(); render();
 }
@@ -7186,6 +7188,19 @@ function _upcPlaceFoil(mode, familyName, categoryId) {
   // 008 del 2: samme gate som kabelveiene — et rom delt i soner skal aldri få produkt
   // over HELE rommet. Sone valgt (fillTargetZoneId/selectedZoneId) slipper gjennom.
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }
+  // 009: folie-«Automatisk» åpner et SAMMENLIKNINGS-panel; selve utlegget skjer først når
+  // brukeren velger et forslag der. Med en aktiv sone finnes allerede den sone-scopede veien
+  // (`_fillSoneFoil`, brukt av ＋-knappen) — den brukes direkte i stedet for å prøve å bære
+  // sonen gjennom panelet.
+  {
+    const _z = _placeTarget().zone;
+    if (_z && mode === 'auto') {
+      const prods = HEATING_PRODUCTS.filter(p => p.category_id === categoryId && p.active !== false
+        && (p.product_family ? p.product_family === familyName : (p.name||'').startsWith(familyName)));
+      if (prods.length) { pushUndo(); _fillSoneFoil(_z, prods); S.ui.fillTargetZoneId = null; return; }
+    }
+    if (_z && mode !== 'auto' && _soneMultiStepBlocked(mode === 'widths' ? 'Breddevelger' : 'Manuelt folie-utlegg')) return;
+  }
   // Clear existing products
   if (mode === 'auto') {
     pushUndo();
@@ -7235,15 +7250,15 @@ function _upcPlacePlate(productId, mode) {
   // 008 del 2: samme gate som kabelveiene — et rom delt i soner skal aldri få produkt
   // over HELE rommet. Sone valgt (fillTargetZoneId/selectedZoneId) slipper gjennom.
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }
+  // 009: manuell plate-plassering er en FLERKLIKKS-modus — sonen ville ikke overlevd til
+  // commit. Gates i sone (se _soneMultiStepBlocked) i stedet for å legge plater over hele rommet.
+  if (mode !== 'auto' && _soneMultiStepBlocked('Manuell plate-plassering')) return;
   pushUndo();
-  _clearRoomProductCollections(roomId);
-
-  if (mode === 'auto') {
-    _autoFillPlates(productId);
-  } else {
-    _startPlatePlacement(productId);
-    return;
-  }
+  _placeInTarget(productId, tid => {
+    if (tid === roomId) _clearRoomProductCollections(roomId);
+    if (mode === 'auto') _autoFillPlates(productId);
+    else _startPlatePlacement(productId);
+  });
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -13260,9 +13275,14 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
   // materialliste og PDF. Gjelder BEGGE veiene inn i autoFillMultiCable: sonemotoren (som kan
   // returnere null når ingen retning er gyldig) og korridor-modus (fire egne null-veier, bl.a.
   // produkter uten fast kabellengde).
+  // 009: er en sone aktiv, kjøres HELE forhåndsvisningen mot sonens midlertidige rom, og alt
+  // som legges adopteres tilbake med `zoneId`. `_tid` brukes overalt der `roomId` sto.
+  const _zPV = _placeTarget().zone;
+  const _run = fn => _zPV ? _withSoneAsRoom(_zPV, productId, tmp => fn(tmp.id)) : fn(roomId);
   let labelFallback = 0;
+  _run(_tid => {
   if (nCables > 1) {
-    const cables = autoFillMultiCable(roomId, productId, nCables, splitDir || undefined);
+    const cables = autoFillMultiCable(_tid, productId, nCables, splitDir || undefined);
     if (cables && cables.length === nCables) {
       for (const c of cables) { S.cables.push(c); newIds.push(c.id); }
       S.ui.selectedCableId = cables[0].id;
@@ -13270,11 +13290,11 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
       // Rydd bort et delvis resultat (f.eks. 2 soner når det ble bedt om 3) — et halvt utlegg med
       // feil antall er nettopp det denne saken handler om.
       if (cables) for (const c of cables) S.cables = S.cables.filter(x => x !== c);
-      const st = _cableLabelOnlyStats(roomId, productId, nCables);
+      const st = _cableLabelOnlyStats(_tid, productId, nCables);
       if (st) {
         const groupId = S.counters.nextCableId;
         for (let i = 0; i < nCables; i++) {
-          const c = { id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
+          const c = { id: S.counters.nextCableId++, roomId: _tid, productId, labelOnly: true,
             spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
             totalLength_cm: st.totalLength_cm, runs: [],
             multiCableIndex: i, multiCableGroup: groupId };
@@ -13285,8 +13305,11 @@ function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir
       }
     }
   } else {
-    const c = autoFillCable(roomId, productId); if (c) { S.cables.push(c); newIds.push(c.id); S.ui.selectedCableId = c.id; }
+    const c = autoFillCable(_tid, productId); if (c) { S.cables.push(c); newIds.push(c.id); S.ui.selectedCableId = c.id; }
   }
+  });
+  // Adopter alt forhåndsvisningen la på sonens midlertidige rom tilbake til det ekte rommet.
+  if (_zPV) _adoptSoneProducts(_soneTempRoomId(_zPV), room, _zPV);
   _invalidateCableCache();
   room._cablePreviewIds = newIds;
   room._cablePreviewMeta = { productId, nCables: nCables > 1 ? nCables : 1, familyName, categoryId,
@@ -13361,12 +13384,20 @@ function _placeCableLabelOnly(productId, familyName, categoryId, count) {
   if (!prod) { console.warn('_placeCableLabelOnly: ukjent produkt'); return; }
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }   // 008
   const n = Math.max(1, Math.min(16, parseInt(count, 10) || 1));
-  const st = _cableLabelOnlyStats(roomId, productId, n);
+  // 009: med aktiv sone regnes CC på SONENS areal, og kablene stemples med sonen — ikke lenger
+  // hele rommets areal. `_placeInTarget` gir `tid` = sonens midlertidige rom-id.
+  const _zLO = _placeTarget().zone;
+  const st = _zLO
+    ? _withSoneAsRoom(_zLO, productId, tmp => _cableLabelOnlyStats(tmp.id, productId, n))
+    : _cableLabelOnlyStats(roomId, productId, n);
   if (!st) return;
   pushUndo();
   _removeCablePreview();
-  // labelOnly er et alternativ til et tegnet utlegg → erstatt evt. kabler i rommet.
-  S.cables = S.cables.filter(c => c.roomId !== roomId);
+  // labelOnly er et alternativ til et tegnet utlegg → erstatt evt. kabler. Med aktiv sone kun
+  // SONENS (naboens skal stå); uten sone rommets egne (og ikke sonenes — se
+  // _clearRoomProductCollections sin 009-vakt).
+  if (_zLO) S.cables = S.cables.filter(c => c.zoneId !== _zLO.id);
+  else S.cables = S.cables.filter(c => !(c.roomId === roomId && (c.zoneId == null || !_sonesForRoom(roomId).length)));
   const groupId = S.counters.nextCableId;
   const ids = [];
   for (let i = 0; i < n; i++) {
@@ -13374,6 +13405,8 @@ function _placeCableLabelOnly(productId, familyName, categoryId, count) {
       id: S.counters.nextCableId++, roomId, productId, labelOnly: true,
       spacing_cm: st.spacing_cm, cc_mm: Math.round(st.spacing_cm * 10),
       totalLength_cm: st.totalLength_cm, runs: [],
+      // 009: stemples med sonen når en er aktiv — ellers ville label-kabler telt som rom-utlegg.
+      ...(_zLO ? { zoneId: _zLO.id } : {}),
       // Samme to feltene sonemotoren setter, så romkort/materialliste/PDF grupperer «N×» likt.
       multiCableIndex: i, multiCableGroup: groupId
     };
@@ -13452,25 +13485,20 @@ function _updateSnowSettingsPanel() {
 function _placeCableProduct(productId, familyName, categoryId) {
   const roomId = S.ui.selectedRoomId;
   if (!roomId) return;
-  // spec-soner-kabel-per-sone-og-N-deling.md DEL B, Krav 2/3: en sone-malrettet klikk (satt av
-  // _openSoneProdukt, overlevd gjennom showCablePlacePanel) fylles ALDRI som et vanlig romkabel-
-  // kall - den ma ga via _fillSoneCable (egen temp-rom + zoneId-stempling), ellers er dette
-  // nettopp feilen Kenneth meldte (kabel legger seg over hele rommet, ikke bare sonen).
-  if (S.ui.fillTargetZoneId != null) {
-    const zone = S.zones.find(z => z.id === S.ui.fillTargetZoneId && z.type === 'sone');
-    S.ui.fillTargetZoneId = null;
-    const prod = HEATING_PRODUCTS.find(p => p.id === productId);
-    if (zone && prod) { _fillSoneCable(zone, prod); return; }
-  }
-  // 008 del 2: fantes ingen sone-mål, men rommet HAR soner → aldri kabel over hele rommet.
-  // Den eksisterende grenen over dekket kun «sone valgt»-tilfellet; dette er det motsatte.
+  // 009: den gamle `fillTargetZoneId`-grenen (som kalte `_fillSoneCable` direkte) er borte —
+  // `_placeInTarget` gjør nøyaktig det samme for ALLE veier, og dekker i tillegg «sone valgt i
+  // sidebar», som den gamle grenen ikke gjorde.
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }
   pushUndo();
-  const cable = autoFillCable(roomId, productId);
-  if (!cable) { console.warn('_placeCableProduct: could not generate cable layout'); return; }
-  S.cables.push(cable); _invalidateCableCache();
-  _trackProductUsage(productId);
-  S.ui.selectedCableId = cable.id;
+  const ok = _placeInTarget(productId, tid => {
+    const cable = autoFillCable(tid, productId);
+    if (!cable) return false;
+    S.cables.push(cable); _invalidateCableCache();
+    _trackProductUsage(productId);
+    S.ui.selectedCableId = cable.id;
+    return true;
+  });
+  if (!ok) { console.warn('_placeCableProduct: could not generate cable layout'); return; }
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -13481,20 +13509,23 @@ function _placeMultiCableProduct(productId, familyName, categoryId, nCables) {
   // 008: gate FØR fillTargetZoneId nullstilles under — ellers ville en sone-plassering via
   // «Flere kabler» mistet målet sitt og lagt over hele rommet (målt i STEG 0).
   { const _g = _soneGateBlocks(roomId); if (_g) { _soneGateToast(_g); return; } }
-  // "Flere kabler" (autoFillMultiCable/_buildNCableZones) er UTENFOR DEL B sitt omfang denne
-  // runden (spec-en er eksplisitt: ikke rør den, rapporter kallesteder). Rydder likevel bort et
-  // eventuelt sone-mal-flagg her sa det aldri lekker inn i en senere, urelatert plassering.
-  S.ui.fillTargetZoneId = null;
+  // 009: nullet FØR `fillTargetZoneId` sto her og drepte sone-målet — målt: «Flere kabler» med
+  // sonen valgt la to kabler over HELE rommet. `_placeInTarget` nuller flagget ETTER plassering,
+  // ett sted, i sin egen `finally`.
   pushUndo();
-  const cables = autoFillMultiCable(roomId, productId, nCables);
-  if (!cables || cables.length < 2) {
+  const _fallback = () => {
     console.warn('_placeMultiCableProduct: could not generate multi-cable layout, falling back to single');
     _placeCableProduct(productId, familyName, categoryId);
-    return;
-  }
-  for (const c of cables) S.cables.push(c);
-  _invalidateCableCache();
-  S.ui.selectedCableId = cables[0].id;
+  };
+  const ok = _placeInTarget(productId, tid => {
+    const cables = autoFillMultiCable(tid, productId, nCables);
+    if (!cables || cables.length < 2) return false;
+    for (const c of cables) S.cables.push(c);
+    _invalidateCableCache();
+    S.ui.selectedCableId = cables[0].id;
+    return true;
+  });
+  if (!ok) { _fallback(); return; }
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -21164,6 +21195,141 @@ function _cableSkewRegressionTest() {
 // krever partall). V4 kan ikke redde det; den ligger i den andre paritetsgruppen. Minste retting
 // er V9 139→140 (Kenneth skrev selv «~226» — tallene er avlest fra et skjermbilde), og da følger
 // V4 = 884 entydig. Polygonet under er det av de seks mulige som matcher skjermbildets form.
+// ─── 009: SONE SOM ROM — låser at plasseringen faktisk skjer I sonen ──────────────────────────
+// Kenneths feil (25.09.2026) var at 008 sin gate slapp kallet gjennom mens plasseringen fortsatt
+// traff hele rommet. Denne testen måler det som faktisk BLE LAGT: eierskap (roomId/zoneId),
+// GEOMETRI (alle punkter innenfor sonens polygon), at nabosonen er urørt, og at rom uten soner
+// er bit-for-bit uendret. Samme «mål, ikke anta»-mønster som _foilRegressionTest sin checkNoOutside.
+function _soneRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const saved = { rooms: S.rooms, zones: S.zones, cables: S.cables, strips: S.strips,
+    mats: S.mats, plates: S.plates, hindrings: S.hindrings,
+    selRoom: S.ui.selectedRoomId, selZone: S.ui.selectedZoneId, fillZone: S.ui.fillTargetZoneId,
+    nextCable: S.counters.nextCableId, nextZone: S.counters.nextZoneId,
+    dir: S.varmefolie && S.varmefolie.direction, dirX: S.varmefolie && S.varmefolie.dirExplicit };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    const prod = { id: 9701, category_id: 9500, active: true, product_family: 'SONETEST',
+      name: 'SONETEST 1000W 100m', article_no: 'SONE100', watt_per_m: 10, cable_length_m: 100,
+      total_effect_w: 1000, voltage: 230, min_spacing_mm: 80, max_spacing_mm: 300,
+      recommended_spacing_mm: 150, min_bend_radius_mm: 30, max_length_m: 100,
+      min_gap_mm: 10, min_wall_margin_mm: 50 };
+    const RID = 992001;
+    const PTS = [{x:0,y:0},{x:800,y:0},{x:800,y:500},{x:0,y:500}];
+    const nytt = () => {
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(prod);
+      S.rooms = [{ id: RID, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
+        wallThicknessCm: 0, points: PTS.map(p=>({...p})), walls: [], dims: [],
+        area: Math.abs(compArea(PTS)), roomType: null, targetWm2: null }];
+      S.zones = []; S.cables = []; S.strips = []; S.mats = []; S.plates = []; S.hindrings = [];
+      S.ui.selectedRoomId = RID; S.ui.selectedZoneId = null; S.ui.fillTargetZoneId = null;
+      S.counters.nextCableId = 1; S.counters.nextZoneId = 1;
+      S.varmefolie.direction = null; S.varmefolie.dirExplicit = false;
+      return _performZoneSplit(RID, {x:500,y:0}, {x:500,y:500}, { skipSelect: true });
+    };
+    // Alle kabelpunkter innenfor sonens polygon? (1 cm slingring for avrunding.)
+    const utenfor = (cab, poly) => {
+      let n = 0;
+      for (const s of _cableWorldSegments(cab)) {
+        for (const p of [{x:s.x1,y:s.y1},{x:s.x2,y:s.y2}]) {
+          if (!ptInPoly(p.x, p.y, poly) && !ptInPoly(p.x, p.y, poly.map(q=>({x:q.x,y:q.y})))) n++;
+        }
+      }
+      return n;
+    };
+
+    // ── A: hver plasseringsvei, med sone VALGT i sidebar (selectedZoneId) ──
+    const veier = [
+      ['_upcPlaceCable',        () => _upcPlaceCable(prod.id, 'single', 1)],
+      ['_placeCableProduct',    () => _placeCableProduct(prod.id, 'SONETEST', 9500)],
+      ['_placeCableLabelOnly',  () => _placeCableLabelOnly(prod.id, 'SONETEST', 9500, 1)],
+    ];
+    for (const [navn, kjør] of veier) {
+      const soner = nytt();
+      const z1 = soner[0], z2 = soner[1];
+      // nabosonen får først sin egen kabel, som SKAL overleve
+      S.ui.fillTargetZoneId = z2.id; _placeCableProduct(prod.id, 'SONETEST', 9500);
+      S.ui.fillTargetZoneId = null;
+      const z2Ids = S.cables.filter(c=>c.zoneId===z2.id).map(c=>c.id).sort().join(',');
+      S.ui.selectedZoneId = z1.id;
+      kjør();
+      S.ui.selectedZoneId = null;
+      const nye = S.cables.filter(c=>c.zoneId===z1.id);
+      check(`${navn}: la kabel i sonen`, '≥1', nye.length >= 1, nye.length);
+      check(`${navn}: roomId er ROMMET, ikke temp-rommet`, String(RID),
+        nye.every(c=>c.roomId===RID), nye.map(c=>c.roomId).join(','));
+      check(`${navn}: ingen kabel uten zoneId`, '0',
+        !S.cables.some(c=>c.roomId===RID && c.zoneId==null),
+        S.cables.filter(c=>c.roomId===RID && c.zoneId==null).length);
+      check(`${navn}: nabosonen urørt`, z2Ids,
+        S.cables.filter(c=>c.zoneId===z2.id).map(c=>c.id).sort().join(',')===z2Ids,
+        S.cables.filter(c=>c.zoneId===z2.id).map(c=>c.id).sort().join(','));
+      const geomFeil = nye.filter(c=>!c.labelOnly).reduce((a,c)=>a+utenfor(c, z1.points), 0);
+      check(`${navn}: all geometri innenfor sonen (målt)`, '0', geomFeil === 0, geomFeil);
+    }
+
+    // ── B: «Flere kabler» mistet sone-målet i 008 (nullet fillTargetZoneId før plassering) ──
+    {
+      const soner = nytt();
+      S.ui.fillTargetZoneId = soner[0].id;
+      _placeMultiCableProduct(prod.id, 'SONETEST', 9500, 2);
+      const iSone = S.cables.filter(c=>c.zoneId===soner[0].id);
+      check('B: Flere kabler havner i sonen', '≥1', iSone.length >= 1, iSone.length);
+      check('B: ingen kabel uten zoneId', '0',
+        !S.cables.some(c=>c.zoneId==null), S.cables.filter(c=>c.zoneId==null).length);
+    }
+
+    // ── C: ingen aktiv sone → gaten blokkerer, ingenting legges ──
+    {
+      nytt();
+      S.ui.selectedZoneId = null; S.ui.fillTargetZoneId = null;
+      _upcPlaceCable(prod.id, 'single', 1);
+      check('C: blokkert uten aktiv sone', '0 kabler', S.cables.length === 0, S.cables.length);
+    }
+
+    // ── D: rom UTEN soner — bit for bit som før ──
+    {
+      nytt(); S.zones = [];   // fjern sonene igjen
+      S.ui.selectedZoneId = null; S.ui.fillTargetZoneId = null;
+      _placeCableProduct(prod.id, 'SONETEST', 9500);
+      check('D: rom uten soner får kabel', '1', S.cables.length === 1, S.cables.length);
+      check('D: og den har INGEN zoneId', 'null',
+        S.cables[0] && S.cables[0].zoneId == null, S.cables[0] && S.cables[0].zoneId);
+    }
+
+    // ── E: rom-rydding sparer sonenes utlegg (008-feilen) ──
+    {
+      const soner = nytt();
+      S.ui.fillTargetZoneId = soner[0].id; _placeCableProduct(prod.id, 'SONETEST', 9500);
+      S.ui.fillTargetZoneId = null;
+      const før = S.cables.filter(c=>c.zoneId===soner[0].id).length;
+      _clearRoomProductCollections(RID);
+      check('E: _clearRoomProductCollections sparer sonene', String(før),
+        S.cables.filter(c=>c.zoneId===soner[0].id).length === før,
+        S.cables.filter(c=>c.zoneId===soner[0].id).length);
+    }
+
+    // ── F: ingen midlertidige sone-rom lekker til S.rooms ──
+    check('F: ingen temp-rom i S.rooms', '0',
+      !S.rooms.some(r=>r.id < 0), S.rooms.filter(r=>r.id<0).length);
+
+  } finally {
+    HEATING_PRODUCTS.length = 0; savedProducts.forEach(p=>HEATING_PRODUCTS.push(p));
+    S.rooms = saved.rooms; S.zones = saved.zones; S.cables = saved.cables; S.strips = saved.strips;
+    S.mats = saved.mats; S.plates = saved.plates; S.hindrings = saved.hindrings;
+    S.ui.selectedRoomId = saved.selRoom; S.ui.selectedZoneId = saved.selZone;
+    S.ui.fillTargetZoneId = saved.fillZone;
+    S.counters.nextCableId = saved.nextCable; S.counters.nextZoneId = saved.nextZone;
+    if (S.varmefolie) { S.varmefolie.direction = saved.dir; S.varmefolie.dirExplicit = saved.dirX; }
+    _invalidateCableCache(); _invalidateStripCache(); _invalidateMatCache();
+  }
+  const ok = results.every(r=>r.ok);
+  console[ok ? 'log' : 'error']('_soneRegressionTest', ok ? 'BESTÅTT' : 'FEILET',
+    results.filter(r=>!r.ok));
+  return { ok, results };
+}
+
 function _cableZoneRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
   const savedRooms = S.rooms, savedHindrings = S.hindrings, savedZones = S.zones, savedCables = S.cables,
@@ -22021,9 +22187,13 @@ document.addEventListener('mousedown', e => {
 // mistreff-klikk utenfor rommet, eller å velge en annen vegg/rom fritt kan endre underveis).
 let _manualPlaceSession = null;   // { roomId, familyName, categoryId, kind } eller null
 function startManualPlace(familyName, categoryId) {
-  // 008 del 2: manuell utlegging i et rom med soner ville lagt folie/matte fritt over begge
-  // sonene. Samme gate som de automatiske veiene — sone valgt slipper gjennom.
+  // 008: manuell utlegging i et rom med soner ville lagt folie/matte fritt over begge sonene.
+  // 009: og med en AKTIV sone er den fortsatt ikke sone-scopet — modusen lever over mange klikk,
+  // så sonen måtte bæres på selve modusen (S.ui.manualPlaceZoneId) og hvert klikk klippes mot
+  // `_zoneFillablePolygon`. Det er en egen sak; her gates den ærlig i stedet for å legge utlegget
+  // stille over hele rommet.
   { const _g = _soneGateBlocks(S.ui.selectedRoomId); if (_g) { _soneGateToast(_g); return; } }
+  if (_soneMultiStepBlocked('Manuelt utlegg')) return;
   S.ui.manualPlaceMode = true;
   S.ui.manualFamilyName = familyName;
   S.ui.manualCategoryId = categoryId;
@@ -27004,9 +27174,12 @@ function _renameSonesWithRoom(roomId, oldRoomName){
 // kun i showCablePlacePanel (UI-laget), og den unified-panelet nå går utenom. Derfor ligger gaten
 // her, på PLASSERINGS-laget: én funksjon, kalt fra hver vei, umulig å gå rundt.
 // Returnerer sonene når kallet skal blokkeres, ellers null.
+// 009: gaten er nå ENKEL — blokker når det ikke finnes en aktiv sone og rommet har soner.
+// 008 hadde en «sone valgt → lov»-snarvei; DEN var hullet: den slapp kallet gjennom uten at
+// plasseringen faktisk skjedde i sonen (målt). Nå avgjør `_placeTarget()` begge deler, så gate og
+// plassering kan ikke komme i utakt.
 function _soneGateBlocks(roomId){
-  if (S.ui.fillTargetZoneId != null) return null;     // brukeren kom via en sone — lov
-  if (S.ui.selectedZoneId != null) return null;       // en sone er valgt — lov
+  if (_placeTarget().zone) return null;
   const sones = _sonesForRoom(roomId);
   return sones.length > 0 ? sones : null;
 }
@@ -27030,10 +27203,74 @@ function _withSoneAsRoom(zone, productId, fn){
   try { return fn(tmp); }
   finally { S.rooms = S.rooms.filter(r=>r.id!==TID); S.ui.selectedRoomId = savedSel; }
 }
-// Sonen som er «målet» nå, eller null. Delt av panelet og _updateCableSelection.
-function _activeFillSone(){
-  if (S.ui.fillTargetZoneId == null) return null;
-  return S.zones.find(z=>z.id===S.ui.fillTargetZoneId && z.type==='sone') || null;
+// ── 009: «er en sone aktiv, ER sonen rommet» ──────────────────────────────────────────────────
+// Kenneth 25.09.2026: «funker ikke enda — jeg ønsker at en sone blir behandlet som et separat
+// rom.» 008 bygde gjerdet (gate + sone-scopet REGNESTYKKE), men plasseringen skjedde fortsatt på
+// rommet. MÅLT etter 008: med sone valgt slapp `_upcPlaceCable` gjennom gaten og la kabel over
+// HELE rommet med `zoneId: undefined` — og `_clearRoomProductCollections` slettet den ANDRE
+// sonens kabel først. `_placeMultiCableProduct` nullet `fillTargetZoneId` FØR plassering og la to
+// kabler over hele rommet.
+//
+// ÉN kilde til hva «målet» er. Aktiv sone = ＋-knappen (fillTargetZoneId) ELLER valgt sone
+// (selectedZoneId) — 008 sin `_activeFillSone` kjente bare den første, så panelet regnet på
+// rommet når brukeren valgte sonen i sidebar.
+function _placeTarget(){
+  const roomId = S.ui.selectedRoomId;
+  const room = S.rooms.find(r=>r.id===roomId) || null;
+  const zid = S.ui.fillTargetZoneId ?? S.ui.selectedZoneId;
+  const zone = (zid != null && room)
+    ? (S.zones.find(z=>z.id===zid && z.type==='sone' && z.roomId===roomId) || null)
+    : null;
+  return { room, zone };
+}
+function _activeFillSone(){ return _placeTarget().zone; }
+
+// Rydder KUN én sones produkter. Speiler _clearRoomProductCollections, men filtrerer på zoneId.
+function _clearZoneProductCollections(zoneId, keys){
+  for (const key of (keys || ROOM_PRODUCT_KEYS)) {
+    const uiKey = ROOM_PRODUCT_SELECTED_UI_KEY[key];
+    if (uiKey && S.ui[uiKey] != null && (S[key] || []).some(x => x.id === S.ui[uiKey] && x.zoneId === zoneId)) {
+      S.ui[uiKey] = null;
+    }
+    S[key] = (S[key] || []).filter(x => x.zoneId !== zoneId);
+  }
+  _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
+}
+
+// Alt `fn` la på det midlertidige sone-rommet adopteres tilbake til det EKTE rommet og stemples
+// med sonen. Generalisert fra halen i `_fillSoneCable` (som gjorde nøyaktig dette for kabel).
+function _adoptSoneProducts(tmpRoomId, room, zone){
+  let n = 0;
+  for (const key of ROOM_PRODUCT_KEYS) {
+    for (const o of (S[key] || [])) {
+      if (o.roomId !== tmpRoomId) continue;
+      o.roomId = room.id; o.zoneId = zone.id; n++;
+    }
+  }
+  return n;
+}
+
+// Innpakningen alle plasseringsveier går gjennom. Uten sone: `fn(room.id)`, nøyaktig som før.
+// Med sone: kjør `fn` mot sonens midlertidige rom (synkront — se _withSoneAsRoom), adopter
+// resultatet, og rydd KUN sonen. `fillTargetZoneId` nulles ett sted, her, i `finally`.
+function _placeInTarget(productId, fn, opts){
+  opts = opts || {};
+  const { room, zone } = _placeTarget();
+  if (!room) return null;
+  if (!zone) {
+    try { return fn(room.id); }
+    finally { S.ui.fillTargetZoneId = null; }
+  }
+  try {
+    return _withSoneAsRoom(zone, productId, tmp => {
+      // Rydd kun DENNE sonen — aldri naboens (008-feilen: _clearRoomProductCollections slettet
+      // alle sonenes utlegg før den la ett nytt over hele rommet).
+      if (opts.clear !== false) _clearZoneProductCollections(zone.id, opts.keys);
+      const r = fn(tmp.id);
+      _adoptSoneProducts(tmp.id, room, zone);
+      return r;
+    });
+  } finally { S.ui.fillTargetZoneId = null; }
 }
 
 // Produkter som ligger på ROMMET (ikke i en sone). Etter en deling er disse tvetydige: de dekker
@@ -27071,6 +27308,20 @@ function _markWholeRoomProductsLegacy(roomId){
 function _roomHasLegacyWholeRoom(roomId){
   const w=_wholeRoomProducts(roomId);
   return [w.cables,w.strips,w.mats,w.plates].some(a=>a.some(o=>o._legacyWholeRoom));
+}
+// 009: FLERSTEGS-veier (manuell utlegging, folie-sammenlikning, breddevelger) lever over flere
+// klikk og et panel. Sonen ville ikke overlevd fram til commit uten å bære den på selve modusen,
+// og et halvt implementert sone-modus er verre enn ingen: da havner utlegget stille over hele
+// rommet igjen. Derfor gates de eksplisitt, med et ærlig «kommer»-varsel.
+// (Prompten åpner selv for dette: «Er det for stort: gate manuell plassering i soner … skriv det
+// i rapporten.»)
+function _soneMultiStepBlocked(hva){
+  const z = _placeTarget().zone;
+  if (!z) return false;
+  if (typeof _showToast === 'function') {
+    _showToast(`${hva} i sone kommer. Bruk «Automatisk» i ${z.name}, eller legg produktet på hele rommet ved å velge bort sonen.`, 'warn');
+  }
+  return true;
 }
 function _soneGateToast(sones){
   const navn = sones.map(z=>z.name).join(' · ');
@@ -27576,10 +27827,13 @@ function _soneStats(zone){
 // rom, som for. Kaller ma selv legge tmp til/fjerne fra S.rooms rundt kallet sitt (samme
 // try/finally-monster begge fyll-funksjonene bruker) - denne bygger kun objektet. Returnerer null
 // hvis sonen er for liten.
+// 009: ÉN kilde til det midlertidige sone-rommets id — formelen var duplisert i
+// _cablePreviewPlace sin adopsjon og kunne drifte fra _soneTempRoom.
+function _soneTempRoomId(zone){ return -(900000 + zone.id); }
 function _soneTempRoom(zone, room, productId) {
   const insetPoly = _zoneFillablePolygon(zone, room, productId);
   if (!insetPoly || insetPoly.length < 3 || Math.abs(compArea(insetPoly)) < 50) return null;
-  const TID = -(900000 + zone.id);
+  const TID = _soneTempRoomId(zone);
   // 008: sonen har EGNE innstillinger (Kenneth: «entré og stue … ulik romtype»). Faller tilbake
   // til rommets verdi når sonen ikke har satt sin egen — soner laget før 008 har ingen.
   return { id: TID, name: zone.name, floorId: room.floorId, partId: room.partId, shape: 'polygon',
@@ -35726,12 +35980,17 @@ const ROOM_PRODUCT_SELECTED_UI_KEY = { strips:'selectedStripId', foilFree:'selec
 // `keys` narrower enn ROOM_PRODUCT_KEYS brukes av DEL B (_beginProductSwapSession) — «Tøm rommet
 // for produkter» og alle andre eksisterende kallere lar `keys` stå tom og rydder ALT, som før.
 function _clearRoomProductCollections(roomId, keys) {
+  // 009: har rommet soner, er sonenes utlegg IKKE «rommets» — de eies av hver sone og skal
+  // overleve en rom-nivå rydding. MÅLT i STEG 0: uten denne vakten slettet `_upcPlaceCable`
+  // nabosonens kabel før den la én kabel over hele rommet (Kenneths skjermbilde).
+  const _harSoner = _sonesForRoom(roomId).length > 0;
+  const _rammes = x => x.roomId === roomId && (!_harSoner || x.zoneId == null);
   for (const key of (keys || ROOM_PRODUCT_KEYS)) {
     const uiKey = ROOM_PRODUCT_SELECTED_UI_KEY[key];
-    if (uiKey && S.ui[uiKey] != null && (S[key] || []).some(x => x.id === S.ui[uiKey] && x.roomId === roomId)) {
+    if (uiKey && S.ui[uiKey] != null && (S[key] || []).some(x => x.id === S.ui[uiKey] && _rammes(x))) {
       S.ui[uiKey] = null;
     }
-    S[key] = (S[key] || []).filter(x => x.roomId !== roomId);
+    S[key] = (S[key] || []).filter(x => !_rammes(x));
   }
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
 }
