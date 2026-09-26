@@ -4,6 +4,75 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Visma-eksport: filnavn `Varmeplan_P<nr>_<kunde>_<merking>` — 2026-09-26
+
+Kenneth: filnavnet var `tilbud_P0260_P0260-Varmefolie-25-09-2026-REV-2_20260926-0752.txt` —
+P-nummeret to ganger, REV og tidsstempel på. Ønsket:
+`Varmeplan_P0260_Omland-Elektro-AS_Varmefolie-25-09-2026.txt`. Commit `88aab18`.
+
+- `_gbao10FileName(projectNo, customerName, merking)` — `type` er ute av signaturen: Tilbud/Ordre
+  styrer INNHOLDET, ikke navnet, så de gir nå samme filnavn. Begge kallstedene oppdatert.
+- Kundenavnet: kunderaden når kunden er koblet (samme `_cachedCustomers`-oppslag `kundenr` bruker),
+  ellers prosjektets fritekstfelt, ellers `Ukjent-kunde`. Tom merking → `eksport`.
+- Sanitering som `_exportFileName`, men `_` → `-` (så `_` kun skiller de fire delene) og gjentatte
+  bindestreker slås sammen — «Folie/2026: del» ga ellers `Folie-2026--del`. Maks 120 tegn:
+  MERKINGEN klippes, aldri kunden eller prosjektnummeret (de identifiserer fila).
+- `_gbao10DefaultFilenameMerking` **fjernet** — den ga «P0260 … REV 2» og var hele grunnen til
+  dobbelt P-nummer. `filenameMerking` er ute av `_gbao10Build`, og den villedende DEL B-kommentaren
+  er erstattet.
+- **Kollisjonsvernet er flyttet, ikke fjernet.** Tidsstempelet vernet mot at to eksporter til samme
+  delte tilbudsmappe overskriver hverandre. `_gbao10WriteToFolder` hadde allerede et vern, men som
+  et «Overskrive?»-spørsmål — rimelig da kollisjon var sjeldent. Uten tidsstempel er kollisjon
+  normalt, så spørsmålet er byttet med **auto-suffiks**: første ledige `…_2.txt`, `…_3.txt`, med
+  toast om hva fila ble hetende. Ved nedlasting gjør nettleseren det samme selv.
+- Testet: Kenneths eksempel eksakt; tom kunde/merking; uten prosjektnummer; `Å/B:C AS` +
+  `Folie/2026: del_1` → `Å-B-C-AS` + `Folie-2026-del-1`; 200-tegns merking klippes til 120;
+  koblet vs. ukoblet kunde; kollisjonsvernet hopper til `_3` når både originalen og `_2` finnes.
+
+**Fil:** index.html.
+
+---
+
+## Soner tar hensyn til rommets hindringer — og «+ Hindring» i valgt sone — 2026-09-25
+
+Kenneth: «Varmekabel tar ikke hensyn til hindringen jeg lagde i rommet før jeg opprettet sone. Jeg
+får heller ikke mulighet til å lage hindring i en valgt sone i ettertid.» Commit `7e5e384`.
+
+**STEG 0 — målt:** alle motorene finner hindringer via `h.roomId === room.id`, og sonens temp-rom
+har en syntetisk id. Sonen var derfor bokstavelig talt TOM: 0 hindringer, `hindArea: 0`, og
+kabelen la **352 av 1964 målte punkter (17,9 %) rett inne i trappa**. Samme rom UTEN soner ga
+44 av 2955 (1,5 %) — motoren respekterer hindringen når den kjenner den.
+*(Første måling viste 0 % og var FEIL: jeg samplet bare segment-endepunkter, så en bane tvers
+gjennom hindringen ble ikke talt. Rettet til sampling hvert 5. cm langs banen.)*
+
+**Klippes ikke — og det er målt trygt.** Ingen generell polygon-mot-polygon-klipper finnes i fila,
+og soner fra «Del i soner» kan ha skrå delelinje. Motorene TÅLER en uklippet hindring: verken en
+2 × 2 m hindring på et 1 × 1 m rom eller en halvveis utenfor kastet feil — de subtraherer/klipper
+mot rommet selv. En hindring som dekker begge soner respekteres derfor i BEGGE, som er riktig:
+den er fysisk der.
+
+- `_soneShadowHindrings(zone, room, tid)` + push/cleanup i `_withSoneAsRoom`: rommets hindringer
+  kopieres med temp-rommets id (`tmpsoneh_<id>`, `_soneShadow: true`) når bbox overlapper sonen.
+  Samme grep `_buildNCableZones` allerede bruker for sine delrom — ingen motor endres, og ALLE
+  veier arver det gratis. Opprydding i `finally`, også når `fn` kaster.
+- `tmp.area` blir stående som BRUTTO med vilje: `roomAreas()` trekker fra hindringsarealet selv, så
+  å skrive netto inn i `area` ville gitt DOBBEL subtraksjon ved neste kall.
+- **Funn:** `showCablePlacePanel` hentet temp-rommet UT av scopet og kalte `roomAreas` etterpå — da
+  er skyggene ryddet, så panelet viste sonens BRUTTO (14,7 m² der riktig svar er 11,6). Arealet
+  regnes nå inne i scopet.
+- «+ Hindring» i sone-ctxbaren. `startHindringMode` bruker `_placeTarget()`: hindringen eies av
+  ROMMET (den er fysisk og skal telle der), men dimensjons-modus sentrerer i SONENS polygon. Har
+  sonen alt utlegg → toast «legg ut produktet på nytt», ingen automatisk re-utlegging.
+- Sidebar: hindringsraden får «· i «sonenavn»» når sentroiden ligger i en sone.
+
+**Resultatet, målt:** kabelen går fra 352/1964 punkter (17,9 %) inne i trappa → **0/2385 (0 %)**,
+og panelet viser 11,6 m² netto i stedet for 14,7.
+`_soneRegressionTest` utvidet 31 → **40 sjekker** (gruppe I). Alle sju regresjonstester OK.
+
+**Fil:** index.html.
+
+---
+
 ## Én GODKJENN-knapp under produktvalget — og forhåndsvisning i sone finner det ekte rommet — 2026-09-25
 
 Kenneth: «Jeg får ikke noe valg om GODKJENN, slik at jeg ikke får opp etasje/rom-listen. Jeg ønsker
