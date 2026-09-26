@@ -57670,16 +57670,9 @@ function _gbao10DefaultMerking() {
   const proj = S.project || {};
   return proj.name || '';
 }
-// DEL B: filnavnet skal IKKE endre seg bare fordi felt 7 ble kortere — se _gbao10Build sin
-// filenameMerking og de to _gbao10FileName-kallene (forhåndsvisning + eksport). Beholder PRESIS
-// den gamle, fyldige standarden (P-nummer + navn + REV) _gbao10DefaultMerking hadde FØR DEL A,
-// men KUN til filnavn-formål — felt 7 i selve Visma-linja bruker den nye, korte standarden.
-function _gbao10DefaultFilenameMerking() {
-  const proj = S.project || {};
-  const noStr = _fmtProjectNo(proj.projectNo);
-  const nextRev = (proj.revision || 0) + 1;
-  return [noStr ? 'P' + noStr : '', proj.name || '', 'REV ' + nextRev].filter(Boolean).join(' ');
-}
+// 012: `_gbao10DefaultFilenameMerking` er FJERNET. Den ga filnavnet den gamle fyldige merkingen
+// («P0260 Varmefolie 25.09.2026 REV 2») — derfor sto P-nummeret to ganger og REV hang med.
+// Filnavnet bruker nå dialogens egen korte `merking`, samme tekst som felt 7 i Visma-linja.
 // spec-visma-eksporter-gbao10-del-a-f.md DEL F (Kenneth 04.09.2026): tilbehør hentes via samme
 // showAccessoriesModal()-kontrakt som PDF/XLSX/paste (avbrutt modal → hele eksporten avbrytes,
 // {items:[]} → går videre uten tilbehørslinjer) — hentet ÉN gang når dialogen åpnes, ikke per
@@ -57699,9 +57692,6 @@ function _gbao10Build() {
   const kundenr = (cust && cust.erp_customer_no) || '';
   const kontaktperson = proj.contact_name || '';
   const merking = proj.gbao10Merking != null ? proj.gbao10Merking : _gbao10DefaultMerking();
-  // DEL B: samme overstyring, men den GAMLE fyldige standarden når intet er skrevet — kun brukt
-  // til filnavnet (_gbao10FileName-kallene), aldri til felt 7 selv (merking, over).
-  const filenameMerking = proj.gbao10Merking != null ? proj.gbao10Merking : _gbao10DefaultFilenameMerking();
   const items = _collectMaterialItems();
   const groups = _groupByMaterialGroups(_aggregateMaterialItems(items), e => e.kind, e => e.product.id);
   const missing = [];   // {key, name, el_no}
@@ -57727,7 +57717,10 @@ function _gbao10Build() {
     if (acc.el_no && _gbao10ElChoices.has(key)) { lines.push({ artikkelnr: acc.el_no, antall }); continue; }
     missing.push({ key, name: acc.name || 'Tilbehør', el_no: acc.el_no || null });
   }
-  return { kundenr, kontaktperson, merking, filenameMerking, custName: proj.customer || '', lines, missing, totalAntall: lines.reduce((s, l) => s + l.antall, 0) };
+  // 012: kundenavnet inn i filnavnet — kunderaden når kunden er koblet (samme oppslag
+  // `kundenr` bruker), ellers prosjektets fritekstfelt.
+  const custName = (cust && cust.name) || proj.customer || '';
+  return { kundenr, kontaktperson, merking, custName, lines, missing, totalAntall: lines.reduce((s, l) => s + l.antall, 0) };
 }
 function _gbao10ToggleEl(key, checked) {
   if (checked) _gbao10ElChoices.add(key); else _gbao10ElChoices.delete(key);
@@ -57793,33 +57786,52 @@ async function _gbao10EnsureWritePermission(handle) {
   return false;
 }
 // Ikke overskriv i stillhet — en delt tilbudsmappe på en server tåler ikke en tapt revisjon.
+// 012: filnavnet har ikke lenger tidsstempel, så kollisjon er normalt (samme prosjekt eksportert
+// to ganger), ikke et unntakstilfelle. Derfor auto-suffiks `…_2.txt` i stedet for et
+// ja/nei-spørsmål om å overskrive — brukeren mister aldri den forrige fila ved et uhell.
 async function _gbao10WriteToFolder(dirHandle, filename, text) {
-  let exists = false;
-  try { await dirHandle.getFileHandle(filename); exists = true; } catch (e) { exists = false; }
-  if (exists && !confirm(`Filen «${filename}» finnes allerede i mappa. Overskrive?`)) return false;
+  const finnes = async n => { try { await dirHandle.getFileHandle(n); return true; } catch (e) { return false; } };
+  if (await finnes(filename)) {
+    const stem = filename.replace(/\.txt$/i, '');
+    let n = 2, kandidat = `${stem}_${n}.txt`;
+    while (await finnes(kandidat) && n < 100) { n++; kandidat = `${stem}_${n}.txt`; }
+    filename = kandidat;
+    _showToast && _showToast(`Fila fantes fra før — lagret som ${filename}`, 'info');
+  }
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
   await writable.write(text);
   await writable.close();
   return true;
 }
-// ⚠ Filnavnet må inneholde prosjektnummer OG tidsstempel — flere personer skriver til samme
-// mappe, og fila blir liggende til den plukkes opp. To like filnavn før innlesing betyr at ett
-// tilbud forsvinner uten spor. Samme saniterings-mønster som _exportFileName (PDF), men MED
-// klokkeslett og BEVISST forskjellig fra PDF-filnavnet (spec: dette er Vismas inngang og skal se
-// ut som de andre filene i mappa, ikke Kenneths eget arkivformat).
-function _gbao10FileName(type, projectNo, merking) {
-  const safeMerking = String(merking || 'eksport')
+// Kenneth 26.09.2026: `Varmeplan_P0260_Kundenavn_Merking.txt` — fast prefiks, prosjektnummer,
+// kunde og dialogens egen merking. Ikke tilbud/ordre-prefiks (Tilbud/Ordre styrer INNHOLDET, ikke
+// navnet), ikke REV, ikke tidsstempel.
+//
+// ⚠ Tidsstempelet var kollisjonsvernet: flere personer skriver til samme tilbudsmappe, og fila
+// blir liggende til den plukkes opp. Uten det kan to eksporter hete det samme. Vernet er derfor
+// FLYTTET, ikke fjernet — `_gbao10WriteToFolder` finner første ledige `…_2.txt`, `…_3.txt` i
+// stedet for å overskrive. Ved nedlasting (ingen mappe valgt) gjør nettleseren det samme selv.
+//
+// `_` skiller de fire delene og kan derfor ikke forekomme INNE i en del — saniteringen gjør
+// `_` om til `-`, samme mønster som `_exportFileName` (PDF).
+function _gbao10FileName(projectNo, customerName, merking) {
+  const rens = (v, fallback) => String(v || '').trim()
     .replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g, '_')
     .replace(/_/g, '-')
     .trim()
-    .replace(/\s+/g, '-');
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')          // «Folie/2026: del» ga ellers dobbel bindestrek
+    .replace(/^-+|-+$/g, '') || fallback;
+  const kunde = rens(customerName, 'Ukjent-kunde');
+  let merk = rens(merking, 'eksport');
   const noStr = _fmtProjectNo(projectNo);
   const noPart = noStr ? `P${noStr}_` : '';
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `${type}_${noPart}${safeMerking}_${ts}.txt`;
+  // Maks 120 tegn totalt — klipp MERKINGEN, aldri kunden eller prosjektnummeret (de identifiserer
+  // fila; merkingen er beskrivende).
+  const fast = `Varmeplan_${noPart}${kunde}_`.length + 4;   // + '.txt'
+  if (fast + merk.length > 120) merk = merk.slice(0, Math.max(1, 120 - fast)).replace(/-+$/, '');
+  return `Varmeplan_${noPart}${kunde}_${merk}.txt`;
 }
 async function _showGbao10ExportDialog() {
   if (!S.project) return;
@@ -57888,7 +57900,7 @@ function _gbao10RenderDialog() {
         ${('showDirectoryPicker' in window) ? `<button class="npc-btn-ghost" onclick="_gbao10ChooseFolder()">Velg mappe</button>` : ''}
       </div>
     </div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Filnavn: ${esc(_gbao10FileName(_gbao10Type, S.project.projectNo, built.filenameMerking))}</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Filnavn: ${esc(_gbao10FileName(S.project.projectNo, built.custName, built.merking))}</div>
     ${built.missing.length ? `<div style="margin-bottom:10px">
       <div style="font-size:12px;color:var(--warn);margin-bottom:4px">Mangler artikkelnummer, blokkerer eksport:</div>
       ${built.missing.map(m => `<div style="font-size:12px;padding:3px 0">
@@ -57940,7 +57952,7 @@ async function _gbao10Export() {
   const built = _gbao10Build();
   if (!built.kundenr || built.missing.length || !built.lines.length) return;
   const text = _gbao10BuildFileText({ kundenr: built.kundenr, kontaktperson: built.kontaktperson, merking: built.merking, items: built.lines });
-  const filename = _gbao10FileName(_gbao10Type, S.project.projectNo, built.filenameMerking);
+  const filename = _gbao10FileName(S.project.projectNo, built.custName, built.merking);
   const msg = document.getElementById('gbao10-export-msg');
   const handle = _gbao10FolderHandles[_gbao10Type];
   if (handle && 'showDirectoryPicker' in window) {
