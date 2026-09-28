@@ -4,6 +4,50 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Hindring oppå folie: eksklusivt valg, hindring vinner klikket, Bredde vannrett — 2026-09-28
+
+Kenneth: «Når jeg setter inn en hindring etter at jeg har lagt ut varmefolien, får jeg markert
+hindringen, men når jeg velger Roter, får jeg bare rotert en av foliebreddene, ikke selve
+hindringen. Når jeg setter mål (lengde × bredde) på hindringen og setter inn, er lengde og bredde
+motsatt — bredde bør være horisontalt.» Commit `bf54b28`.
+
+**STEG 0 — promptens hypotese om «to overlappende ringer» ble AVKREFTET.** Jeg instrumenterte
+gizmo-kallene: `{folie_tegnet: 1, hindring_tegnet: 0}`. Render-kjeden er en `else if`-kjede med
+stripe FØRST, så hindringens ring **tegnes aldri**. Men den er samtidig TREFFBAR: i samme punkt
+returnerte `hitHindringRotHandle` treff mens `hitFolieRotHandle` ikke gjorde det. Brukeren ser
+folias ring, griper den, og folien roterer. Rotårsaken var at BEGGE objektene var valgt samtidig
+— ikke at to ringer ble tegnet.
+
+- `_clearProductSelection()` — ÉN ting valgt om gangen. Kalles fra alle fire veier som velger en
+  hindring (kropp-klikk, `selHindringItem`, `selHindringWall`, `hindringCtxMenu`). Motsatt vei
+  rydder hindringsvalget i `selStrip` og `selectCable`.
+- **Klikket måtte også LANDE på hindringen, og det krevde to grep — målt hver for seg:**
+  1. `_buildCycleCandidates`: hindringen (polygon-treff, ikke bbox) lagt inn FØR stripa, og det
+     senere bbox-baserte innslaget av-duplisert. Målt: `["hindring:9001","strip:4","room:5001"]`.
+  2. **Det var ikke nok.** Ved `idx 0` faller klikk-syklingen med vilje gjennom til den vanlige
+     select+drag-flyten (for å bevare draget) — og der lå «Strip body click» først. Nedfallsveien
+     fikk derfor sin egen hindring-vinner-gren. Målt før den: `branch_evaluert: 0`, stripa valgt.
+     `ptInPoly`, ikke `hitHindring` sin bbox: en L-formet hindring ville ellers gjort folien
+     uklikkbar i hjørnet som ikke er hindring. Gjentatte klikk sykler fortsatt videre til folien.
+- Målfeltet: `hindring-w-inp`/«Lengde» + `hindring-h-inp`/«Bredde» byttet til
+  `hindring-bredde-inp` (vannrett) + `hindring-lengde-inp` (loddrett), etikett
+  «Mål — Bredde (↔) × Lengde (↕)». `confirmHindring` leser nå `hw` fra Bredde-feltet.
+  Sidebar-raden og objektinfo viste allerede x-utstrekningen først — uendret.
+
+**Målt etter:** klikk i hindringen → `{hindring: 9001, strip: null}`, ctxbar «Hindring …».
+Rotasjonsmodus → `{folie_ring: 0, hindring_ring: 1}`. Dra ringen 90° → hindringen 120×100 →
+100×120, alle 6 folie-striper uendret. Klikk folien utenfor hindringen → `{hindring: null,
+strip: 2}`, ctxbar «Stripe …». Bredde 120 / Lengde 60 → 120 cm vannrett, 60 cm loddrett; sidebar
+«120 × 60». Alle sju regresjonstester grønne.
+
+**Testfelle verdt å huske:** første ende-til-ende-klikktest ga «ingenting skjedde» — canvas var
+0×0 fordi ingen skjermbilde hadde tvunget layout ennå, så klikk-koordinatene bommet. Etter et
+skjermbilde passerte samme test uendret.
+
+**Fil:** index.html.
+
+---
+
 ## Visma-eksport: filnavn `Varmeplan_P<nr>_<kunde>_<merking>` — 2026-09-26
 
 Kenneth: filnavnet var `tilbud_P0260_P0260-Varmefolie-25-09-2026-REV-2_20260926-0752.txt` —
