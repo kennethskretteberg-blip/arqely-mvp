@@ -4,6 +4,58 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Filnavn for PDF og Visma-fil: samme mønster som Cenika Flow — 2026-09-28
+
+Kenneth: «Utskrift PDF-filnavn må også være med firmanavn og merking. Det bør også gjelde for
+Visma-fila. Slik døper vi Visma-fila fra Cenika Flow:
+`{type}_{kundenavn}_{merking}_{ÅÅÅÅMMDD-TTMM}_{initialer}_{doc_no}.txt`.» Erstatter filnavn-delen
+av 012 (`88aab18`).
+
+Ny felles form — ÉN navnebygger `_docFileName(type, ext, extra, stamp)` for begge filene:
+`tilbud_Elektro-24-AS_8575_20260928-1056_KS_P0264.txt` og
+`varmeplan_Elektro-24-AS_8575_20260928-1056_KS_P0264_rev1.pdf`.
+`doc_no` i Cenika Flow er dokumentnummeret; Varmeplans motstykke er prosjektnummeret.
+
+**STEG 0 — tre av promptens antakelser måtte rettes:**
+- `_projectCustomerName()` **fantes ikke**. Den ekte oppløsningen lå inline i `_gbao10Build`
+  (:57784): `proj.customer_id` → `_cachedCustomers` → ellers `proj.customer`. Løftet ut som egen
+  funksjon, så PDF-en (som ikke har noe `built`-objekt) kan bruke samme kilde.
+- **`_userInitials()` leser IKKE profilens `initials`-felt.** Den utleder fra navn/e-post; det er
+  `_plResponsibleInitials` (:59552) som bruker det lagrede feltet. `_profileInitialsForFile()`
+  leser derfor `initials` først og faller til `_userInitials()`. `_userInitials()` er urørt.
+- **Visma-dialogen hadde ikke noe tidsstempel i det hele tatt**, så spørsmålet var ikke om det
+  fryses, men at det MÅ fryses: `_gbao10RenderDialog()` kjøres på nytt ved hvert type-bytte,
+  merking-endring og EL-valg. `_gbao10Stamp` settes én gang når dialogen åpnes, og brukes av BÅDE
+  forhåndsvisningen og `_gbao10Export` — så navnet verken tikker mens man ser på det eller
+  avviker fra fila som faktisk skrives. PDF-en lager sitt i selve lagringen (ingen dialog å tikke i).
+
+- `_safeName(v, fallback)` — én sanitering i stedet for tre nesten like. Understrek er FELTSKILLET,
+  så `_` renses til `-` inne i hver del. `Folie/2026: del_1` → `Folie-2026-del-1`.
+- `_projectMerking()` — Visma-dialogens lagrede merking, ellers prosjektnavnet. PDF-en arver den,
+  så de to filene for samme jobb heter likt bortsett fra type og endelse.
+- Maks 150 tegn: **merkingen** klippes, aldri kunde/tid/initialer/doknr — de identifiserer fila.
+- Kallsteder: `_exportFileName` hadde **ett** (`doc.save`, :50565) og beholdes som tynn wrapper;
+  `_gbao10FileName` hadde **to** (dialogens forhåndsvisning :57965 og `_gbao10Export` :58017),
+  begge nå uten argumenter.
+- **Én utilsiktet endring, bevisst:** den gamle PDF-formen utelot P-feltet helt uten et ekte
+  prosjektnummer. Det faste sjuledds-mønsteret krever en plassholder, så det blir `P0`.
+- `_gbao10SaveMerking` tegner nå dialogen på nytt, ellers viste forhåndsvisningen gammel merking.
+- Kollisjonsvernet fra 012 (`_2`, `_3`) er urørt — med tidsstempel slår det bare inn ved to
+  eksporter samme minutt, men det er nettopp da det trengs.
+- Profilens Initialer-felt: «… og brukes i filnavn på PDF og Visma-fil». Uten navn, initialer og
+  e-post → `XX` + toast «Legg inn initialer i profilen — de brukes i filnavn», én gang per økt.
+
+**Testet** (klokka frosset til 2026-09-28 10:56): Kenneths eksempel eksakt for både Visma og PDF;
+ordre → `ordre_…`; ukoblet kunde → fritekstfeltet; uten begge → `Ukjent-kunde`; egne initialer
+«KSK» → `_KSK_`; merking med `/` og `:` renset; uten prosjektnr → `P0`; merking arvet fra
+prosjektnavnet; 200-tegns merking klippet til nøyaktig 150 tegn med hale
+`_20260928-1056_KS_P0264.txt` intakt; frosset stempel sto stille mens klokka tikket til 11:42
+mens PDF-en fikk den nye tiden; toast kun første gang. Alle sju regresjonstester grønne.
+
+**Fil:** index.html.
+
+---
+
 ## Hindring oppå folie: eksklusivt valg, hindring vinner klikket, Bredde vannrett — 2026-09-28
 
 Kenneth: «Når jeg setter inn en hindring etter at jeg har lagt ut varmefolien, får jeg markert

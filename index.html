@@ -1211,7 +1211,7 @@ body.present-mode #render-stats{display:none !important}
          utledede («Kenneth Skretteberg» → «KS») i prosjektlista NÅR prosjektets «Prosjektert
          av»-fritekst er lik dette navnet — se _plResponsibleInitials. Tomt felt = automatisk. -->
     <div class="pf-field">
-      <label>Initialer <span style="color:var(--dim);font-weight:400">(valgfritt, maks 4 tegn — vises i prosjektlista i stedet for automatiske initialer)</span></label>
+      <label>Initialer <span style="color:var(--dim);font-weight:400">(valgfritt, maks 4 tegn — vises i prosjektlista, og brukes i filnavn på PDF og Visma-fil)</span></label>
       <input id="pf-initials" type="text" maxlength="4" placeholder="F.eks. KES" style="text-transform:uppercase" oninput="this.value=this.value.toUpperCase()">
     </div>
     <div class="pf-field">
@@ -49023,28 +49023,87 @@ function _pdfStampBranding(doc, M) {
 // (_exportMaterialListXLSX) er IKKE endret denne runden (ikke bedt om — rapportert i commit-
 // meldingen at de to avviker i format nå), men skrevet slik at den kan overta der senere uten en
 // omskriving.
-// Form: {kind}_P{firesifret}_{navn}_{dd.mm.åååå}_rev{N}.{ext}. Datoen er EKSPORTDATOEN (samme som
-// «Generert» på forsiden), ikke prosjektets opprettelsesdato. P-feltet UTELATES helt uten et ekte
-// prosjektnr — aldri en oppdiktet verdi (samme regel _fmtProjectNo/forsiden allerede følger).
-// Kolon kan ikke stå i et filnavn (ulovlig på Windows, tolkes som sti-skille i Finder på macOS) —
-// «P0142», ikke «P:0142». Understrek er FELTSKILLET i det ferdige navnet: et prosjektnavn med
-// egen understrek — eller et ulovlig tegn regexen under bytter til understrek — ville ellers sett
-// ut som et feltskille. Erstatt derfor ALLE understreker (opprinnelige og nyoppståtte av
-// saniteringen) med bindestrek i samme steg, slik at et understrek i det endelige navnet
-// utvetydig alltid er et feltskille.
-function _exportFileName(kind, ext, rev) {
-  const proj = S.project || {};
-  const safeName = (proj.name || 'prosjekt')
+// ⚠ 015 ERSTATTET formen under (`{kind}_P{nr}_{navn}_{dd.mm.åååå}_rev{N}`). Se `_docFileName`
+// rett under for den gjeldende. Tidsstempelet er fortsatt EKSPORTTIDEN, ikke prosjektets
+// opprettelsesdato. Én endring i praksis: den gamle formen UTELOT P-feltet helt uten et ekte
+// prosjektnr, mens det faste sjuledds-mønsteret krever en plassholder — `P0` (Kenneth 28.09.2026).
+// ─────────────────────────────────────────────────────────────────────────────
+// 015 (Kenneth 28.09.2026): ÉN navnebygger for BÅDE PDF og Visma-fila, samme mønster som
+// Cenika Flow døper sine filer:
+//     {type}_{kunde}_{merking}_{ÅÅÅÅMMDD-TTMM}_{initialer}_{doknr}[_{extra}].{ext}
+//     → tilbud_Elektro-24-AS_8575_20260928-1056_KS_P0264.txt
+//     → varmeplan_Elektro-24-AS_8575_20260928-1056_KS_P0264_rev1.pdf
+// `doc_no` i Cenika Flow er dokumentnummeret; Varmeplans motstykke er PROSJEKTNUMMERET.
+// Understrek er FELTSKILLET i det ferdige navnet, så det kan ikke forekomme INNE i en del —
+// `_safeName` gjør `_` om til `-`. Før 015 fantes tre nesten like saniteringer; nå én.
+// Kolon kan ikke stå i et filnavn (ulovlig på Windows, sti-skille i Finder) — derfor «P0264».
+function _safeName(v, fallback) {
+  return String(v || '').trim()
     .replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g, '_')
     .replace(/_/g, '-')
     .trim()
-    .replace(/\s+/g, '-');
-  const no = _fmtProjectNo(proj.projectNo);
-  const noPart = no ? `P${no}_` : '';
-  const now = new Date();
-  const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')          // «Folie/2026: del» ga ellers dobbel bindestrek
+    .replace(/^-+|-+$/g, '') || fallback;
+}
+// Kunden: kunderaden når kunden er koblet (samme oppslag `kundenr` bruker i _gbao10Build),
+// ellers prosjektets fritekstfelt. Er kundelista ikke lastet ennå, faller vi til fritekstfeltet
+// framfor å vente — filnavnet skal aldri blokkere en eksport.
+function _projectCustomerName() {
+  const proj = S.project || {};
+  const cust = proj.customer_id ? (_cachedCustomers || []).find(c => c.id === proj.customer_id) : null;
+  return (cust && cust.name) || proj.customer || '';
+}
+// Merkingen: Visma-dialogens lagrede verdi når den finnes, ellers prosjektnavnet
+// (_gbao10DefaultMerking). Samme tekst som felt 7 i Visma-linja — PDF-en arver den, slik at de
+// to filene for samme jobb heter det samme bortsett fra type og endelse.
+function _projectMerking() {
+  const proj = S.project || {};
+  const m = proj.gbao10Merking;
+  return (m != null && String(m).trim() !== '') ? m : (proj.name || '');
+}
+function _stampYYYYMMDDHHMM(d) {
+  const t = d || new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}-${pad(t.getHours())}${pad(t.getMinutes())}`;
+}
+// Egne initialer fra Innstillinger vinner (sak 6b). `_userInitials()` sin egen logikk er URØRT —
+// den brukes i prosjektlista og skal fortsatt utlede fra navn/e-post. Målt: `_userInitials()`
+// leser IKKE profilens `initials`-felt, så overstyringen må gjøres her.
+let _initialsFileToastShown = false;
+function _profileInitialsForFile() {
+  const own = (_currentProfile?.initials || _currentUser?.user_metadata?.initials || '').trim();
+  if (own) return own.toUpperCase();
+  const auto = (typeof _userInitials === 'function') ? _userInitials() : '';
+  if (auto && auto !== '?') return auto;
+  if (!_initialsFileToastShown) {
+    _initialsFileToastShown = true;
+    _showToast && _showToast('Legg inn initialer i profilen — de brukes i filnavn', 'info');
+  }
+  return 'XX';
+}
+// `stamp` fryses av den som åpner en dialog (Visma), slik at forhåndsvist navn og skrevet fil er
+// identiske selv om minuttet tikker over mens dialogen står åpen. PDF-en lager sitt i selve lagringen.
+function _docFileName(type, ext, extra, stamp) {
+  const proj = S.project || {};
+  const kunde = _safeName(_projectCustomerName(), 'Ukjent-kunde');
+  const ts    = stamp || _stampYYYYMMDDHHMM();
+  const init  = _safeName(_profileInitialsForFile(), 'XX');
+  const noStr = _fmtProjectNo(proj.projectNo);
+  const dokno = noStr ? 'P' + noStr : 'P0';
+  let merk    = _safeName(_projectMerking(), 'eksport');
+  const build = m => [type, kunde, m, ts, init, dokno, extra].filter(Boolean).join('_') + '.' + ext;
+  // Maks 150 tegn — klipp MERKINGEN, aldri kunde/tid/initialer/doknr (de identifiserer fila;
+  // merkingen er beskrivende). `build('x').length - 1` = alt UNNTATT merkingens egen tekst.
+  const fast = build('x').length - 1;
+  if (fast + merk.length > 150) merk = _safeName(merk.slice(0, Math.max(1, 150 - fast)), 'eksport');
+  return build(merk);
+}
+// Beholdt som tynn wrapper: PDF-en er eneste kallsted (doc.save), men navnet er innarbeidet.
+function _exportFileName(kind, ext, rev) {
+  const proj = S.project || {};
   const revNo = rev != null ? rev : (typeof proj.revision === 'number' ? proj.revision : 1);
-  return `${kind}_${noPart}${safeName}_${dateStr}_rev${revNo}.${ext}`;
+  return _docFileName(String(kind || 'varmeplan').toLowerCase(), ext, 'rev' + revNo);
 }
 
 async function exportPDF(opts) {
@@ -50560,8 +50619,8 @@ async function exportPDF(opts) {
 
   _pdfStampBranding(doc, M);   // org-logo (co-brand) på forside/alle sider iht. flagg
 
-  // Save \u2014 spec-pdf-nytt-filnavn.md: Varmeplan_P{nr}_{navn}_{dd.mm.\u00e5\u00e5\u00e5\u00e5}_rev{N}.pdf, se
-  // _exportFileName over.
+  // Save — 015: varmeplan_{kunde}_{merking}_{ÅÅÅÅMMDD-TTMM}_{initialer}_P{nr}_rev{N}.pdf, samme
+  // navnebygger (`_docFileName`) som Visma-fila. Se _exportFileName over.
   doc.save(_exportFileName('Varmeplan', 'pdf', rev));
 
   // STEG 5: en priset PDF er et tilbud → flytt under_arbeid → tilbud_sendt.
@@ -57789,6 +57848,11 @@ function _gbao10ToggleEl(key, checked) {
   _gbao10RenderDialog();
 }
 let _gbao10Type = 'tilbud';   // styrer KUN hvilket mappehåndtak det skrives til, aldri filinnholdet
+// 015: tidsstempelet i filnavnet fryses når dialogen ÅPNES, ikke ved hver gjenoppbygging.
+// `_gbao10RenderDialog()` kjøres på nytt ved hvert type-bytte, merking-endring og EL-valg — et
+// levende `new Date()` ville fått forhåndsvist navn til å tikke mens man ser på det, og i verste
+// fall til å avvike fra den fila som faktisk skrives.
+let _gbao10Stamp = null;
 function _gbao10SetType(t) { _gbao10Type = (t === 'ordre') ? 'ordre' : 'tilbud'; _gbao10RenderDialog(); }
 
 // spec-visma-eksporter-gbao10-del-a-f.md DEL E (Kenneth 04.09.2026): «Vi slipper denne inn på
@@ -57866,34 +57930,17 @@ async function _gbao10WriteToFolder(dirHandle, filename, text) {
   await writable.close();
   return true;
 }
-// Kenneth 26.09.2026: `Varmeplan_P0260_Kundenavn_Merking.txt` — fast prefiks, prosjektnummer,
-// kunde og dialogens egen merking. Ikke tilbud/ordre-prefiks (Tilbud/Ordre styrer INNHOLDET, ikke
-// navnet), ikke REV, ikke tidsstempel.
+// 015 (Kenneth 28.09.2026): filnavnet følger nå SAMME mønster som Cenika Flow, delt med PDF-en
+// via `_docFileName` — `tilbud_Elektro-24-AS_8575_20260928-1056_KS_P0264.txt`. Tilbud/Ordre
+// styrer fortsatt INNHOLDET og mappa, men er nå også TYPE-leddet i navnet (det var 012-navnets
+// faste «Varmeplan»-prefiks som skjulte hvilken av de to fila var).
 //
-// ⚠ Tidsstempelet var kollisjonsvernet: flere personer skriver til samme tilbudsmappe, og fila
-// blir liggende til den plukkes opp. Uten det kan to eksporter hete det samme. Vernet er derfor
-// FLYTTET, ikke fjernet — `_gbao10WriteToFolder` finner første ledige `…_2.txt`, `…_3.txt` i
-// stedet for å overskrive. Ved nedlasting (ingen mappe valgt) gjør nettleseren det samme selv.
-//
-// `_` skiller de fire delene og kan derfor ikke forekomme INNE i en del — saniteringen gjør
-// `_` om til `-`, samme mønster som `_exportFileName` (PDF).
-function _gbao10FileName(projectNo, customerName, merking) {
-  const rens = (v, fallback) => String(v || '').trim()
-    .replace(/[^a-zA-Z0-9æøåÆØÅ_\- ]/g, '_')
-    .replace(/_/g, '-')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-{2,}/g, '-')          // «Folie/2026: del» ga ellers dobbel bindestrek
-    .replace(/^-+|-+$/g, '') || fallback;
-  const kunde = rens(customerName, 'Ukjent-kunde');
-  let merk = rens(merking, 'eksport');
-  const noStr = _fmtProjectNo(projectNo);
-  const noPart = noStr ? `P${noStr}_` : '';
-  // Maks 120 tegn totalt — klipp MERKINGEN, aldri kunden eller prosjektnummeret (de identifiserer
-  // fila; merkingen er beskrivende).
-  const fast = `Varmeplan_${noPart}${kunde}_`.length + 4;   // + '.txt'
-  if (fast + merk.length > 120) merk = merk.slice(0, Math.max(1, 120 - fast)).replace(/-+$/, '');
-  return `Varmeplan_${noPart}${kunde}_${merk}.txt`;
+// ⚠ Kollisjonsvernet fra 012 er URØRT: flere personer skriver til samme tilbudsmappe, og fila
+// blir liggende til den plukkes opp. `_gbao10WriteToFolder` finner første ledige `…_2.txt`,
+// `…_3.txt` i stedet for å overskrive. Med tidsstempel i navnet slår det bare inn ved to
+// eksporter samme MINUTT — men det er nettopp da det trengs.
+function _gbao10FileName() {
+  return _docFileName(_gbao10Type, 'txt', null, _gbao10Stamp);
 }
 async function _showGbao10ExportDialog() {
   if (!S.project) return;
@@ -57908,6 +57955,7 @@ async function _showGbao10ExportDialog() {
     _gbao10AccessoryItems = accessoryResult.items || [];
   }
   _gbao10ElChoices = new Set();
+  _gbao10Stamp = _stampYYYYMMDDHHMM();   // 015: fryses her, se _gbao10Stamp
   try {
     _gbao10FolderHandles.tilbud = await _gbao10LoadHandle('tilbud');
     _gbao10FolderHandles.ordre = await _gbao10LoadHandle('ordre');
@@ -57962,7 +58010,7 @@ function _gbao10RenderDialog() {
         ${('showDirectoryPicker' in window) ? `<button class="npc-btn-ghost" onclick="_gbao10ChooseFolder()">Velg mappe</button>` : ''}
       </div>
     </div>
-    <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Filnavn: ${esc(_gbao10FileName(S.project.projectNo, built.custName, built.merking))}</div>
+    <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Filnavn: ${esc(_gbao10FileName())}</div>
     ${built.missing.length ? `<div style="margin-bottom:10px">
       <div style="font-size:12px;color:var(--warn);margin-bottom:4px">Mangler artikkelnummer, blokkerer eksport:</div>
       ${built.missing.map(m => `<div style="font-size:12px;padding:3px 0">
@@ -57986,6 +58034,9 @@ function _gbao10SaveMerking() {
   S.project.gbao10Merking = document.getElementById('gbao10-merking')?.value || '';
   if (typeof _markProjectDirty === 'function') _markProjectDirty();
   if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
+  // 015: merkingen er nå et ledd i filnavnet — tegn dialogen på nytt så forhåndsvisningen
+  // stemmer. `onchange` fyrer først ved blur, så fokus er alt ute av feltet.
+  _gbao10RenderDialog();
 }
 function _gbao10EditCustomer() {
   const proj = S.project || {};
@@ -58014,7 +58065,7 @@ async function _gbao10Export() {
   const built = _gbao10Build();
   if (!built.kundenr || built.missing.length || !built.lines.length) return;
   const text = _gbao10BuildFileText({ kundenr: built.kundenr, kontaktperson: built.kontaktperson, merking: built.merking, items: built.lines });
-  const filename = _gbao10FileName(S.project.projectNo, built.custName, built.merking);
+  const filename = _gbao10FileName();
   const msg = document.getElementById('gbao10-export-msg');
   const handle = _gbao10FolderHandles[_gbao10Type];
   if (handle && 'showDirectoryPicker' in window) {
