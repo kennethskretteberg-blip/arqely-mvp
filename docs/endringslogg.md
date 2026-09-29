@@ -4,6 +4,65 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kabel: CC over anbefalt maks er advarsel, ikke sperre — 2026-09-29
+
+Kenneth: «Innendørs – kabel – 17T – ønsket flateeffekt settes lavt, f.eks. 60 W/m². Appen vil
+ikke foreslå mindre kabel enn InFloor 17T 900W 54 m, som gir 85 W/m². Jeg ønsker ikke å ha noen
+regel på dette, men kan få en advarsel når man velger CC mer enn 20 cm.»
+
+**STEG 0 — reprodusert med ekte katalog (165 kabelprodukter):** i et 10,6 m² rom ved 60 W/m² var
+de fire nærmeste kandidatene alle forkastet på `ccValid`: 600 W/35 m (CC 30,3 / 56,1 W/m²),
+700 W/41 m (25,9), 500 W/29 m (36,6), 800 W/47 m (22,6). Første kandidat med CC ≤ 20 var
+900 W/54 m (19,6 cm, 85 W/m²) — nøyaktig det Kenneth så.
+*(Promptens tall «600 W/36 m, CC ≈ 29» var nær, men katalogen har 600 W/**35** m → CC 30,3.)*
+
+**Grensen må komme fra produktet:** InFloor 17T = 200, InSnow 20/30/40T = 200, **InFloor 10T =
+500** (noen hadde alt utvidet den der), FLXHEAT 8W/m = null. Aldri hardkodet 20 cm.
+
+- `_ccLimits(prod)` — én kilde til `minSp` (HARD, fysisk, urørt), `maxWarn` (produsentens
+  anbefaling = `max_spacing_mm`) og `maxHard` (teknisk tak, nytt valgfritt `max_spacing_hard_mm`,
+  tomt = 500 mm). `Math.max(…, maxWarn)` så et produkt over 500 aldri får tak under egen anbefaling.
+- `_ccOverWarn` / `_ccWarnText` / `_roomCcOverWarn` / `_ccWarnToast` — ÉN sannhet som footer,
+  toast, lerret-label, romkort, romlista og PDF alle leser, så de ikke kan si hver sin ting.
+- **STEG 0.2, 27 steder fordelt på tre klasser:** 7 KANDIDATFILTRE (`selectCableByPower`,
+  `selectMultiCables`, `_generateMixedCombos`, `_mixComposerStats`, `_cableLabelOnlyStats`,
+  `_listSuggestCableFrom`, `_listProductOptionsHtml`) → gyldig opp til `maxHard`, merket med
+  `ccOverMax` imellom. 16 MOTOR-/KLEMMESTEDER → `maxHard`. 2 trappesteder
+  (`_stairSpacingDelta`, `getStairCableViolations`) RØRT IKKE — egen modul med egne låste regler.
+  `getCableViolations` meldte allerede `maxSpacing`; den veien er gjenbrukt, ikke duplisert.
+- `_cableSpacingDelta` (manuell CC-stepper) stopper ikke lenger på 20 cm.
+
+**Funn underveis 1 — en blind heving av taket ødela skew-motoren.** Flere motorer GROVSVEIPER
+`minSp..maxSp`, så et videre område gir andre kandidater og et annet vinnerutlegg; målt falt
+`_cableSkewRegressionTest` E fra «skew» til «serpentine-fallback» i to av tre soner. Rettet med
+`_ccSearchMaxCm(prod, room)`: behold anbefalingen som tak, løft KUN så høyt kabelens egen lengde
+(eller en påtvunget CC fra soner/N-deling) krever. Er den lengdedrevne CC-en under anbefalingen,
+er søkeområdet bit-for-bit som før.
+
+**Funn underveis 2 — testen som var grønn låste et fysisk umulig utlegg.** `_buildNCableZones`
+klemte felles CC til anbefalingen (20) i stedet for den lengdedrevne verdien (60 m² / 3 × 40 m =
+50 cm). MÅLT på gammel kode: alle tre soner la **95,9 / 86,9 / 95,9 m av en 40 m kabel**, og
+`getCableViolations` flagget `maxLength`-brudd på alle tre — mens testen sto grønn, fordi den
+bare spurte hvilken MOTOR som vant. Sjekkene i E er byttet med invarianter som fanger dette:
+ingen sone legger mer enn produktets lengde, felles CC = 50, alle soner deler CC.
+
+**ÅPENT, rapportert til Kenneth:** ved den brede (riktige) CC-en faller 2 av 3 uregelmessige
+delpolygoner fra skew til `serpentine-fallback` og legger ~24,5 av 40 m. Mindre galt enn før
+(ingen overskrider lengden nå), men ikke bra. Dokumentert som en egen sjekk i E med terskel 55 %,
+så det ikke blir borte.
+
+**Testet:** 60 W/m² → beste forslag nå 600 W/35 m (56,2 W/m², CC 30,3, merket), lagt på 28,6 cm
+→ 59 W/m² i rommet. 100 W/m² → 1100 W/65 m, CC 16,3, ingen advarsel, utlegg uendret. Kun label →
+CC 30,3 (ikke klemt). Flere kabler 2× → 300 W/18 m, CC 29,4, merket. CC under `min_spacing_mm`
+og over `maxHard` avvises fortsatt. Footer viser advarselen OG beholder GODKJENN. Lerret-labelen
+målt fra canvas: «59 W/m² flate · 58 W/m² BTA · ⚠ CC 28.6 cm». Romkortet: «c/c-avstand 28.6 cm
+⚠ over anbefalt maks 20 cm». Ny `_ccWarnRegressionTest` (20 sjekker) + alle sju øvrige grønne
+— 150 sjekker totalt.
+
+**Fil:** index.html.
+
+---
+
 ## AGENTS.md slettet — CLAUDE.md er eneste instruksjonsfil — 2026-09-29
 
 `AGENTS.md` lå usporet i repoet fra 18.09.2026. Den var en kopi av `CLAUDE.md` med «Claude»
