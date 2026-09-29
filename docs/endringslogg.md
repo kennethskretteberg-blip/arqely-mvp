@@ -4,6 +4,48 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Fil-knappene i topbaren også i Hurtig prosjektering — 2026-09-29
+
+Kenneth: «Jeg ønsker å ha knappene for lagre, eksportere, PDF m.m. på liste-modulen også.»
+
+Fil-gruppa lå i `<span class="tb-grp" data-modules="indoor stair snow">`, og
+`updateTopbarForModule` skjuler alt som ikke nevner aktiv modul — listemodulen heter `list`.
+MÅLT i listemodul før endringen: **hver eneste** topbar-gruppe skjult, bare logoen sto igjen.
+
+- `list` lagt til på fire elementer: separatoren etter logoen, `?`-brikken, separatoren før
+  fil-gruppa og fil-gruppa selv.
+- **Avvik fra bestillingen, med grunn:** den SISTE separatoren (før zoom-gruppa) fikk IKKE `list`.
+  Zoom er lerret-only og blir skjult, så et `list` der ville gitt en løs, hengende strek på
+  slutten av topbaren. Verifisert: begge synlige separatorer har innhold på hver side.
+- Funksjonene bak knappene virket hele tiden — de leser `S.rooms`/`S.project`, ikke lerretet.
+
+**STEG 0.2 — ingen avvik.** Med et reelt listeprosjekt (2 rom, label-kabler, 99/100 W/m²):
+- PDF kjørte feilfritt og inneholdt forside, **Romoversikt med begge listerommene** og
+  **Materialliste med begge produktene**. Eksportdialogens rom-avkrysning viste «Alle rom (2)
+  Bad Gang» — punkt 4 krevde derfor ingen endring.
+- `_exportMaterialListXLSX()` ga en 23,8 kB `.xlsx`.
+- `_showGbao10ExportDialog()` åpnet med filnavn og 2 artikkellinjer; Visma-paste-dialogen åpnet.
+- `.btn-visma-paste`/`.btn-gbao10` har ingen `data-modules` og styres kun av
+  `_updateVismaPasteButton` (org-ens `erp_format`) — uendret oppførsel i liste, verifisert synlig.
+
+**Presentasjon er SKJULT i liste.** MÅLT at den ikke fungerer for et listeprosjekt: listerom har
+`points: []`, så lerretet tegner ingenting (kun målestokkslinja), og present-baren viste
+«0 Rom · 0.0 m² · 0 W» for et prosjekt med 2 rom, 10 m² og 995 W. `#chip-present` fikk derfor
+sitt eget, smalere `data-modules="indoor stair snow"`. «Send til montør» hadde alt `indoor`.
+
+**Funn som motsier bestillingen: Ctrl+S finnes ikke.** Knappen har tooltip «(Ctrl+S)», men det er
+ingen tastehåndterer for den noe sted i fila, og ingen rad i `_SHORTCUTS` — verken i liste eller
+innendørs. Målt: et `keydown` med `ctrlKey` + `s` kaller ikke `saveProject`. Ingen ny hurtigtast
+ble lagt inn (bestillingen sa eksplisitt nei), så tooltipen er fortsatt misvisende — rapportert.
+
+**Testet:** liste viser ? / Lagre / Versjoner / Åpne / PDF / Excel / Visma ×2 — Send til montør,
+Presentasjon, tegneverktøy og zoom skjult. Innendørs uendret (alle 21 knapper). Alle åtte
+regresjonstester grønne (137 sjekker).
+
+**Fil:** index.html.
+
+---
+
 ## Kabel: CC over anbefalt maks er advarsel, ikke sperre — 2026-09-29
 
 Kenneth: «Innendørs – kabel – 17T – ønsket flateeffekt settes lavt, f.eks. 60 W/m². Appen vil
