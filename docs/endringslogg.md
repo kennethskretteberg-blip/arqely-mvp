@@ -4,6 +4,30 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## AGENTS.md slettet — CLAUDE.md er eneste instruksjonsfil — 2026-09-29
+
+`AGENTS.md` lå usporet i repoet fra 18.09.2026. Den var en kopi av `CLAUDE.md` med «Claude»
+byttet til «Codex», laget for at andre kodeverktøy skal lese samme prosjektinstruksjoner.
+
+**Hvorfor den ble slettet — den hadde allerede driftet:**
+- **14 diff-linjer bak `CLAUDE.md`.** Hele kart-avsnittet manglet, inkludert regelen «kalibrer,
+  roter, speilvend eller skaler aldri en geo-bakgrunn». Den regelen er av den farlige sorten:
+  brytes den, blir alle koordinater feil UTEN at noe ser galt ut.
+- **Pekte på stier som ikke finnes:** `.Codex/launch.json` og `docs/Codex/`. De virkelige er
+  `.claude/launch.json` og `docs/claude/`. Et verktøy som leste fila, lette forgjeves.
+- Ingen merket noe av dette på ti dager — det kom fram først da filene ble diffet 29.09.2026.
+
+Ingen commit: fila var aldri sporet i git, så det finnes ingenting å registrere. Vurdert og
+forkastet: `.gitignore` (skjuler en fil som er feil i stedet for å rette den) og symlink til
+`CLAUDE.md` (aktuelt kun om Codex faktisk tas i bruk på repoet).
+
+**Regel videre:** dukker det opp en ny parallell instruksjonsfil (`AGENTS.md`, `.cursorrules`
+e.l.), gjøres den til en symlink til `CLAUDE.md` eller slettes — to kopier vedlikeholdes ikke.
+
+**Fil:** AGENTS.md (slettet).
+
+---
+
 ## Filnavn for PDF og Visma-fil: samme mønster som Cenika Flow — 2026-09-28
 
 Kenneth: «Utskrift PDF-filnavn må også være med firmanavn og merking. Det bør også gjelde for
