@@ -4,6 +4,34 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Ctrl/⌘+S lagrer faktisk — snarveien har aldri vært implementert — 2026-09-29
+
+Kenneth: «fiks Ctrl+S». Oppfølging av funnet i 017: Lagre-knappens tooltip har sagt «(Ctrl+S)»
+siden den ble laget, men det fantes **ingen tastehåndterer noe sted i fila** og ingen rad i
+`_SHORTCUTS`. Målt: et `keydown` med `ctrlKey` + `s` kalte ikke `saveProject` — det gikk rett til
+nettleserens egen «lagre side». Gjaldt alle moduler, ikke bare liste.
+
+- Grenen ligger **først** i `keydown`, med vilje FØR `INPUT/TEXTAREA`-vakten: en lagre-snarvei
+  skal virke midt i at man skriver et romnavn, slik den gjør i alle andre programmer.
+- `preventDefault()` kjøres **uansett** om vi lagrer eller ei — halve jobben er å stoppe
+  nettleserdialogen. `_ctrlSCanSave()` avgjør om selve lagringen skjer, med fire nei-er:
+  ingen prosjekt lastet, prosjektlista/dashbordet framme, dokumentasjons-/reklamasjons-
+  veiviseren framme (egne fullskjerm-overlegg), eller presentasjonsmodus (read-only for kunde).
+- `Ctrl+Shift+S` fanges ikke — den er reservert.
+- Ny rad i `_SHORTCUTS` («Alltid» → ⌘S/Ctrl+S → «Lagre prosjektet»), som CLAUDE.md krever ved
+  hver ny hurtigtast. Verifisert at den faktisk tegnes i `?`-panelet.
+- Ikke modul-gatet: `saveProject` leser `S.project`, ikke lerretet (verifisert for `list` i 017).
+
+**Testet, ni punkter:** app + prosjekt → lagrer; midt i et tekstfelt → lagrer; ⌘S på Mac →
+lagrer; Ctrl+Shift+S → ikke fanget; prosjektlista framme → lagrer ikke, men stopper
+nettleserdialogen; presentasjonsmodus → samme; `#doc-screen` framme → samme; uten prosjekt →
+samme; raden vises i `?`-panelet. `saveProject` selv er urørt. Alle åtte regresjonstester
+grønne (137 sjekker).
+
+**Fil:** index.html.
+
+---
+
 ## Fil-knappene i topbaren også i Hurtig prosjektering — 2026-09-29
 
 Kenneth: «Jeg ønsker å ha knappene for lagre, eksportere, PDF m.m. på liste-modulen også.»
