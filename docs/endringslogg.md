@@ -4,6 +4,42 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## DWG blir en vanlig plantegning — samme valg og samme underlag som PDF — 2026-09-30
+
+Kenneth, etter at 020 var i produksjon: «det ble ikke vellykket. jeg ønsker å importere dwg filen
+som en vanlig plantegning, på lik linje som en pdf plantegning.» 020 løste feil problem — jeg
+bygde vektorveien (DWG → ferdige rom), mens han vil ha tegningen som UNDERLAG å tegne oppå.
+Motor-halvdelen: `lumelo-backend` `67200b5`.
+
+**Hvorfor vektorveien ikke duger for denne tegningen — målt:** romgjenkjenningen ga **590 «rom»**
+med alle lag og 10 merkelige med vegg-lagene. Kenneth: «lag-velgeren kom, resultatet ble rot.»
+
+- **`_startImportFile` sa før «vektor → auto, ingen spørsmål» for DWG.** Nå faller DWG gjennom til
+  NØYAKTIG samme flyt som en PDF: «har etasjen alt en plantegning?» → `_rasterMethodChoice` →
+  «la appen finne rommene» eller «jeg tegner selv». Den felles delen er skilt ut som
+  `_startImportFileRaster`, fordi DWG må innom den asynkrone capabilities-sjekken først.
+- **`_loadFileAsBackground` er SNUDD.** Sto før: «DXF/DWG er vektor (ingen rasterbar bakgrunn) →
+  rut til motorens vektor-import». Men en vektortegning kan tegnes til et bilde like godt som en
+  PDF-side. Nå: `_loadBgDwg`.
+- `_loadBgDwg` speiler `_loadBgPdf`: hent SVG fra motoren → `Image` → `_installBgImageForFloor`.
+  Alt etterpå (Bytt plantegning, etasjevalg, Flytt underlag, opasitet, utskrift) virker uendret,
+  fordi det er et helt vanlig `S.bgs`-objekt.
+- **`img.decode()` framfor `onload`:** uten den er `naturalWidth` 0 i det øyeblikket
+  `_installBgImageForFloor` leser den, og hele plasseringen blir feil.
+- **Ferdig kalibrert når fila vet det selv.** `$INSUNITS` → cm direkte, `_needsCalibration = false`
+  (samme grep kart-bakgrunnen bruker), og toasten sier «målestokk fra fila». Mangler enhetene,
+  faller vi tilbake til nøyaktig samme kalibrering som en PDF.
+- Vektorveien er BEHOLDT — den er nå et valg, ikke noe man tvinges gjennom.
+
+**Testet med Kenneths egen fil, ende-til-ende i appen:** slipp → valgdialogen «Fant en
+plantegning» kom (samme som PDF) → «Jeg tegner selv» → underlag på 20,1 × 24,3 m,
+`_needsCalibration: false`, bilde 1982 × 2400 px (~1 cm i verden per piksel), BAKGRUNN-panelet og
+tegneverktøyene framme. Alle åtte regresjonstester grønne (137 sjekker).
+
+**Fil:** index.html.
+
+---
+
 ## Native .dwg-import: motoren konverterer, klienten sier tydelig fra — 2026-09-30
 
 Kenneth: «Første gang jeg prøver å dra en DWG-fil inn i Varmeplan — det lot seg ikke gjøre.»

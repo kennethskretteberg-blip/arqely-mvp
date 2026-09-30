@@ -35379,9 +35379,11 @@ function _loadFileAsBackground(file) {
   if (!file) return;
   const fileName = file.name;
   if (/\.(dxf|dwg)$/i.test(file.name)) {
-    // DXF/DWG er vektor (ingen rasterbar bakgrunn) → rut til motorens vektor-import
-    // (lag-modal med vegg/hindring + fast målestokk), ikke bakgrunnsbilde.
-    _pdfImportTarget = 'draw'; _pdfImportPickLayers(file); return;
+    // 021: SNUDD. Sto før: «DXF/DWG er vektor (ingen rasterbar bakgrunn) → rut til motorens
+    // vektor-import». Men en vektortegning kan tegnes til et bilde like godt som en PDF-side —
+    // motoren leverer strekene som SVG (`/import/dwg/background`). Og den er BEDRE enn en PDF:
+    // har fila entydige enheter ($INSUNITS), kommer underlaget ferdig kalibrert.
+    _loadBgDwg(file, fileName); return;
   }
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
     _loadBgPdf(file, fileName); return;
@@ -35398,6 +35400,67 @@ function _loadFileAsBackground(file) {
     img.src = ev.target.result;
   };
   reader.readAsDataURL(file);
+}
+
+// 021: DWG/DXF → bakgrunnstegning. Speiler `_loadBgPdf`: hent en tegnbar representasjon, lag et
+// Image, og installer det via den vanlige `_installBgImage`-veien — så alt etterpå (Bytt
+// plantegning, etasjevalg, Flytt underlag, opasitet, utskrift) virker uendret.
+//
+// Målestokken er hele gevinsten: `units` fra $INSUNITS gir cm direkte, og da hoppes kalibreringen
+// over (`_needsCalibration = false`, samme grep kart-bakgrunnen bruker). Er enhetene IKKE
+// entydige, faller vi tilbake til nøyaktig samme kalibrering som en PDF — motoren gjetter aldri.
+async function _loadBgDwg(file, fileName) {
+  let res;
+  try {
+    const eng = await _resolveEngineUrl();
+    const fd = new FormData(); fd.append('file', file);
+    const r = await _engineFetchWithRetry(eng.url + '/import/dwg/background',
+      { method: 'POST', body: fd }, _engineShowColdStartToast);
+    if (r.status === 415) { _dwgCapability = null; _showToast && _showToast(_DWG_NO_SUPPORT_MSG, 'warn'); return; }
+    if (!r.ok) {
+      let d = ''; try { d = (await r.json()).detail || ''; } catch(e) {}
+      _showToast && _showToast(_dwgConvertFailMsg(d), 'warn'); return;
+    }
+    res = await r.json();
+  } catch(err) {
+    _engineHandleImportError(err, () => _loadBgDwg(file, fileName)); return;
+  }
+  // SVG → Image via blob-URL. `decode()` framfor onload: uten den er naturalWidth 0 i det
+  // øyeblikket _installBgImage leser den, og hele plasseringen blir feil.
+  const blob = new Blob([res.svg], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.src = url;
+  try { await img.decode(); }
+  catch(e) { URL.revokeObjectURL(url); _showToast && _showToast('Klarte ikke å tegne DWG-underlaget', 'error'); return; }
+
+  const floorId = (_bgReplaceFloorId != null) ? _bgReplaceFloorId
+    : (_bgImportTargetFloorId != null ? _bgImportTargetFloorId
+      : (S.ui.activeFloorId != null ? S.ui.activeFloorId : '__global__'));
+  const oldBg = (_bgReplaceFloorId != null) ? S.bgs[_bgReplaceFloorId] : null;
+  _bgReplaceFloorId = null; _bgImportTargetFloorId = null;
+
+  const cm = res.mm_per_unit ? { w: res.width_units * res.mm_per_unit / 10,
+                                 h: res.height_units * res.mm_per_unit / 10 } : null;
+  _installBgImageForFloor(img, url, fileName, null, floorId,
+    { showCalibration: !cm, replaceOf: oldBg });
+
+  const bg = S.bgs[floorId];
+  if (bg && cm) {
+    // Kjent målestokk: sett verdensmålene selv og hopp over kalibreringen.
+    bg.widthCm = cm.w; bg.heightCm = cm.h;
+    bg.originX = 0; bg.originY = -bg.heightCm;
+    bg._needsCalibration = false;
+    if (S.ui.activeFloorId !== floorId) setActiveBgFloor(floorId === '__global__' ? null : floorId);
+    showBgPanel(); updateCtxBar();
+    if (typeof _fitViewToBg === 'function') _fitViewToBg(bg);
+    render();
+    _showToast && _showToast(
+      `Plantegning lagt inn — ${(cm.w/100).toFixed(1)} × ${(cm.h/100).toFixed(1)} m (målestokk fra fila)`, 'ok');
+  } else if (bg) {
+    _showToast && _showToast('Plantegning lagt inn — fila mangler målestokk, sett den selv', 'warn');
+  }
+  if (res.truncated) _showToast && _showToast('Tegningen var svært stor — bare de første strekene er med', 'warn');
 }
 
 function _loadBgPdf(file, fileName) {
@@ -47114,11 +47177,22 @@ function _startImportFile(file){
   _engineWarmResolve();   // STEG 2: dekker slippsonen (filen er allerede valgt der, ingen tidligere «panel»-hendelse)
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
     : ((S.floors[0] && S.floors[0].id) ?? null);
-  if (_importKind(file) === 'dwg') {   // vektor → auto, ingen spørsmål
+  // 021 (Kenneth 30.09.2026): «jeg ønsker å importere dwg filen som en vanlig plantegning, på lik
+  // linje som en pdf plantegning». DWG gikk FØR rett i vektorveien («vektor → auto, ingen
+  // spørsmål») — og romgjenkjenningen ga rot på hans tegning (590 «rom» med alle lag, 10
+  // merkelige med vegg-lagene). Nå faller DWG gjennom til NØYAKTIG samme flyt som en PDF:
+  // «har etasjen alt en plantegning?» → `_rasterMethodChoice` → auto eller «jeg tegner selv».
+  // Vektorveien er beholdt — den er nå et valg, ikke noe man tvinges gjennom.
+  if (_importKind(file) === 'dwg') {
     // 020: spør motoren om den kan .dwg i det hele tatt før vi laster opp en stor fil.
-    _dwgBlockedBeforeUpload(file).then(blocked => { if (!blocked) _autoReadStart(file); });
+    _dwgBlockedBeforeUpload(file).then(blocked => { if (blocked) return; _startImportFileRaster(file); });
     return;
   }
+  _startImportFileRaster(file);
+}
+// Delen av `_startImportFile` som er FELLES for PDF/bilde og (etter 021) DWG. Skilt ut fordi
+// DWG må innom capabilities-sjekken først, og den er asynkron.
+function _startImportFileRaster(file){
   // Kenneth 24.09.2026: har aktiv etasje ALLEREDE en plantegning, fylte slippet før samme slot og
   // nullstilte origin/størrelse — kalibreringen gikk tapt uten spørsmål (målt i STEG 0.2). Spør nå
   // FØR noe skjer. Etasje uten plantegning: rett inn, som før.
