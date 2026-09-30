@@ -46780,6 +46780,41 @@ async function _roofFetchBackground() {
   }
 }
 
+// ── 020 (Kenneth 30.09.2026): «Første gang jeg prøver å dra en DWG-fil inn i Varmeplan — det lot
+// seg ikke gjøre.» Native .dwg er et lukket binærformat; motoren må konvertere det med et eksternt
+// program (ODA eller LibreDWG). Etter 020 svarer motoren på `/import/dwg/capabilities`, så vi kan
+// si fra FØR opplasting i stedet for å la brukeren vente på en 415. Cachet per økt — svaret endrer
+// seg bare ved deploy av motoren.
+let _dwgCapability;            // undefined = ikke spurt, null = ingen konverterer, ellers 'oda'|'libredwg'
+async function _engineDwgCapability(){
+  if (_dwgCapability !== undefined) return _dwgCapability;
+  try {
+    const res = await _resolveEngineUrl();
+    const r = await fetch(res.url + '/import/dwg/capabilities');
+    _dwgCapability = r.ok ? ((await r.json()).dwg ?? null) : undefined;
+  } catch(e) {
+    // Fikk ikke kontakt: IKKE cache noe. Et nett-blaff skal ikke låse oss til «ingen DWG-støtte»
+    // resten av økta — og selve importen under gir uansett sin egen tilkoblings-dialog.
+    _dwgCapability = undefined;
+  }
+  return _dwgCapability;
+}
+// Meldingene 415/400 og «vet på forhånd» skal si det SAMME — én kilde, ikke fire varianter.
+const _DWG_NO_SUPPORT_MSG =
+  'Motoren kan ikke lese .dwg akkurat nå — lagre tegningen som DXF (R2018 eller eldre) og prøv igjen.';
+function _dwgConvertFailMsg(detail){
+  const v = (String(detail||'').match(/AC10\d\d/) || [])[0];
+  return 'Klarte ikke å konvertere denne .dwg-fila' + (v ? ' (versjon ' + v + ')' : '')
+       + '. Prøv å lagre som DXF, eller send fila til oss.';
+}
+// Kalles først i hver .dwg-vei. true = stopp, brukeren har fått beskjed.
+async function _dwgBlockedBeforeUpload(file){
+  if (_importKind(file) !== 'dwg' || !/\.dwg$/i.test(file.name||'')) return false;
+  const cap = await _engineDwgCapability();
+  if (cap === null) { _showToast && _showToast(_DWG_NO_SUPPORT_MSG, 'warn'); return true; }
+  return false;
+}
+
 // Delt av auto-lesing og verktøylinje-import — begge poster filen til /import/{kind}/layers for
 // å hente lag-listen FØR bruker velger vegger. Kaster et klassifisert feilobjekt (ikke en rå
 // Error) slik at kallerne kan vise samme tilkoblings-dialog (STEG 4).
@@ -46791,7 +46826,13 @@ async function _engineFetchLayers(file){
   try {
     r = await _engineFetchWithRetry(url, {method:'POST', body:fd}, _engineShowColdStartToast);
   } catch(err){ throw _engineClassifyError(err, url); }
-  if(r.status===415){ const e=new Error('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.'); e.kind='dwg415'; throw e; }
+  // 020: 415 = motoren har INGEN konverterer (entydig råd: lagre som DXF).
+  //      400 på en .dwg = en konverterer fantes, men klarte ikke akkurat denne fila.
+  if(r.status===415){ _dwgCapability = null; const e=new Error(_DWG_NO_SUPPORT_MSG); e.kind='dwg415'; throw e; }
+  if(r.status===400 && /\.dwg$/i.test(file.name||'')){
+    let d=''; try{ d=(await r.json()).detail||''; }catch(e){}
+    const e=new Error(_dwgConvertFailMsg(d)); e.kind='dwg415'; throw e;   // samme toast-vei, annen tekst
+  }
   if(!r.ok){ throw _engineClassifyError(new Error('HTTP '+r.status), url, r.status); }
   return (await r.json()).layers || {};
 }
@@ -46826,7 +46867,11 @@ async function _engineFetchImport(file, params){
     const corsNote = c.maybeCors ? ' (kan skyldes CORS — se motorens cors_origins)' : '';
     throw new Error('Fikk ikke kontakt med tolkemotoren på '+_engineHost(url)+corsNote);
   }
-  if(r.status===415){ const e=new Error('Native .dwg støttes ikke ennå — lagre som DXF og prøv igjen.'); e.kind='dwg415'; throw e; }
+  if(r.status===415){ _dwgCapability = null; const e=new Error(_DWG_NO_SUPPORT_MSG); e.kind='dwg415'; throw e; }
+  if(r.status===400 && /\.dwg$/i.test(file.name||'')){   // 020, se _engineFetchLayers
+    let d=''; try{ d=(await r.json()).detail||''; }catch(e){}
+    const e=new Error(_dwgConvertFailMsg(d)); e.kind='dwg415'; throw e;
+  }
   if(!r.ok){ let d='HTTP '+r.status; try{ const b=await r.json(); if(b.detail) d=b.detail; }catch(e){} throw new Error(d); }
   return await r.json();
 }
@@ -47069,7 +47114,11 @@ function _startImportFile(file){
   _engineWarmResolve();   // STEG 2: dekker slippsonen (filen er allerede valgt der, ingen tidligere «panel»-hendelse)
   _pdfImportDrawFloorId = (S.ui.activeFloorId != null) ? S.ui.activeFloorId
     : ((S.floors[0] && S.floors[0].id) ?? null);
-  if (_importKind(file) === 'dwg') { _autoReadStart(file); return; }   // vektor → auto, ingen spørsmål
+  if (_importKind(file) === 'dwg') {   // vektor → auto, ingen spørsmål
+    // 020: spør motoren om den kan .dwg i det hele tatt før vi laster opp en stor fil.
+    _dwgBlockedBeforeUpload(file).then(blocked => { if (!blocked) _autoReadStart(file); });
+    return;
+  }
   // Kenneth 24.09.2026: har aktiv etasje ALLEREDE en plantegning, fylte slippet før samme slot og
   // nullstilte origin/størrelse — kalibreringen gikk tapt uten spørsmål (målt i STEG 0.2). Spør nå
   // FØR noe skjer. Etasje uten plantegning: rett inn, som før.
@@ -47272,7 +47321,9 @@ function _spiPickCustomer() {
 function _autoReadStart(file){
   // DXF/DWG er vektor uten rasterbar bakgrunn → gå rett til motorens vektor-flyt
   // (lag-modal + fast målestokk) i stedet for bakgrunn+kalibrering.
-  if(_importKind(file)==='dwg'){ _pdfImportTarget='draw'; _pdfImportPickLayers(file); return; }
+  if(_importKind(file)==='dwg'){ _pdfImportTarget='draw';
+    _dwgBlockedBeforeUpload(file).then(blocked => { if (!blocked) _pdfImportPickLayers(file); });
+    return; }
   _autoReadPdf = { file };
   // Last som bakgrunn (rasteriserer + viser). _needsCalibration=true → ctxbar tilbyr
   // «Sett målestokk» (to-punkts) og «Fast målestokk» (1:50). Begge ender i _autoReadIfPending.

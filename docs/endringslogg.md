@@ -4,6 +4,43 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Native .dwg-import: motoren konverterer, klienten sier tydelig fra — 2026-09-30
+
+Kenneth: «Første gang jeg prøver å dra en DWG-fil inn i Varmeplan — det lot seg ikke gjøre.»
+Fila: 1,2 MB, AC1032 (AutoCAD 2018). Hoveddelen ligger i `lumelo-backend` (commit `2ed9c30`,
+egen endringslogg der); dette er klient-halvdelen.
+
+**STEG 0 — svaret på «var det 415 eller avvist før sending?»: 415.** Klienten avviste den aldri
+— `.dwg` står i `_IMPORT_EXTS` og i alle `accept`-attributtene, så fila ble lastet opp og
+motoren svarte 415. Det Kenneth så var toasten «Native .dwg støttes ikke ennå».
+
+- `_engineDwgCapability()` spør `GET /import/dwg/capabilities` og cacher svaret per økt.
+  **Fikk vi ikke kontakt, caches INGENTING** — et nett-blaff skal ikke låse oss til «ingen
+  DWG-støtte» resten av økta, og selve importen gir uansett sin egen tilkoblings-dialog.
+- `_dwgBlockedBeforeUpload(file)` kalles først i begge `.dwg`-inngangene (auto-lesing og
+  lag-velgeren). `dwg: null` → beskjed **før** opplasting i stedet for etter.
+- **To ulike svar fra motoren gir to ulike beskjeder.** 415 = «motoren kan ikke .dwg i det hele
+  tatt» → lagre som DXF. 400 på en `.dwg` = «vi prøvde, denne fila gikk ikke» → egen tekst med
+  DWG-versjonen plukket ut av `detail` («versjon AC1036»). Før 020 var begge samme toast.
+- Alle fire meldingsstedene leser nå `_DWG_NO_SUPPORT_MSG` / `_dwgConvertFailMsg` — én kilde.
+
+**Testet mot ekte motor lokalt** (to instanser, én med og én uten konverterer):
+- Motor med LibreDWG → `capability: 'libredwg'`, `.dwg` slipper gjennom; en ødelagt AC1032-fil
+  ga 400 → toast «Klarte ikke å konvertere denne .dwg-fila (versjon AC1032) …», og
+  capability-cachen ble **ikke** forgiftet.
+- Motor uten konverterer → `capability: null`, blokkert før opplasting med riktig toast; et
+  direkte kall ga 415 med samme tekst. `.dxf` blokkeres aldri.
+- Kenneths ekte fil gjennom motoren: **200, 10 rom, 0,58 s**.
+- Alle åtte regresjonstester grønne (137 sjekker).
+
+**Kenneth kan gjøre (valgfritt, gir best kvalitet):** last ned ODA File Converter for Linux
+(.deb) fra oda.com, legg den i `lumelo-backend/oda/`, `fly deploy`. Da brukes ODA foran
+LibreDWG automatisk. Ikke commit .deb-en — den ligger i `.gitignore`.
+
+**Fil:** index.html.
+
+---
+
 ## Ctrl/⌘+S lagrer faktisk — snarveien har aldri vært implementert — 2026-09-29
 
 Kenneth: «fiks Ctrl+S». Oppfølging av funnet i 017: Lagre-knappens tooltip har sagt «(Ctrl+S)»
