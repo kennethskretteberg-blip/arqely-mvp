@@ -4,6 +4,43 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## DWG: toolbar-knappen gikk utenom valget, og modalen spurte om målestokk — 2026-09-30
+
+Kenneth, etter at 021 var ute: «dwg feiler fortsatt.. jeg får mange valg på hva som skal
+importeres. jeg får valg på størrelse, jeg trodde dwg slapp å få skalering?»
+Motor-halvdelen: `lumelo-backend` `21f3ccc`.
+
+**Jeg fikset bare ÉN av tre innganger i 021.** «Mange valg på hva som skal importeres» var
+lag-velgeren — altså landet han fortsatt i vektorveien:
+- `_emptyPickImport` (toolbar «Importer plantegning» OG tom-tilstandens slipp-sone) kalte
+  `_autoReadStart(f)` direkte, som for DWG hoppet rett i `_pdfImportPickLayers` — utenom
+  valgdialogen 021 la inn. Nå kaller den `_startImportFile(f)`, samme dispatcher som et filslipp,
+  slik kommentaren over `_importPlanMenu` alltid har hevdet at den gjorde.
+- Samme feilklasse som sone-gaten i 008-010: **én rute er ikke nok — finn ALLE inngangene.**
+
+**«Valg på størrelse» var aktivt feil, ikke bare unødvendig.** Lag-modalen spurte om
+papirmålestokk («1:100») og `_pdfImportRun` regnet `meters_per_point = ratio × 0.0254 / 72` —
+PDF-formelen. For en mm-tegning ga det **0,0353 der riktig svar er 0,001: 35× feil.**
+Motoren sender nå enhetene med lag-lista; `_engineFetchLayers` returnerer `{layers, units,
+mmPerUnit}`, modalen skjuler målestokk-feltet og viser «Målestokk fra fila — tegningen er i mm»,
+og `_pdfImportRun` bruker `mmPerUnit / 1000`. En PDF beholder målestokk-feltet uendret.
+
+**Og så det ubehagelige funnet: romgjenkjenningen finner NULL rom i denne tegningen.** Med
+riktig målestokk og et fornuftig minsteareal gir 0,5 / 1 / 2 m² alle **0 rom** — de «10 rommene»
+var fragmenter under 0,3 m². CAD-vegger er doble streker med skravur og lukker seg ikke til
+flater motoren kan polygonisere. Derfor er valgdialogen SNUDD for DWG/DXF: «Legg inn som
+plantegning» er nå Anbefalt, og automatikken er ærlig merket «Virker sjelden på CAD-tegninger
+der veggene er doble streker — da får du ingen eller rare rom.» PDF-er er uendret.
+
+**Testet ende-til-ende med Kenneths fil:** toolbar-veien gir nå valgdialogen; rekkefølgen er
+underlag først; «Legg inn som plantegning» ga 20,1 × 24,3 m, ingen kalibrering, 1982 × 2400 px.
+Lag-modalen for DWG viser «Målestokk fra fila», PDF-modalen beholder feltet. Alle åtte
+regresjonstester grønne (137 sjekker).
+
+**Fil:** index.html.
+
+---
+
 ## DWG blir en vanlig plantegning — samme valg og samme underlag som PDF — 2026-09-30
 
 Kenneth, etter at 020 var i produksjon: «det ble ikke vellykket. jeg ønsker å importere dwg filen
