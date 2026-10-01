@@ -19,5 +19,7 @@ Invariantene den koder er låst i `_gbao10RegressionTest()` i `index.html`:
 | Tegnsett | UTF-8, ingen BOM |
 | Artikkelnr (felt 17) | `CV`+6 siffer (89×), bare siffer (7×), `CK`+6 siffer (1×), `CV`+7 siffer (1×) |
 
-Siste rad er den viktige: **`CVA`-koder forekommer ikke én eneste gang i fasiten**, men er
-det Varmeplan-katalogen sender. Se endringsloggen 01.10.2026.
+⚠ **Fasiten definerer IKKE Visma sitt artikkelregister.** `CVA`-koder forekommer ikke i denne
+fila, men Kenneth bekreftet 01.10.2026 at Varmeplan-eksporter med `CVA` ALLTID har gått inn i
+Visma. Artikkelnummer-formen er derfor kun INFORMASJON i testen, aldri en feil — en test som
+feiler på data vi vet er riktig, er verre enn ingen test.
