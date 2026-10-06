@@ -4,79 +4,6 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## DWG: toolbar-knappen gikk utenom valget, og modalen spurte om målestokk — 2026-09-30
-
-Kenneth, etter at 021 var ute: «dwg feiler fortsatt.. jeg får mange valg på hva som skal
-importeres. jeg får valg på størrelse, jeg trodde dwg slapp å få skalering?»
-Motor-halvdelen: `lumelo-backend` `21f3ccc`.
-
-**Jeg fikset bare ÉN av tre innganger i 021.** «Mange valg på hva som skal importeres» var
-lag-velgeren — altså landet han fortsatt i vektorveien:
-- `_emptyPickImport` (toolbar «Importer plantegning» OG tom-tilstandens slipp-sone) kalte
-  `_autoReadStart(f)` direkte, som for DWG hoppet rett i `_pdfImportPickLayers` — utenom
-  valgdialogen 021 la inn. Nå kaller den `_startImportFile(f)`, samme dispatcher som et filslipp,
-  slik kommentaren over `_importPlanMenu` alltid har hevdet at den gjorde.
-- Samme feilklasse som sone-gaten i 008-010: **én rute er ikke nok — finn ALLE inngangene.**
-
-**«Valg på størrelse» var aktivt feil, ikke bare unødvendig.** Lag-modalen spurte om
-papirmålestokk («1:100») og `_pdfImportRun` regnet `meters_per_point = ratio × 0.0254 / 72` —
-PDF-formelen. For en mm-tegning ga det **0,0353 der riktig svar er 0,001: 35× feil.**
-Motoren sender nå enhetene med lag-lista; `_engineFetchLayers` returnerer `{layers, units,
-mmPerUnit}`, modalen skjuler målestokk-feltet og viser «Målestokk fra fila — tegningen er i mm»,
-og `_pdfImportRun` bruker `mmPerUnit / 1000`. En PDF beholder målestokk-feltet uendret.
-
-**Og så det ubehagelige funnet: romgjenkjenningen finner NULL rom i denne tegningen.** Med
-riktig målestokk og et fornuftig minsteareal gir 0,5 / 1 / 2 m² alle **0 rom** — de «10 rommene»
-var fragmenter under 0,3 m². CAD-vegger er doble streker med skravur og lukker seg ikke til
-flater motoren kan polygonisere. Derfor er valgdialogen SNUDD for DWG/DXF: «Legg inn som
-plantegning» er nå Anbefalt, og automatikken er ærlig merket «Virker sjelden på CAD-tegninger
-der veggene er doble streker — da får du ingen eller rare rom.» PDF-er er uendret.
-
-**Testet ende-til-ende med Kenneths fil:** toolbar-veien gir nå valgdialogen; rekkefølgen er
-underlag først; «Legg inn som plantegning» ga 20,1 × 24,3 m, ingen kalibrering, 1982 × 2400 px.
-Lag-modalen for DWG viser «Målestokk fra fila», PDF-modalen beholder feltet. Alle åtte
-regresjonstester grønne (137 sjekker).
-
-**Fil:** index.html.
-
----
-
-## DWG blir en vanlig plantegning — samme valg og samme underlag som PDF — 2026-09-30
-
-Kenneth, etter at 020 var i produksjon: «det ble ikke vellykket. jeg ønsker å importere dwg filen
-som en vanlig plantegning, på lik linje som en pdf plantegning.» 020 løste feil problem — jeg
-bygde vektorveien (DWG → ferdige rom), mens han vil ha tegningen som UNDERLAG å tegne oppå.
-Motor-halvdelen: `lumelo-backend` `67200b5`.
-
-**Hvorfor vektorveien ikke duger for denne tegningen — målt:** romgjenkjenningen ga **590 «rom»**
-med alle lag og 10 merkelige med vegg-lagene. Kenneth: «lag-velgeren kom, resultatet ble rot.»
-
-- **`_startImportFile` sa før «vektor → auto, ingen spørsmål» for DWG.** Nå faller DWG gjennom til
-  NØYAKTIG samme flyt som en PDF: «har etasjen alt en plantegning?» → `_rasterMethodChoice` →
-  «la appen finne rommene» eller «jeg tegner selv». Den felles delen er skilt ut som
-  `_startImportFileRaster`, fordi DWG må innom den asynkrone capabilities-sjekken først.
-- **`_loadFileAsBackground` er SNUDD.** Sto før: «DXF/DWG er vektor (ingen rasterbar bakgrunn) →
-  rut til motorens vektor-import». Men en vektortegning kan tegnes til et bilde like godt som en
-  PDF-side. Nå: `_loadBgDwg`.
-- `_loadBgDwg` speiler `_loadBgPdf`: hent SVG fra motoren → `Image` → `_installBgImageForFloor`.
-  Alt etterpå (Bytt plantegning, etasjevalg, Flytt underlag, opasitet, utskrift) virker uendret,
-  fordi det er et helt vanlig `S.bgs`-objekt.
-- **`img.decode()` framfor `onload`:** uten den er `naturalWidth` 0 i det øyeblikket
-  `_installBgImageForFloor` leser den, og hele plasseringen blir feil.
-- **Ferdig kalibrert når fila vet det selv.** `$INSUNITS` → cm direkte, `_needsCalibration = false`
-  (samme grep kart-bakgrunnen bruker), og toasten sier «målestokk fra fila». Mangler enhetene,
-  faller vi tilbake til nøyaktig samme kalibrering som en PDF.
-- Vektorveien er BEHOLDT — den er nå et valg, ikke noe man tvinges gjennom.
-
-**Testet med Kenneths egen fil, ende-til-ende i appen:** slipp → valgdialogen «Fant en
-plantegning» kom (samme som PDF) → «Jeg tegner selv» → underlag på 20,1 × 24,3 m,
-`_needsCalibration: false`, bilde 1982 × 2400 px (~1 cm i verden per piksel), BAKGRUNN-panelet og
-tegneverktøyene framme. Alle åtte regresjonstester grønne (137 sjekker).
-
-**Fil:** index.html.
-
----
-
 ## Egne standardverdier per bruker: folie-avstand og vegg-avstand — 2026-10-06
 
 Kenneth: «Kan hver bruker sette sine egne preferanser på standard avstand mellom varmefolier? …
@@ -188,6 +115,79 @@ Ny `_gapRegressionTest` (11 sjekker) + alle ni øvrige grønne — 158 sjekker t
 **Testfelle verdt å huske:** `setRoomGap` kaller `_savePrefs()`, så mine egne testkall skrev
 `S.varmefolie.gapCm = 20` til localStorage. Det fikk `_foilRegressionTest` til å feile på
 dekningsgrad ved neste last — en «regresjon» som utelukkende var min testforurensning.
+
+**Fil:** index.html.
+
+---
+
+## DWG: toolbar-knappen gikk utenom valget, og modalen spurte om målestokk — 2026-09-30
+
+Kenneth, etter at 021 var ute: «dwg feiler fortsatt.. jeg får mange valg på hva som skal
+importeres. jeg får valg på størrelse, jeg trodde dwg slapp å få skalering?»
+Motor-halvdelen: `lumelo-backend` `21f3ccc`.
+
+**Jeg fikset bare ÉN av tre innganger i 021.** «Mange valg på hva som skal importeres» var
+lag-velgeren — altså landet han fortsatt i vektorveien:
+- `_emptyPickImport` (toolbar «Importer plantegning» OG tom-tilstandens slipp-sone) kalte
+  `_autoReadStart(f)` direkte, som for DWG hoppet rett i `_pdfImportPickLayers` — utenom
+  valgdialogen 021 la inn. Nå kaller den `_startImportFile(f)`, samme dispatcher som et filslipp,
+  slik kommentaren over `_importPlanMenu` alltid har hevdet at den gjorde.
+- Samme feilklasse som sone-gaten i 008-010: **én rute er ikke nok — finn ALLE inngangene.**
+
+**«Valg på størrelse» var aktivt feil, ikke bare unødvendig.** Lag-modalen spurte om
+papirmålestokk («1:100») og `_pdfImportRun` regnet `meters_per_point = ratio × 0.0254 / 72` —
+PDF-formelen. For en mm-tegning ga det **0,0353 der riktig svar er 0,001: 35× feil.**
+Motoren sender nå enhetene med lag-lista; `_engineFetchLayers` returnerer `{layers, units,
+mmPerUnit}`, modalen skjuler målestokk-feltet og viser «Målestokk fra fila — tegningen er i mm»,
+og `_pdfImportRun` bruker `mmPerUnit / 1000`. En PDF beholder målestokk-feltet uendret.
+
+**Og så det ubehagelige funnet: romgjenkjenningen finner NULL rom i denne tegningen.** Med
+riktig målestokk og et fornuftig minsteareal gir 0,5 / 1 / 2 m² alle **0 rom** — de «10 rommene»
+var fragmenter under 0,3 m². CAD-vegger er doble streker med skravur og lukker seg ikke til
+flater motoren kan polygonisere. Derfor er valgdialogen SNUDD for DWG/DXF: «Legg inn som
+plantegning» er nå Anbefalt, og automatikken er ærlig merket «Virker sjelden på CAD-tegninger
+der veggene er doble streker — da får du ingen eller rare rom.» PDF-er er uendret.
+
+**Testet ende-til-ende med Kenneths fil:** toolbar-veien gir nå valgdialogen; rekkefølgen er
+underlag først; «Legg inn som plantegning» ga 20,1 × 24,3 m, ingen kalibrering, 1982 × 2400 px.
+Lag-modalen for DWG viser «Målestokk fra fila», PDF-modalen beholder feltet. Alle åtte
+regresjonstester grønne (137 sjekker).
+
+**Fil:** index.html.
+
+---
+
+## DWG blir en vanlig plantegning — samme valg og samme underlag som PDF — 2026-09-30
+
+Kenneth, etter at 020 var i produksjon: «det ble ikke vellykket. jeg ønsker å importere dwg filen
+som en vanlig plantegning, på lik linje som en pdf plantegning.» 020 løste feil problem — jeg
+bygde vektorveien (DWG → ferdige rom), mens han vil ha tegningen som UNDERLAG å tegne oppå.
+Motor-halvdelen: `lumelo-backend` `67200b5`.
+
+**Hvorfor vektorveien ikke duger for denne tegningen — målt:** romgjenkjenningen ga **590 «rom»**
+med alle lag og 10 merkelige med vegg-lagene. Kenneth: «lag-velgeren kom, resultatet ble rot.»
+
+- **`_startImportFile` sa før «vektor → auto, ingen spørsmål» for DWG.** Nå faller DWG gjennom til
+  NØYAKTIG samme flyt som en PDF: «har etasjen alt en plantegning?» → `_rasterMethodChoice` →
+  «la appen finne rommene» eller «jeg tegner selv». Den felles delen er skilt ut som
+  `_startImportFileRaster`, fordi DWG må innom den asynkrone capabilities-sjekken først.
+- **`_loadFileAsBackground` er SNUDD.** Sto før: «DXF/DWG er vektor (ingen rasterbar bakgrunn) →
+  rut til motorens vektor-import». Men en vektortegning kan tegnes til et bilde like godt som en
+  PDF-side. Nå: `_loadBgDwg`.
+- `_loadBgDwg` speiler `_loadBgPdf`: hent SVG fra motoren → `Image` → `_installBgImageForFloor`.
+  Alt etterpå (Bytt plantegning, etasjevalg, Flytt underlag, opasitet, utskrift) virker uendret,
+  fordi det er et helt vanlig `S.bgs`-objekt.
+- **`img.decode()` framfor `onload`:** uten den er `naturalWidth` 0 i det øyeblikket
+  `_installBgImageForFloor` leser den, og hele plasseringen blir feil.
+- **Ferdig kalibrert når fila vet det selv.** `$INSUNITS` → cm direkte, `_needsCalibration = false`
+  (samme grep kart-bakgrunnen bruker), og toasten sier «målestokk fra fila». Mangler enhetene,
+  faller vi tilbake til nøyaktig samme kalibrering som en PDF.
+- Vektorveien er BEHOLDT — den er nå et valg, ikke noe man tvinges gjennom.
+
+**Testet med Kenneths egen fil, ende-til-ende i appen:** slipp → valgdialogen «Fant en
+plantegning» kom (samme som PDF) → «Jeg tegner selv» → underlag på 20,1 × 24,3 m,
+`_needsCalibration: false`, bilde 1982 × 2400 px (~1 cm i verden per piksel), BAKGRUNN-panelet og
+tegneverktøyene framme. Alle åtte regresjonstester grønne (137 sjekker).
 
 **Fil:** index.html.
 
