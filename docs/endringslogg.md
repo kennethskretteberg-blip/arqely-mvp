@@ -4,6 +4,75 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Romtype Fryserom/kjølerom + automatisk reservekabel — 2026-10-06
+
+Kenneth: «Jeg ønsker en egen funksjon for fryserom, fryselager og kjølerom … 10 W/m med CC mellom
+30–50 cm og ca. 15–20 W/m². Det legges alltid en ekstra kabel i reserve, siden varmekablene blir
+forlagt under isolasjonen, under støpt dekke … Reservekabelen må telles med i alle lister, men
+ikke beregnes i flateeffekt — den brukes kun dersom hovedkabelen ryker.»
+
+**STEG 0 — ett funn forenklet hele saken.**
+
+| | Målt |
+|---|---|
+| **0.1 Sperren** | 20 W/m² ble klemt til **50** med toast «Min 50 W/m² for innendørs» |
+| **0.2 Forslag** | 20 W/m² → InFloor 10T 1000W/100m, **CC 48 cm, 20,8 W/m²** — gyldig og **uten ⚠**; 33 W/m² → CC 30 |
+| **0.3 `ccMaxCm`** | Klemmer ingenting innendørs — alle tre bruksstedene er gatet på `_isSnowModule()` (farge/filter kun i snø) |
+| **0.4 Etterpunktet** | `_invalidateCableCache()` — **alle 22 kallsteder er mutasjoner**, ingen render-/lesevei kaller den |
+
+**InFloor 10T har allerede `max_spacing_mm = 500`**, så CC 30–50 ga ingen advarsel fra før.
+Bestillingen antok 200 (som gjelder 17T). CC-maks-overstyringen var altså ikke det som blokkerte
+— **det var kun 50 W/m²-gulvet.** `ccMinCm` (⚠ under 30 cm) er den som faktisk legger til noe nytt.
+
+- **Romtype «Fryserom/kjølerom»** 🧊: 20 W/m², varmetype kabel, `reserveCable`, `wm2Min: 10`,
+  CC 30–50. Migrasjon `supabase-migration-room-type-reserve.sql` (**Kenneth kjører manuelt**) —
+  men funksjonen virker også UTEN den: de samme verdiene ligger hardkodet i `_ROOMTYPE_HARDCODED`
+  som fallback, og lasteren faller tilbake dit når DB-kolonnene mangler.
+- `_wm2MinFor(roomId)`: romtypen eier sitt minimum. 50 står for alle andre innendørs romtyper —
+  verifisert at Bad fortsatt klemmer 20 → 50.
+- `_ccLimits(prod, roomId)` tar nå rommet: romtypens CC-område overstyrer produktets anbefaling,
+  og ny `minWarn` gir ⚠ under grensen. **Kenneth 06.10: «la min 200mm og max 500mm være grenser
+  man kan bryte med advarsel»** — så området er 20–50 cm, og BEGGE er advarsler. Produktets
+  `min_spacing_mm` er fortsatt den eneste harde grensen.
+- **Reservekabelen er en KLON, ikke et nytt utlegg.** `_offsetCableClone` kopierer hovedkabelens
+  løp og flytter dem **ca. 10 cm** vinkelrett (Kenneth 06.10: «den kan legges ca 10cm forskjøvet
+  slik at det er litt bedre plass til hovedkabel»). Klemt til maks ½ CC: med en trang CC ville
+  10 cm lagt reserven NÆRMERE neste hovedløp enn det den skal erstatte — begge geometriformene (`runs[].pos_cm` og `pathEls` med
+  `a/b/pts/from/to`), og skew-kabler bruker sin egen vinkel via `_cableRunNormal`, ikke aksen.
+  Siden velges mot der det er mest plass, og resultatet klippes mot rommet med `_offsetPolygon`
+  + `_effectiveMarginCm` — samme innsett og margin motoren selv bruker (:17237).
+- **`_syncReserveCables` henges på `_invalidateCableCache`** — ÉN plass. Reserven følger derfor
+  hovedkabelen uansett hvilken av de elleve plasseringsveiene som ble brukt, og ved sletting,
+  retningsbytte og undo. Re-entrans-vakt, og en rask vei som hopper ut når ingen rom har reserve
+  OG ingen reserve finnes.
+- **Usynlig for effekt, synlig i lister:** `_computeRoomStats` hopper over reserven FØR alt annet
+  (egne `reserveCount`/`reserveLenM` i retur), `_roomRatedEffectW` hopper over den.
+  `_roomProductBreakdown` gir den EGEN rad «Reservekabel» med 0 W rett under hovedkabelen;
+  materiallista likedan. Visma teller den som +1 på samme artikkel.
+- Tegning: stiplet (`[6,4]`), 70 % opasitet, ingen randsone.
+
+**Feil funnet og rettet underveis:** hurtigveien i synkroniseringen hoppet ut når *ingen* rom
+hadde flagget — så gamle reserver ble liggende igjen når avkrysningen ble slått av. Nå sjekkes
+også om det FINNES reserver å rydde.
+
+**Testet ende-til-ende med ekte katalog:** romtype → 20 W/m², reserve på, `wm2Min` 10. Forslag
+InFloor 10T 1000W/100m, CC 48, uten ⚠. Utlegg → 2 kabler, CC 49,9, reserven forskjøvet **10 cm**
+(klemmes til 7,5 cm ved CC 15). Stats: `cableCount` 1 / `reserveCount` 1, ratedW **1000** (ikke 2000),
+flateeffekt 20. Breakdown: «Kabel» 1000 W + «Reservekabel» 0 W. Materialliste: 97,4 m à 974 W +
+97,4 m à 0 W. Visma: antall **2**. «Flere kabler» → 3 hoved + 3 reserver, riktig parvis; slett
+én hovedkabel → dens reserve forsvinner. Bad: 20 W/m² klemmes fortsatt til 50, og CC 25 gir ingen
+under-advarsel. Ny `_reserveCableRegressionTest` (29 sjekker) + alle tolv øvrige grønne —
+**210 sjekker**.
+
+**Ikke gjort, bevisst:** Hurtig prosjektering dobler ikke antallet for fryserom-listerom (eget
+kodeløp i `_listAutoSuggest`, ville blitt vesentlig mer enn de ~30 linjene bestillingen satte som
+grense). **Montørappen** (`varmeplan-app`) får reserven som en vanlig kabel med `reserve: true` i
+prosjektfila — den bør skille dem visuelt, men det er en egen sak.
+
+**Filer:** index.html, supabase-migration-room-type-reserve.sql (ny).
+
+---
+
 ## Snøsmelting viser flateeffekt, ikke W per romareal — 2026-10-06
 
 Kenneth: «Utendørs snøsmelt i grunnen — da trenger vi ikke å forholde oss til watt pr brutto

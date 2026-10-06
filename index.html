@@ -2730,10 +2730,43 @@ let ROOM_TYPES = [
   {id:'laundry',   label:'Vaskerom',  icon:'🧺', targetWm2:130, defaultModType:'mat'},
   {id:'hallway',   label:'Gang',     icon:'<svg class="ic ic-door" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M5 21V4a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v17"/><path d="M3 21h18"/><circle cx="15.5" cy="12.5" r="1" fill="currentColor" stroke="none"/></svg>', targetWm2:100, defaultModType:'foil'},
   {id:'office',    label:'Kontor',   icon:'💼', targetWm2:80,  defaultModType:'foil'},
+  // 025 (Kenneth 06.10.2026): «fryserom, fryselager og kjølerom … 10 W/m med CC mellom 30–50 cm
+  // og ca. 15–20 W/m² … det legges alltid en ekstra kabel i reserve». Kablene ligger UNDER
+  // isolasjonen for å hindre at frosten går ned i bakken — derfor den lave flateeffekten, og
+  // derfor reserven: en kabel støpt under et fryselager kan ikke byttes.
+  // `wm2Min: 10` fjerner 50-gulvet KUN for denne romtypen (se `_wm2MinFor`).
+  {id:'fryserom',  label:'Fryserom/kjølerom', icon:'🧊', targetWm2:20, defaultModType:'cable',
+   reserveCable:true, wm2Min:10, ccMinCm:20, ccMaxCm:50},
   {id:'other',     label:'Annet',    icon:'<svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg>', targetWm2:100, defaultModType:'foil'},
 ];
 function _roomTypeDefaults(typeId) {
   return ROOM_TYPES.find(t => t.id === typeId) || ROOM_TYPES[ROOM_TYPES.length - 1];
+}
+// 025: de hardkodede standardene brukes som fallback når DB-raden mangler de nye kolonnene.
+// Egen liste, fordi ROOM_TYPES selv byttes ut av lasteren.
+const _ROOMTYPE_HARDCODED = {
+  // Kenneth 06.10.2026: «la min 200mm og max 500mm være grenser man kan bryte med advarsel».
+  // Begge er ADVARSLER, ikke sperrer — produktets `min_spacing_mm` er fortsatt den harde grensen.
+  fryserom: { reserveCable: true, wm2Min: 10, ccMinCm: 20, ccMaxCm: 50 },
+};
+function _roomTypeFallbackFlag(typeId, key) {
+  const t = _ROOMTYPE_HARDCODED[typeId];
+  return t ? t[key] : (key === 'reserveCable' ? false : null);
+}
+// Rommets romtype som objekt (null når rommet ikke har en).
+function _roomTypeOf(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.roomType) return null;
+  return ROOM_TYPES.find(t => t.id === room.roomType) || null;
+}
+// 025: nedre grense for ønsket flateeffekt. Romtypen eier sitt eget minimum — fryserom skal
+// kunne settes til 15–20 W/m², mens 50 står for alle andre innendørs romtyper.
+// MÅLT 06.10.2026: uten dette ble 20 W/m² stille løftet til 50 med toast «Min 50 W/m²».
+function _wm2MinFor(roomId) {
+  const rt = _roomTypeOf(roomId);
+  if (rt && rt.wm2Min != null) return rt.wm2Min;
+  const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
+  return _moduleContext(modType).wm2Min;
 }
 // STEG 3 fallback: brukes når DB-raden mangler default_mod_type (før migrasjon kjøres).
 const _ROOMTYPE_FALLBACK_MODTYPE = { bathroom:'mat', laundry:'mat' };
@@ -2812,6 +2845,12 @@ async function _loadRoomTypeDefaults() {
       targetWm2: d.target_wm2,
       // STEG 3: standard varmetype per romtype (fallback til hardkodet default hvis DB-kolonnen mangler).
       defaultModType: d.default_mod_type || (_ROOMTYPE_FALLBACK_MODTYPE[d.room_type_id] || 'foil'),
+      // 025: additive kolonner. Mangler de (før migrasjonen er kjørt), faller vi tilbake på
+      // den hardkodede raden over for samme id — så funksjonen virker også uten migrasjon.
+      reserveCable: d.reserve_cable != null ? !!d.reserve_cable : !!_roomTypeFallbackFlag(d.room_type_id, 'reserveCable'),
+      wm2Min:  d.wm2_min != null ? d.wm2_min : _roomTypeFallbackFlag(d.room_type_id, 'wm2Min'),
+      ccMinCm: d.cc_min_mm != null ? d.cc_min_mm / 10 : _roomTypeFallbackFlag(d.room_type_id, 'ccMinCm'),
+      ccMaxCm: d.cc_max_mm != null ? d.cc_max_mm / 10 : _roomTypeFallbackFlag(d.room_type_id, 'ccMaxCm'),
       _source: d._source,
       _dbId: d.id,
     }));
@@ -2833,15 +2872,42 @@ function _roomTargetWm2(roomId) {
 // klemmingen faktisk endrer tallet — et rent lese-/tegne-kall går aldri gjennom denne funksjonen
 // (kalt kun fra de to skrivefunksjonene, aldri fra rendering), så en lagret verdi over taket står
 // urørt helt til brukeren selv taster et nytt tall.
+// 025: avkrysningen Kenneth ba om («Eller velge rommet, sette romtype fryserom, så prosjekterer
+// den med reservekabel automatisk» — men den skal kunne slås av/på i et hvilket som helst
+// kabelrom). Romtypen setter flagget; avkrysningen er den eneste som tar det bort igjen.
+function _reserveCheckboxHtml(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return '';
+  const on = !!room.reserveCable;
+  return `<label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;
+      padding:5px 7px;border:1px solid ${on ? 'var(--accent)' : 'var(--brd)'};border-radius:6px;
+      background:${on ? 'rgba(34,211,238,0.10)' : 'transparent'}">
+    <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleReserveCable(${roomId}, this.checked)">
+    <span><b>Reservekabel</b> <span style="color:var(--dim)">— legges forskjøvet ½ CC, telles i
+    lister, men ikke i effekt</span></span>
+  </label>`;
+}
+
+function toggleReserveCable(roomId, on) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  pushUndo();
+  room.reserveCable = !!on;
+  if (!on) S.cables = S.cables.filter(c => !(c.roomId === roomId && c.reserve));
+  _invalidateCableCache();   // 025: ett punkt — synkroniserer reservene
+  renderSidebar(); updateObjInfo(); updateCtxBar(); render();
+}
+
 function _clampTargetWm2(roomId, val) {
   const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
   const mc = _moduleContext(modType);
   const requested = Number(val);
   const hasRequest = isFinite(requested) && requested > 0;
-  const clamped = Math.max(mc.wm2Min, Math.min(mc.wm2Max, hasRequest ? requested : mc.wm2Default));
+  const minWm2 = _wm2MinFor(roomId);   // 025: romtypens eget minimum, ellers modulens
+  const clamped = Math.max(minWm2, Math.min(mc.wm2Max, hasRequest ? requested : mc.wm2Default));
   if (hasRequest && clamped !== requested && typeof _showToast === 'function') {
     const overMax = requested > clamped;
-    const bound = overMax ? mc.wm2Max : mc.wm2Min;
+    const bound = overMax ? mc.wm2Max : minWm2;
     _showToast(`${overMax ? 'Maks' : 'Min'} ${bound} W/m² for ${mc.isSnow ? 'utendørs' : 'innendørs'} — satt til ${clamped}.`, 'warn');
   }
   return clamped;
@@ -4683,6 +4749,154 @@ function _defaultCardPos(room) {
 // distance-based coverage sees the cable's true reach toward the end walls
 // (the run ends are clipped sweepMargin = margin+CC/2 from the wall, but the
 // U-turn bulges CC/2 back toward the wall, reaching ~margin).
+// ─────────────────────────────────────────────────────────────────────────────
+// 025 (Kenneth 06.10.2026): RESERVEKABEL. «Det legges alltid en ekstra kabel i reserve, siden
+// varmekablene blir forlagt under isolasjonen, under støpt dekke … Reservekabelen må telles med
+// i alle lister, men ikke beregnes i flateeffekt — den brukes kun dersom hovedkabelen ryker.»
+//
+// Reserven er IKKE et nytt utlegg fra motoren (den ville valgt annen CC/vinkel og dermed ikke
+// kunne overta). Den er en KOPI av hovedkabelens løp, flyttet ½ CC sideveis, så den ligger midt
+// mellom hovedkabelens løp — samme produkt, samme lengde, samme retning.
+
+// Enhetsnormal på løpsretningen. Akseparallell kabel: rett ut fra aksen. Skew-kabel (pathEls)
+// har sin egen vinkel — den må leses fra første run, ikke antas.
+function _cableRunNormal(cab) {
+  if (cab.pathEls && cab.pathEls.length) {
+    const run = cab.pathEls.find(e => e.kind === 'run' && e.a && e.b);
+    if (run) {
+      const dx = run.b.x - run.a.x, dy = run.b.y - run.a.y;
+      const L = Math.hypot(dx, dy);
+      if (L > 1e-6) return { x: -dy / L, y: dx / L };
+    }
+  }
+  return cab.direction === 'v' ? { x: 1, y: 0 } : { x: 0, y: 1 };
+}
+
+// Hvilken vei skal reserven flyttes? Mot siden med MEST plass, slik at det ytterste
+// reserve-løpet ikke havner i veggen.
+function _reserveOffsetSign(cab, room, d) {
+  if (!room || !room.points || room.points.length < 3) return 1;
+  const n = _cableRunNormal(cab);
+  const segs = _cableWorldSegments(cab);
+  if (!segs.length) return 1;
+  const inside = (x, y) => (typeof ptInPoly === 'function') ? ptInPoly(x, y, room.points) : true;
+  let okPos = 0, okNeg = 0;
+  for (const sg of segs) {
+    for (const [px, py] of [[sg.x1, sg.y1], [sg.x2, sg.y2]]) {
+      if (inside(px + n.x * d, py + n.y * d)) okPos++;
+      if (inside(px - n.x * d, py - n.y * d)) okNeg++;
+    }
+  }
+  return okNeg > okPos ? -1 : 1;
+}
+
+// Dyp kopi av hovedkabelen, forskjøvet ½ CC. Returnerer null når kabelen ikke har geometri.
+// Kenneth 06.10.2026: «trenger ikke å forskyve reservekabel med en halv cc, den kan legges ca
+// 10cm forskjøvet slik at det er litt bedre plass til hovedkabel». Klemt til maks ½ CC: med en
+// trang CC (f.eks. 15 cm) ville 10 cm lagt reserven NÆRMERE neste hovedløp enn det den skal
+// erstatte, og da er den ikke lenger en reserve for riktig kabel.
+const RESERVE_OFFSET_CM = 10;
+function _reserveOffsetCm(spacingCm) {
+  return Math.min(RESERVE_OFFSET_CM, (spacingCm || 0) / 2);
+}
+
+function _offsetCableClone(main, room) {
+  const d = _reserveOffsetCm(main.spacing_cm);
+  if (!(d > 0)) return null;
+  const n = _cableRunNormal(main);
+  const sign = _reserveOffsetSign(main, room, d);
+  const dx = n.x * d * sign, dy = n.y * d * sign;
+  const res = JSON.parse(JSON.stringify(main));
+  res.id = S.counters.nextCableId++;
+  res.reserve = true;
+  res.mainCableId = main.id;
+  delete res._manual;
+  // pathEls-form (skew/additiv): flytt ALLE punkter.
+  if (res.pathEls && res.pathEls.length) {
+    for (const el of res.pathEls) {
+      for (const k of ['a', 'b', 'from', 'to']) if (el[k]) { el[k].x += dx; el[k].y += dy; }
+      if (el.pts) for (const q of el.pts) { q.x += dx; q.y += dy; }
+    }
+  }
+  // runs-form (akseparallell): `pos_cm` ER tverraksen, så ½ CC legges rett på.
+  if (res.runs && res.runs.length) {
+    const along = main.direction === 'v' ? dx : dy;   // forskyvningen langs tverraksen
+    for (const run of res.runs) run.pos_cm += along;
+  }
+  // Klipp mot rommet med samme margin auto-utlegget bruker, så reserven ikke stikker ut.
+  const drawn = _reserveClipToRoom(res, room);
+  res.drawnLength_cm = drawn;
+  // `totalLength_cm` blir stående = produktets lengde: det er DEN som bestilles og telles.
+  return res;
+}
+
+// Klipper reserven mot rommet og returnerer tegnet lengde i cm. Bruker `computeClippedSegments`
+// sin margin-kilde (`_effectiveMarginCm`) — ikke en ny klippfunksjon.
+function _reserveClipToRoom(res, room) {
+  if (!room || !room.points || room.points.length < 3) return res.totalLength_cm || 0;
+  const margin = _effectiveMarginCm(res.productId, room.id);
+  const inset = (typeof _offsetPolygon === 'function') ? _offsetPolygon(room.points, margin) : room.points;   // samme innsett motoren bruker (:17237)
+  const poly = (inset && inset.length >= 3) ? inset : room.points;
+  const keep = (x, y) => (typeof ptInPoly === 'function') ? ptInPoly(x, y, poly) : true;
+  let len = 0;
+  if (res.pathEls && res.pathEls.length) {
+    res.pathEls = res.pathEls.filter(el => {
+      const pts = el.kind === 'run' ? [el.a, el.b] : (el.pts || [el.from, el.to].filter(Boolean));
+      return pts.length && pts.every(q => q && keep(q.x, q.y));
+    });
+  }
+  if (res.runs && res.runs.length) {
+    for (const run of res.runs) {
+      if (!run.segments) continue;
+      run.segments = run.segments.filter(sg => {
+        const a = res.direction === 'v' ? [run.pos_cm, sg.start_cm] : [sg.start_cm, run.pos_cm];
+        const b = res.direction === 'v' ? [run.pos_cm, sg.end_cm]   : [sg.end_cm,   run.pos_cm];
+        return keep(a[0], a[1]) && keep(b[0], b[1]);
+      });
+    }
+    res.runs = res.runs.filter(r => (r.segments || []).length);
+  }
+  for (const sg of _cableWorldSegments(res)) len += Math.hypot(sg.x2 - sg.x1, sg.y2 - sg.y1);
+  return Math.round(len);
+}
+
+// ÉN funksjon. Kalles fra `_invalidateCableCache` (STEG 0.4: alle 22 kallsteder der er
+// mutasjoner — ingen render-/lesevei kaller den), så reserven følger hovedkabelen uansett hvilken
+// vei den ble laget, flyttet eller slettet.
+let _reserveSyncing = false;
+function _syncReserveCables(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  if (room._zoneId != null || room.id < 0) return;        // midlertidig sone-rom — hopp over
+  const manual = S.cables.filter(c => c.roomId === roomId && c.reserve && c._manual);
+  S.cables = S.cables.filter(c => !(c.roomId === roomId && c.reserve && !c._manual));
+  if (!room.reserveCable) return;
+  for (const main of S.cables.filter(c => c.roomId === roomId)) {
+    if (main.reserve || main.labelOnly) continue;
+    if (manual.some(m => m.mainCableId === main.id)) continue;   // brukeren har flyttet sin egen
+    const res = _offsetCableClone(main, room);
+    if (res) S.cables.push(res);
+  }
+}
+
+function _syncAllReserveCables() {
+  if (_reserveSyncing) return;
+  // Rask vei — men den må også slå til når det FINNES reserver å rydde bort. MÅLT 06.10.2026:
+  // med bare `rooms.some(reserveCable)` ble gamle reserver liggende når flagget ble slått av,
+  // siden ingen rom lenger hadde det. To `some()` over små lister koster ingenting.
+  if (!S.rooms) return;
+  if (!S.rooms.some(r => r.reserveCable) && !(S.cables || []).some(c => c.reserve)) return;
+  _reserveSyncing = true;
+  // Kjør for rom som SKAL ha reserve, og for rom som HAR en (så den ryddes når flagget er av).
+  try {
+    const ids = new Set();
+    for (const r of S.rooms) if (r.reserveCable) ids.add(r.id);
+    for (const c of (S.cables || [])) if (c.reserve) ids.add(c.roomId);
+    for (const id of ids) _syncReserveCables(id);
+  }
+  finally { _reserveSyncing = false; }
+}
+
 function _cableWorldSegments(cab) {
   const segs = [];
   // Skew / additive cables: ordered path elements (runs + sampled U-turns).
@@ -4818,7 +5032,11 @@ function _computeRoomStats(room) {
     ? S.cables.filter(c => c.zoneId === room._zoneId)
     : _cablesForRoom(room.id);
   const cableSegs = [];
+  let reserveCount = 0, reserveLenM = 0;
   for (const cab of roomCables) {
+    // 025: reservekabelen er ikke tilkoblet — den skal ikke inn i effekt, CC-vekting, dekning
+    // eller flateeffekt. Den telles bare, så lister og materialliste får den med.
+    if (cab.reserve) { reserveCount++; reserveLenM += (cab.totalLength_cm || 0) / 100; continue; }
     if (cab.labelOnly) hasLabelOnlyCable = true;
     const cp = HEATING_PRODUCTS.find(pr => pr.id === cab.productId);
     const lenM = (cab.totalLength_cm || 0) / 100;
@@ -4903,7 +5121,7 @@ function _computeRoomStats(room) {
   const wm2Total = bruttoM2 > 0 ? Math.round(totalW / bruttoM2) : 0;
   // W/m² over heated area only (flateeffekt)
   const wm2Heated = heatedM2 > 0 ? Math.round(totalW / heatedM2) : 0;
-  return { bruttoM2, hindM2, zoneM2, nettoM2, stripM2, cableAreaM2, heatedM2, uncoveredM2: Math.max(0, nettoM2 - heatedM2), totalW, wm2Total, wm2Heated, cableWm2, cableW: Math.round(cableW), cableLenM, cableCount, cableCcCm, cableProductName, matW: Math.round(matW), matAreaM2, matWm2, plateW: Math.round(plateW), plateAreaM2, plateCount };
+  return { bruttoM2, hindM2, zoneM2, nettoM2, stripM2, cableAreaM2, heatedM2, uncoveredM2: Math.max(0, nettoM2 - heatedM2), totalW, wm2Total, wm2Heated, cableWm2, cableW: Math.round(cableW), cableLenM, cableCount, cableCcCm, cableProductName, reserveCount, reserveLenM, matW: Math.round(matW), matAreaM2, matWm2, plateW: Math.round(plateW), plateAreaM2, plateCount };
 }
 
 // Delt linje-2-bygger for BEGGE matte-labelsystemer (rektangulær S.mats og frihånds S.matPaths) —
@@ -5020,7 +5238,7 @@ function drawRoomCard(room) {
     if (stats.cableCcCm > 0) {   // 016: suffiks når over anbefalt maks — ingen egen advarselsboks
       const _ccw = _roomCcOverWarn(room);
       rows.push(['CC', stats.cableCcCm.toFixed(1) + ' cm' +
-        (_ccw ? ' (' + _ccWarnText(_ccw.prod, _ccw.cc, false) + ')' : '')]);
+        (_ccw ? ' (' + _ccWarnText(_ccw.prod, _ccw.cc, false, _ccw.roomId) + ')' : '')]);
     }
   }
   rows.push(['Installert effekt', stats.totalW + ' W']);
@@ -6226,7 +6444,7 @@ function showUnifiedProductPanel() {
         <div style="flex:1">
           <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px">Flateeffekt</label>
           <div style="display:flex;align-items:center;gap:4px;margin-top:2px">
-            <input type="number" id="upc-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
+            <input type="number" id="upc-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
               style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface2);color:var(--text);font-family:inherit"
               onchange="_upcWm2Changed(parseInt(this.value)||${_wm2Mc.wm2Default})">
             <span style="font-size:12px;color:var(--dim)">W/m²</span>
@@ -6454,7 +6672,7 @@ function _presentRoomDetailHtml(room) {
   if (stats.cableCcCm > 0) {   // 016: ⚠ når over produsentens anbefalte maks
     const _ccw = _roomCcOverWarn(room);
     rows.push(row('c/c-avstand', stats.cableCcCm.toFixed(1) + ' cm' +
-      (_ccw ? ` <span style="color:#f59e0b">⚠ ${esc(_ccWarnText(_ccw.prod, _ccw.cc, false))}</span>` : '')));
+      (_ccw ? ` <span style="color:#f59e0b">⚠ ${esc(_ccWarnText(_ccw.prod, _ccw.cc, false, _ccw.roomId))}</span>` : '')));
   }
   if (stats.cableLenM > 0) rows.push(row('Kabellengde', stats.cableLenM.toFixed(1) + ' m'));
   rows.push(row('Spenning', volt + ' V'));
@@ -7883,6 +8101,7 @@ function _isSnowRoom(room) {
 function _roomRatedEffectW(room) {
   let w = 0;
   for (const c of _cablesForRoom(room.id)) {
+    if (c.reserve) continue;   // 025: reserven er ikke tilkoblet — teller ikke i rommets effekt
     const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId); if (!p) continue;
     if (p.total_effect_w) w += p.total_effect_w;
     else if (p.cable_length_m && p.watt_per_m) w += p.cable_length_m * p.watt_per_m;
@@ -7945,15 +8164,21 @@ function _roomProductBreakdown(room) {
   // ikke ender som to rader som begge står oppført som «3,2 m».
   const add = (p, kind, w, lengthM) => {
     if (!p) return;
-    const key = kind === 'Folie' ? (p.id + '|' + lengthM) : p.id;
+    // 025: reserven får sin EGEN rad, rett ved siden av hovedkabelen (samme produkt). Uten en
+    // egen nøkkel ville de smeltet sammen til «2 stk» med dobbel W.
+    const key = kind === 'Folie' ? (p.id + '|' + lengthM)
+              : (p.id + (kind === 'Reservekabel' ? '|reserve' : ''));
     let e = map.get(key);
     if (!e) { e = { product: p, kind, count: 0, effectW: 0, lengthM }; map.set(key, e); }
     e.count += 1; e.effectW += w;
   };
-  for (const c of _cablesForRoom(room.id)) {
+  // Hovedkabler først, reserver etter — så reserve-raden havner rett under sin hovedkabel-rad.
+  for (const c of _cablesForRoom(room.id).slice().sort((x, y) => (x.reserve ? 1 : 0) - (y.reserve ? 1 : 0))) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
     const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
-    add(p, 'Kabel', w, p ? (p.cable_length_m ?? null) : null);
+    // 025: reserven har 0 W (ikke tilkoblet) — W-cellen viser da «—» og Σ W er fortsatt
+    // romtotalen. Antall/lengde/art.nr er som en vanlig kabel, så den bestilles.
+    add(p, c.reserve ? 'Reservekabel' : 'Kabel', c.reserve ? 0 : w, p ? (p.cable_length_m ?? null) : null);
   }
   for (const m of _matsForRoom(room.id)) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
@@ -12970,7 +13195,7 @@ function showCablePlacePanel(familyName, categoryId) {
         <div style="font-size:11px;color:var(--dim)">${areaLabel}: ${nettoM2.toFixed(1)} m² netto</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <label style="font-size:11px;white-space:nowrap">Ønsket W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
             style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
             onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <label style="font-size:11px;white-space:nowrap">Ønsket CC cm</label>
@@ -12978,6 +13203,7 @@ function showCablePlacePanel(familyName, categoryId) {
             style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
             onchange="_updateCableSelection(${sq(familyName)},${categoryId})">
         </div>
+        ${_reserveCheckboxHtml(roomId)}
         <div id="cable-selection-results" style="font-size:11px"></div>
       </div>`;
   } else {
@@ -13000,7 +13226,7 @@ function showCablePlacePanel(familyName, categoryId) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <label style="font-size:11px;white-space:nowrap">W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2Mc.wm2Min}" max="${_wm2Mc.wm2Max}" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
             style="width:60px;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
             onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <button onclick="_savePersonalWm2Override()" title="Lagre som din standard for denne romtypen" style="font-size:10px;padding:2px 6px;border:1px solid var(--brd);border-radius:4px;background:var(--bg);color:var(--dim);cursor:pointer;white-space:nowrap"><svg class="ic ic-save" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Min std</button>
@@ -13364,7 +13590,7 @@ function _cablePreviewFooterHtml(roomId, familyName, categoryId, targetWm2) {
   // uberørt. Samme gule stil som `mismatch`/`fallbackMsg` over, samme kilde som label og PDF.
   const _ccw = _roomCcOverWarn(statRoom || room);
   const ccWarn = _ccw
-    ? `<div style="font-size:11px;color:#f59e0b;line-height:1.35">${esc(_ccWarnText(_ccw.prod, _ccw.cc, true))}</div>` : '';
+    ? `<div style="font-size:11px;color:#f59e0b;line-height:1.35">${esc(_ccWarnText(_ccw.prod, _ccw.cc, true, _ccw.roomId))}</div>` : '';
   return `<div style="display:flex;flex-direction:column;gap:5px;background:rgba(34,211,238,0.12);border:1px solid var(--accent);border-radius:7px;padding:8px 9px;margin:6px 0">
     <div style="font-size:11px;color:var(--accent);font-weight:600">● Forhåndsvises — ${nTxt}${nameTxt}${zoneTxt ? ` <span style="color:var(--dim);font-weight:400">i ${esc(zoneTxt)}</span>` : ''}</div>
     <div style="font-size:11px;color:var(--dim)">${st.cableWm2} W/m²${targetTxt} ${badge} · CC ${st.cableCcCm.toFixed(1)} cm · ${st.cableLenM.toFixed(1)} m kabel</div>
@@ -22788,6 +23014,121 @@ function _gapPanelWarn(res, gapMm) {
 // 023: låser «aldri mindre enn tillatt» og «eksisterende rom står urørt».
 // 024: låser at snø viser PRODUKTETS effekttetthet, ikke W per romareal — og at innendørs
 // er uendret.
+// 025: låser at reserven finnes, ligger ½ CC unna, og er USYNLIG for effekt men SYNLIG i lister.
+function _reserveCableRegressionTest() {
+  const saved = { rooms: S.rooms, cables: S.cables, mats: S.mats, strips: S.strips,
+    prods: HEATING_PRODUCTS.slice(), nextId: S.counters.nextCableId,
+    parts: S.project && S.project.parts, part: S.ui.activePartId, types: ROOM_TYPES.slice() };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    const CAB = { id: 9990, category_id: 9000, active: true, product_family: 'FRYSETEST',
+      name: 'FRYSETEST 10T 1000W 100m', article_no: 'FT100', el_no: '1234567',
+      watt_per_m: 10, cable_length_m: 100, total_effect_w: 1000, voltage: 230,
+      min_spacing_mm: 50, max_spacing_mm: 500 };
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(CAB);
+    S.project = S.project || {};
+    S.project.parts = [{ id: 1, name: 'Inne', moduleType: 'indoor' }];
+    S.ui.activePartId = 1;
+    const RID = 995001;
+    const PTS = [{x:0,y:0},{x:600,y:0},{x:600,y:800},{x:0,y:800}];   // 48 m²
+    S.rooms = [{ id: RID, name: 'Fryselager', floorId: null, partId: 1, shape: 'rect',
+      wallThicknessCm: 0, points: PTS.map(p => ({...p})), walls: [], dims: [], area: 480000,
+      roomType: 'fryserom', targetWm2: 20, reserveCable: true }];
+    S.mats = []; S.strips = [];
+    S.counters.nextCableId = 1;
+    // Hovedkabel: 8 løp med CC 50, langs y
+    const runs = [];
+    for (let i = 0; i < 8; i++) runs.push({ pos_cm: 30 + i * 50, segments: [{ start_cm: 30, end_cm: 770 }] });
+    S.cables = [{ id: S.counters.nextCableId++, roomId: RID, productId: CAB.id, direction: 'v',
+      spacing_cm: 50, totalLength_cm: 10000, runs }];
+
+    // ─── A — romtypen ───
+    const rt = _roomTypeDefaults('fryserom');
+    check('A: romtypen finnes', 'Fryserom/kjølerom', rt && /fryserom|kjølerom/i.test(rt.label), rt && rt.label);
+    check('A: 20 W/m² er standard', 20, rt.targetWm2 === 20, rt.targetWm2);
+    check('A: wm2Min 10 — 50-gulvet gjelder ikke', 10, _wm2MinFor(RID) === 10, _wm2MinFor(RID));
+    check('A: 20 W/m² blir IKKE klemt til 50', 20, _clampTargetWm2(RID, 20) === 20, _clampTargetWm2(RID, 20));
+    check('A: 15 W/m² går også', 15, _clampTargetWm2(RID, 15) === 15, _clampTargetWm2(RID, 15));
+
+    // ─── B — reserven genereres ───
+    _invalidateCableCache();
+    const res = S.cables.filter(c => c.reserve);
+    check('B: én reserve per hovedkabel', 1, res.length === 1, res.length);
+    check('B: merket reserve + peker på hovedkabelen', true,
+      res[0] && res[0].reserve === true && res[0].mainCableId === 1, res[0] && res[0].mainCableId);
+    check('B: samme produkt og CC', true,
+      res[0] && res[0].productId === CAB.id && res[0].spacing_cm === 50, res[0] && res[0].spacing_cm);
+    const off = res[0] ? Math.abs(res[0].runs[0].pos_cm - 30) : 0;
+    // Kenneth 06.10.2026: ~10 cm, ikke ½ CC — gir bedre plass til hovedkabelen. Med CC 50 er
+    // ½ CC 25, så 10 er den som gjelder her.
+    check('B: forskjøvet 10 cm (ikke ½ CC)', 10, Math.abs(off - 10) < 0.1, +off.toFixed(2));
+    check('B: trang CC klemmes til ½ CC', 7.5, _reserveOffsetCm(15) === 7.5, _reserveOffsetCm(15));
+    check('B: romslig CC gir 10 cm', 10, _reserveOffsetCm(50) === 10, _reserveOffsetCm(50));
+
+    // ─── C — usynlig for effekt ───
+    const st = _computeRoomStats(S.rooms[0]);
+    check('C: cableCount teller KUN hovedkabelen', 1, st.cableCount === 1, st.cableCount);
+    check('C: reserveCount = 1', 1, st.reserveCount === 1, st.reserveCount);
+    check('C: ratedW = 1000 (ikke 2000)', 1000,
+      _roomRatedEffectW(S.rooms[0]) === 1000, _roomRatedEffectW(S.rooms[0]));
+    check('C: flateeffekt uten reserven', st.cableWm2,
+      _roomFlateeffektWm2(S.rooms[0], st) === st.cableWm2, _roomFlateeffektWm2(S.rooms[0], st));
+
+    // ─── D — synlig i lister ───
+    const bd = _roomProductBreakdown(S.rooms[0]);
+    check('D: to rader (Kabel + Reservekabel)', 2, bd.length === 2, bd.map(b => b.kind));
+    const rr = bd.find(b => b.kind === 'Reservekabel');
+    check('D: reserve-raden har 0 W', 0, rr && rr.effectW === 0, rr && rr.effectW);
+    check('D: reserve-raden har antall 1', 1, rr && rr.count === 1, rr && rr.count);
+    check('D: hovedraden har full W', 1000,
+      bd.find(b => b.kind === 'Kabel')?.effectW === 1000, bd.find(b => b.kind === 'Kabel')?.effectW);
+
+    // ─── E — følger hovedkabelen ───
+    S.cables = S.cables.filter(c => !c.reserve && c.id !== 1);   // slett hovedkabelen
+    _invalidateCableCache();
+    check('E: reserven forsvinner med hovedkabelen', 0,
+      S.cables.filter(c => c.reserve).length === 0, S.cables.filter(c => c.reserve).length);
+    // Avkrysning av
+    S.cables = [{ id: 50, roomId: RID, productId: CAB.id, direction: 'v', spacing_cm: 50,
+      totalLength_cm: 10000, runs: runs.map(r => ({ pos_cm: r.pos_cm, segments: [{...r.segments[0]}] })) }];
+    _invalidateCableCache();
+    check('E: reserve tilbake når hovedkabel finnes', 1, S.cables.filter(c => c.reserve).length === 1,
+      S.cables.filter(c => c.reserve).length);
+    S.rooms[0].reserveCable = false;
+    _invalidateCableCache();
+    check('E: avkrysning av → ingen reserve', 0, S.cables.filter(c => c.reserve).length === 0,
+      S.cables.filter(c => c.reserve).length);
+
+    // ─── F — andre romtyper lekker ikke ───
+    S.rooms[0].roomType = 'bathroom';
+    check('F: Bad beholder 50-gulvet', 50, _wm2MinFor(RID) === 50, _wm2MinFor(RID));
+    check('F: 20 W/m² i Bad klemmes til 50', 50, _clampTargetWm2(RID, 20) === 50, _clampTargetWm2(RID, 20));
+    S.rooms[0].roomType = 'fryserom';
+    check('F: CC 15 under 20 gir advarsel for fryserom', true,
+      _ccOverWarn(CAB, 15, RID) === true, _ccOverWarn(CAB, 15, RID));
+    check('F: CC 25 er INNENFOR 20-50 — ingen advarsel', false,
+      _ccOverWarn(CAB, 25, RID) === false, _ccOverWarn(CAB, 25, RID));
+    check('F: CC 55 over 50 gir advarsel', true,
+      _ccOverWarn(CAB, 55, RID) === true, _ccOverWarn(CAB, 55, RID));
+    check('F: CC 48 innenfor 30-50 gir INGEN advarsel', false,
+      _ccOverWarn(CAB, 48, RID) === false, _ccOverWarn(CAB, 48, RID));
+    S.rooms[0].roomType = 'bathroom';
+    check('F: samme CC 25 i Bad gir ingen under-advarsel', false,
+      _ccOverWarn(CAB, 25, RID) === false, _ccOverWarn(CAB, 25, RID));
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    S.rooms = saved.rooms; S.cables = saved.cables; S.mats = saved.mats; S.strips = saved.strips;
+    S.counters.nextCableId = saved.nextId;
+    if (S.project) S.project.parts = saved.parts;
+    S.ui.activePartId = saved.part; ROOM_TYPES = saved.types;
+    _invalidateCableCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_reserveCableRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 function _flateeffektRegressionTest() {
   const saved = { rooms: S.rooms, mats: S.mats, cables: S.cables, strips: S.strips,
     parts: S.project && S.project.parts, part: S.ui.activePartId, prods: HEATING_PRODUCTS.slice() };
@@ -25004,8 +25345,9 @@ function drawCables() {
     const isSel = S.ui.selectedCableId === cable.id;
     const isHov = !isSel && _hoveredCableId === cable.id;
 
-    // Draw margin zone (randsone) along all walls
-    _drawCableMarginZone(cable, room);
+    // 025: reserven er ikke tilkoblet — ingen randsone (den «eier» ikke flaten), og den tegnes
+    // stiplet og nedtonet så den aldri forveksles med hovedkabelen.
+    if (!cable.reserve) _drawCableMarginZone(cable, room);
 
     // Draw corridor for multi-cable lead-run (zone 1 only)
     if (cable.zoneBounds?.corridor) {
@@ -25033,7 +25375,8 @@ function drawCables() {
 
     ctx.strokeStyle = _cableStroke(cable, isSel, isHov);
     ctx.lineWidth = isSel ? 2.5 : isHov ? 2 : 1.5;
-    ctx.setLineDash([]);
+    if (cable.reserve) { ctx.setLineDash([6, 4]); ctx.globalAlpha = 0.7; }   // 025
+    else ctx.setLineDash([]);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
@@ -29755,7 +30098,16 @@ function _foilCountItemsForRoom(roomId) {
 // ── Cable cache (same pattern as strip cache) ──
 let _cableCacheVer = 0;
 const _cableCacheStore = {};
-function _invalidateCableCache() { _cableCacheVer++; }
+function _invalidateCableCache() {
+  _cableCacheVer++;
+  // 025: DET ENE etterpunktet for reservekabler. STEG 0.4 målte at alle 22 kallsteder for denne
+  // funksjonen er MUTASJONER (plassering, sletting, retningsbytte, undo, prosjektåpning) — ingen
+  // render- eller lesevei kaller den. Reserven følger derfor hovedkabelen uansett hvilken av de
+  // elleve plasseringsveiene som ble brukt, uten elleve kopier av samme kall.
+  // `_syncAllReserveCables` har egen re-entrans-vakt og hopper ut med én `some()` når ingen rom
+  // har reserve — altså ingen kostnad for vanlige prosjekter.
+  if (typeof _syncAllReserveCables === 'function') _syncAllReserveCables();
+}
 function _cablesForRoom(roomId) {
   return S.cables.filter(c => c.roomId === roomId);
 }
@@ -36970,6 +37322,11 @@ function setRoomType(roomId, typeId) {
   room.roomType = typeId || null;
   const defaults = _roomTypeDefaults(typeId);
   room.targetWm2 = typeId ? defaults.targetWm2 : null;
+  // 025: romtyper med `reserveCable` (fryserom/kjølerom) slår PÅ flagget. Det slås bevisst
+  // ALDRI av igjen ved bytte av romtype — brukeren kan ha villet ha reserve uansett; bare
+  // avkrysningen i kabelpanelet tar den bort.
+  if (typeId && defaults.reserveCable) room.reserveCable = true;
+  _invalidateCableCache();
   renderSidebar(); render();
 }
 function setRoomTargetWm2(roomId, val) {
@@ -38159,7 +38516,7 @@ function _renderDetailPanel(roomId) {
     <select style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:10px;flex:1;min-width:0" onchange="setRoomType(${roomId},this.value)">
       <option value="">${_isSnowModule() ? 'Områdetype' : 'Romtype'}...</option>${_rtOpts}
     </select>
-    <input type="number" min="${_wm2McSb.wm2Min}" max="${_wm2McSb.wm2Max}" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
+    <input type="number" min="${_wm2MinFor(roomId)}" max="${_wm2McSb.wm2Max}" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
     <button class="sb-detail-act" onclick="_showDupeRoomMenu(event,${roomId})">Dupliser</button>
     <button class="sb-detail-act danger" onclick="delRoom(${roomId})">Slett</button>
   </div>`;
@@ -50843,7 +51200,7 @@ async function exportPDF(opts) {
         : _roomCablesCC.map(v => v.toFixed(1)).join(', ') + ' cm';
       const _ccwPdf = _roomCcOverWarn(room);   // 016
       doc.text('Senteravstand (CC): ' + _ccTxt +
-        (_ccwPdf ? ' (' + _ccWarnText(_ccwPdf.prod, _ccwPdf.cc, false) + ')' : ''), M, y); y += 5;
+        (_ccwPdf ? ' (' + _ccWarnText(_ccwPdf.prod, _ccwPdf.cc, false, _ccwPdf.roomId) + ')' : ''), M, y); y += 5;
     }
     y += 4;
     _line(y); y += 4;
@@ -58490,8 +58847,11 @@ function _collectMaterialItems() {
       const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
       if(!p) return;
       const lenM = (c.totalLength_cm||0)/100;
-      const watt = p.watt_per_m ? lenM * p.watt_per_m : 0;
-      items.push({ product: p, kind: 'Kabel', roomName, floorName, qtyStr: lenM.toFixed(1)+' m', count: 1, areaM2: 0, lenM, watt });
+      // 025: reserven bestilles (antall/lengde teller), men har 0 W — den er ikke tilkoblet,
+      // så den skal ikke blåse opp effektsummen i materiallista.
+      const watt = (c.reserve || !p.watt_per_m) ? 0 : lenM * p.watt_per_m;
+      items.push({ product: p, kind: c.reserve ? 'Reservekabel' : 'Kabel', roomName, floorName,
+        qtyStr: lenM.toFixed(1)+' m', count: 1, areaM2: 0, lenM, watt });
     });
     (S.mats||[]).filter(m => m.roomId === room.id).forEach(m => {
       const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
@@ -62030,18 +62390,31 @@ const MARGIN_CM = 2.5; // 25mm — fallback safety zone when no product context
 // `Math.max(..., maxWarn)`: får et produkt en dag `max_spacing_mm` over 500, skal ikke det
 // tekniske taket havne UNDER produsentens egen anbefaling. `max_spacing_hard_mm` er et valgfritt
 // katalogfelt — ingen migrering nødvendig, tomt = 500 mm.
-function _ccLimits(prod) {
+function _ccLimits(prod, roomId) {
   const p = prod || {};
   const minSp   = (p.min_spacing_mm || 50) / 10;
-  const maxWarn = (p.max_spacing_mm || 200) / 10;
+  let maxWarn = (p.max_spacing_mm || 200) / 10;
+  let minWarn = null;
+  // 025: har rommets romtype sitt eget CC-område (fryserom: 30–50 cm), eier DEN anbefalingen —
+  // ikke produktet. MÅLT 06.10.2026 at InFloor 10T allerede har max_spacing_mm 500, så 30–50
+  // ga ingen advarsel i utgangspunktet; `ccMinCm` er den som faktisk legger til noe (⚠ under 30).
+  const rt = roomId != null ? _roomTypeOf(roomId) : null;
+  if (rt) {
+    if (rt.ccMaxCm != null) maxWarn = rt.ccMaxCm;
+    if (rt.ccMinCm != null) minWarn = rt.ccMinCm;
+  }
   const maxHard = Math.max((p.max_spacing_hard_mm || 500) / 10, maxWarn);
-  return { minSp, maxWarn, maxHard };
+  return { minSp, maxWarn, maxHard, minWarn, fromRoomType: !!(rt && (rt.ccMaxCm != null || rt.ccMinCm != null)), roomTypeLabel: rt ? rt.label : null };
 }
 // Er lagt CC over produsentens anbefaling? Én sannhet for filtre, footer, toast, label og PDF —
 // så de aldri kan si hver sin ting om samme kabel.
-function _ccOverWarn(prod, cc_cm) {
+function _ccOverWarn(prod, cc_cm, roomId) {
   if (!prod || !(cc_cm > 0)) return false;
-  return cc_cm > _ccLimits(prod).maxWarn + 0.01;
+  const L = _ccLimits(prod, roomId);
+  if (cc_cm > L.maxWarn + 0.01) return true;
+  // 025: fryserom har også en NEDRE anbefaling (30 cm). Produktets fysiske `min_spacing_mm` er
+  // fortsatt den harde grensen — dette er en advarsel, ikke en sperre.
+  return L.minWarn != null && cc_cm < L.minWarn - 0.01;
 }
 // Motorenes ØVRE grense. Å heve taket til `maxHard` for alle ville endret utlegg som aldri var i
 // nærheten av grensen: flere motorer GROVSVEIPER `minSp..maxSp`, så et videre område gir andre
@@ -62063,8 +62436,15 @@ function _ccSearchMaxCm(prod, room) {
   return Math.min(maxHard, need);
 }
 // Delt advarselstekst. `long` for footer/toast, kort for label/tabellrader.
-function _ccWarnText(prod, cc_cm, long) {
-  const mw = _ccLimits(prod).maxWarn;
+function _ccWarnText(prod, cc_cm, long, roomId) {
+  const L = _ccLimits(prod, roomId);
+  if (L.minWarn != null && cc_cm < L.minWarn - 0.01) {
+    const hvem = L.roomTypeLabel ? ('for ' + L.roomTypeLabel.toLowerCase()) : 'anbefalt';
+    return long
+      ? `⚠ CC ${cc_cm.toFixed(1)} cm er under ${L.minWarn} cm ${hvem}`
+      : `under ${L.minWarn} cm ${hvem}`;
+  }
+  const mw = L.maxWarn;
   return long
     ? `⚠ CC ${cc_cm.toFixed(1)} cm er over anbefalt maks (${mw.toFixed(0)} cm) for ${prod.product_family || prod.name || 'produktet'}`
     : `over anbefalt maks ${mw.toFixed(0)} cm`;
@@ -62076,8 +62456,8 @@ function _roomCcOverWarn(room) {
   for (const cab of S.cables) {
     if (cab.roomId !== room.id || !(cab.spacing_cm > 0)) continue;
     const prod = HEATING_PRODUCTS.find(pp => pp.id === cab.productId);
-    if (prod && _ccOverWarn(prod, cab.spacing_cm)) {
-      return { prod, cc: cab.spacing_cm, maxWarn: _ccLimits(prod).maxWarn };
+    if (prod && _ccOverWarn(prod, cab.spacing_cm, room.id)) {
+      return { prod, cc: cab.spacing_cm, roomId: room.id, maxWarn: _ccLimits(prod, room.id).maxWarn };
     }
   }
   return null;
@@ -62087,7 +62467,7 @@ function _roomCcOverWarn(room) {
 function _ccWarnToast(roomId) {
   const room = S.rooms.find(r => r.id === roomId);
   const w = _roomCcOverWarn(room);
-  if (w && typeof _showToast === 'function') _showToast(_ccWarnText(w.prod, w.cc, true), 'warn');
+  if (w && typeof _showToast === 'function') _showToast(_ccWarnText(w.prod, w.cc, true, w.roomId), 'warn');
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
