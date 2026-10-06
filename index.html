@@ -22026,26 +22026,34 @@ function centerRoomStrips(roomId) {
 }
 
 // ─── AVSTAND MELLOM VARMEFOLIER (GAP-PANEL) ───────────────────
-function openGapPanel(e, roomId) {
+// 022: `opts.stripIds` → panelet gjelder KUN de markerte foliene (Kenneth: «endre avstanden
+// mellom disse uavhengig av resten»). Uten opts er alt som før — rommets avstand.
+function openGapPanel(e, roomId, opts) {
   e.stopPropagation();
-  const gapMm = Math.round(_roomFoilGapCm(roomId) * 10);
+  const selIds = opts && opts.stripIds && opts.stripIds.length >= 2 ? opts.stripIds.slice() : null;
+  // For et utvalg finnes ingen lagret verdi: vis den avstanden som FAKTISK er mellom dem nå
+  // (måles mellom de to første), så steppern starter der brukeren er — ikke på rommets verdi.
+  const gapMm = selIds ? _measureStripsGapMm(roomId, selIds) : Math.round(_roomFoilGapCm(roomId) * 10);
+  const call = selIds
+    ? (mmExpr, skip) => `setStripsGap(${roomId},${JSON.stringify(selIds)},${mmExpr}${skip ? ',true' : ''})`
+    : (mmExpr, skip) => `setRoomGap(${roomId},${mmExpr}${skip ? ',true' : ''})`;
   const presets = [10, 20, 30, 40, 50, 60, 70, 80];
   const presetBtns = presets.map(mm => {
     const on = gapMm === mm ? ' on' : '';
-    return `<button class="gap-preset-btn${on}" onclick="setRoomGap(${roomId},${mm})">${mm/10} cm</button>`;
+    return `<button class="gap-preset-btn${on}" onclick="${call(mm)}">${mm/10} cm</button>`;
   }).join('');
   const panel = document.getElementById('gap-panel');
   panel.innerHTML = `
-    <div class="gap-title">Avstand mellom varmefolier</div>
+    <div class="gap-title">${selIds ? `Avstand mellom valgte folier (${selIds.length})` : 'Avstand mellom varmefolier'}</div>
     <div class="gap-presets">${presetBtns}</div>
     <div class="gap-custom-row">
       <span class="gap-custom-lbl">Egendefinert:</span>
       <input id="gap-mm-input" class="gap-mm-input" type="number" min="0" max="200" step="1" value="${gapMm}"
         onclick="event.stopPropagation()"
-        oninput="setRoomGap(${roomId}, parseFloat(this.value)||0, true)" />
+        oninput="${call('parseFloat(this.value)||0', true)}" />
       <span class="gap-custom-lbl">mm</span>
-      <button class="gap-step-btn" onclick="stepGap(${roomId},-1)">▼</button>
-      <button class="gap-step-btn" onclick="stepGap(${roomId},+1)">▲</button>
+      <button class="gap-step-btn" onclick="stepGap(${roomId},-1${selIds ? ',' + JSON.stringify(selIds) : ''})">▼</button>
+      <button class="gap-step-btn" onclick="stepGap(${roomId},+1${selIds ? ',' + JSON.stringify(selIds) : ''})">▲</button>
     </div>
     <div id="gap-margin-warn" class="gap-warn">⚠ Varmefolie er nærmere enn 25 mm fra vegg</div>`;
   // Position near button, keep within viewport
@@ -22056,6 +22064,38 @@ function openGapPanel(e, roomId) {
   panel.style.top  = Math.min(e.clientY + 8, H - ph - 8) + 'px';
   // Push undo once when panel opens (so one undo reverts all gap changes)
   pushUndo();
+}
+
+// 022: hva er avstanden mellom de valgte nå? Måles mellom de to første (sortert), så panelet
+// åpner på brukerens faktiske verdi i stedet for rommets.
+function _measureStripsGapMm(roomId, stripIds) {
+  const ids = new Set(stripIds);
+  const sel = S.strips.filter(s => ids.has(s.id) && s.roomId === roomId)
+                      .sort((a, b) => a.pos_cm - b.pos_cm);
+  if (sel.length < 2) return Math.round(_roomFoilGapCm(roomId) * 10);
+  return Math.max(0, Math.round((sel[1].pos_cm - (sel[0].pos_cm + _stripNettoCm(sel[0]))) * 10));
+}
+
+// 022: ctxbar-chippen. Ved multivalg (≥2 striper, samme rom OG samme retning) gjelder panelet
+// KUN utvalget. Ulik retning → egen chip som sier fra i stedet for å gjøre noe uventet; avstand
+// mellom en loddrett og en vannrett folie er ikke et meningsfylt tall.
+function _selGapChipHtml(roomId, gapMm, hasStripsInRoom) {
+  const ids = [...(S.ui.selectedStripIds || [])];
+  if (ids.length >= 2) {
+    const sel = S.strips.filter(s => ids.includes(s.id));
+    const sameRoom = sel.every(s => s.roomId === sel[0].roomId);
+    const sameDir = sel.every(s => s.direction === sel[0].direction);
+    if (sameRoom && sameDir) {
+      return `<button class="snap-chip on" onclick='openGapPanel(event,${sel[0].roomId},{stripIds:${JSON.stringify(ids)}})' title="Juster avstanden mellom de ${ids.length} markerte foliene — resten av rommet røres ikke">⟷ Avstand (${ids.length} valgte)</button>`;
+    }
+    if (sameRoom) {
+      return `<button class="snap-chip" onclick="_showToast&&_showToast('Velg folier med samme retning','warn')" title="Avstand krever at foliene ligger samme vei">⟷ Avstand</button>`;
+    }
+    return '';
+  }
+  return hasStripsInRoom
+    ? `<button class="snap-chip" onclick="openGapPanel(event,${roomId})" title="Juster avstand mellom varmefolier">⟷ ${gapMm} mm</button>`
+    : '';
 }
 
 function hideGapPanel() {
@@ -22397,6 +22437,268 @@ function stepMatGroupGap(roomId, delta, rotationDeg) {
 }
 
 // gapMm: desired gap in millimetres; skipUndo = true when called live from input field
+// ─────────────────────────────────────────────────────────────────────────────
+// 022 (Kenneth 06.10.2026). To problemer, én årsak: `setRoomGap` LA ALT PÅ NYTT, sentrert i
+// rommets BOUNDING-BOKS. I et skrått rom er boksen større enn gulvet, så «midten av boksen»
+// ligger delvis utenfor polygonet.
+//
+// MÅLT 06.10.2026 på et skrått rom (21 striper, 2 cm → 3 cm): 16 striper fikk kortere plass,
+// 18 beholdt en `length_cm` polygonet ikke tillater — altså tegnet tvers gjennom veggen — og
+// 5,9 m folie forsvant (76,8 → 70,9 m). Akseparallelle L- og T-rom var uskadd, fordi boksen
+// der er lik rommets utstrekning langs stripeaksen. Det er derfor feilen virket tilfeldig.
+//
+// Kjernen under flytter i stedet det som ALLEREDE ligger der, og nekter å gjøre det hvis en
+// stripe mister plass. Brukt av både rom-justering og utvalgs-justering — én algoritme.
+
+// Hvor mye plass gir polygonet en stripe på en gitt posisjon? Dette er den samme
+// gyldighetstesten auto-utlegget bruker (`computeClippedSegments` → sum av segmentene).
+function _stripAvailableLenCm(roomId, strip, posCm) {
+  const segs = computeClippedSegments(roomId, strip.direction, posCm, strip.productId) || [];
+  return segs.reduce((a, g) => a + (g.length_cm || 0), 0);
+}
+
+// Lengste sammenhengende segment polygonet gir på en posisjon. Det er DET en stripe skal fylle.
+function _stripBestSegment(roomId, strip, posCm) {
+  const segs = computeClippedSegments(roomId, strip.direction, posCm, strip.productId) || [];
+  let best = null;
+  for (const g of segs) if (!best || g.length_cm > best.length_cm) best = g;
+  return best;
+}
+
+// Er dette oppsettet lovlig?
+//
+// ⚠ RETTET UNDERVEIS 06.10.2026: første forsøk krevde at hver stripe BEHOLDT minst 99 % av lengden
+// sin. Det er feil i et skrått rom — der har hver posisjon ulik plass, så enhver endring av
+// avstanden gjør noen striper kortere, og regelen gjorde det umulig å endre gapet i det hele tatt
+// (målt: 0 striper flyttet seg). Det Kenneth faktisk rapporterte, var striper som KRYSSER VEGGER
+// — altså at stripa beholdt en lengde polygonet ikke tillot. Derfor: en stripe får gjerne bli
+// kortere, men den må KLIPPES PÅ NYTT der den havner (`_reclipStrip` under), og den må fortsatt
+// ha et brukbart segment igjen.
+function _stripLayoutValid(roomId, strips, positions, outsideStrips) {
+  const MIN_LEN = 5;   // samme nedre grense som computeClippedSegments bruker
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return false;
+  for (let i = 0; i < strips.length; i++) {
+    const s = strips[i], pos = positions[i];
+    // En stripe som IKKE flytter seg (typisk ankeret) skal aldri kunne blokkere operasjonen.
+    // MÅLT 06.10.2026: uten dette vetoet ankeret sin egen, allerede eksisterende naboavstand
+    // enhver endring — ingenting flyttet seg i det hele tatt.
+    if (Math.abs(pos - s.pos_cm) < 0.01) continue;
+    // FOTAVTRYKK: hele stripas bredde må ligge innenfor rommet, med produktets veggmargin.
+    // MÅLT 06.10.2026: uten denne slapp et oppsett gjennom der gruppa strakk seg fra −7,5 til
+    // 407,5 i et rom som er 0–400 — `_stripBestSegment` ga nemlig fortsatt et segment, siden
+    // DELEN som lå inne i rommet ble klippet ut. «Har den noe plass» er altså ikke det samme som
+    // «ligger den inne i rommet».
+    const coords = s.direction === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
+    const lo = Math.min(...coords), hi = Math.max(...coords);
+    const margin = _effectiveMarginCm(s.productId);
+    if (pos < lo + margin - 0.01) return false;
+    if (pos + _stripNettoCm(s) > hi - margin + 0.01) return false;
+    const best = _stripBestSegment(roomId, s, pos);
+    if (!best || best.length_cm < MIN_LEN) return false;   // ingen plass igjen → ulovlig
+    const w = _stripNettoCm(s);
+    for (const o of outsideStrips) {
+      if (o.direction !== s.direction) continue;   // kryssende retninger er ikke et avstandsspørsmål
+      // PRODUKTETS minimum, ikke `_effectiveGapCmPair` — den er max(brukerens preferanse,
+      // leverandørminimum), og brukerens preferanse har ingenting å gjøre her: brukeren setter jo
+      // nettopp en ny avstand. MÅLT: med preferansen på 8 cm veto-et den en helt lovlig 4 cm.
+      const need = Math.max(_productMinGapCm(s.productId), _productMinGapCm(o.productId));
+      const ow = _stripNettoCm(o);
+      // intervallene [pos, pos+w] og [o.pos, o.pos+ow] må ha minst `need` mellom seg
+      if (pos < o.pos_cm + ow + need - 0.01 && o.pos_cm < pos + w + need - 0.01) return false;
+    }
+  }
+  return true;
+}
+
+function _respaceLayout(strips, gapCm, anchor) {
+  const widths = strips.map(_stripNettoCm);
+  const total = widths.reduce((a, w) => a + w, 0) + (strips.length - 1) * gapCm;
+  let start;
+  if (anchor === 'center') {
+    const oldStart = strips[0].pos_cm;
+    const oldEnd = strips[strips.length - 1].pos_cm + widths[widths.length - 1];
+    start = (oldStart + oldEnd) / 2 - total / 2;
+  } else {
+    start = strips[0].pos_cm;            // 'first' — ankeret står helt stille
+  }
+  const pos = []; let cur = start;
+  for (let i = 0; i < strips.length; i++) { pos.push(cur); cur += widths[i] + gapCm; }
+  return pos;
+}
+
+// Felles kjerne. `strips` sorteres på pos_cm av kalleren. Prøver ønsket gap; går det ikke,
+// KLEMMES det til den største verdien som faktisk går (binærsøk på hele millimeter), slik at
+// brukeren får en ærlig «⚠ Maks N mm» i stedet for et stille ugyldig utlegg.
+// Returnerer { ok, maxGapCm } — `ok` er false når gapet måtte klemmes.
+function _respaceStrips(roomId, strips, gapCm, anchorPref, outsideStrips) {
+  if (!strips || strips.length < 2) return { ok: true, maxGapCm: gapCm };
+  outsideStrips = outsideStrips || [];
+  const anchors = anchorPref === 'center' ? ['center', 'first'] : ['first'];
+  const tryGap = g => {
+    for (const a of anchors) {
+      const pos = _respaceLayout(strips, g, a);
+      if (_stripLayoutValid(roomId, strips, pos, outsideStrips)) return pos;
+    }
+    return null;
+  };
+  const apply = (positions) => {
+    strips.forEach((s, i) => { s.pos_cm = positions[i]; });
+    // KLIPP PÅ NYTT: uten dette beholder stripa start/lengde fra den gamle posisjonen og tegnes
+    // gjennom veggen — det var nettopp feilen Kenneth meldte.
+    for (const s of strips) {
+      const best = _stripBestSegment(roomId, s, s.pos_cm);
+      if (best) { s.start_cm = best.start_cm; s.length_cm = best.length_cm; }
+    }
+    _invalidateStripCache();
+  };
+  let pos = tryGap(gapCm);
+  if (pos) { apply(pos); return { ok: true, maxGapCm: gapCm }; }
+  // Binærsøk på mm: finn største gap ≤ ønsket som er gyldig.
+  let lo = 0, hi = Math.round(gapCm * 10), best = null, bestMm = 0;
+  if (tryGap(0) == null) return { ok: false, maxGapCm: null };   // selv 0 går ikke → rør ingenting
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const cand = tryGap(mid / 10);
+    if (cand) { best = cand; bestMm = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  if (best) apply(best);
+  return { ok: false, maxGapCm: bestMm / 10 };
+}
+
+// Avstand mellom KUN de markerte foliene (Kenneth: «da vil jeg endre avstanden mellom disse
+// uavhengig av resten»). Ankeret er den første (laveste pos_cm) — den står stille, så utvalget
+// vokser/krymper innover i rommet i stedet for å hoppe. Rommets `foilGapCm` røres IKKE: dette er
+// utvalgets avstand, ikke rommets.
+function setStripsGap(roomId, stripIds, gapMm, skipUndo) {
+  const ids = new Set(stripIds);
+  const sel = S.strips.filter(s => ids.has(s.id) && s.roomId === roomId)
+                      .sort((a, b) => a.pos_cm - b.pos_cm);
+  if (sel.length < 2) return { ok: true, maxGapCm: null };
+  if (!skipUndo) pushUndo();
+  const minCm = Math.max(...sel.map(s => _productMinGapCm(s.productId)));
+  const gapCm = Math.max(minCm, Math.max(0, gapMm) / 10);
+  const outside = S.strips.filter(s => s.roomId === roomId && !ids.has(s.id));
+  const res = _respaceStrips(roomId, sel, gapCm, 'first', outside);
+  _gapPanelWarn(res, gapMm);
+  renderSidebar(); updateObjInfo(); updateCtxBar(); render();
+  return res;
+}
+
+// Delt varsellinje i panelet for begge veier.
+function _gapPanelWarn(res, gapMm) {
+  const warn = document.getElementById('gap-margin-warn');
+  if (!warn) return;
+  if (res.ok) { warn.style.display = 'none'; return; }
+  warn.style.display = 'flex';
+  warn.textContent = res.maxGapCm == null
+    ? '⚠ Får ikke plass — rommet er fullt'
+    : `⚠ Maks ${Math.round(res.maxGapCm * 10)} mm her — rommet er fullt`;
+  const inp = document.getElementById('gap-mm-input');
+  if (inp && res.maxGapCm != null) inp.value = Math.round(res.maxGapCm * 10);
+}
+
+// 022: låser begge kravene Kenneth meldte — (1) rom-justering skal ALDRI etterlate en stripe
+// utenfor polygonet eller med en lengde polygonet ikke tillater, og (2) utvalgs-justering skal
+// bare røre de markerte. Bruker syntetiske rom, så den er uavhengig av produktkatalogen.
+function _gapRegressionTest() {
+  const saved = { rooms: S.rooms, strips: S.strips, zones: S.zones, hindrings: S.hindrings,
+    prods: HEATING_PRODUCTS.slice(), sel: S.ui.selectedStripIds, room: S.ui.selectedRoomId,
+    nextId: S.counters.nextStripId, gap: S.varmefolie.gapCm };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    const prod = { id: 9900, category_id: 9000, active: true, product_family: 'GAPTEST',
+      name: 'GAPTEST 20cm', article_no: 'GAPTEST', width_mm: 200, netto_width_mm: 190,
+      watt_per_m2: 100, voltage: 230, min_gap_mm: 10, min_wall_margin_mm: 25 };
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(prod);
+    const RID = 996001;
+    const mk = (pts, n, dir, gapCm) => {
+      S.rooms = [{ id: RID, name: 'GAPTEST', floorId: null, partId: null, shape: 'polygon',
+        wallThicknessCm: 0, points: pts.map(p => ({ ...p })), walls: [], dims: [],
+        area: Math.abs(compArea(pts)), roomType: null, targetWm2: null }];
+      S.zones = []; S.hindrings = []; S.strips = []; S.counters.nextStripId = 1;
+      S.ui.selectedRoomId = RID; S.ui.selectedStripIds = new Set();
+      let pos = 30;
+      for (let i = 0; i < n; i++) {
+        const st = { id: S.counters.nextStripId++, roomId: RID, productId: prod.id,
+          direction: dir, pos_cm: pos, start_cm: 0, length_cm: 0 };
+        const b = _stripBestSegment(RID, st, pos);
+        st.start_cm = b ? b.start_cm : 0; st.length_cm = b ? b.length_cm : 0;
+        S.strips.push(st); pos += 19 + gapCm;
+      }
+      _invalidateStripCache();
+      S.rooms[0].foilGapCm = gapCm;
+    };
+    const utenfor = () => {
+      const room = S.rooms[0];
+      return S.strips.filter(st => {
+        const c = st.direction === 'v' ? room.points.map(p => p.x) : room.points.map(p => p.y);
+        const m = _effectiveMarginCm(st.productId);
+        const b = _stripBestSegment(RID, st, st.pos_cm);
+        return st.pos_cm < Math.min(...c) + m - 0.01
+            || st.pos_cm + _stripNettoCm(st) > Math.max(...c) - m + 0.01
+            || !b || st.length_cm > b.length_cm + 0.5;
+      }).length;
+    };
+
+    // ─── A — L-rom, 2 → 3 cm: ingen stripe utenfor polygonet etterpå ───
+    const L = [{x:0,y:0},{x:600,y:0},{x:600,y:250},{x:300,y:250},{x:300,y:500},{x:0,y:500}];
+    mk(L, 8, 'v', 2);
+    check('A: start uten avvik', 0, utenfor() === 0, utenfor());
+    setRoomGap(RID, 30, true); _invalidateStripCache();
+    check('A: 0 striper utenfor polygonet etter 2→3 cm', 0, utenfor() === 0, utenfor());
+
+    // ─── B — skrått rom: det var HER feilen bet (målt 16/21 kortere, 18 løy om lengden) ───
+    const SK = [{x:0,y:0},{x:500,y:200},{x:400,y:500},{x:-100,y:300}];
+    mk(SK, 8, 'v', 2);
+    setRoomGap(RID, 30, true); _invalidateStripCache();
+    check('B: 0 avvik i skrått rom etter 2→3 cm', 0, utenfor() === 0, utenfor());
+    const ss = S.strips.slice().sort((a, b) => a.pos_cm - b.pos_cm);
+    const g = [];
+    for (let i = 1; i < ss.length; i++) g.push(+(ss[i].pos_cm - (ss[i-1].pos_cm + 19)).toFixed(2));
+    check('B: alle mellomrom er 3 cm', '[3]', [...new Set(g)].join(',') === '3', [...new Set(g)]);
+
+    // ─── C — utvalg: 3 av 6, bare de tre flytter, rommets gap urørt ───
+    const R = [{x:0,y:0},{x:900,y:0},{x:900,y:400},{x:0,y:400}];
+    mk(R, 6, 'v', 2);
+    const alle = S.strips.slice().sort((a, b) => a.pos_cm - b.pos_cm);
+    const valgte = [alle[3].id, alle[4].id, alle[5].id];
+    const før = Object.fromEntries(S.strips.map(st => [st.id, st.pos_cm]));
+    const romGapFør = S.rooms[0].foilGapCm;
+    setStripsGap(RID, valgte, 40, true); _invalidateStripCache();
+    const flyttet = S.strips.filter(st => Math.abs(før[st.id] - st.pos_cm) > 0.01).map(st => st.id);
+    check('C: nøyaktig 2 striper flyttet (ankeret står stille)', 2, flyttet.length === 2, flyttet.length);
+    check('C: bare striper fra utvalget flyttet', true,
+      flyttet.every(id => valgte.includes(id)), flyttet);
+    check('C: 3 striper utenfor utvalget er urørt', 3,
+      S.strips.filter(st => !valgte.includes(st.id) && Math.abs(før[st.id] - st.pos_cm) < 0.01).length === 3,
+      S.strips.filter(st => !valgte.includes(st.id) && Math.abs(før[st.id] - st.pos_cm) < 0.01).length);
+    check('C: rommets foilGapCm er IKKE endret', romGapFør,
+      S.rooms[0].foilGapCm === romGapFør, S.rooms[0].foilGapCm);
+    const vv = valgte.map(id => S.strips.find(st => st.id === id)).sort((a, b) => a.pos_cm - b.pos_cm);
+    check('C: 4 cm mellom de valgte', 4,
+      Math.abs((vv[1].pos_cm - (vv[0].pos_cm + 19)) - 4) < 0.01
+      && Math.abs((vv[2].pos_cm - (vv[1].pos_cm + 19)) - 4) < 0.01,
+      +(vv[1].pos_cm - (vv[0].pos_cm + 19)).toFixed(2));
+    check('C: ingen utenfor polygonet', 0, utenfor() === 0, utenfor());
+
+    // ─── D — for stort gap klemmes, og stripene blir værende lovlige ───
+    mk(R, 6, 'v', 2);
+    const res = setRoomGap(RID, 200, true); _invalidateStripCache();
+    check('D: 0 utenfor også når gapet er for stort', 0, utenfor() === 0, utenfor());
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    S.rooms = saved.rooms; S.strips = saved.strips; S.zones = saved.zones; S.hindrings = saved.hindrings;
+    S.ui.selectedStripIds = saved.sel; S.ui.selectedRoomId = saved.room;
+    S.counters.nextStripId = saved.nextId; S.varmefolie.gapCm = saved.gap;
+    _invalidateStripCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_gapRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 function setRoomGap(roomId, gapMm, skipUndo) {
   const gapCm = Math.max(0, gapMm) / 10;
   // BUG-fiks (28.08.2026): hent rommet FØR noe skrives — en ugyldig roomId skal ikke gi en global
@@ -22412,40 +22714,30 @@ function setRoomGap(roomId, gapMm, skipUndo) {
   S.varmefolie.gapCm = gapCm;   // «sist brukt» = frø for NYE rom (bevisst fortsatt global)
   _savePrefs();
 
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-
-  let hasMarginWarning = false;
-
+  // 022: RELATIV omfordeling av det som allerede ligger der — ikke «legg alt på nytt, sentrert
+  // i bounding-boksen». Den gamle veien sentrerte i rommets boks (minX..maxX / minY..maxY) pluss
+  // MARGIN; i et skrått rom er boksen større enn gulvet, og midten av boksen ligger delvis
+  // UTENFOR polygonet. MÅLT på et skrått rom (21 striper, 2 → 3 cm): 16 striper mistet plass,
+  // 18 beholdt en length_cm polygonet ikke tillot (tegnet gjennom veggen), 5,9 m folie borte.
+  //
+  // Nå: behold gruppens senter, fordel på nytt, og VALIDER hver stripe mot polygonet
+  // (`computeClippedSegments`, samme test auto-utlegget bruker). Går det ikke med senter-anker,
+  // prøves første stripe som anker; går heller ikke det, klemmes gapet til største verdi som går.
+  // Rommet skal aldri ende med en stripe utenfor polygonet etter denne funksjonen.
+  let worst = { ok: true, maxGapCm: gapCm };
   const dirs = [...new Set(_stripsForRoom(roomId).map(s => s.direction))];
   for (const dir of dirs) {
     const strips = _stripsForRoomDir(roomId, dir).slice()
                            .sort((a, b) => a.pos_cm - b.pos_cm);
-    if (!strips.length) continue;
-
-    const MARGIN = Math.max(...strips.map(s => _effectiveMarginCm(s.productId)));
-    const across  = dir === 'v' ? maxX - minX : maxY - minY;
-    const basePos = dir === 'v' ? minX : minY;
-
-    // Total width occupied by strips + gaps between them
-    let totalWidth = strips.reduce((sum, s) => sum + _stripNettoCm(s), 0);
-    totalWidth += (strips.length - 1) * gapCm;
-
-    // Centered distribution — equal cold zones on both sides
-    const coldEach = (across - 2 * MARGIN - totalWidth) / 2;
-    if (coldEach < 0) hasMarginWarning = true; // would be closer than margin from wall
-
-    let cursor = basePos + MARGIN + coldEach; // may go below MARGIN if warning
-    for (const s of strips) {
-      s.pos_cm = cursor;
-      cursor += _stripNettoCm(s) + gapCm;
+    if (strips.length < 2) continue;
+    // Striper i ANDRE retninger i samme rom er «utenfor» denne omfordelingen og må ikke treffes.
+    const outside = S.strips.filter(x => x.roomId === roomId && x.direction !== dir);
+    const res = _respaceStrips(roomId, strips, gapCm, 'center', outside);
+    if (!res.ok && (worst.ok || (res.maxGapCm != null && worst.maxGapCm != null && res.maxGapCm < worst.maxGapCm))) {
+      worst = res;
     }
   }
-
-  // Show/hide 25mm margin warning in the open panel
-  const warn = document.getElementById('gap-margin-warn');
-  if (warn) warn.style.display = hasMarginWarning ? 'flex' : 'none';
+  _gapPanelWarn(worst, gapMm);
 
   // Sync input value when called from preset/stepper (not from input oninput)
   const inp = document.getElementById('gap-mm-input');
@@ -22461,12 +22753,17 @@ function setRoomGap(roomId, gapMm, skipUndo) {
   render();
 }
 
-function stepGap(roomId, delta) {
-  const currentMm = Math.round(_roomFoilGapCm(roomId) * 10);
+function stepGap(roomId, delta, stripIds) {
+  // 022: med stripIds teller vi fra utvalgets EGEN avstand, ikke rommets.
+  const currentMm = stripIds ? _measureStripsGapMm(roomId, stripIds)
+                             : Math.round(_roomFoilGapCm(roomId) * 10);
   const newMm = Math.max(0, currentMm + delta);
-  setRoomGap(roomId, newMm, false);
+  const res = stripIds ? setStripsGap(roomId, stripIds, newMm, false)
+                       : setRoomGap(roomId, newMm, false);
   const inp = document.getElementById('gap-mm-input');
-  if (inp) inp.value = newMm;
+  // Ble gapet klemt, skal feltet vise det som FAKTISK ble satt — `_gapPanelWarn` har alt skrevet
+  // den verdien, så ikke overskriv den her.
+  if (inp && !(res && res.ok === false)) inp.value = newMm;
 }
 
 // Close gap-panel when clicking outside
@@ -44961,7 +45258,7 @@ function _ctxBarItems() {
       <button class="snap-chip" id="chip-label-color" onclick="openLabelColorPanel(event)" title="Farge på folie-label (+ prosjekt-standard)">🎨 Farge</button>
       ${stripObj ? `<button class="snap-chip" onclick="_swapProductForRoom(${stripRoomId})" title="Bytt produkt">⇄ Bytt produkt</button>` : ''}
       ${hasStripsInRoom ? `<button class="snap-chip" onclick="centerRoomStrips(${stripRoomId})" title="Fordel kalde soner likt på begge sider">⟺ Sentrer varmefolie</button>` : ''}
-      ${hasStripsInRoom ? `<button class="snap-chip" onclick="openGapPanel(event,${stripRoomId})" title="Juster avstand mellom varmefolier">⟷ ${gapMm} mm</button>` : ''}
+      ${_selGapChipHtml(stripRoomId, gapMm, hasStripsInRoom)}
       <span class="tc-sep"></span>
       <button class="snap-chip${stripRoomDimOn?' on':''}" id="chip-dim-rom" onclick="_toggleRoomDimSnap(${stripRoomId})" title="Vis/skjul mål for alle vegger"><span class="snap-dot"></span>Målsett Rom</button>
       <button class="snap-chip${stripRoom?.stripDimSnap?' on':''}" id="chip-dim-folie" onclick="toggleStripDimSnap()"><span class="snap-dot"></span>Målsett Folie</button>`;

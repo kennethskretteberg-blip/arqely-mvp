@@ -77,6 +77,63 @@ tegneverktøyene framme. Alle åtte regresjonstester grønne (137 sjekker).
 
 ---
 
+## Folie-avstand: gjelder valgte folier, og flytter aldri folie ut av rommet — 2026-10-06
+
+Kenneth: «Når jeg markerer flere varmefoliebredder, ønsker jeg at «Avstand mellom varmefolier»
+kun skal gjelde de som er markert … Jeg opplever også at dersom all varmefolie legger seg ut på
+2 cm og jeg i ettertid endrer til 3 cm, så flytter all varmefolie på seg slik at noen havner ut
+av rommet og andre krysser vegger.»
+
+**STEG 0.1 — skaden målt.** `setRoomGap` la ALT på nytt, sentrert i rommets BOUNDING-BOKS. I et
+skrått rom er boksen større enn gulvet, så «midten av boksen» ligger delvis utenfor polygonet:
+
+| Rom | Striper som ble kortere | Striper som påsto lengde polygonet ikke tillot | Tapt folie |
+|---|---|---|---|
+| **Skrått rom** | **16 av 21** | **18 av 21** | **5,9 m** (76,8 → 70,9) |
+| L-rom (akseparallelt) | 0 | 0 | 0 |
+| T-rom (akseparallelt) | 0 | 0 | 0 |
+
+Akseparallelle rom var uskadd fordi boksen der er lik rommets utstrekning langs stripeaksen —
+det er derfor feilen virket tilfeldig. **Gyldighetskallet** som nå brukes er
+`computeClippedSegments(roomId, direction, pos, productId)` — samme test auto-utlegget bruker.
+**Manuelt-flagg finnes ikke:** en stripe har bare `roomId, productId, direction, pos_cm,
+start_cm, length_cm`, så manuelt plasserte striper er ikke skillbare fra auto-plasserte i
+datamodellen. Punktet om å holde dem utenfor er derfor ikke implementert — det krever et nytt felt.
+
+- `_respaceStrips(roomId, strips, gapCm, anker, utenfor)` — én algoritme for begge veier. Prøver
+  ønsket gap; går det ikke, binærsøker den på hele millimeter etter største verdi som faktisk går,
+  og panelet sier «⚠ Maks N mm her». Aldri en stille ugyldig plassering.
+- `setStripsGap(roomId, stripIds, gapMm)` + chip «⟷ Avstand (3 valgte)». Ankeret (laveste
+  `pos_cm`) står stille; rommets `foilGapCm` røres ikke. Ulik retning → egen chip med toast.
+- `setRoomGap` beholder gruppens senter i stedet for å sentrere i boksen, med fallback til
+  første-stripe-anker og deretter klemming.
+
+**Tre ting jeg tok feil om underveis, alle målt:**
+1. Første gyldighetsregel var «hver stripe beholder minst 99 % av lengden». Det er umulig i et
+   skrått rom, der hver posisjon har ulik plass — resultatet var at INGENTING flyttet seg.
+   Riktig regel: stripa får bli kortere, men må **klippes på nytt** der den havner
+   (`_stripBestSegment`). Det var jo nettopp «krysser vegger» Kenneth meldte.
+2. «Har stripa noe plass» er ikke «ligger stripa i rommet». Et oppsett slapp gjennom der gruppa
+   strakk seg fra −7,5 til 407,5 i et rom som er 0–400, fordi delen som lå inne ga et segment.
+   La til en fotavtrykk-sjekk mot rommets akse-utstrekning med veggmargin.
+3. Overlapp-kravet brukte `_effectiveGapCmPair` = max(brukerens preferanse, leverandørminimum).
+   Med preferansen på 8 cm veto-et ANKERET — som ikke engang flytter seg — en helt lovlig 4 cm.
+   Nå: produktets minimum, og striper som ikke flytter seg sjekkes ikke.
+
+**Testet:** skrått rom og L-rom 2 → 3 cm → 0 striper utenfor, 0 som påstår for lang lengde, gapet
+nøyaktig 3 cm. Rektangel med 19 striper → klemt ærlig til 1,8 cm (maks som får plass). Utvalg av
+3 av 10 → bare de to bak ankeret flyttet, 8 urørt, 4 cm mellom dem, naboen utenfor urørt,
+`room.foilGapCm` uendret, og Ctrl+Z ga alt tilbake i ett steg. Ulik retning → chip med toast.
+Ny `_gapRegressionTest` (11 sjekker) + alle ni øvrige grønne — 158 sjekker totalt.
+
+**Testfelle verdt å huske:** `setRoomGap` kaller `_savePrefs()`, så mine egne testkall skrev
+`S.varmefolie.gapCm = 20` til localStorage. Det fikk `_foilRegressionTest` til å feile på
+dekningsgrad ved neste last — en «regresjon» som utelukkende var min testforurensning.
+
+**Fil:** index.html.
+
+---
+
 ## Native .dwg-import: motoren konverterer, klienten sier tydelig fra — 2026-09-30
 
 Kenneth: «Første gang jeg prøver å dra en DWG-fil inn i Varmeplan — det lot seg ikke gjøre.»
