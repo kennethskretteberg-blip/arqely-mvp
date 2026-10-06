@@ -4,6 +4,63 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Snøsmelting viser flateeffekt, ikke W per romareal — 2026-10-06
+
+Kenneth: «Utendørs snøsmelt i grunnen — da trenger vi ikke å forholde oss til watt pr brutto
+kvadrat, siden det ikke er snakk om oppvarming av et rom. Her er det kun flateeffekt som gjelder
+… si 300 W/m² når det brukes matter på 300 W/m². Dekning av brutto areal kan fortsatt være
+interessant.»
+
+**STEG 0 — målt på et 20 m² snø-rom med 12 m² matter à 300 W/m², og med snø-kabel 30 W/m / CC 8:**
+
+| Sted | Matte (fasit 300) | Kabel (fasit 375) |
+|---|---|---|
+| Rom-detaljside «Flateeffekt» | **300** ✓ | **375** ✓ |
+| PDF Romoversikt `W/m²` | 180 ✗ | 134 ✗ |
+| PDF Prosjektoversikt «Flate W/m²» | 180 ✗ | 134 ✗ |
+| Excel `W/m²` | 180 ✗ | — |
+| Hurtig prosjektering-kort «W/m² flate» | 180 ✗ | — |
+
+Alle fire feilstedene delte `ratedW` på rommets areal. Det er riktig innendørs («hvor mange watt
+får rommet per m² gulv»), men utendørs er spørsmålet «hvor varm blir overflaten DER varmen
+ligger» — og det svarer bare produktets egen tetthet på.
+*(Bestillingen gjettet ~312 for kabelen; det ekte produktet er 30 W/m, altså 375.)*
+
+- `_roomFlateeffektWm2(room, stats)` er nå ÉN kilde: kabel → `cableWm2` (W/m ÷ CC), ellers
+  `wm2Heated` (totalW over dekket flate), tomt rom → ønsket flateeffekt. Rom-detaljsidens
+  inline-formel kaller den nå også, så detaljside og tabeller kan ikke vise ulike tall.
+- `_roomDekningBruttoPct` + `_isSnowRoom` (avgjøres PER ROM via `_roomModuleType`, ikke aktiv
+  fane — et blandet prosjekt får riktig tall per rad).
+- **PDF Romoversikt:** snø-rad viser flateeffekt; ny `Dekn.`-kolonne (kun når tabellen har
+  snø-rom). Alle snø → overskrift «Flate W/m²»; blandet → `W/m²` beholdt + fotnote.
+  **`rColX` måtte ikke justeres** — den nye kolonnen legges etter CC, ytterst, så ingen
+  eksisterende kolonne flyttes.
+- **PDF Prosjektoversikt:** per etasje. Alle rom snø → «Dekning %» / «Flate W/m²»; blandet →
+  overskriftene beholdt + fotnote. Innendørs uendret.
+- **Excel:** snø-rader viser flateeffekt i `W/m²`-kolonnen, ny siste kolonne «Dekning % brutto»,
+  og en notatrad under tabellen som forklarer det (Excel har én header for hele arket).
+- **Hurtig prosjektering-kortene:** `_listWm2FlateStr` — snø → flateeffekt, innendørs uendret.
+
+**Tallet er produktets, ikke rommets — derfor på HVER variantrad.** I et snø-rom med flere
+mattetyper hører 300 hjemme på 300-raden og 200 på 200-raden; den gamle regelen «kun på første
+variantrad» gjaldt et rom-nivå-tall.
+
+**Testet:** snø-only PDF → «Flate W/m²» + «Dekn.», 300 og 60 %; Prosjektoversikt «Dekning %» /
+«Flate W/m²» med 60 %. Blandet → `W/m²` beholdt, `Dekn.` med, fotnote vist, snø-rad 300/60 %,
+inne-rad 13 som før. Innendørs-only → `W/m²`, INGEN `Dekn.`-kolonne, INGEN fotnote,
+«Brutto W/m²»/«Flate W/m²» uendret. Excel: header med «Dekning % brutto», rad `300 … 60`,
+notatrad til slutt. Kort: snø 300 W/m², innendørs 13 W/m². Ny `_flateeffektRegressionTest`
+(9 sjekker) + alle elleve øvrige grønne — **181 sjekker**.
+
+**Spørsmål til Kenneth, ikke besvart her:** kolonnen «Flate W/m²» i Prosjektoversikt og
+«W/m² flate» på kortene er `ratedW / netto` også INNENDØRS — det er ikke flateeffekt i fysisk
+forstand. Skal de også bli ekte flateeffekt (W/m ÷ CC for kabel, `watt_per_m2` for folie/matte),
+eller stå som i dag? Ingenting innendørs er endret i denne runden.
+
+**Fil:** index.html.
+
+---
+
 ## Egne standardverdier per bruker: folie-avstand og vegg-avstand — 2026-10-06
 
 Kenneth: «Kan hver bruker sette sine egne preferanser på standard avstand mellom varmefolier? …

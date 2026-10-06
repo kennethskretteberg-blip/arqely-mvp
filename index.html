@@ -7843,6 +7843,43 @@ function _matRatedW(prod, mat) {
 // nøyaktig lengde), så geometrien gir f.eks. 1628 W mens produktet faktisk er 1700 W. Her brukes
 // produktets total_effect_w (ev. cable_length_m × watt_per_m) for kabel, _matRatedW for matte, og
 // arealbasert ratet effekt for folie/plate (disse kuttes til mål → ingen avvik).
+// ─────────────────────────────────────────────────────────────────────────────
+// 024 (Kenneth 06.10.2026): «Utendørs snøsmelt i grunnen — da trenger vi ikke å forholde oss til
+// watt pr brutto kvadrat, siden det ikke er snakk om oppvarming av et rom. Her er det kun
+// flateeffekt som gjelder for å oppnå tilstrekkelig temperatur på overflaten.»
+//
+// FLATEEFFEKT = produktets effekttetthet DER det ligger — uavhengig av rommets areal.
+//   kabel  → W/m ÷ CC          (stats.cableWm2)
+//   matte  → produktets watt_per_m2 (= stats.matWm2 når én type; wm2Heated dekker blandet)
+//   tomt   → rommets ønskede flateeffekt
+//
+// MÅLT 06.10.2026, 12 m² matter à 300 W/m² i et 20 m² rom: detaljsiden viste 300, mens
+// Romoversikt, Prosjektoversikt «Flate W/m²», Excel og Hurtig prosjektering-kortet alle viste
+// 180 — altså ratedW/areal. Snø-kabel (30 W/m, CC 8 cm): 375 mot 134. Denne funksjonen er nå
+// den ENE kilden, så detaljside og tabeller aldri kan vise ulike tall for samme rom.
+function _roomFlateeffektWm2(room, stats) {
+  if (!room) return 0;
+  stats = stats || _computeRoomStats(room);
+  // Rent kabel-rom: cableWm2 er den eneste riktige — totalW/areal tar ikke hensyn til at
+  // kabelen varmer flaten den ligger i, ikke rommet.
+  if (stats.cableLenM > 0 && !(stats.matAreaM2 > 0) && !(stats.stripM2 > 0)) return stats.cableWm2 || 0;
+  if (stats.heatedM2 > 0) return stats.wm2Heated || 0;
+  return _roomTargetWm2(room.id) || 0;
+}
+
+// Dekning av BRUTTO areal i prosent — «Dekning av brutto areal kan fortsatt være interessant».
+function _roomDekningBruttoPct(room, stats) {
+  if (!room) return 0;
+  stats = stats || _computeRoomStats(room);
+  return stats.bruttoM2 > 0 ? Math.round((stats.heatedM2 / stats.bruttoM2) * 100) : 0;
+}
+
+// Er dette et snø-rom? Avgjøres PER ROM (ikke aktiv fane), så et blandet prosjekt får riktig
+// tall per rad.
+function _isSnowRoom(room) {
+  return !!room && _roomModuleType(room.id) === 'snow';
+}
+
 function _roomRatedEffectW(room) {
   let w = 0;
   for (const c of _cablesForRoom(room.id)) {
@@ -22749,6 +22786,84 @@ function _gapPanelWarn(res, gapMm) {
 // utenfor polygonet eller med en lengde polygonet ikke tillater, og (2) utvalgs-justering skal
 // bare røre de markerte. Bruker syntetiske rom, så den er uavhengig av produktkatalogen.
 // 023: låser «aldri mindre enn tillatt» og «eksisterende rom står urørt».
+// 024: låser at snø viser PRODUKTETS effekttetthet, ikke W per romareal — og at innendørs
+// er uendret.
+function _flateeffektRegressionTest() {
+  const saved = { rooms: S.rooms, mats: S.mats, cables: S.cables, strips: S.strips,
+    parts: S.project && S.project.parts, part: S.ui.activePartId, prods: HEATING_PRODUCTS.slice() };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    const MAT = { id: 9980, category_id: 9500, active: true, product_family: 'SNOTEST',
+      name: 'SNOTEST 300T 0,5x8m', article_no: 'ST300', watt_per_m2: 300, mat_area_m2: 4,
+      mat_width_mm: 500, mat_length_mm: 8000, total_effect_w: 1200, voltage: 230 };
+    const CAB = { id: 9981, category_id: 9500, active: true, product_family: 'SNOTEST',
+      name: 'SNOTEST 30T', article_no: 'ST30', watt_per_m: 30, cable_length_m: 89.1,
+      total_effect_w: 2673, voltage: 230, min_spacing_mm: 60, max_spacing_mm: 200 };
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(MAT, CAB);
+    S.project = S.project || {};
+    S.project.parts = [{ id: 1, name: 'Ute', moduleType: 'snow' },
+                       { id: 2, name: 'Inne', moduleType: 'indoor' }];
+    S.ui.activePartId = 1;
+    const PTS = [{x:0,y:0},{x:500,y:0},{x:500,y:400},{x:0,y:400}];   // 20 m²
+    const mkRoom = (id, partId, modType) => ({ id, name: 'R' + id, floorId: null, partId,
+      shape: 'rect', wallThicknessCm: 0, points: PTS.map(p => ({...p})), walls: [], dims: [],
+      area: 200000, roomType: null, targetWm2: 300, moduleType: modType });
+
+    // ─── A — snø-matte: 12 m² à 300 W/m² i et 20 m² rom ───
+    S.rooms = [mkRoom(998001, 1, 'snow')];
+    S.mats = []; S.cables = []; S.strips = []; S.matPaths = [];
+    for (let i = 0; i < 3; i++) S.mats.push({ id: 900 + i, roomId: 998001, productId: MAT.id,
+      x_cm: 20 + i * 70, y_cm: 20, rotationDeg: 0, width_cm: 50,
+      runs: [{x0: 20 + i*70, y0: 20, x1: 20 + i*70, y1: 820}], runLengths: [800] });
+    _invalidateMatCache(); _invalidateStripCache();
+    let st = _computeRoomStats(S.rooms[0]);
+    check('A: 12 m² matte dekket', 12, Math.abs(st.matAreaM2 - 12) < 0.01, st.matAreaM2);
+    check('A: flateeffekt = produktets 300 W/m² (var 180)', 300,
+      _roomFlateeffektWm2(S.rooms[0], st) === 300, _roomFlateeffektWm2(S.rooms[0], st));
+    check('A: dekning av brutto = 60 %', 60,
+      _roomDekningBruttoPct(S.rooms[0], st) === 60, _roomDekningBruttoPct(S.rooms[0], st));
+    check('A: rommet gjenkjennes som snø', true, _isSnowRoom(S.rooms[0]), _isSnowRoom(S.rooms[0]));
+    // Det gamle tallet skal IKKE lenger brukes for snø
+    const ratedA = _roomRatedEffectW(S.rooms[0]);
+    check('A: gammelt tall (ratedW/netto) var 180 — bevis på at det er en annen verdi', 180,
+      Math.round(ratedA / st.nettoM2) === 180, Math.round(ratedA / st.nettoM2));
+
+    // ─── B — snø-kabel: 30 W/m, CC 8 cm → 375 W/m² ───
+    S.mats = [];
+    S.cables = [{ id: 901, roomId: 998001, productId: CAB.id, labelOnly: true, spacing_cm: 8,
+      cc_mm: 80, totalLength_cm: 8910, runs: [] }];
+    _invalidateMatCache(); if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+    st = _computeRoomStats(S.rooms[0]);
+    check('B: flateeffekt = W/m ÷ CC = 375 (var 134)', 375,
+      Math.abs(_roomFlateeffektWm2(S.rooms[0], st) - 375) <= 1, _roomFlateeffektWm2(S.rooms[0], st));
+    check('B: samme tall som detaljsidens cableWm2', st.cableWm2,
+      _roomFlateeffektWm2(S.rooms[0], st) === st.cableWm2, st.cableWm2);
+
+    // ─── C — innendørs: uendret, og funksjonen skal IKKE brukes i tabellene ───
+    S.ui.activePartId = 2;
+    S.rooms = [mkRoom(998002, 2, 'indoor')];
+    S.mats = []; S.cables = []; S.strips = [];
+    _invalidateMatCache(); if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+    check('C: innendørs rom er ikke snø', false, _isSnowRoom(S.rooms[0]) === false, _isSnowRoom(S.rooms[0]));
+    const stC = _computeRoomStats(S.rooms[0]);
+    const ratedC = _roomRatedEffectW(S.rooms[0]);
+    const gammelC = stC.nettoM2 > 0 ? Math.round(ratedC / stC.nettoM2) : 0;
+    check('C: innendørs beholder ratedW/netto i tabellene', gammelC,
+      (!_isSnowRoom(S.rooms[0]) ? gammelC : _roomFlateeffektWm2(S.rooms[0], stC)) === gammelC, gammelC);
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    S.rooms = saved.rooms; S.mats = saved.mats; S.cables = saved.cables; S.strips = saved.strips;
+    if (S.project) S.project.parts = saved.parts;
+    S.ui.activePartId = saved.part;
+    _invalidateMatCache(); _invalidateStripCache();
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_flateeffektRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 function _prefsRegressionTest() {
   const saved = { rooms: S.rooms, strips: S.strips, prods: HEATING_PRODUCTS.slice(),
     gap: S.varmefolie.gapCm, wall: S.varmefolie.wallMarginCm, prof: _currentProfile };
@@ -46460,6 +46575,18 @@ function _listClassOptionsHtml(room){
   for(const f of fams){ o+=`<option value="${esc(f)}"${f===cur?' selected':''}>${esc(_listFamKeyLabel(f))}</option>`; }
   return o || `<option value="">—</option>`;
 }
+// 024: kortene i Hurtig prosjektering viste ratedW/netto også for snø. For et snø-rom er det
+// flateeffekten som gjelder — produktets W/m² der det ligger. Listerom uten geometri har ingen
+// lagt matte/kabel, så `_roomFlateeffektWm2` faller til rommets ønskede flateeffekt, som er
+// nettopp det brukeren har valgt. Innendørs er uendret.
+function _listWm2FlateStr(room, ratedW, net){
+  if (_isSnowRoom(room)) {
+    const v = _roomFlateeffektWm2(room);
+    return v ? (Math.round(v) + ' W/m²') : '—';
+  }
+  return (ratedW && net > 0) ? (Math.round(ratedW / net) + ' W/m²') : '—';
+}
+
 function _listProductOptionsHtml(room){
   const rid=room.id, envType=_roomModuleType(rid), modType=room.listModType||'cable', curId=_listRoomProductId(rid);
   const net=roomAreas(room).net/10000, count=room.listCount||1;
@@ -46501,7 +46628,7 @@ function _listRefreshComputed(roomId){
   set('li-want-'+roomId, net>0?Math.round(net*_tgt)+' W':'—');
   set('li-eff-'+roomId, ratedW?ratedW+' W':'—');
   set('li-wm2b-'+roomId, (ratedW&&brutto>0)?Math.round(ratedW/brutto)+' W/m²':'—');
-  set('li-wm2f-'+roomId, (ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—');
+  set('li-wm2f-'+roomId, _listWm2FlateStr(room, ratedW, net));   // 024
   // Kabel → CC; Matte → Størrelse matte (m²). Etiketten byttes på stedet (fokus bevares).
   const modType=room.listModType||'cable';
   set('li-cclabel-'+roomId, modType==='mat'?'Størrelse':'CC');
@@ -46546,7 +46673,7 @@ function _listDraftCardHtml(room){
   const targetStr=room.targetWm2?String(room.targetWm2):'';
   const cc=(modType==='cable'&&stats.cableCcCm>0)?(_roomCcOverWarn(room)?'⚠ ':'')+stats.cableCcCm.toFixed(1)+' cm':'—';   // 016
   const wm2b=(ratedW&&brutto>0)?Math.round(ratedW/brutto)+' W/m²':'—';
-  const wm2f=(ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—';
+  const wm2f=_listWm2FlateStr(room, ratedW, net);   // 024
   const heated=stats.heatedM2||0, cov=net>0?Math.min(100,Math.round(heated/net*100))+' %':'—';
   const editing=!!room._editing;
   const base='box-sizing:border-box;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:6px;color:var(--text,#e8eaed);padding:7px 9px;font-size:13px';
@@ -46617,7 +46744,7 @@ function _listFinalizedRowHtml(room,showBuilding){
   const prodTxt=p?((count>1?count+'× ':'')+p.name+voltSuffix):'—';
   const envType=room.moduleType||'indoor';
   const cc=modType==='mat' ? _listMatSizeStr(room) : ((stats.cableCcCm>0)?(_roomCcOverWarn(room)?'⚠ ':'')+stats.cableCcCm.toFixed(1)+' cm':'—');   // 016
-  const wm2f=(ratedW&&net>0)?Math.round(ratedW/net)+' W/m²':'—';
+  const wm2f=_listWm2FlateStr(room, ratedW, net);   // 024
   const td=(c,st)=>`<td style="padding:7px 10px;border-bottom:1px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${c}</td>`;
   const editing=!!room._editing;
   const hlBg='rgba(79,162,184,.16)';
@@ -50340,7 +50467,12 @@ async function exportPDF(opts) {
     doc.text('Type', cols[1], y);
     doc.text('Brutto m\u00b2', cols[2], y);
     doc.text('Netto m\u00b2', cols[3], y);
-    doc.text('Brutto W/m\u00b2', cols[4], y);
+    // 024: for en etasje der ALLE rom er snø er «Brutto W/m²» meningsløst (det er ikke et rom
+    // som varmes opp) — kolonnen viser dekning av brutto i stedet, og «Flate W/m²» blir ekte
+    // flateeffekt. Blandet etasje beholder overskriftene og får en fotnote under tabellen.
+    const _flSnow = fs.rooms.some(r => _isSnowRoom(r.room));
+    const _flAllSnow = _flSnow && fs.rooms.every(r => _isSnowRoom(r.room));
+    doc.text(_flAllSnow ? 'Dekning %' : 'Brutto W/m\u00b2', cols[4], y);
     doc.text('Flate W/m\u00b2', cols[5], y);
     doc.text('W', cols[6], y);
     y += 2.5;
@@ -50352,17 +50484,29 @@ async function exportPDF(opts) {
       const st = rs.stats;
       const ratedW = rs.ratedW;
       // DEL C: SAMME to formler som _listDraftCardHtml (wm2b=ratet\u00f7brutto, wm2f=ratet\u00f7netto).
-      const wm2b = st.bruttoM2 > 0 ? Math.round(ratedW / st.bruttoM2) : 0;
-      const wm2f = st.nettoM2 > 0 ? Math.round(ratedW / st.nettoM2) : 0;
+      // 024: snø-rom → kolonne 5 er FLATEEFFEKT (produktets W/m²) og kolonne 4 er DEKNING av
+      // brutto i prosent. Innendørs er begge uendret.
+      const _rSnow = _isSnowRoom(rs.room);
+      const wm2b = _rSnow ? _roomDekningBruttoPct(rs.room, st)
+                          : (st.bruttoM2 > 0 ? Math.round(ratedW / st.bruttoM2) : 0);
+      const wm2f = _rSnow ? _roomFlateeffektWm2(rs.room, st)
+                          : (st.nettoM2 > 0 ? Math.round(ratedW / st.nettoM2) : 0);
       doc.setTextColor(30, 40, 60);
       doc.text(_fitFloorTbl(rs.name, colW[0]), cols[0], y);
       doc.text(_roomProductFamily(rs.room), cols[1], y);
       doc.text(st.bruttoM2.toFixed(1), cols[2], y);
       doc.text(st.nettoM2.toFixed(1), cols[3], y);
-      doc.text(wm2b ? String(wm2b) : '\u2014', cols[4], y);
+      doc.text(wm2b ? (String(wm2b) + (_rSnow ? '%' : '')) : '\u2014', cols[4], y);
       doc.text(wm2f ? String(wm2f) : '\u2014', cols[5], y);
       doc.text(String(ratedW), cols[6], y);
       y += 5;
+    }
+    if (_flSnow && !_flAllSnow) {   // 024: blandet etasje — si hva tallene betyr
+      _checkPage(6);
+      doc.setFontSize(6.5); doc.setTextColor(120, 130, 150);
+      doc.text('Snøsmelting: Flate W/m\u00b2 er flateeffekt (produktets effekt på dekket flate), '
+             + 'og Brutto-kolonnen viser dekning i %. Innendørs: W per m\u00b2 gulv.', cols[0], y);
+      doc.setFontSize(8); y += 4;
     }
     // Floor total
     _checkPage(8);
@@ -50518,7 +50662,7 @@ async function exportPDF(opts) {
     const dekningNettoPct = stats.nettoM2 > 0 ? Math.round((heatedM2 / stats.nettoM2) * 100) : 0;
     const dekningBruttoPct = stats.bruttoM2 > 0 ? Math.round((heatedM2 / stats.bruttoM2) * 100) : 0;
     const totalW = Math.round(stats.totalW || 0);
-    const flateeffekt = stats.cableLenM > 0 ? (stats.cableWm2 || 0) : (heatedM2 > 0 ? Math.round(totalW / heatedM2) : 0);
+    const flateeffekt = _roomFlateeffektWm2(room, stats);   // 024: én kilde, delt med tabellene
     const wPerBrutto = stats.bruttoM2 > 0 ? Math.round(totalW / stats.bruttoM2) : 0;
 
     doc.setFont('helvetica', 'bold');
@@ -50972,21 +51116,40 @@ async function exportPDF(opts) {
     // (se _roomProductBreakdown). Samme regel som over \u2014 Etasje r\u00f8res ALDRI; de 11mm er tatt fra
     // Rom (\u22122), Produkt (\u22126) og Gruppe (\u22123), begge oppsett summerer fortsatt til n\u00f8yaktig 180.
     const _anyBuildingTable = floorSummaries.some(fs => fs.floor && fs.floor.building);
+    // 024: har tabellen snø-rom, trengs en Dekn.%-kolonne. CC-kolonnen er smal (7-8 mm) og
+    // ligger helt ytterst, så Dekn. legges etter den — radene får litt mindre luft, men ingen
+    // kolonne flyttes, og innendørs-only-tabeller er BIT-FOR-BIT som før.
+    const _snowRows = floorSummaries.some(f => f.rooms.some(r => _isSnowRoom(r.room)));
+    const _allSnow  = _snowRows && floorSummaries.every(f => f.rooms.every(r => _isSnowRoom(r.room)));
     const rColX = _anyBuildingTable
       ? [15, 29, 43, 61, 72, 79, 90, 106, 122, 142, 157, 168, 179, 188]
       : [15, 29, 49, 60, 67, 78, 94, 110, 134, 153, 166, 177, 187];
     const rColW = _anyBuildingTable
       ? [14, 14, 18, 11,  7, 11, 16,  16,  20,  15,  11,  11,   9,  7]
       : [14, 20, 11,  7, 11, 16, 16,  24,  19,  13,  11,  10,   8];
+    // Snø: «Flateeffekt W/m²» er for bredt for kolonnen (9-10 mm) — bruk «Flate W/m²» i
+    // overskriften og forklar i fotnoten under tabellen.
+    const _wm2Head = _allSnow ? 'Flate W/m\u00b2' : 'W/m\u00b2';
     const rHeads = _anyBuildingTable
-      ? ['Bygg','Etasje','Rom','Areal','Ant','Lengde','El.nr','Art.nr','Produkt','Gruppe','Type','W','W/m\u00b2','CC']
-      : ['Etasje','Rom','Areal','Ant','Lengde','El.nr','Art.nr','Produkt','Gruppe','Type','W','W/m\u00b2','CC'];
+      ? ['Bygg','Etasje','Rom','Areal','Ant','Lengde','El.nr','Art.nr','Produkt','Gruppe','Type','W',_wm2Head,'CC']
+      : ['Etasje','Rom','Areal','Ant','Lengde','El.nr','Art.nr','Produkt','Gruppe','Type','W',_wm2Head,'CC'];
+    if (_snowRows) { rHeads.push('Dekn.'); rColX.push(rColX[rColX.length-1] + 9); rColW.push(8); }
     const _fit = (s, wmm) => {
       s = String(s == null ? '' : s);
       if (!s) return '';
       const parts = doc.splitTextToSize(s, wmm);
       return parts[0] || '';
     };
+    // 024: for et snø-rom er tallet PRODUKTETS, ikke rommets — da hører det hjemme på HVER
+    // variantrad, ikke bare den første. Matte/folie/plate har sin egen `watt_per_m2`; en
+    // kabel-variant bruker rommets cableWm2 (W/m ÷ CC), som er det samme tallet.
+    const _wm2Cell = (v, first, roomWm2, isSnow) => {
+      if (!isSnow) return first ? (roomWm2 ? String(roomWm2) : '') : '';
+      const pw = v && v.product && v.product.watt_per_m2;
+      if (pw > 0) return String(Math.round(pw));
+      return roomWm2 ? String(roomWm2) : '';
+    };
+    let _rNeedsFootnote = false;
     const _rDrawHead = () => {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7);
@@ -51001,7 +51164,12 @@ async function exportPDF(opts) {
         const room = rs.room, st = rs.stats;
         const nettoM2 = st.nettoM2 || 0;
         const ratedW = _roomRatedEffectW(room);
-        const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2) : (rs.targetWm2 || 0);
+        // 024: snø-rom viser FLATEEFFEKT (produktets W/m² der det ligger), ikke W per romareal.
+        // Innendørs er uendret: W per m² netto gulv.
+        const _snow = _isSnowRoom(room);
+        const wm2 = _snow ? _roomFlateeffektWm2(room, st)
+                          : (nettoM2 > 0 ? Math.round(ratedW / nettoM2) : (rs.targetWm2 || 0));
+        const deknPct = _snow ? _roomDekningBruttoPct(room, st) : null;
         const ccCm = st.cableCcCm > 0 ? st.cableCcCm.toFixed(1) : '';
         // Én rad PER UNIK produkt-variant (mikset multi-kabel-rom → én rad per kabel-variant,
         // Antall/W korrekt per variant). Rom/Areal/W-m² står kun på første variantrad (rom-nivå),
@@ -51027,7 +51195,7 @@ async function exportPDF(opts) {
             dp?.product_family || '',
             v?.kind || '',
             v ? String(v.effectW) : '',
-            first ? (wm2 ? String(wm2) : '') : '',
+            _wm2Cell(v, first, wm2, _snow),
             ccCm
           ] : [
             first ? (fs.floor ? fs.floor.name : '') : '',
@@ -51041,15 +51209,25 @@ async function exportPDF(opts) {
             dp?.product_family || '',
             v?.kind || '',
             v ? String(v.effectW) : '',
-            first ? (wm2 ? String(wm2) : '') : '',
+            _wm2Cell(v, first, wm2, _snow),
             ccCm
           ];
+          if (_snowRows) cells.push(first && deknPct != null ? deknPct + '%' : '');
+          _rNeedsFootnote = _snowRows;
           doc.setFontSize(7);
           doc.setTextColor(30, 40, 60);
           for (let i = 0; i < cells.length; i++) doc.text(_fit(cells[i], rColW[i]), rColX[i], y);
           y += 5;
         }
       }
+    }
+    if (_rNeedsFootnote) {   // 024
+      if (y + 8 > H - M) _addPage();
+      y += 2;
+      doc.setFontSize(6.5); doc.setTextColor(120, 130, 150);
+      doc.text('Snøsmelting: W/m\u00b2 er flateeffekt (produktets effekt på dekket flate), '
+             + 'og Dekn. er oppvarmet andel av brutto areal. Innendørs: W per m\u00b2 netto gulv.', M, y);
+      y += 4;
     }
     _pageStarted = true;
   } // end if (opts.roomTable)
@@ -59198,14 +59376,22 @@ async function _exportMaterialListXLSX() {
   //    el-nummer/art.nr/navn/familie (det dominerende produktet for rom med flere produkter). ──
   // Sak 4 (Kenneth 17.09.2026): «Lengde m» rett etter «Antall produkter», samme radrekkefølge
   // som PDF-Romoversikten (samme _roomProductBreakdown, samme v.lengthM).
-  const roomRows = [['Etasje','Rom','Areal m²','Antall produkter','Lengde m','El.nummer','Lev. art.nr','Produkt','Produktgruppe','Type','Effekt W','W/m²','CC cm']];
+  // 024: ny siste kolonne «Dekning % brutto». Excel har én header for hele arket, så W/m²-
+  // kolonnen beholder navnet — men for snø-rom INNEHOLDER den flateeffekt (produktets W/m² på
+  // dekket flate), ikke W per romareal. Det står i notatraden under tabellen.
+  const roomRows = [['Etasje','Rom','Areal m²','Antall produkter','Lengde m','El.nummer','Lev. art.nr','Produkt','Produktgruppe','Type','Effekt W','W/m²','CC cm','Dekning % brutto']];
+  let _xlSnow = false;
   for (const room of rooms) {
     const floor = (S.floors||[]).find(f => f.id === room.floorId);
     const stats = (typeof _computeRoomStats === 'function') ? _computeRoomStats(room) : { nettoM2: 0, cableCcCm: 0 };
     const nettoM2 = stats.nettoM2 || 0;
     const ratedW = (typeof _roomRatedEffectW === 'function') ? _roomRatedEffectW(room) : 0;
-    const wm2 = nettoM2 > 0 ? Math.round(ratedW / nettoM2)
-      : ((typeof _roomTargetWm2 === 'function') ? (_roomTargetWm2(room.id) || '') : '');
+    const _snow = (typeof _isSnowRoom === 'function') && _isSnowRoom(room);
+    if (_snow) _xlSnow = true;
+    const wm2 = _snow ? _roomFlateeffektWm2(room, stats)
+      : (nettoM2 > 0 ? Math.round(ratedW / nettoM2)
+      : ((typeof _roomTargetWm2 === 'function') ? (_roomTargetWm2(room.id) || '') : ''));
+    const deknPct = _snow ? _roomDekningBruttoPct(room, stats) : '';
     const ccCm = (stats.cableCcCm > 0) ? +stats.cableCcCm.toFixed(1) : '';
     // Én rad PER UNIK produkt-variant (jf. PDF-Romoversikten). Etasje/Rom/Areal/W-m² kun på
     // første variantrad; Antall/Effekt W = per variant (Σ Effekt W = romtotal); CC = felles.
@@ -59227,13 +59413,21 @@ async function _exportMaterialListXLSX() {
         dp?.product_family || '',
         v?.kind || '',
         v ? v.effectW : '',
-        first ? wm2 : '',
-        ccCm
+        // Snø: tallet er PRODUKTETS, så det hører hjemme på hver variantrad (som i PDF-en).
+        _snow ? ((dp && dp.watt_per_m2 > 0) ? Math.round(dp.watt_per_m2) : (first ? wm2 : ''))
+              : (first ? wm2 : ''),
+        ccCm,
+        first ? deknPct : ''
       ]);
     }
   }
+  if (_xlSnow) {
+    roomRows.push([]);
+    roomRows.push(['Snøsmelting: W/m² er flateeffekt (produktets effekt på dekket flate). '
+                 + 'Innendørs: W per m² netto gulv. Dekning % brutto = oppvarmet areal av brutto.']);
+  }
   const wsRooms = XLSX.utils.aoa_to_sheet(roomRows);
-  wsRooms['!cols'] = [{wch:14},{wch:20},{wch:10},{wch:14},{wch:10},{wch:14},{wch:16},{wch:28},{wch:18},{wch:10},{wch:10},{wch:10},{wch:8}];
+  wsRooms['!cols'] = [{wch:14},{wch:20},{wch:10},{wch:14},{wch:10},{wch:14},{wch:16},{wch:28},{wch:18},{wch:10},{wch:10},{wch:10},{wch:8},{wch:16}];   // 024: + Dekning % brutto
 
   // ── Sheet 4: Per trapp — A-Q (17 kolonner), samme kolonner som PDF-ens Trappeoversikt (én
   //    kilde, to utganger — se exportPDF). Én rad pr. sone/trinn-serie, samme fallback som Per rom
