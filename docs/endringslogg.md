@@ -95,9 +95,14 @@ produktminimum som før — `_hideCycleBadge`, `_loadProducts`, `marginWarnSnap`
   samme try/catch som `initials` alt bruker, og localStorage overtar.
 - `_userPrefs()` = profil ⊕ localStorage ⊕ standard. Profilen vinner fra det øyeblikket brukeren er
   innlogget — ellers ville en kollega på samme maskin arvet forrige brukers verdier.
-- **Standardverdien for gap er uendret 1,0 cm.** Bestillingen foreslo 2,0, men ba meg bekrefte;
-  jeg endrer ikke en verdi som påvirker alle brukere uten svar. Vegg-standard er `null` = ingen
-  preferanse, altså nøyaktig dagens oppførsel.
+- **Standardverdien for gap er 2,0 cm** (Kenneth bekreftet: «2 cm standard»). Vegg-standard er
+  `null` = ingen preferanse, altså nøyaktig dagens oppførsel.
+- **To ulike tall, atskilt med vilje — ikke slå dem sammen senere.** `DEFAULT_FOIL_GAP_CM = 2.0`
+  er standarden en bruker uten egen preferanse prosjekterer med i dag. `LEGACY_FOIL_GAP_CM = 1.0`
+  er verdien gamle prosjekter FRYSES på ved åpning når prosjektfila ikke selv har lagret noen
+  avstand — de ble lagt ut da standarden var 1,0. Heves den til 2,0, påstår man i ettertid at
+  gammel folie lå på 2 cm, og folien ville flyttet seg i prosjekter som alt er levert.
+  Verifisert: fersk bruker får 2,0; gammelt prosjekt uten lagret verdi fryses på 1,0.
 
 **Prinsippet fra «folie-avstand lekker mellom rom» (22.09) er bærende:** en preferanse er et FRØ
 for nye rom. `room.wallMarginCm` lagres på rommet, og `_effectiveMarginCm` leser rommets verdi —
