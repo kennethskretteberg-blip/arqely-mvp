@@ -77,6 +77,60 @@ tegneverktøyene framme. Alle åtte regresjonstester grønne (137 sjekker).
 
 ---
 
+## Egne standardverdier per bruker: folie-avstand og vegg-avstand — 2026-10-06
+
+Kenneth: «Kan hver bruker sette sine egne preferanser på standard avstand mellom varmefolier? …
+Standard avstand til vegger også … men aldri tillate mindre enn tillatt, verken for avstand til
+vegg eller avstand mellom varmefolier.»
+
+**STEG 0 — funnet som styrte hele designet: bare 1 av 51 kallsteder sendte `roomId` til
+`_effectiveMarginCm`.** En rom-lagret margin ville altså ikke slått gjennom noe sted. 38 kallsteder
+er nå trådd med `roomId` (de som faktisk har den i scope); 12 står igjen uten, og de faller på
+produktminimum som før — `_hideCycleBadge`, `_loadProducts`, `marginWarnSnap`, `_hindringWallLabel`,
+`_fillZoneAsRectChain`, `getStripViolations` og `_roomWord`.
+
+- `profiles.prefs` (jsonb): `{foilGapCm, wallMarginCm}`. **Migrasjon:
+  `supabase-migration-profiles-prefs.sql` — additiv og idempotent, Kenneth kjører den manuelt i
+  Supabase SQL Editor.** Uten den virker alt likevel: `upsert` med en ukjent kolonne feiler stille i
+  samme try/catch som `initials` alt bruker, og localStorage overtar.
+- `_userPrefs()` = profil ⊕ localStorage ⊕ standard. Profilen vinner fra det øyeblikket brukeren er
+  innlogget — ellers ville en kollega på samme maskin arvet forrige brukers verdier.
+- **Standardverdien for gap er uendret 1,0 cm.** Bestillingen foreslo 2,0, men ba meg bekrefte;
+  jeg endrer ikke en verdi som påvirker alle brukere uten svar. Vegg-standard er `null` = ingen
+  preferanse, altså nøyaktig dagens oppførsel.
+
+**Prinsippet fra «folie-avstand lekker mellom rom» (22.09) er bærende:** en preferanse er et FRØ
+for nye rom. `room.wallMarginCm` lagres på rommet, og `_effectiveMarginCm` leser rommets verdi —
+ikke brukerens — for et rom som har en. Gamle prosjekter fryses ved åpning på `0` («ingenting
+utover produktets minimum»), samme mønster som `foilGapCm`-migreringen, så en bruker med egen
+preferanse som åpner et gammelt prosjekt ikke flytter folie som alt ligger der.
+
+- `_effectiveMarginCm(productId, roomId)` = `max(produktets minimum, ønsket)`. Ønsket kan bare ØKE
+  avstanden — «aldri mindre enn tillatt» er hele poenget, og produktminimum er et leverandørkrav.
+- Sone-temp-rommet arver `foilGapCm`/`wallMarginCm` fra rommet. Uten det ville en sone falt
+  tilbake på brukerens preferanse mens rommet rundt brukte sin egen — to marginer i samme rom.
+- Ny ctxbar-chip «↔ Vegg N cm» → panel med presets 1/2/2,5/3/4/5 cm. Setter `room.wallMarginCm` og
+  kjører den RELATIVE omfordelingen fra 022 (`_respaceStrips`, anker senter) — aldri «legg alt på
+  nytt». Verdier under produktminimum klemmes med «⚠ Min N cm (produktets krav)».
+- Gap-panelet (rom og utvalg) viser nå «Min N cm (produktets krav)». Før ble verdien klemt stille
+  i `_effectiveGapCmPair` uten at brukeren så det.
+
+**Testfelle rettet underveis:** `_foilRegressionTest` målte dekningsgrad mot faste terskler, men
+leste samtidig brukerens lagrede avstand. En lagret verdi på 20 cm fikk «Trapp-rom: dekning over
+85 %» til å feile uten at noe var galt med koden — det skjedde to ganger under dette arbeidet.
+Testen fester nå preferansene og gjenoppretter dem etterpå. En regresjonstest skal ikke avhenge av
+hva brukeren har stilt inn.
+
+**Testet:** uten preferanse → 2,5 cm (produktminimum), uendret. Preferanse 4 → 4 cm. Rom frosset på
+0 → 2,5, altså preferansen ignorert. Produkt med minimum 5 og preferanse 4 → 5. 20 (preferanse,
+produkt)-par → aldri under produktminimum. Profil slår localStorage; utlogget vinner localStorage.
+«↔ Vegg» 2,5 → 4 cm i et L-rom → alle striper innenfor polygonet; 1 cm klemmes til 2,5.
+Ny `_prefsRegressionTest` (14 sjekker) + alle ti øvrige grønne — **172 sjekker**.
+
+**Filer:** index.html, supabase-migration-profiles-prefs.sql (ny).
+
+---
+
 ## Folie-avstand: gjelder valgte folier, og flytter aldri folie ut av rommet — 2026-10-06
 
 Kenneth: «Når jeg markerer flere varmefoliebredder, ønsker jeg at «Avstand mellom varmefolier»
