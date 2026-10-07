@@ -60,8 +60,38 @@ så Kenneth kan si «ok» eller «endre». Kenneth svarer til slutt.
 
 ## 029
 
-- Resend: er `varmeplan.no` verifisert som avsenderdomene? Hvis ikke beholdes `noreply@arqely.no`
-  som avsender til Kenneth har verifisert — skriv her hva som ble brukt.
+- **❓ TIL KENNETH — Resend-domenet.** `send-invite-email` sender i dag fra `noreply@arqely.no`,
+  og det virker. `send-warranty-email` har `noreply@varmeplan.no` som standard, men den er
+  dokumentert som ikke aktiv — altså uprøvd. **Valgt:** `kundelenke-mail` bruker samme standard
+  som den som faktisk sender i dag (`noreply@arqely.no`), slik at e-post virker fra første
+  deploy. Skal avsender bli `noreply@varmeplan.no`, må du verifisere domenet i Resend (DNS) og
+  deretter sette `FROM_EMAIL`-secreten — ingen kodeendring. Lenkene **i** e-posten peker
+  uansett på `varmeplan.no`; det er uavhengig av avsenderadressen.
+- **❓ TIL KENNETH — Vercel-domenet (prompten §3).** Jeg kan ikke lese Vercel-prosjektets
+  domeneoppsett herfra. Bekreft at `varmeplan.no` er primærdomene og at `arqely.com` redirecter
+  dit — ellers havner kundelenkene på en side som kanskje sies opp. `vercel.json` har bare
+  `/romtegner.html → /`-redirecten; domene-redirect settes normalt på prosjektnivå i Vercel, så
+  jeg har ikke lagt noe inn i fila. Skriv her hva som faktisk gjelder.
+- **`verify_jwt` er ikke innlogging.** Supabase godtar anon-nøkkelen som en gyldig JWT, og den
+  ligger åpent i klienten. **Valgt:** `kind='invite'` verifiserer brukeren eksplisitt med
+  `auth.getUser(jwt)` + medlemskapssjekk mot lenkens `org_id`, i stedet for å stole på
+  plattformens JWT-sjekk.
+- **Funksjonen slår opp alt innhold selv.** Fra klienten kommer bare token, og for `invite`
+  mottaker + melding. **Valgt** framfor `send-invite-email`-mønsteret, der både mottaker og
+  lenke-URL kommer fra klientens body — den kan sende en vilkårlig lenke til hvem som helst med
+  Varmeplan som avsender. Den eksisterende funksjonen er ikke rørt i denne omgang, men svakheten
+  er verdt en egen oppgave.
+- **`kind='answered'` måtte kunne kalles anonymt** (kunden er ikke innlogget). **Valgt:** tre
+  lag i stedet for autentisering — `status='answered'`, svar under 10 min gammelt, og maks ett
+  varsel per lenke per 10 min. Mottakeren er alltid lenkens egen `notify_email`. Det eneste en
+  angriper kan utløse er én e-post til Kenneth selv, rett etter at en kunde faktisk har svart.
+- **Svarvarselet sendes uten `await`.** E-post er et tillegg; kundens bekreftelse skal aldri
+  avhenge av at en SMTP-tjeneste svarer.
+- **Boot-stien `?project=&kundesvar=` ligger etter innlogging**, ikke blant de anonyme grenene
+  i `initSupabase()` — å åpne et skyprosjekt krever en sesjon.
+- **En 027-test besto av feil grunn.** `location.origin`-sjekken matchet en *kommentar* om
+  `location.origin`, ikke kode, og ville vært grønn selv om bruken ble satt tilbake. Rettet med
+  `_kildeUtenKommentarer` + et sveip over hele skriptet i stedet for en liste med funksjonsnavn.
 
 ## 030
 

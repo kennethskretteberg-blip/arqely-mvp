@@ -6996,6 +6996,10 @@ async function _kundeSubmit() {
       alert('Kunne ikke sende inn — lenken kan være utløpt eller allerede innarbeidet. Ta kontakt med den som sendte den.');
       return;
     }
+    // 029: varsle den som laget lenken. UTEN await og uten feilmelding til kunden — e-post er
+    // et tillegg, og en kunde som nettopp målte opp stua kan uansett ikke gjøre noe med at en
+    // SMTP-tjeneste er nede. Bekreftelsen under vises uansett.
+    _kundeNotifyAnswered(_kundeState.token);
     document.getElementById('_kunde-bar').innerHTML =
       `<div style="text-align:center;padding:22px 8px">
         <div style="font-size:34px;margin-bottom:8px">✓</div>
@@ -7126,9 +7130,20 @@ async function _kundeCreateLink() {
       <div style="display:flex;gap:7px;align-items:center">
         <input readonly value="${esc(url)}" onclick="this.select()" style="flex:1;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px">
         <button onclick="navigator.clipboard.writeText('${esc(url)}').then(()=>_showToast&&_showToast('Kundelenke kopiert','ok'))" style="padding:7px 13px;background:var(--accent);border:none;border-radius:7px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
-        <button disabled title="E-post kommer i 029" style="padding:7px 13px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--dim);cursor:not-allowed">Send på e-post</button>
       </div>
-      <div style="font-size:11px;color:var(--dim);margin-top:6px">Utløper ${new Date(row.expires_at).toLocaleDateString('nb-NO')}. Kan trekkes tilbake fra prosjektinfo.</div>`;
+      <div style="font-size:11px;color:var(--dim);margin-top:6px">Utløper ${new Date(row.expires_at).toLocaleDateString('nb-NO')}. Kan trekkes tilbake fra prosjektinfo.</div>
+      <!-- 029: e-post. Meldinga til kunden er den samme fritekstoen som ble skrevet over
+           (#kunde-note) — ikke et nytt felt å fylle ut to ganger. -->
+      <div style="margin-top:12px;padding-top:11px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--dim);margin-bottom:5px">Eller send den direkte:</div>
+        <div style="display:flex;gap:7px;align-items:center">
+          <input id="kunde-mail-to" type="email" placeholder="kundens@epost.no"
+            style="flex:1;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px">
+          <button id="kunde-mail-btn" onclick="_kundeSendInvite('${esc(token)}')"
+            style="padding:7px 13px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer">Send på e-post</button>
+        </div>
+        <div id="kunde-mail-msg" style="display:none;font-size:11px;margin-top:6px"></div>
+      </div>`;
   }
   _kundeRefreshStatus();
 }
@@ -7160,6 +7175,63 @@ function _kundeCopyLink() {
     .then(() => _showToast && _showToast('Kundelenken er kopiert', 'ok'));
 }
 
+
+// ─── 029: E-post for kundelenker ───────────────────────────────────────────────
+// Klienten sender ALDRI e-post selv — ingen API-nokkel i index.html. Alt gar via
+// Edge-funksjonen `kundelenke-mail`, som slar opp innholdet sitt selv med service role.
+// Herfra sendes bare: hvilken lenke (token), og for invitasjon mottaker + melding.
+async function _kundeMailCall(body, withAuth) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (withAuth) {
+    const tok = (await _db.auth.getSession()).data.session?.access_token;
+    if (!tok) return { ok: false, error: 'Du må være innlogget for å sende e-post' };
+    headers.Authorization = 'Bearer ' + tok;
+  } else {
+    // Anonymt kall (kundesiden): anon-nøkkelen er det funksjonsgatewayen forventer.
+    headers.Authorization = 'Bearer ' + SUPABASE_KEY;
+    headers.apikey = SUPABASE_KEY;
+  }
+  try {
+    const resp = await fetch(SUPABASE_URL + '/functions/v1/kundelenke-mail',
+      { method: 'POST', headers, body: JSON.stringify(body) });
+    let data = null;
+    try { data = await resp.json(); } catch (e) {}
+    if (!resp.ok) return { ok: false, error: (data && data.error) || ('HTTP ' + resp.status) };
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e.message || 'nettverksfeil' };
+  }
+}
+
+// Kalt fra «Be kunde om mål»-modalen etter at lenken er laget.
+async function _kundeSendInvite(token) {
+  const toEl = document.getElementById('kunde-mail-to');
+  const btn = document.getElementById('kunde-mail-btn');
+  const msgEl = document.getElementById('kunde-mail-msg');
+  const to = (toEl && toEl.value || '').trim();
+  if (!to || !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]{2,}$/.test(to)) {
+    if (msgEl) { msgEl.style.display = 'block'; msgEl.style.color = '#e5484d'; msgEl.textContent = 'Skriv en gyldig e-postadresse'; }
+    return;
+  }
+  const note = (document.getElementById('kunde-note') || {}).value || '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Sender …'; }
+  const r = await _kundeMailCall({ kind: 'invite', token, to, message: note }, true);
+  if (btn) { btn.disabled = false; btn.textContent = 'Send på e-post'; }
+  if (msgEl) {
+    msgEl.style.display = 'block';
+    if (r.ok) { msgEl.style.color = 'var(--accent)'; msgEl.textContent = '✓ Sendt til ' + to; }
+    else { msgEl.style.color = '#e5484d'; msgEl.textContent = 'Kunne ikke sende: ' + r.error + ' — lenken kan deles manuelt.'; }
+  }
+  if (r.ok) _kundeRefreshStatus();
+}
+
+// Kalt fra kundesiden etter vellykket innsending. E-post er et TILLEGG: feiler den, skal
+// kunden likevel se bekreftelsen sin — derfor ingen await i den kritiske stien og ingen
+// feilmelding til kunden, som uansett ikke kan gjore noe med den.
+function _kundeNotifyAnswered(token) {
+  _kundeMailCall({ kind: 'answered', token }, false)
+    .then(r => { if (!r.ok) console.info('[kundelenke] svarvarsel ikke sendt:', r.error); });
+}
 
 // ─── 028: Gjennomgang av kundens svar ──────────────────────────────────────────
 // Kundens svar er et FORSLAG (spec regel 2) — det ligger på kundelenken, aldri i prosjektet.
@@ -35923,6 +35995,15 @@ function roomAreas(room){
 // summerte til 8,15 m mot venstreveggens oppgitte 11,25 m — 3,10 m forsvant.
 const _AXIS_TOL_DEG = 1;
 // 027: låser svar-validering, URL-bygging og «går målene opp?»-regnestykket.
+// 029: fjerner kommentarer fra en funksjons kildekode før en test leter etter et mønster.
+// Uten dette kan en test bestå fordi forbudte ord står i en KOMMENTAR om hvorfor de er
+// forbudt — som var akkurat det som skjedde med 027s location.origin-sjekk (se sjekk C).
+function _kildeUtenKommentarer(fn) {
+  return String(typeof fn === 'function' ? fn.toString() : fn)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+}
+
 function _kundelenkeRegressionTest() {
   const saved = { rooms: S.rooms, state: typeof _kundeState !== 'undefined' ? _kundeState : null,
                   link: typeof _kundeLinkCache !== 'undefined' ? _kundeLinkCache : null,
@@ -35984,8 +36065,14 @@ function _kundelenkeRegressionTest() {
     const u = _PUBLIC_BASE_URL + '/?kunde=' + 'abc-123';
     check('C: kundelenke peker på varmeplan.no', true,
       u.startsWith('https://varmeplan.no/?kunde='), u);
-    check('C: ikke location.origin i delelenken', false,
-      /location\.origin/.test(_presentShareLink.toString()), 'location.origin funnet');
+    // ⚠ RETTET 029: denne sjekken besto FØR av feil grunn. Den var skrevet som
+    // `check(navn, false, /location\.origin/.test(kilde), …)` — men tredje argument ER
+    // betingelsen som må være SANN for å bestå, så den krevde i praksis at kilden INNEHOLDT
+    // «location.origin». Den gjorde det: i en KOMMENTAR inne i funksjonen. Sjekken ville
+    // altså vært grønn selv om `location.origin` ble satt rett tilbake i koden.
+    // `_kildeUtenKommentarer` fjerner kommentarene først, så bare ekte kode teller.
+    check('C: ikke location.origin i delelenken', true,
+      !/location\.origin/.test(_kildeUtenKommentarer(_presentShareLink)), _presentShareLink.name);
 
     // ─── D — svar-payload valideres ───
     S.rooms = [{ id: 994002, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
@@ -36144,6 +36231,65 @@ function _kundelenkeRegressionTest() {
     check('F: rommet er LIKEVEL rettvinklet (ikke skjevt i stillhet)', true,
       _roomAxisBalance(S.rooms[0].points).rectilinear, false);
     undo();
+
+    // ─── G (029) — e-post: lenkebygging, grenser, og at klienten ikke kan styre innholdet ───
+    // STEG 0.3 fant tre invitasjonslenker bygget med `location.origin` — de ville sendt
+    // kunden til arqely.com eller localhost i en e-post. Alle utgående lenker skal på
+    // _PUBLIC_BASE_URL (spec regel 8). Dette låser det for ALLE tre, ikke bare delelenka.
+    // ⚠ Første utgave listet opp fire funksjonsNAVN. To av de tre invitasjonslenkene bygges
+    // inne i anonyme handlere uten stabilt navn, og en navneliste fanger uansett ikke et
+    // kallsted som legges til i morgen. Derfor sveipes HELE det innebygde skriptet, med
+    // kommentarer og denne testfila selv fjernet — da er påstanden «ingen utgående lenke
+    // bygges på location.origin» faktisk dekkende.
+    const _alleSkript = [...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n');
+    const _kode = _kildeUtenKommentarer(_alleSkript)
+      .replace(/function _kundelenkeRegressionTest\(\)[\s\S]*?\n\}/, '');   // testen selv nevner det
+    const _treff = (_kode.match(/location\.origin/g) || []).length;
+    check('G: ingen utgående lenke bygges på location.origin', 0, _treff === 0, _treff);
+    check('G: sveipet fant faktisk kode (ikke tom streng)', true,
+      _kode.length > 100000 && /_PUBLIC_BASE_URL/.test(_kode), _kode.length);
+    const _invitt = (_kode.match(/'\/\?invite='/g) || []).length;
+    check('G: alle tre invitasjonslenkene bygges på _PUBLIC_BASE_URL', 3,
+      _invitt === 3 && (_kode.match(/_PUBLIC_BASE_URL \+ '\/\?invite='/g) || []).length === 3, _invitt);
+    check('G: basis-URL uendret av 029', 'https://varmeplan.no',
+      _PUBLIC_BASE_URL === 'https://varmeplan.no', _PUBLIC_BASE_URL);
+
+    // Klienten sender ALDRI e-post selv — ingen nøkkel, ingen Resend-kall i index.html.
+    check('G: ingen Resend-nøkkel i klienten', true,
+      !/RESEND_API_KEY|api\.resend\.com/.test(_kundeMailCall.toString() + _kundeSendInvite.toString()),
+      'Resend funnet i klienten');
+
+    // «invite» må gå med brukerens egen sesjon; «answered» er anonymt (kunden har ingen).
+    check('G: invite sendes med bruker-JWT', true,
+      /auth\.getSession/.test(_kundeMailCall.toString()) && /_kundeMailCall\([^)]*,\s*true\)/.test(_kundeSendInvite.toString()),
+      _kundeSendInvite.toString().slice(0, 200));
+    check('G: svarvarsel sendes anonymt', true,
+      /_kundeMailCall\(\{[^}]*\},\s*false\)/.test(_kundeNotifyAnswered.toString()),
+      _kundeNotifyAnswered.toString());
+
+    // E-post er et TILLEGG: kundens bekreftelse skal aldri avhenge av at den gikk gjennom.
+    check('G: svarvarselet blokkerer ikke kundens bekreftelse', true,
+      !/await\s+_kundeNotifyAnswered/.test(_kundeSubmit.toString()), 'await funnet');
+    check('G: _kundeNotifyAnswered svelger feil selv', true,
+      !/throw/.test(_kundeNotifyAnswered.toString()), _kundeNotifyAnswered.toString());
+
+    // Samme e-postvalidering på begge sider av nettet (klienten er bekvemmelighet, funksjonen
+    // er grensa) — men klienten skal ikke slippe gjennom åpenbart søppel.
+    const gyldig = ['ola@kunde.no', 'a.b+c@sub.domene.co.uk'];
+    const ugyldig = ['', 'ola', 'ola@', '@kunde.no', 'ola@kunde', 'a@b.c,d@e.fg', 'ola kunde@no.no'];
+    const re = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]{2,}$/;
+    check('G: gyldige adresser godtas', true, gyldig.every(e => re.test(e)), gyldig.filter(e => !re.test(e)));
+    check('G: ugyldige adresser avvises', true, ugyldig.every(e => !re.test(e)), ugyldig.filter(e => re.test(e)));
+
+    // Boot-stien fra e-posten krever innlogging og ligger derfor ETTER auth.
+    check('G: ?project=&kundesvar= leses etter innlogging', true,
+      /_kundeOpenFromMail/.test(_initAfterAuth.toString()) && !/_kundeOpenFromMail/.test(initSupabase.toString()),
+      'feil sted');
+    check('G: åpner ikke panelet om prosjektet ikke ble lastet', true,
+      /_supabaseProjectId !== pid/.test(_kundeOpenFromMail.toString()), 'mangler vakt');
+    check('G: ?kunde= og ?present= er fortsatt anonyme grener før auth', true,
+      /get\('present'\)/.test(initSupabase.toString()) && /get\('kunde'\)/.test(initSupabase.toString()),
+      'anonym gren mangler');
   } finally {
     S.rooms = saved.rooms;
     if (typeof _kundeState !== 'undefined') _kundeState = saved.state;
@@ -49718,9 +49864,15 @@ function _renderSbProjInfo() {
   if (lenkeEl) {
     if (k && k.status === 'open') {
       const exp = k.expires_at ? ' · utløper ' + new Date(k.expires_at).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}) : '';
+      // 029: er lenken sendt pa e-post, vises mottakeren her — ellers er det umulig a vite om
+      // kunden faktisk har fatt den, eller om den bare ble kopiert og aldri delt.
+      const sendt = k.invite_sent_to
+        ? '<div style="font-size:10px;color:var(--dim);margin-top:2px">Sendt til ' + esc(k.invite_sent_to) +
+          (k.invite_sent_at ? ' ' + new Date(k.invite_sent_at).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}) : '') + '</div>'
+        : '';
       lenkeEl.innerHTML = '<span style="color:var(--muted)">Kundelenke: åpen' + exp + '</span>' +
         ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="_kundeCopyLink()">Kopier</span>' +
-        ' <span style="color:var(--dim);cursor:pointer;text-decoration:underline" onclick="_kundeRevokeLink(\'' + k.id + '\')">Trekk tilbake</span>';
+        ' <span style="color:var(--dim);cursor:pointer;text-decoration:underline" onclick="_kundeRevokeLink(\'' + k.id + '\')">Trekk tilbake</span>' + sendt;
       lenkeEl.style.display = '';
     } else lenkeEl.style.display = 'none';
   }
@@ -56188,7 +56340,8 @@ async function _admSendInvite() {
     const { error: invErr } = await _db.from('org_invitations').insert({ email, org_id:orgId||null, role, token, status:'pending', invited_by:_currentUser.id }).select().single();
     if (invErr) throw invErr;
 
-    const inviteUrl = window.location.origin + window.location.pathname + '?invite=' + token;
+    const inviteUrl = _PUBLIC_BASE_URL + '/?invite=' + token;   // 029 (spec regel 8): aldri location.origin —
+    // den gir arqely.com eller localhost i en e-post kunden skal klikke på.
     try {
       const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
         method:'POST',
@@ -57029,7 +57182,8 @@ async function _orgAdmInviteUser() {
     const token = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2)+Date.now().toString(36));
     const { error } = await _db.from('org_invitations').insert({ email, org_id:_userOrg.id, role, token, status:'pending', invited_by:_currentUser.id }).select().single();
     if (error) throw error;
-    const inviteUrl = window.location.origin + window.location.pathname + '?invite=' + token;
+    const inviteUrl = _PUBLIC_BASE_URL + '/?invite=' + token;   // 029 (spec regel 8): aldri location.origin —
+    // den gir arqely.com eller localhost i en e-post kunden skal klikke på.
     try {
       const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
         method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
@@ -57086,7 +57240,7 @@ async function _orgAdmResendInvite(invId) {
   const inv = (_orgAdmState.cache.invitations || []).find(i => i.id === invId);
   if (!inv || !inv.token) { _showToast('Fant ikke invitasjonen'); return; }
   try {
-    const inviteUrl = window.location.origin + window.location.pathname + '?invite=' + inv.token;
+    const inviteUrl = _PUBLIC_BASE_URL + '/?invite=' + inv.token;   // 029 (spec regel 8)
     const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
@@ -61314,6 +61468,27 @@ async function _initAfterAuth() {
   catch(e) { console.error('[initAfterAuth] _showProjectListScreen feilet:', e); }
   await safe('_startPeriodicSave',     () => _startPeriodicSave());
   await safe('_checkForRecovery',      () => _checkForRecovery());
+  // 029: e-postens «Åpne i Varmeplan» → ?project=<id>&kundesvar=<lenke-id>. Må ligge HER,
+  // etter innlogging: å åpne et skyprosjekt krever en sesjon, i motsetning til ?kunde= og
+  // ?present= som er anonyme og derfor gren-ut før auth i initSupabase().
+  await safe('_kundeOpenFromMail',     () => _kundeOpenFromMail());
+}
+
+async function _kundeOpenFromMail() {
+  const q = new URLSearchParams(location.search);
+  const pid = q.get('project'), svarId = q.get('kundesvar');
+  if (!pid) return;
+  await _openCloudProject(pid);
+  // _openCloudProject alert-er og returnerer stille om lastingen feilet. Uten denne sjekken
+  // ville meldinga under pastaa at svaret var innarbeidet, naar sannheten er at prosjektet
+  // aldri ble apnet.
+  if (_supabaseProjectId !== pid) return;
+  if (!svarId) return;
+  // _openCloudProject ender med _kundeRefreshStatus() via renderSidebar-kjeden, men den er
+  // asynkron — vent på den eksplisitt i stedet for å gjette på en timeout.
+  await _kundeRefreshStatus();
+  if (_kundeLinkCache && _kundeLinkCache.status === 'answered') openKundeReviewPanel();
+  else _showToast && _showToast('Svaret er enten allerede innarbeidet eller trukket tilbake', 'info');
 }
 
 async function initSupabase() {

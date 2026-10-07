@@ -4,6 +4,66 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundelenke på e-post begge veier, alle utgående lenker på varmeplan.no — 2026-10-07
+
+Serien «Kundelenke» (027–030), prompt 029. Krever 027 og 028.
+
+**STEG 0 — tre funn, og det første endret hele sikkerhetsdesignet:**
+
+1. **Ingen av de eksisterende e-postfunksjonene verifiserer kalleren.** `send-invite-email`
+   leser ikke `Authorization` i det hele tatt — den tar både mottaker **og** selve lenke-URL-en
+   rett fra klientens body. Den kan altså sende en vilkårlig lenke til en vilkårlig adresse med
+   Varmeplan som avsender. Og: Supabase sin `verify_jwt` er ikke det samme som «innlogget
+   bruker» — **anon-nøkkelen er en gyldig JWT**, og den ligger åpent i klienten. En funksjon som
+   stoler på `verify_jwt` alene er i praksis åpen. Den nye funksjonen verifiserer derfor
+   brukeren eksplisitt med `auth.getUser(jwt)` og sjekker medlemskap i lenkens organisasjon.
+   `send-warranty-email` er mønsteret som ble kopiert: den slår opp alt selv med service role.
+2. **`FROM_EMAIL` spriker mellom funksjonene** — `send-invite-email` har `noreply@arqely.no`
+   som standard og sender faktisk e-post i dag; `send-warranty-email` har `noreply@varmeplan.no`,
+   men er dokumentert som ikke aktiv, altså uprøvd. Den nye funksjonen bruker den *provde*
+   standarden. Skal avsender bli `varmeplan.no`, må domenet verifiseres i Resend først — notert
+   i SPØRSMÅL.md.
+3. **Tre invitasjonslenker bygges med `location.origin`** i klienten — de ville sendt mottakeren
+   til `arqely.com` eller `localhost` i en e-post. Alle tre over på `_PUBLIC_BASE_URL`.
+
+**⚠ En test som besto av feil grunn, oppdaget her.** 027s sjekk «ikke `location.origin` i
+delelenken» var skrevet som `check(navn, false, /location\.origin/.test(kilde), …)` — men tredje
+argument *er* betingelsen som må være sann. Sjekken krevde altså at kilden **inneholdt**
+«location.origin», og det gjorde den: i en kommentar om hvorfor den ikke skal brukes. Den ville
+vært grønn selv om `location.origin` ble satt rett tilbake i koden. Rettet, og samtidig gjort
+dekkende: i stedet for å liste opp funksjonsnavn (to av de tre invitasjonslenkene bygges i
+anonyme handlere uten navn, og en navneliste fanger uansett ikke et kallsted som legges til i
+morgen) sveipes nå **hele det innebygde skriptet**, med kommentarer og testen selv fjernet via
+en ny `_kildeUtenKommentarer`.
+
+**Dette er bygget:**
+- Ny Edge Function `kundelenke-mail` — to meldinger, én funksjon. `invite` krever innlogget
+  bruker som er medlem av lenkens org; `answered` er anonym, men krever `status='answered'`,
+  svar under 10 minutter gammelt, og maks ett varsel per lenke per 10 minutter. Mottakeren for
+  `answered` er alltid lenkens egen `notify_email`, aldri noe fra kallet.
+- «Send på e-post» i «Be kunde om mål»-modalen er aktivert. Meldinga til kunden er den samme
+  fritekstboksen som alt står der — ikke et nytt felt å fylle ut to ganger.
+- Kundesiden varsler automatisk etter innsending. **Uten `await`**: e-post er et tillegg, og en
+  kunde som nettopp målte opp stua kan ikke gjøre noe med at en SMTP-tjeneste er nede.
+  Bekreftelsen vises uansett.
+- E-postens «Åpne i Varmeplan» → `?project=<id>&kundesvar=<id>` åpner prosjektet og
+  gjennomgangspanelet fra 028. Ligger etter innlogging, i motsetning til `?kunde=`/`?present=`
+  som er anonyme grener før auth.
+- Sidebaren viser hvem lenken ble sendt til og når — ellers er det umulig å vite om kunden
+  faktisk har fått den, eller om lenken bare ble kopiert og aldri delt.
+
+**Klienten sender aldri e-post selv** — ingen API-nøkkel i `index.html`.
+
+**Migrasjon:** `supabase-migration-kundelenke-mail.sql` (tre additive kolonner:
+`last_notified_at`, `invite_sent_to`, `invite_sent_at`).
+
+**Deploy:** `supabase functions deploy kundelenke-mail`. Secrets er de samme som de øvrige
+e-postfunksjonene bruker — se `supabase/functions/kundelenke-mail/README.md`.
+
+**Regresjon:** `_kundelenkeRegressionTest` 65 → 79 sjekker. Hele batteriet grønt: **289 sjekker**.
+
+---
+
 ## Kundesvar: gjennomgang vegg for vegg, Bruk / Bruk alle, avvik som vises — 2026-10-07
 
 Serien «Kundelenke» (027–030), prompt 028. Krever 027.
