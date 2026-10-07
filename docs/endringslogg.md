@@ -4,6 +4,65 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesiden: hjørner kan flyttes, markør som i Varmeplan, panelet som fast tabell — 2026-10-07
+
+Prompt 033, etter 032. Kenneth: «Ønsker å kunne flytte hjørnene også … markør som endrer seg når
+den føres over vegger … Venstre bar ser litt rotete ut.»
+
+**STEG 0 — tre målinger:**
+1. **Markør-kaskaden var gatet** i kundemodus. Den innloggede har 20+ grener (rom-gizmo, folie,
+   kabel, matte, labels). Kunden har fått nøyaktig fem: hjørne-X-pil, hjørne-Y-pil, vegg-pil,
+   hjørne, vegg — ellers `grab`/`grabbing`. Samme funksjoner, samme markører.
+2. **Hjørne-drag i Varmeplan, målt i den innloggede editoren:** hjørne 0 flyttet 50 cm i X på et
+   400×320-rom gir vegg 0 = **449,9** og vegg 3 = **323,9 cm skrå** (−98,9°), `rectilinear:false`.
+   Det er oppførselen Kenneth ber om — rette vinkler tvinges *ikke*.
+3. **Panelets «rot», kvantifisert:** å velge en vegg flyttet **hver rad 342 px nedover** (hintboksen
+   dukket opp) og tallfeltet **59–79 px sideveis** (−/+ kom til). Å taste et tall flyttet feltet
+   79 px igjen («var N ↺»). Etter 033: **0 px på alle tre målene.**
+
+**To lag, og hvordan de ble forsonet.** `_kundeState` har nå både vegglengder og
+`vertexDelta[roomId][vertexIdx] = {dx, dy}`. `_kundeRebuildRoom` regner alltid
+**original → vegglengder → hjørne-deltaer**, i den rekkefølgen. Da er resultatet det samme
+uansett hva kunden gjorde først — målt: tre operasjoner i to ulike rekkefølger gir identiske
+punkter.
+
+Men et tastet tall på en vegg som grenser til et flyttet hjørne ville da ikke stemt, siden
+deltaet legges på etterpå. **Valget:** etter begge lag måles hver vegg kunden ga et tall. Er
+nøyaktig **ett** av endepunktene flyttet, justeres det punktets posisjon langs veggens egen
+retning så lengden blir det kunden tastet — *tallet gjelder*. Er **begge** flyttet, kan tallet
+ikke oppfylles uten å overstyre kundens eget hjørnevalg; da står avviket igjen og **vises**:
+«⚠ Du ba om 5,00 m, men hjørnene gir 5,04 m». Samme prinsipp som 028 — et avvik skjules aldri.
+
+**Svaret sier nå hvem som er fasit.** `answer.geometryMode` er `'points'` når kunden har flyttet
+et hjørne (rommet kan da ikke uttrykkes som vegglengder) og `'walls'` ellers. I punkt-modus får
+028-panelet én knapp — «Bruk kundens rom» — som erstatter polygonet eksakt; avkryssingen og
+bunnknappene for vegg-innarbeiding er borte, med forklaringen «Kunden flyttet hjørner — hele
+rommet brukes». Verifisert: resultatet er punkt for punkt identisk med kundens, og ett Ctrl+Z
+angrer alt.
+
+**Panelet er nå en tabell** med faste kolonner — `Vegg | Før | Nytt | −/+ | Δ | ↺` — der −/+ og ↺
+alltid står i DOM-en (grå når de ikke gjelder) og hintlinja alltid er én linje høy. Hjørne-rader
+har fast plass («Ingen hjørner flyttet» når tom), og naboveggene til et valgt hjørne merkes ◆.
+
+**Fem feil funnet ved måling:**
+- **`drawVertexGizmo` lå inne i `drawTransformGizmo`** — som 032 stengte for kunden. Trukket ut
+  som egen funksjon, kalt fra begge. Posisjonene (18/84 px) må følge `hitXArrow`/`hitYArrow`.
+- **`punktModus` ble brukt før den var deklarert** — panelet kastet «Cannot access before
+  initialization» for *ethvert* svar. Fanget live, ikke av en test.
+- **Bunnknappene «Bruk valgte/alle mål» sto igjen i punkt-modus** selv om avkryssingen var
+  deaktivert — de ville gitt et annet rom enn kunden så.
+- **«Vegg 2 ?» ble kuttet til «Vegg …»** — først på PC, så på telefon der de to 44 px-knappene
+  spiser 88 px alene. Tallkolonnene strammet inn begge ganger.
+- **«Tilbakestill alt» var usynlig i lyst tema** — jeg brukte hvit-alfa som deaktivert farge.
+  Nå `opacity` på `var(--muted)`.
+
+**Innlogget bruk er uendret**, verifisert etter endringene: hjørne-drag gir fortsatt 449,9/323,9,
+rom-gizmoen er der, undo-steg legges til, kundepanelet finnes ikke.
+
+**Regresjon:** `_kundelenkeRegressionTest` 140 → 166 sjekker. 15 batterier grønt: **390 sjekker**.
+
+---
+
 ## Kundesiden: sidepanel, veggvalg, piltaster og gizmo — tegningen følger målene — 2026-10-07
 
 Prompt 032. Kenneth: «Siden kunden får opp ved å trykke på lenken er ikke så god … Fyll inn mål
