@@ -61,6 +61,36 @@ const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
 
+// 031 (Kenneth 07.10.2026): avsenderen skal hete «Cenika Varmeplan», ikke «Cenika AS».
+// Selskapsformen fjernes fra slutten av organisasjonsnavnet. Aldri hardkod «Cenika» — navnet
+// kommer fra `organizations.name`.
+//
+// Tre feller det er tatt hensyn til:
+//  * Ordgrense kreves, så et navn som tilfeldigvis SLUTTER paa bokstavene ikke klippes
+//    («Vikinganes» beholder «nes», «Mesta» beholder «ta»).
+//  * Et navn som BARE er en selskapsform («AS») ville blitt tomt — da faller vi til «Varmeplan».
+//  * Et navn som alt inneholder «Varmeplan» ville gitt «Varmeplan Varmeplan».
+const ORG_FORMER = /[\s,]+(a\.?s\.?a\.?|a\.?n\.?s\.?|a\.?s\.?|d\.?a\.?|e\.?n\.?k\.?|s\.?a\.?|b\.?a\.?)\.?$/i;
+// Samme formene, men som HELE navnet. Regexen over krever noe foran selskapsformen, saa en
+// org-rad med et slurvete navn («AS») slapp gjennom som «AS Varmeplan». Fanget av testen i
+// scripts/sjekk-norsk-i-epost.sh, ikke i produksjon.
+const ORG_BARE_FORM = /^(a\.?s\.?a\.?|a\.?n\.?s\.?|a\.?s\.?|d\.?a\.?|e\.?n\.?k\.?|s\.?a\.?|b\.?a\.?)\.?$/i;
+
+function _orgShort(navn: unknown): string {
+  const n = String(navn ?? "").trim().replace(/\s+/g, " ");
+  if (!n || ORG_BARE_FORM.test(n)) return "";
+  const kort = n.replace(ORG_FORMER, "").trim();
+  return kort || "";
+}
+
+// Avsendernavnet slik mottakeren ser det: «<Org> Varmeplan», eller bare «Varmeplan».
+function _avsenderNavn(orgNavn: unknown): string {
+  const kort = _orgShort(orgNavn);
+  if (!kort) return "Varmeplan";
+  if (/\bvarmeplan\b/i.test(kort)) return kort;   // unngaa «Varmeplan Varmeplan»
+  return kort + " Varmeplan";
+}
+
 // Bevisst konservativ: en adresse, ingen mellomrom, ett @, punktum i domenet.
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]{2,}$/;
 
@@ -168,7 +198,7 @@ Deno.serve(async (req) => {
 
       await sendEmail({
         to: [rcpt],
-        fromName: orgName,
+        fromName: _avsenderNavn(orgName),
         replyTo: link.notify_email || undefined,
         subject: `${orgName} ber deg fylle inn mål for ${projectName}`,
         html: shell(`
@@ -206,6 +236,7 @@ Deno.serve(async (req) => {
 
     await sendEmail({
       to: [link.notify_email],
+      fromName: _avsenderNavn(orgName),   // 031: samme avsendernavn på begge meldingene
       subject: `${hvem} har sendt inn mål for ${projectName}`,
       html: shell(`
         <div style="font-size:17px;font-weight:600;margin-bottom:10px">Svar fra kunde</div>

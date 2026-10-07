@@ -109,10 +109,33 @@ på kallet mot Resend.
    topptekst sier «Ren ASCII»; de er byttet til bindestrek (kun kommentarer, trenger ikke kjøres
    på nytt).
 
+**Punkt 4b (lagt til samme dag): avsenderen heter nå «Cenika Varmeplan», ikke «Cenika AS».**
+Ny `_orgShort()` fjerner selskapsformen fra slutten av organisasjonsnavnet (`AS`, `ASA`, `ANS`,
+`DA`, `ENK`, `SA`, `BA` — med eller uten punktum, uansett store/små bokstaver), og
+`_avsenderNavn()` legger på « Varmeplan». Navnet kommer fra `organizations.name`; «Cenika» er
+ikke hardkodet noe sted. Gjelder **begge** meldingene — svarvarselet hadde ingen avsendernavn i
+det hele tatt før og brukte bare `FROM_EMAIL`.
+
+Tre feller er dekket, og den tredje ble funnet av testen:
+- **Ordgrense kreves**, så et navn som tilfeldigvis slutter på bokstavene ikke klippes:
+  «Vikinganes» beholder «nes», «Mesta» beholder «ta».
+- **Et navn som alt inneholder «Varmeplan»** ville gitt «Varmeplan Varmeplan».
+- **Et navn som BARE er en selskapsform** («AS») slapp gjennom som «AS Varmeplan», fordi
+  regexen krever noe foran formen. Egen `ORG_BARE_FORM`-sjekk fanger det. Den feilen fantes
+  aldri i produksjon — testen tok den først.
+
 **Ny sjekk i repoet:** `scripts/sjekk-norsk-i-epost.sh`. Den flagger ASCII-erstatninger utenfor
-kommentarer, manglende `charset`, og ikke-ASCII i kundelenke-seriens SQL. Verifisert at den
-**fanger** en innført feil, ikke bare består: med «Fyll inn maal» satt inn igjen gir den exit 1
-og peker på linja.
+kommentarer, manglende `charset`, ikke-ASCII i kundelenke-seriens SQL, og kjører
+`scripts/test-avsendernavn.mjs` (23 tilfeller). Det siste skriptet leser `_orgShort` /
+`_avsenderNavn` **ut av** `.ts`-fila og kjører dem — altså testes den ekte koden, ikke en kopi,
+siden en Deno-funksjon ikke kan nås fra regresjonsbatteriet i `index.html`.
+
+Verifisert at sjekken **fanger**, ikke bare består — alle tre feilklasser gir exit 1: en
+ASCII-erstatning i en streng, en ødelagt avsendernavn-logikk, og manglende `charset`.
+
+**⚠ Sjekken ga først et falskt treff på seg selv.** Den hoppet bare over *hele* kommentarlinjer,
+så en etterfølgende `// 031: samme avsendernavn paa begge meldingene` ble flagget. Etterfølgende
+kommentarer klippes nå bort før søket — og kommentaren er skrevet med «på».
 
 ---
 
