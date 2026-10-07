@@ -36510,13 +36510,102 @@ function roomAreas(room){
 // summerte til 8,15 m mot venstreveggens oppgitte 11,25 m — 3,10 m forsvant.
 const _AXIS_TOL_DEG = 1;
 // 027: låser svar-validering, URL-bygging og «går målene opp?»-regnestykket.
-// 029: fjerner kommentarer fra en funksjons kildekode før en test leter etter et mønster.
-// Uten dette kan en test bestå fordi forbudte ord står i en KOMMENTAR om hvorfor de er
-// forbudt — som var akkurat det som skjedde med 027s location.origin-sjekk (se sjekk C).
+// 029: fjerner kommentarer fra kildekode før en test leter etter et mønster. Uten dette kan en
+// test bestå fordi forbudte ord står i en KOMMENTAR om hvorfor de er forbudt — som var akkurat
+// det som skjedde med 027s location.origin-sjekk (se sjekk C).
+//
+// ⚠ OMSKREVET 07.10.2026 etter en MÅLING: første utgave fjernet `/* … */` med en global regex.
+// Hele skriptet har 185 `/*` men bare 184 `*/` — én åpner som ikke er en kommentar (den ligger
+// i en streng eller et regex-literal). Da forskyves pareringen, og hver «kommentar» etter den
+// spiser ekte kode fram til neste `*/`. Målt: 1,18 MB forsvant, og strengen
+// `functions/v1/send-feedback` var borte FØR noen test fikk se den — altså ville en påstand om
+// det kallet bestått uten å ha undersøkt noe som helst.
+//
+// En regex kan ikke parse JavaScript. Denne er derfor LINJEBASERT og kan aldri fjerne en
+// kodelinje: den dropper linjer som i sin helhet er kommentar, og klipper en etterfølgende
+// `//`-kommentar bare når det står mellomrom foran (så `https://` i en streng er trygg).
 function _kildeUtenKommentarer(fn) {
   return String(typeof fn === 'function' ? fn.toString() : fn)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1');
+    .split('\n')
+    .filter(l => {
+      const t = l.trim();
+      return t && !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*');
+    })
+    .map(l => l.replace(/\s+\/\/[^'"`]*$/, ''))
+    .join('\n');
+}
+
+
+// ─── Regresjonstest: e-postfunksjonenes kontrakt mot klienten ────────────────
+// Bakgrunn (målt 07.10.2026): tre Edge Functions var åpne e-postutløsere.
+// `send-invite-email` leste aldri `Authorization` og tok både mottaker OG lenke-URL fra
+// klientens body — en ferdig phishing-kanal på vårt eget verifiserte domene.
+// `notify-admin-registration` og `send-feedback` sendte e-post på et HELT TOMT POST-kall
+// (bekreftet live: 200 {"success":true}).
+//
+// Denne testen låser KLIENTSIDEN av kontrakten: at vi ikke lenger sender mottaker, lenke eller
+// avsenderidentitet. At funksjonene faktisk avviser uautentiserte kall kan bare måles mot den
+// deployede funksjonen — se STATUS.md for de målingene.
+function _edgeMailRegressionTest() {
+  const results = [];
+  // ⚠ TREDJE ARGUMENT ER PÅSTANDEN SOM MÅ VÆRE SANN. `expected` er kun visning.
+  // Det er lett å skrive `check('ingen X', false, /X/.test(kode), …)` og tro at `false` er
+  // forventningen — da feiler sjekken nettopp når koden er RIKTIG. Skjedde i 029 og igjen her.
+  // Skriv alltid `check('ingen X', true, !/X/.test(kode), …)`.
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    // ⚠ Testen må fjerne SEG SELV fra høystakken. Første utgave gjorde ikke det, og feilet på
+    // fire påstander fordi dens egne regexer inneholder nettopp ordene den leter etter
+    // («invite_url», «invited_by»). Samme felle som location.origin-sjekken i 029.
+    const kode = _kildeUtenKommentarer(
+      [...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n'))
+      .replace(/function _edgeMailRegressionTest\(\)[\s\S]*?\n\}/, '');
+
+    // Alle invitasjonskall sender KUN tokenet.
+    const kall = kode.match(/functions\/v1\/send-invite-email[\s\S]{0,700}?\}\)/g) || [];
+    check('A: tre kallsteder til send-invite-email', 3, kall.length === 3, kall.length);
+    check('A: ingen av dem sender mottakeradresse', true,
+      !/body:\s*JSON\.stringify\(\{[^}]*\bto\s*:/.test(kode), 'to: funnet i et body');
+    check('A: ingen av dem sender lenke-URL', true,
+      !/invite_url\s*:/.test(kode), 'invite_url funnet');
+    check('A: ingen av dem sender avsenderidentitet', true,
+      !/invited_by\s*:\s*_currentProfile/.test(kode), 'invited_by funnet');
+    check('A: alle tre sender token', 3,
+      kall.filter(k => /token/.test(k)).length === 3, kall.filter(k => /token/.test(k)).length);
+
+    // Registreringsvarselet krever bruker-id-en fra signUp-svaret.
+    check('B: _notifyAdminNewRegistration tar userId først', true,
+      /_notifyAdminNewRegistration\(\s*userId\s*,/.test(kode), 'feil signatur');
+    check('B: den avbryter uten id', true,
+      /if \(!userId\) return;/.test(_kildeUtenKommentarer(_notifyAdminNewRegistration)), 'ingen vakt');
+    check('B: kalles med id fra signUp-svaret', true,
+      /_notifyAdminNewRegistration\(\s*data\?\.user\?\.id\s*,/.test(kode), 'id ikke sendt');
+    check('B: e-postadressen sendes ikke lenger', true,
+      !/_notifyAdminNewRegistration\([^)]*\bemail\b/.test(kode), 'email sendes fortsatt');
+
+    // Tilbakemeldingen oppgir ikke lenger hvem den er fra — det slås opp fra JWT-en.
+    const fb = (kode.match(/functions\/v1\/send-feedback[\s\S]{0,600}?\}\);/) || [''])[0];
+    // Bare selve body-objektet — et bredere vindu drar med seg koden etter kallet, og da
+    // kan «org_name:» fra en helt annen linje få påstanden til å feile uten grunn.
+    const fbBody = (fb.match(/body\s*:\s*JSON\.stringify\(\{([^}]*)\}/) || ['', ''])[1];
+    check('C: fant send-feedback-kallet i det hele tatt', true, fb.length > 50, fb.length);
+    check('C: det sender brukerens sesjon', true,
+      /Authorization/.test(fb) && /access_token/.test(kode), fb.slice(0, 200));
+    check('C: send-feedback oppgir ikke avsenderidentitet', true,
+      !/user_email\s*:|user_name\s*:|org_name\s*:/.test(fbBody), fbBody);
+    check('C: men sender fortsatt type og melding', true,
+      /type\s*:/.test(fbBody) && /message\s*:/.test(fbBody), fbBody);
+
+    // Alle utgående lenker på varmeplan.no (gjelder også reserveveien «del lenken manuelt»).
+    check('D: manuell reservelenke bygges på _PUBLIC_BASE_URL', 3,
+      (kode.match(/_PUBLIC_BASE_URL \+ '\/\?invite='/g) || []).length === 3,
+      (kode.match(/_PUBLIC_BASE_URL \+ '\/\?invite='/g) || []).length);
+  } catch (e) {
+    results.push({ name: 'KASTET', ok: false, expected: '-', got: e.message });
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_edgeMailRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
 }
 
 function _kundelenkeRegressionTest() {
@@ -56045,8 +56134,10 @@ async function _authRegister() {
       }
     });
     if (error) throw error;
-    // Notify admin about new registration (fire-and-forget)
-    _notifyAdminNewRegistration(name, email, company, message);
+    // Notify admin about new registration (fire-and-forget).
+    // Bruker-id-en fra signUp-svaret er det funksjonen verifiserer mot — uten den sender den
+    // ikke. E-postadressen slås opp server-side, ikke sendt herfra.
+    _notifyAdminNewRegistration(data?.user?.id, name, company, message);
     // Show success via the consolidated status component
     document.getElementById('auth-tabs').style.display = 'none';
     document.getElementById('auth-error').style.display = 'none';
@@ -56059,12 +56150,15 @@ async function _authRegister() {
   }
 }
 
-async function _notifyAdminNewRegistration(name, email, company, message) {
+async function _notifyAdminNewRegistration(userId, name, company, message) {
+  if (!userId) return;   // uten id-en har funksjonen ingenting å verifisere mot
   try {
     await fetch(SUPABASE_URL + '/functions/v1/notify-admin-registration', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY },
-      body: JSON.stringify({ name, email, company, message })
+      // Beviset på at registreringen finnes: id-en fra signUp-svaret. E-posten slås opp
+      // server-side, så den kan ikke oppgis av en tilfeldig kaller.
+      body: JSON.stringify({ user_id: userId, name, company, message })
     });
   } catch(e) { /* notification is best-effort */ }
 }
@@ -57048,7 +57142,9 @@ async function _admSendInvite() {
       const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
         method:'POST',
         headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
-        body: JSON.stringify({ to:email, invite_url:inviteUrl, org_name:(orgId&&orgName&&!orgName.startsWith('('))?orgName:(_userOrg?.name||'Varmeplan'), invited_by:_currentProfile?.full_name||_currentUser.email })
+        // Ny kontrakt: KUN tokenet. Funksjonen slår opp mottaker, lenke, org-navn og
+        // avsendernavn selv — se kommentaren øverst i send-invite-email/index.ts.
+        body: JSON.stringify({ token })
       });
       if (resp.ok) {
         msgEl.style.display='block'; msgEl.style.background='rgba(34,211,238,.08)'; msgEl.style.color='var(--accent)'; msgEl.innerHTML=`✓ Invitasjon sendt til ${_esc(email)}`;
@@ -57889,7 +57985,7 @@ async function _orgAdmInviteUser() {
     try {
       const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
         method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
-        body: JSON.stringify({ to:email, invite_url:inviteUrl, org_name:_userOrg.name, invited_by:_currentProfile?.full_name||_currentUser.email })
+        body: JSON.stringify({ token })
       });
       msg.style.display='block'; msg.style.background='rgba(34,211,238,.08)'; msg.style.color='var(--accent)';
       msg.innerHTML = resp.ok ? `✓ Invitasjon sendt til ${_esc(email)}` : `✓ Invitasjon opprettet! Del lenken:<br><input value="${inviteUrl}" readonly onclick="this.select()" style="width:100%;margin-top:6px;padding:6px;font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text)">`;
@@ -57946,7 +58042,7 @@ async function _orgAdmResendInvite(invId) {
     const resp = await fetch(SUPABASE_URL + '/functions/v1/send-invite-email', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+(await _db.auth.getSession()).data.session?.access_token },
-      body: JSON.stringify({ to:inv.email, invite_url:inviteUrl, org_name:_userOrg.name, invited_by:_currentProfile?.full_name||_currentUser.email })
+      body: JSON.stringify({ token: inv.token })
     });
     _showToast(resp.ok ? ('Invitasjon sendt på nytt til ' + inv.email) : 'Kunne ikke sende e-post — del lenken manuelt');
   } catch(e) {
@@ -60937,9 +61033,15 @@ async function _sendFeedback() {
     await _db.from('feedback').insert({ user_id:_currentUser.id, org_id:_userOrg?.id||null, type:_feedbackType, message:msg, page_context:_getCurrentContext() });
     // Send email (best-effort)
     try {
+      // Kallet sendte FØR ingen Authorization i det hele tatt, bare apikey — og oppga
+      // avsenderidentiteten i body. Nå følger brukerens egen sesjon med, og identiteten
+      // slås opp fra den server-side. Uten token ville funksjonen svart 401.
+      const _fbTok = (await _db.auth.getSession()).data.session?.access_token;
       await fetch(SUPABASE_URL+'/functions/v1/send-feedback', {
-        method:'POST', headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY},
-        body:JSON.stringify({ user_email:_currentUser.email, user_name:_currentProfile?.full_name||'', org_name:_userOrg?.name||'', type:_feedbackType, message:msg })
+        method:'POST',
+        headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,
+                 'Authorization':'Bearer '+(_fbTok||SUPABASE_KEY)},
+        body:JSON.stringify({ type:_feedbackType, message:msg })
       });
     } catch(_){}
     msgEl.style.display='block'; msgEl.style.background='rgba(34,211,238,.08)'; msgEl.style.color='var(--accent)'; msgEl.textContent='Takk for tilbakemeldingen! ✓';

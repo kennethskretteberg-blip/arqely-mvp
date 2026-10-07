@@ -4,6 +4,67 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Tre åpne e-postutløsere tettet — send-invite-email, notify-admin-registration, send-feedback — 2026-10-07
+
+Oppfølging av funnet i 029. Jeg undersøkte `send-invite-email` og fant at problemet var større
+enn antatt — og **verre i to andre funksjoner**.
+
+**STEG 0 — målt mot de deployede funksjonene, ikke lest ut av koden:**
+
+| Funksjon | Kall uten `Authorization` | Mottaker |
+|---|---|---|
+| `send-invite-email` | nådde vår kode (400 fra oss, ikke 401 fra plattformen) | **fritt valgt av kaller** |
+| `notify-admin-registration` | **200 `{"success":true}` — sendte e-post på tomt body** | `ADMIN_EMAIL` |
+| `send-feedback` | **200 `{"success":true}` — sendte e-post på tomt body** | `ADMIN_EMAIL` |
+| `kundelenke-mail` | 400, autentiserer først | fra databasen |
+
+Sondene utløste to ekte e-poster til `ADMIN_EMAIL` («Ny registrering: undefined» og «💬 Generelt
+fra bruker»). Det var ikke meningen — jeg forventet 400 som fra `send-invite-email` — men det er
+nettopp beviset: hvem som helst kunne fylt innboksen og tømt Resend-kvoten, slik at ekte
+invitasjoner sluttet å gå ut.
+
+`send-invite-email` var i tillegg en ferdig phishing-kanal: både mottaker **og** lenke-URL kom
+fra klientens body, og `org_name`/`invited_by` ble interpolert **uescapet** inn i HTML-en. Alt
+med Varmeplan som avsender på vårt eget verifiserte domene.
+
+**Dette er rettet:**
+- **`send-invite-email`** tar nå kun `token`. Mottaker, lenke, organisasjonsnavn og avsendernavn
+  slås opp server-side med service role. Krever innlogget bruker (eksplisitt `auth.getUser` —
+  `verify_jwt` holder ikke, anon-nøkkelen er en gyldig JWT) **med eier- eller admin-rolle i
+  nettopp den organisasjonen**. Invitasjoner uten org krever superadmin. Alt escapes.
+- **`notify-admin-registration`** kan ikke kreve innlogging — den kalles rett etter `signUp()`,
+  og med e-postbekreftelse på finnes ingen sesjon ennå. I stedet beviser kalleren at
+  registreringen *finnes*: klienten sender bruker-id-en fra `signUp`-svaret, funksjonen slår den
+  opp med service role og krever at kontoen er under 15 minutter gammel. Kan ikke forfalskes uten
+  faktisk å registrere seg. E-postadressen tas fra oppslaget, aldri fra body.
+- **`send-feedback`** krever innlogging, og **identiteten slås opp fra JWT-en** — før kunne en
+  melding tillegges hvilken som helst bruker. Bare type og melding kommer fra body, escapet.
+  Klientkallet sendte forresten *ingen* `Authorization` i det hele tatt, bare `apikey`; uten den
+  rettelsen ville tilbakemeldinger sluttet å virke.
+
+**⚠ En test som hadde undersøkt tomme strenger.** `_kildeUtenKommentarer` (innført i 029) fjernet
+`/* … */` med en global regex. Skriptet har **185 `/*` men bare 184 `*/`** — én åpner som ikke er
+en kommentar, og da forskyves pareringen slik at hver «kommentar» etter den spiser ekte kode fram
+til neste `*/`. Målt: **1,18 MB forsvant**, og `functions/v1/send-feedback` var borte *før* noen
+test fikk se den. 029-sjekken på `location.origin` sveipet altså et lemlestet korpus. En regex
+kan ikke parse JavaScript; funksjonen er skrevet om linjebasert og kan ikke fjerne en kodelinje.
+
+**⚠ Og samme inverteringsfeil som i 029, igjen.** `check(navn, forventet, betingelse, fikk)` —
+tredje argument er påstanden som må være **sann**; `forventet` er kun visning. Jeg skrev
+`check('ingen X', false, /X/.test(kode), …)` fire ganger, som feiler nettopp når koden er riktig.
+Advarsel lagt rett over `check`-definisjonen i den nye testen.
+
+**Ny regresjonstest** `_edgeMailRegressionTest` (14 sjekker) låser klientsiden av kontrakten:
+ingen mottaker, ingen lenke-URL, ingen avsenderidentitet sendes lenger, registreringsvarselet
+krever bruker-id-en, og tilbakemeldingen sender brukerens sesjon.
+
+**Krever deploy av tre funksjoner** (se under). Klient og funksjon må deployes sammen — den nye
+kontrakten er ikke bakoverkompatibel, og en gammel klient får «token kreves (last siden på nytt)».
+
+**Regresjon:** 15 batterier grønt, **338 sjekker**.
+
+---
+
 ## Kundelenke satt i drift — deploy, migrasjon og live verifisering — 2026-10-07
 
 Avslutningen på serien 027–030. Ikke ny funksjonalitet, men oppsettet som gjør den operativ,
