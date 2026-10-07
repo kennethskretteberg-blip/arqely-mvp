@@ -4,6 +4,57 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundelenke satt i drift — deploy, migrasjon og live verifisering — 2026-10-07
+
+Avslutningen på serien 027–030. Ikke ny funksjonalitet, men oppsettet som gjør den operativ,
+pluss én sikkerhetsfiks funnet ved å måle den **deployede** funksjonen i stedet for å lese koden.
+
+**Oppsettet, i rekkefølge:**
+1. `varmeplan.no` verifisert i Resend, `FROM_EMAIL` og `RESEND_API_KEY` satt. Fallbacken i
+   `kundelenke-mail` flyttet fra `noreply@arqely.no` til `noreply@varmeplan.no` så kode og
+   secret peker samme vei.
+2. `supabase-migration-kundelenke-mail.sql` kjørt — `kundelenker` har nå 18 kolonner.
+3. `supabase functions deploy kundelenke-mail` (prosjekt `nhzhffertfqdeslhzyxx`).
+
+**⚠ Sideeffekt verdt å kjenne til:** `FROM_EMAIL` er en **prosjekt**-secret, ikke en
+funksjons-secret. Fem funksjoner leser den — `send-invite-email` og `notify-admin-registration`
+sendte tidligere fra `arqely.no`, `send-feedback` fra `invite.arqely.com`. Alle sender nå fra
+`noreply@varmeplan.no`. Antakelig ønsket (ett avsenderdomene for hele appen), men det er ikke
+isolert til kundelenken.
+
+**⚠ Sikkerhetsfiks funnet ved å teste den live funksjonen.** Et `invite`-kall uten innlogging
+svarte **404 «ukjent lenke»** i stedet for 401 — altså ble lenken slått opp *før*
+autentiseringen. Tokenet er en v4-UUID, så oppregning er praktisk umulig, men svaret røpet
+likevel om et gitt token finnes, til en kaller uten ærend der. JWT-sjekken flyttet foran
+oppslaget og redeployet.
+
+**Vaktene, målt mot den live funksjonen etter fiksen:**
+
+| Kall | Svar |
+|---|---|
+| `invite` med **anon-nøkkelen** | 401 «innlogging kreves» |
+| `invite` uten `Authorization` | 401 |
+| `answered` med ukjent token | 404 «ukjent lenke» |
+| ugyldig `kind` | 400 |
+
+Den første raden er beviset på at plattformens `verify_jwt` **ikke** hadde holdt: anon-nøkkelen
+er en gyldig JWT og ligger åpent i klienten, så den slapp gjennom plattformsjekken og ble
+stoppet først av den eksplisitte `auth.getUser`-sjekken. Det var hypotesen bak hele designet i
+029 — nå er den målt, ikke bare resonnert om.
+
+**En felle i verifiseringen, verdt å huske:** «Success. No rows returned» betyr to helt ulike
+ting i Supabase SQL Editor. For en `select` betyr det at ingenting ble funnet; for en
+`alter table` betyr det at alt gikk bra. Samme melding, motsatt konklusjon — sjekk alltid med en
+etterfølgende `select` på `information_schema.columns`.
+
+`AGENTS.md` lagt i `.gitignore`. Fila gjenskapes av Codex med stier til en `.Codex/`-mappe som
+ikke finnes i dette repoet; den ble slettet en gang før og kom tilbake av seg selv.
+
+**Status for hele serien:** [`docs/kundelenke/STATUS.md`](kundelenke/STATUS.md).
+Commits: `ef636f9`, `bf3f814`, `a737003`, `93a0a18`, `6b99353`.
+
+---
+
 ## Tegn selv via kundelenke — Mål/Polygon/L-form/WBW på PC, talltastatur på telefon — 2026-10-07
 
 Serien «Kundelenke» (027–030), prompt 030 — siste i serien. Krever 027 og 028.
