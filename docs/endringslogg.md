@@ -64,10 +64,17 @@ flateeffekt 20. Breakdown: «Kabel» 1000 W + «Reservekabel» 0 W. Materiallist
 under-advarsel. Ny `_reserveCableRegressionTest` (29 sjekker) + alle tolv øvrige grønne —
 **210 sjekker**.
 
-**Ikke gjort, bevisst:** Hurtig prosjektering dobler ikke antallet for fryserom-listerom (eget
-kodeløp i `_listAutoSuggest`, ville blitt vesentlig mer enn de ~30 linjene bestillingen satte som
-grense). **Montørappen** (`varmeplan-app`) får reserven som en vanlig kabel med `reserve: true` i
-prosjektfila — den bør skille dem visuelt, men det er en egen sak.
+**Avklart av Kenneth 07.10.2026 — begge de åpne punktene:**
+- **Hurtig prosjektering dobler nå antallet.** Et listerom med reserve viser «Bestilles: 2 stk
+  (1 + 1 reserve)», og materialliste/Visma stemmer også fra listeveien. Første forsøk pushet
+  reserven i `_listSetRoomProduct` og fikk den slettet igjen av synkroniseringen, som rydder alt
+  den ikke selv kan gjenskape — den hører hjemme i `_syncReserveCables`, som nå lager en ren
+  label-kopi når hovedkabelen er `labelOnly` (et listerom har ingen geometri å klone). Én kilde.
+  Målt: 1 hoved → «2 stk (1 + 1 reserve)», ratedW 1000 (ikke 2000); 3 hoved → 6 stk, 3000 W.
+- **Montørappen haster** — «en montør som ser to kabler uten å vite hvilken som er reserve, kan
+  koble feil». Datakontrakten i `varmeplan-app` (`docs/datakontrakt-web-app.md`) er oppdatert med
+  hva weben faktisk sender, og rettet: forrige versjon sa «forskjøvet en halv c/c», som ikke
+  lenger stemmer. Selve app-endringen er en egen prompt.
 
 **Filer:** index.html, supabase-migration-room-type-reserve.sql (ny).
 
