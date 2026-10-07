@@ -95,7 +95,35 @@ så Kenneth kan si «ok» eller «endre». Kenneth svarer til slutt.
 
 ## 030
 
--
+- **❗ TO LEKKASJER FUNNET, BEGGE ELDRE ENN 030 — verdt å vite om.**
+  `_presentEnter()` nullstilte `presentPublic` rett etter at de offentlige inngangene hadde satt
+  den, så **«Del lenke» og «Avslutt» har vært synlige for alle med en presentasjonslenke**. Og
+  **PDF-knappen var ikke gatet i det hele tatt**. Begge rettet. **Valgt:** presentasjonslenken
+  *beholder* PDF-en — den er ment som kundens prosjektoversikt — mens kundelenken ikke får den
+  (spec regel 1: aldri produkter, priser, PDF). Si fra hvis presentasjonslenkens PDF også skal
+  bort, det er ett linjebytte.
+- **«Installert effekt» skjult på kundelenken.** KPI-en er utlegget regnet om, altså noe kunden
+  ikke skal se. Romtall og oppvarmet areal er skjult sammen med den for enkelhets skyld.
+- **Autosave-gaten ligger i `_scheduleAutoSave`**, ikke på tjue kallsteder. **Valgt** fordi
+  `pushUndo` er det ene punktet alle mutasjonsveier går gjennom. Uten gaten ville
+  `_saveToSupabase` forsøkt en INSERT av et nytt prosjekt for hvert rom kunden tegnet —
+  RLS ville avvist den, men det er en tilfeldighet, ikke et vern.
+- **`_undoSuppress` er en ny, generell mekanisme.** `createRoom` tar sitt eget undo-snapshot, så
+  en samleoperasjon ga ett snapshot per rom. **Valgt** framfor å endre `createRoom`, som
+  innloggede brukere er avhengige av. Framtidige batch-operasjoner kan bruke samme teller.
+- **Tegn-modus bruker de EKSISTERENDE tegnemotorene uendret.** Ingen ny kode i `addWbwWall`,
+  `confirmDdpRect` eller polygon-/L-form-stiene; regresjonstesten låser at de ikke nevner
+  `kundeMode` i det hele tatt.
+- **Mobiltastaturet er løst med `readonly` + `inputmode="none"`**, ikke ved å fjerne
+  `focus()`-kallet i `addWbwWall`. **Valgt** fordi focus-kallet er riktig for PC (feltet blir
+  markert så neste tall overskriver), og et readonly-felt åpner uansett ikke tastaturet.
+- **Kunden velger «komfort», ikke W/m².** Lav/Normal/Høy → ±20 % av romtypens egen `targetWm2`,
+  regnet ut hos Kenneth i 028-panelet. Kunden ser aldri et tall (spec regel 1).
+- **Rom kunden tegner lagres aldri i `romtegner_projects`** før Kenneth trykker Bruk — de lever
+  bare i kundens egen `S.rooms` med `_kundeNy`, og i svaret.
+- **Ugyldige rom i et svar listes med begrunnelse** («for få hjørner», «areal under 0,01 m²»)
+  i stedet for å forsvinne stille. Samme prinsipp som 028s avviksrader.
+- **Ingen migrasjon for 030.** `kundelenke_answer` tar imot `rooms[]` som den er.
 
 ## Til senere (ikke i v1 — fra spec)
 

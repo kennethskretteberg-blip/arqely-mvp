@@ -6611,17 +6611,23 @@ function _presentRenderBar() {
   let dato = '';
   try { dato = new Date().toLocaleDateString('nb-NO', { year:'numeric', month:'long', day:'numeric' }); } catch(e) { dato = ''; }
   const sub = `Prosjektert av ${esc(sup.name)}${firma ? ` for ${firma}` : ''}${dato ? ` · ${dato}` : ''}`;
+  // 030 (spec-kundelenke regel 1): paa en KUNDELENKE skal det ikke finnes PDF — den viser
+  // produkter og priser — og heller ikke «Installert effekt», som er utlegget regnet om.
+  // Presentasjonslenken er noe annet: den ER ment som kundens prosjektoversikt, og beholder
+  // PDF-en. Se SPORSMAL.md.
+  const _kunde = !!(S.ui && S.ui.kundeMode);
   bar.innerHTML = `
     <div style="border-left:4px solid ${sup.color};padding-left:12px">
       <div class="pb-title">${navn}</div>
       <div class="pb-sub">${sub}</div>
     </div>
     <div class="pb-kpis">
+      ${_kunde ? '' : `
       <div class="pb-kpi"><b>${st.rooms}</b><span>Rom</span></div>
       <div class="pb-kpi"><b>${st.heated.toFixed(1)} m²</b><span>Oppvarmet</span></div>
-      <div class="pb-kpi"><b>${st.totalW} W</b><span>Installert effekt</span></div>
+      <div class="pb-kpi"><b>${st.totalW} W</b><span>Installert effekt</span></div>`}
       ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentShareLink()" title="Kopier delelenke for kunde/elektriker">🔗 Del lenke</button>`}
-      <button class="pb-btn" onclick="_presentDownloadPDF()" title="Last ned prosjektoversikt som PDF">⬇ PDF</button>
+      ${_kunde ? '' : `<button class="pb-btn" onclick="_presentDownloadPDF()" title="Last ned prosjektoversikt som PDF">⬇ PDF</button>`}
       ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentExit()">✕ Avslutt</button>`}
     </div>`;
   bar.style.display = 'flex';
@@ -6634,10 +6640,15 @@ function _presentClearSelections() {
   u.selectedPlateId = null; u.selectedAluboardId = null; u.selectedStairId = null; u.selectedHindringId = null;
   u.selectedDimId = null; u.selectedBg = null;
 }
-function _presentEnter() {
+// ⚠ RETTET 030: `_presentEnter()` satte UBETINGET `presentPublic = false`, og begge de
+// offentlige inngangene (`?present=` og `?kunde=`) setter flagget FØR de kaller hit — altså ble
+// det nullstilt umiddelbart. «Del lenke» og «Avslutt» har derfor vært synlige for alle med en
+// presentasjonslenke hele tiden, stikk i strid med kommentaren på selve linja. Flagget tas nå
+// som argument: uten argument (knappen i appen) er det fortsatt false, som før.
+function _presentEnter(offentlig) {
   if (!S.ui) S.ui = {};
   S.ui.present = true;
-  S.ui.presentPublic = false;   // in-app: vis Del/PDF/Avslutt-knapper
+  S.ui.presentPublic = !!offentlig;
   S.ui.presentRoomId = null;
   _presentClearSelections();
   S.ui.drawMode = null;
@@ -6835,8 +6846,7 @@ async function _kundeLoadByToken(token) {
 
     ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     document.getElementById('app').style.display = 'flex';
-    S.ui.presentPublic = true;
-    _presentEnter();
+    _presentEnter(true);
     S.ui.kundeMode = _kundeState.mode;
     _kundeRenderBar();
     render();
@@ -6897,7 +6907,7 @@ function _kundePointsWith(room) {
 function _kundeRenderBar() {
   if (!_kundeState) return;
   document.getElementById('_kunde-bar')?.remove();
-  const narrow = window.innerWidth < 900 || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const narrow = _kundeErSmal();
   const bar = document.createElement('div');
   bar.id = '_kunde-bar';
   bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:3000;background:var(--surface,#16171c);'
@@ -6933,6 +6943,12 @@ function _kundeRenderBar() {
     </div>`;
   }).join('');
 
+  // 030: tegn-modus har sin egen bar — samme skall, annet innhold.
+  if (_kundeState.mode === 'tegn') {
+    bar.innerHTML = _kundeTegnBar();
+    document.body.appendChild(bar);
+    return;
+  }
   bar.innerHTML = `
     <div style="font-size:15px;font-weight:700;margin-bottom:2px">Fyll inn mål</div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
@@ -6987,7 +7003,13 @@ function _kundeBuildAnswer() {
 async function _kundeSubmit() {
   const btn = document.getElementById('_kunde-send');
   if (btn) { btn.disabled = true; btn.textContent = 'Sender …'; }
-  const answer = _kundeBuildAnswer();
+  const tegn = _kundeState.mode === 'tegn';
+  const answer = tegn ? _kundeBuildTegnAnswer() : _kundeBuildAnswer();
+  if (tegn && !answer.rooms.length) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send inn'; }
+    alert('Tegn minst ett rom før du sender inn.');
+    return;
+  }
   try {
     const { data, error } = await _db.rpc('kundelenke_answer', {
       p_token: _kundeState.token, p_answer: answer, p_name: (_kundeState.name || '').slice(0, 120) || null });
@@ -7003,11 +7025,13 @@ async function _kundeSubmit() {
     document.getElementById('_kunde-bar').innerHTML =
       `<div style="text-align:center;padding:22px 8px">
         <div style="font-size:34px;margin-bottom:8px">✓</div>
-        <div style="font-size:16px;font-weight:700;margin-bottom:4px">Takk — målene er sendt til ${esc(_kundeState.orgName)}</div>
+        <div style="font-size:16px;font-weight:700;margin-bottom:4px">Takk — ${tegn ? 'rommene' : 'målene'} er sendt til ${esc(_kundeState.orgName)}</div>
         <div style="font-size:12.5px;color:var(--dim);line-height:1.5">
-          ${answer.walls.length} ${answer.walls.length === 1 ? 'mål' : 'mål'} mottatt.
+          ${tegn
+            ? `${answer.rooms.length} ${answer.rooms.length === 1 ? 'rom' : 'rom'} mottatt.`
+            : `${answer.walls.length} mål mottatt.`}
           Du kan rette og sende på nytt så lenge lenken er åpen.</div>
-        <button onclick="_kundeRenderBar()" style="margin-top:12px;padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text);cursor:pointer">Rett flere mål</button>
+        <button onclick="_kundeRenderBar()" style="margin-top:12px;padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text);cursor:pointer">${tegn ? 'Tegn flere rom' : 'Rett flere mål'}</button>
       </div>`;
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Send inn'; }
@@ -7062,8 +7086,9 @@ function openKundeLinkModal() {
       <label style="display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;margin-bottom:5px">
         <input type="radio" name="kunde-mode" value="maal" checked> Fylle inn mål på vegger
       </label>
-      <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--dim);cursor:not-allowed">
-        <input type="radio" name="kunde-mode" value="tegn" disabled> Tegne rommene selv <span style="font-size:11px">(kommer i 030)</span>
+      <label style="display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer">
+        <input type="radio" name="kunde-mode" value="tegn"> Tegne rommene selv
+        <span style="font-size:11px;color:var(--dim)">— Mål, Polygon, L-form eller vegg for vegg</span>
       </label>
     </div>
 
@@ -7108,7 +7133,8 @@ async function _kundeCreateLink() {
     token,
     project_id: _supabaseProjectId,
     org_id: _userOrg ? _userOrg.id : null,
-    mode: 'maal',
+    // 030: modusen leses nå faktisk fra valget — 027 hardkodet 'maal' siden Tegn var deaktivert.
+    mode: (document.querySelector('input[name="kunde-mode"]:checked')?.value === 'tegn') ? 'tegn' : 'maal',
     asked_walls: _kundeAskedWalls(),
     note,
     status: 'open',
@@ -7175,6 +7201,484 @@ function _kundeCopyLink() {
     .then(() => _showToast && _showToast('Kundelenken er kopiert', 'ok'));
 }
 
+
+// ═══ 030: TEGN SELV ═══════════════════════════════════════════════════════════
+// Kunden/elektrikeren tegner rommene selv. Ingen nye tegnemotorer — Mal, Polygon, L-form og
+// WBW er de samme funksjonene innloggede brukere har. 030 er fire ting: verktoyene gjort
+// tilgjengelige i kundemodus, en telefon-HUD for WBW, et romskjema, og innsending som forslag.
+
+function _kundeErSmal() {
+  return window.innerWidth < 900 || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+}
+
+// Rommene kunden har tegnet i DENNE okten. Prosjektets egne rom ligger ogsa i S.rooms, men er
+// last: i tegn-modus endres de ikke (mal rettes via en `maal`-lenke, spec regel 3).
+function _kundeTegnedeRom() {
+  return S.rooms.filter(r => r && r._kundeNy);
+}
+
+// ÉN inngang. Alle fire tegnemetodene ender i createRoom(), og createRoom kaller hit — derfor
+// trengs ingen fire separate kroker som kan komme ut av takt.
+function _kundeRoomDrawn(room) {
+  if (!room) return;
+  room._kundeNy = true;
+  room.dimSnap = true;                       // kunden skal se malene han nettopp la
+  _kundeRoomForm(room.id);
+}
+
+// ── Verktoylinje (erstatter mal-baren nar mode === 'tegn') ────────────────────
+function _kundeTegnBar() {
+  const liste = _kundeTegnedeRom();
+  const fraFor = S.rooms.filter(r => !r._kundeNy).length;
+  const verktoy = [
+    ['rect-dim', 'Mål',  'Bredde × lengde'],
+    ['polygon',  'Polygon', 'Klikk hjørnene'],
+    ['lshape',   'L-form',  'Klikk hjørnene'],
+    ['wbw',      'Vegg for vegg', 'Én vegg om gangen'],
+  ];
+  const aktiv = S.ui.drawMode;
+  const knapper = verktoy.map(([id, navn, hint]) => `
+    <button onclick="_kundeStartTegn('${id}')" title="${esc(hint)}"
+      style="flex:1;min-width:84px;padding:12px 8px;border-radius:9px;cursor:pointer;font-size:13px;font-weight:600;
+             border:1px solid ${aktiv===id?'var(--accent)':'var(--border)'};
+             background:${aktiv===id?'var(--accent)':'var(--surface2)'};color:${aktiv===id?'#0d0e10':'var(--text)'}">
+      ${esc(navn)}</button>`).join('');
+
+  const romListe = liste.length ? liste.map(r => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border)">
+      <span style="flex:1;min-width:0;font-size:13px">${esc(r.name || 'Rom')}
+        <span style="color:var(--dim);font-size:11px">${(r.area/10000).toFixed(1).replace('.',',')} m²${
+          r._kundeRomtype ? ' · ' + esc((ROOM_TYPES.find(t=>t.id===r._kundeRomtype)||{}).label || '') : ''}</span></span>
+      <button onclick="_kundeRoomForm(${r.id})" style="padding:7px 11px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px;cursor:pointer">Endre</button>
+      <button onclick="_kundeSlettRom(${r.id})" title="Slett rommet"
+        style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:#f87171;font-size:12px;cursor:pointer">✕</button>
+    </div>`).join('') : '<div style="font-size:12px;color:var(--dim);padding:8px 0">Ingen rom tegnet ennå.</div>';
+
+  return `
+    <div style="font-size:15px;font-weight:700;margin-bottom:2px">Tegn rommene</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
+      ${_kundeState.note ? esc(_kundeState.note) + '<br>' : ''}
+      Velg en metode og tegn ett rom om gangen. ${fraFor ? 'Rommene som alt finnes i prosjektet er låst og kan ikke endres her.' : ''}</div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px">${knapper}</div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:12px;font-weight:600;color:var(--dim);margin-bottom:2px">Dine rom (${liste.length})</div>
+      ${romListe}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+      <input id="_kunde-name" placeholder="Ditt navn (valgfritt)" value="${esc(_kundeState.name)}"
+        oninput="_kundeState.name=this.value"
+        style="flex:1;min-width:150px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+      <input id="_kunde-comment" placeholder="Kommentar (valgfritt)" value="${esc(_kundeState.comment)}"
+        oninput="_kundeState.comment=this.value"
+        style="flex:2;min-width:180px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+      <button id="_kunde-send" onclick="_kundeSubmit()" ${liste.length ? '' : 'disabled'}
+        style="padding:11px 22px;background:${liste.length?'var(--accent,#4fa2b8)':'var(--surface2)'};border:none;border-radius:8px;font-size:14px;font-weight:700;color:${liste.length?'#0d0e10':'var(--dim)'};cursor:${liste.length?'pointer':'not-allowed'}">Send inn</button>
+    </div>`;
+}
+
+function _kundeStartTegn(mode) {
+  // Navnet settes i skjemaet etterpa; her holder det med et forslag.
+  const n = _kundeTegnedeRom().length + 1;
+  startDrawMode(mode, 'Rom ' + n, S.ui.activeFloorId);
+  _kundeRenderBar();
+  _kundeWbwPad();
+}
+
+function _kundeSlettRom(id) {
+  const i = S.rooms.findIndex(r => r.id === id);
+  if (i < 0) return;
+  S.rooms.splice(i, 1);
+  _invalidateStripCache();
+  _kundeRenderBar(); render();
+}
+
+// ── Telefon-HUD for WBW (spec regel 5) ───────────────────────────────────────
+// ⚠ MALT PA 375 px FOR DENNE BLE SKREVET: #wbw-panel passer i bredden (374x101), men ALLE ti
+// knappene er under 48 px — pilene er 30x28 og handlingene 28x28. Og #wbw-len er
+// type="number" uten inputmode, mens addWbwWall kaller el.focus() etter HVER vegg: mobilens
+// eget tastatur ville derfor sprettet opp paa nytt for hver eneste vegg man la.
+// Derfor: egen pad med 56 px-knapper, og #wbw-len satt readonly + inputmode="none" i denne
+// modusen — et readonly-felt apner ikke tastaturet, saa focus()-kallet blir ufarlig uten at
+// addWbwWall maa endres for innloggede brukere.
+function _kundeWbwPad() {
+  document.getElementById('_kunde-wbwpad')?.remove();
+  const paa = _kundeState && _kundeState.mode === 'tegn' && S.ui.drawMode === 'wbw' && _kundeErSmal();
+  const len = document.getElementById('wbw-len');
+  const panel = document.getElementById('wbw-panel');
+  if (!paa) {
+    if (len) { len.readOnly = false; len.removeAttribute('inputmode'); }
+    if (panel && _kundeState && _kundeState.mode === 'tegn') panel.style.display = S.ui.drawMode === 'wbw' ? 'block' : 'none';
+    return;
+  }
+  if (panel) panel.style.display = 'none';          // pad-en erstatter panelet pa telefon
+  if (len) { len.readOnly = true; len.setAttribute('inputmode', 'none'); }
+
+  const bar = document.getElementById('_kunde-bar');
+  if (bar) bar.style.display = 'none';              // pad-en eier skjermen mens man tegner
+
+  const tast = (t, handling, stil) => `<button onclick="${handling}"
+    style="height:56px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);
+           color:var(--text);font-size:19px;font-weight:600;cursor:pointer;${stil||''}">${t}</button>`;
+
+  const d = document.createElement('div');
+  d.id = '_kunde-wbwpad';
+  d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:3200;background:var(--surface,#16171c);'
+    + 'border-top:1px solid var(--border,#2a2d35);padding:10px 10px 14px;'
+    + 'font-family:system-ui,-apple-system,sans-serif;box-shadow:0 -6px 24px rgba(0,0,0,.45)';
+  d.innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+      <div id="_kpad-len" style="font-size:26px;font-weight:700;letter-spacing:-.5px">0,00 m</div>
+      <div id="_kpad-info" style="font-size:12px;color:var(--dim);flex:1;text-align:right"></div>
+    </div>
+    <div id="_kpad-bal" style="font-size:11.5px;color:var(--dim);margin-bottom:8px;line-height:1.35"></div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr) 1.15fr;gap:7px">
+      ${[7,8,9].map(n=>tast(n,`_kpadTast('${n}')`)).join('')}${tast('↑',"_kpadLegg('up')",'background:var(--accent);color:#0d0e10;border-color:var(--accent)')}
+      ${[4,5,6].map(n=>tast(n,`_kpadTast('${n}')`)).join('')}${tast('→',"_kpadLegg('right')",'background:var(--accent);color:#0d0e10;border-color:var(--accent)')}
+      ${[1,2,3].map(n=>tast(n,`_kpadTast('${n}')`)).join('')}${tast('↓',"_kpadLegg('down')",'background:var(--accent);color:#0d0e10;border-color:var(--accent)')}
+      ${tast(',',"_kpadTast(',')")}${tast('0',"_kpadTast('0')")}${tast('⌫', "_kpadTast('back')")}${tast('←',"_kpadLegg('left')",'background:var(--accent);color:#0d0e10;border-color:var(--accent)')}
+    </div>
+    <div style="display:flex;gap:7px;margin-top:9px">
+      <button onclick="_kpadAngre()" style="flex:1;height:48px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;cursor:pointer">Angre vegg</button>
+      <button onclick="_kpadLukk()" style="flex:1.3;height:48px;border-radius:10px;border:none;background:#22c55e;color:#0b2416;font-size:13px;font-weight:700;cursor:pointer">Lukk rom</button>
+      <button onclick="_kpadAvbryt()" style="flex:.8;height:48px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);color:var(--dim);font-size:13px;cursor:pointer">Avbryt</button>
+    </div>`;
+  document.body.appendChild(d);
+  _kpadFit();
+  _kpadOppdater();
+}
+
+// Sifrene skrives i cm, men VISES i meter — det er slik folk oppgir romstorrelser.
+let _kpadBuf = '';
+function _kpadTast(t) {
+  if (t === 'back') _kpadBuf = _kpadBuf.slice(0, -1);
+  else if (t === ',') { if (!_kpadBuf.includes(',')) _kpadBuf = (_kpadBuf || '0') + ','; }
+  else if (_kpadBuf.replace(',', '').length < 6) _kpadBuf += t;
+  _kpadOppdater();
+}
+function _kpadCm() {
+  const m = parseFloat((_kpadBuf || '').replace(',', '.'));
+  return (isFinite(m) && m > 0) ? Math.round(m * 100) : 0;
+}
+function _kpadOppdater() {
+  const visEl = document.getElementById('_kpad-len');
+  const infoEl = document.getElementById('_kpad-info');
+  const balEl = document.getElementById('_kpad-bal');
+  const wbw = S.drawing && S.drawing.wbw;
+  if (visEl) visEl.textContent = (_kpadBuf || '0') + ' m';
+  if (infoEl) infoEl.textContent = wbw ? ('Vegg ' + ((wbw.walls || []).length + 1)) : '';
+  // Balansen MENS man legger vegger: viser hvilken retning som mangler for rommet lukkes.
+  // Det er nettopp feilen fra skissen 07.10 — hvert enkeltmaal stemte, summen gjorde det ikke.
+  if (balEl) {
+    const pts = (typeof _wbwPointsSoFar === 'function') ? _wbwPointsSoFar(wbw) : null;
+    const b = pts ? _roomAxisBalance(pts, true) : null;
+    if (b && b.rectilinear && (Math.abs(b.dxCm) > 2 || Math.abs(b.dyCm) > 2)) {
+      const m = cm => (Math.abs(cm) / 100).toFixed(2).replace('.', ',');
+      const bits = [];
+      if (Math.abs(b.dyCm) > 2) bits.push('↕ ' + m(b.dyCm) + ' m ' + (b.dyCm > 0 ? 'ned' : 'opp') + ' igjen');
+      if (Math.abs(b.dxCm) > 2) bits.push('↔ ' + m(b.dxCm) + ' m ' + (b.dxCm > 0 ? 'venstre' : 'høyre') + ' igjen');
+      balEl.textContent = 'For å lukke: ' + bits.join(' · ');
+    } else if (b && b.rectilinear && (wbw.walls || []).length >= 2) {
+      balEl.textContent = '✓ Du er tilbake ved startpunktet — trykk «Lukk rom»';
+    } else balEl.textContent = '';
+  }
+}
+function _kpadLegg(retning) {
+  const cm = _kpadCm();
+  if (!cm) { _showToast && _showToast('Skriv lengden først', 'warn'); return; }
+  const el = document.getElementById('wbw-len');
+  if (el) el.value = cm;
+  _kpadBuf = '';
+  wbwDirPlace(retning);          // samme funksjon piltastene bruker — ingen parallell motor
+  if (S.ui.drawMode === 'wbw') { _kpadFit(); _kpadOppdater(); } else _kundeWbwPad();
+}
+
+// ⚠ MALT: uten denne var tegningen USYNLIG paa telefon. To grunner, begge i startDrawMode('wbw')
+// som regner ut startvisningen for en PC-bredde:
+//   1) zoom = canvas.width / (2000 * BASE_SCALE) ga 0,15 (minimum) paa 375 px — rommet ble
+//      en knappenaal.
+//   2) den sentrerer i HELE lerretet, men pad-en dekker de nederste ~390 px. Geometrien havnet
+//      paa y 596-650, altsaa bak tastaturet.
+// Her zoomes det til kjeden som faktisk er lagt, innenfor den SYNLIGE stripa over pad-en.
+function _kpadFit() {
+  const wbw = S.drawing && S.drawing.wbw;
+  if (!wbw || !wbw.startPoint) return;
+  const pad = document.getElementById('_kunde-wbwpad');
+  const synligH = pad ? Math.max(120, pad.getBoundingClientRect().top) : canvas.height;
+  const pts = [wbw.startPoint, ...(wbw.walls || []).map(w => ({ x: w.x2, y: w.y2 }))];
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const bw = Math.max(200, maxX - minX), bh = Math.max(200, maxY - minY);
+  const marg = 0.78;                                   // litt luft rundt
+  const z = Math.min(canvas.width * marg / (bw * BASE_SCALE), synligH * marg / (bh * BASE_SCALE));
+  S.view.zoom = Math.max(0.05, Math.min(3, z));
+  const sc = S.view.zoom * BASE_SCALE;
+  // Sentrer kjeden i den synlige stripa, ikke i hele lerretet: w2s legger til canvas.height/2,
+  // saa panY forskyves med differansen mellom lerretets og stripas midtpunkt.
+  S.view.panX = (minX + maxX) / 2;
+  S.view.panY = (minY + maxY) / 2 + (canvas.height / 2 - synligH / 2) / sc;
+  if (typeof updZoomBadge === 'function') updZoomBadge();
+  render();
+}
+function _kpadAngre() { undoWbwWall(); _kpadFit(); _kpadOppdater(); }
+function _kpadLukk() {
+  const wbw = S.drawing && S.drawing.wbw;
+  if (!wbw || (wbw.walls || []).length < 3) { _showToast && _showToast('Legg minst tre vegger først', 'warn'); return; }
+  // STEG 0.2 malte at rommet lukker seg SELV nar en vegg lander < 10 cm fra startpunktet.
+  // Her er den manuelle veien: den lukkende veggen trekkes til start, og vi sier hvilken
+  // lengde den da fikk — saa elektrikeren ser om det stemmer med det han malte.
+  const siste = wbw.walls[wbw.walls.length - 1];
+  const d = Math.hypot(siste.x2 - wbw.startPoint.x, siste.y2 - wbw.startPoint.y);
+  finishWbwRoom();
+  if (d > 5 && _showToast) _showToast('Lukkende vegg ble ' + (d / 100).toFixed(2).replace('.', ',') + ' m', 'info');
+}
+function _kpadAvbryt() { cancelDrawing(); _kundeWbwPad(); _kundeRenderBar(); }
+
+// ── Romskjema (bunnark pa telefon, samme markup pa PC) ───────────────────────
+// Feltene er de samme som import-malen (sak 014) bruker — spec regel 6. Kunden ser ALDRI
+// W/m²-tall eller produkter: «Ønsket komfort» mappes til W/m² hos Kenneth, i 028-panelet.
+const _KUNDE_KOMFORT = [['low','Lav'],['normal','Normal'],['high','Høy']];
+const _KUNDE_VARMETYPE = [['foil','Varmefolie'],['cable','Varmekabel'],['mat','Varmematte'],['','Vet ikke']];
+
+function _kundeRoomForm(roomId) {
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r) return;
+  document.getElementById('_kunde-roomform')?.remove();
+  document.getElementById('_kunde-wbwpad')?.remove();
+  const bar = document.getElementById('_kunde-bar');
+  if (bar) bar.style.display = 'none';
+
+  const ov = document.createElement('div');
+  ov.id = '_kunde-roomform';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3400;background:rgba(0,0,0,.55);display:flex;'
+    + 'align-items:flex-end;justify-content:center;font-family:system-ui,-apple-system,sans-serif';
+  const velg = (navn, liste, valgt) => liste.map(([v, l]) =>
+    `<button onclick="_kundeRoomSet(${roomId},'${navn}','${v}')"
+      style="padding:10px 13px;border-radius:8px;cursor:pointer;font-size:13px;min-height:44px;
+             border:1px solid ${valgt===v?'var(--accent)':'var(--border)'};
+             background:${valgt===v?'var(--accent)':'var(--surface2)'};color:${valgt===v?'#0d0e10':'var(--text)'}">${esc(l)}</button>`).join('');
+
+  ov.innerHTML = `<div style="background:var(--surface,#16171c);border-top-left-radius:16px;border-top-right-radius:16px;
+      width:min(640px,100%);max-height:88vh;overflow:auto;padding:16px 16px 20px;border:1px solid var(--border)">
+    <div style="font-size:16px;font-weight:700;margin-bottom:3px">Om rommet</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:14px">${(r.area/10000).toFixed(1).replace('.',',')} m² · ${r.points.length} hjørner</div>
+
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Romnavn</label>
+    <input value="${esc(r.name||'')}" oninput="_kundeRoomSet(${roomId},'name',this.value,true)"
+      style="width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface2);color:var(--text);font-size:15px;margin-bottom:14px">
+
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Hva slags rom?</label>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px">
+      ${velg('_kundeRomtype', ROOM_TYPES.map(t => [t.id, t.label]), r._kundeRomtype || '')}</div>
+
+    ${S.floors.length > 1 ? `<label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Etasje</label>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px">
+      ${velg('floorId', S.floors.map(f => [f.id, f.name]), r.floorId)}</div>` : ''}
+
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Ønsket varmetype</label>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px">
+      ${velg('_kundeModType', _KUNDE_VARMETYPE, r._kundeModType || '')}</div>
+
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Ønsket komfort</label>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px">
+      ${velg('_kundeKomfort', _KUNDE_KOMFORT, r._kundeKomfort || 'normal')}</div>
+
+    <label style="display:block;font-size:12px;color:var(--dim);margin-bottom:4px">Kommentar (valgfritt)</label>
+    <textarea rows="2" oninput="_kundeRoomSet(${roomId},'_kundeKommentar',this.value,true)"
+      style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface2);color:var(--text);font-size:14px;resize:vertical">${esc(r._kundeKommentar||'')}</textarea>
+
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="_kundeSlettRom(${roomId});_kundeRoomFormClose()"
+        style="padding:12px 15px;border:1px solid var(--border);border-radius:9px;background:var(--surface2);color:#f87171;font-size:13px;cursor:pointer;min-height:48px">Slett rommet</button>
+      <span style="flex:1"></span>
+      <button onclick="_kundeRoomFormClose()"
+        style="padding:12px 26px;border:none;border-radius:9px;background:var(--accent,#4fa2b8);color:#0d0e10;font-size:14px;font-weight:700;cursor:pointer;min-height:48px">Ferdig</button>
+    </div></div>`;
+  document.body.appendChild(ov);
+}
+
+function _kundeRoomSet(roomId, felt, verdi, behold) {
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r) return;
+  if (felt === 'floorId') r.floorId = isNaN(+verdi) ? verdi : +verdi;
+  else r[felt] = verdi;
+  if (!behold) _kundeRoomForm(roomId);     // tegn skjemaet pa nytt sa valget vises
+  render();
+}
+function _kundeRoomFormClose() {
+  document.getElementById('_kunde-roomform')?.remove();
+  const bar = document.getElementById('_kunde-bar');
+  if (bar) bar.style.display = '';
+  _kundeRenderBar();
+  render();
+}
+
+// ── Svar-format for tegn (spec: rooms[]) ─────────────────────────────────────
+function _kundeBuildTegnAnswer() {
+  const rooms = [];
+  for (const r of _kundeTegnedeRom()) {
+    const pts = (r.points || []).map(p => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+    // Samme vern som mal-grenen: ugyldig geometri skal aldri inn i et svar.
+    if (pts.length < 3) continue;
+    if (pts.some(p => !isFinite(p.x) || !isFinite(p.y) || Math.abs(p.x) > 10000 || Math.abs(p.y) > 10000)) continue;
+    const flr = S.floors.find(f => f.id === r.floorId);
+    rooms.push({
+      name: String(r.name || 'Rom').slice(0, 80),
+      roomType: r._kundeRomtype || null,
+      floorName: flr ? flr.name : null,
+      shape: r.shape || 'polygon',
+      points: pts,
+      modType: r._kundeModType || null,
+      comfort: r._kundeKomfort || 'normal',
+      comment: String(r._kundeKommentar || '').slice(0, 500),
+    });
+  }
+  return { rooms, comment: (_kundeState.comment || '').slice(0, 2000) };
+}
+
+// ─── 030: gjennomgangspanelet tar imot TEGNEDE rom ────────────────────────────
+// Samme prinsipp som 028s vegger: kundens tegning er et FORSLAG til Kenneth trykker Bruk.
+function _kundeNyeRomFraSvar() {
+  const k = _kundeLinkCache;
+  const raa = (k && k.answer && Array.isArray(k.answer.rooms)) ? k.answer.rooms : [];
+  const ut = [];
+  for (let i = 0; i < raa.length; i++) {
+    const r = raa[i] || {};
+    const pts = Array.isArray(r.points) ? r.points
+      .filter(p => p && isFinite(p.x) && isFinite(p.y))
+      .map(p => ({ x: +p.x, y: +p.y })) : [];
+    // Samme vern som kundesiden, gjentatt her: et svar kan komme fra hva som helst.
+    if (pts.length < 3) { ut.push({ idx: i, feil: 'for få hjørner', navn: r.name || 'Rom' }); continue; }
+    if (pts.some(p => Math.abs(p.x) > 10000 || Math.abs(p.y) > 10000)) {
+      ut.push({ idx: i, feil: 'punkter utenfor 100 m', navn: r.name || 'Rom' }); continue; }
+    const areal = Math.abs(compArea(pts));
+    if (!(areal > 100)) { ut.push({ idx: i, feil: 'areal under 0,01 m²', navn: r.name || 'Rom' }); continue; }
+    ut.push({
+      idx: i,
+      navn: String(r.name || ('Rom ' + (i + 1))).slice(0, 80),
+      romtype: r.roomType || null,
+      etasjeNavn: r.floorName || null,
+      shape: r.shape || 'polygon',
+      points: pts,
+      modType: r.modType || null,
+      komfort: r.comfort || 'normal',
+      kommentar: String(r.comment || '').slice(0, 500),
+      arealM2: areal / 10000,
+    });
+  }
+  return ut;
+}
+
+// Komfort -> W/m². Kunden ser aldri tallet; romtypen eier det, komforten justerer ±20 %.
+function _kundeKomfortWm2(romtypeId, komfort) {
+  const rt = ROOM_TYPES.find(t => t.id === romtypeId);
+  if (!rt || !rt.targetWm2) return null;
+  const f = komfort === 'low' ? 0.8 : komfort === 'high' ? 1.2 : 1.0;
+  return Math.round(rt.targetWm2 * f);
+}
+
+function _kundeNyttRomNavn(onsket) {
+  const brukt = new Set(S.rooms.map(r => (r.name || '').toLowerCase()));
+  if (!brukt.has(String(onsket).toLowerCase())) return onsket;
+  let n = onsket + ' (kunde)';
+  let i = 2;
+  while (brukt.has(n.toLowerCase())) { n = onsket + ' (kunde ' + i + ')'; i++; }
+  return n;
+}
+
+// Bruk ett eller alle. ÉN pushUndo for hele klikket (som 028).
+function _kundeBrukNyeRom(bareIdx) {
+  const liste = _kundeNyeRomFraSvar().filter(r => !r.feil && (bareIdx == null || r.idx === bareIdx));
+  if (!liste.length) { _showToast && _showToast('Ingen gyldige rom å legge inn', 'info'); return; }
+
+  // Hele gruppen flyttes samlet til hoyre for det som alt finnes — kundens innbyrdes
+  // plassering bevares (samme 100 cm-regel som startDrawMode('wbw') bruker).
+  let dx = 0;
+  if (S.rooms.length > 0) {
+    const maxX = Math.max(...S.rooms.flatMap(r => r.points.map(p => p.x)));
+    const minKunde = Math.min(...liste.flatMap(r => r.points.map(p => p.x)));
+    dx = maxX + 100 - minKunde;
+  }
+
+  // ETT snapshot for hele klikket. createRoom tar sitt eget — det undertrykkes her, ellers
+  // ville Ctrl+Z angret ett rom om gangen (maalt: fire snapshots for tre rom).
+  pushUndo();
+  const lagde = [];
+  _undoSuppress++;
+  try {
+    for (const r of liste) {
+      const pts = r.points.map(p => ({ x: p.x + dx, y: p.y }));
+      const flr = r.etasjeNavn ? S.floors.find(f => f.name === r.etasjeNavn) : null;
+      const rom = createRoom(pts, r.shape, _kundeNyttRomNavn(r.navn),
+        flr ? flr.id : S.ui.activeFloorId, true);
+      if (!rom) continue;
+      if (r.romtype) {
+        rom.roomType = r.romtype;
+        rom.targetWm2 = _kundeKomfortWm2(r.romtype, r.komfort);
+      }
+      if (r.modType) rom.listModType = r.modType;
+      if (r.kommentar) rom.notat = r.kommentar;
+      rom._fraKunde = true;
+      lagde.push(rom.id);
+    }
+  } finally { _undoSuppress--; }
+  _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache();
+  _kundeHighlight(lagde);
+  renderSidebar(); updateWip(); render();
+  _showToast && _showToast(lagde.length + (lagde.length === 1 ? ' rom lagt inn' : ' rom lagt inn'), 'ok');
+  if (bareIdx == null) _kundeMarkApplied();
+  else if (document.getElementById('kunde-rev-ov')) _kundeRevRender();
+}
+
+// Panelseksjonen. Vises over vegg-tabellene nar svaret inneholder tegnede rom.
+function _kundeNyeRomHtml() {
+  const liste = _kundeNyeRomFraSvar();
+  if (!liste.length) return '';
+  const gyldige = liste.filter(r => !r.feil);
+  const rader = liste.map(r => {
+    if (r.feil) return `<div style="padding:7px 10px;border-top:1px solid var(--border);font-size:12px;color:#f0b232">
+      ⚠ ${esc(r.navn)} ble ikke lagt inn — ${esc(r.feil)}</div>`;
+    const rt = ROOM_TYPES.find(t => t.id === r.romtype);
+    const wm2 = _kundeKomfortWm2(r.romtype, r.komfort);
+    const mt = { foil: 'Varmefolie', cable: 'Varmekabel', mat: 'Varmematte' }[r.modType] || 'ikke valgt';
+    const komf = { low: 'Lav', normal: 'Normal', high: 'Høy' }[r.komfort] || 'Normal';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-top:1px solid var(--border)">
+      <span style="width:46px;height:34px;flex:0 0 auto">${_kundeRomSkisse(r.points, 46, 34)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600">${esc(r.navn)}
+          <span style="font-weight:400;color:var(--dim)">${r.arealM2.toFixed(1).replace('.', ',')} m²</span></div>
+        <div style="font-size:11px;color:var(--dim)">${rt ? esc(rt.label) : 'romtype ikke valgt'} ·
+          ${esc(mt)} · komfort ${esc(komf)}${wm2 ? ' → ' + wm2 + ' W/m²' : ''}${r.etasjeNavn ? ' · ' + esc(r.etasjeNavn) : ''}</div>
+        ${r.kommentar ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">«${esc(r.kommentar)}»</div>` : ''}
+      </div>
+      <button class="snap-chip" onclick="_kundeBrukNyeRom(${r.idx})">Bruk</button>
+    </div>`;
+  }).join('');
+
+  return `<div style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    <div style="padding:8px 10px;background:var(--surface2);display:flex;align-items:center;gap:8px">
+      <b style="font-size:13px">Nye rom fra kunde (${gyldige.length})</b>
+      <span style="flex:1"></span>
+      <button class="snap-chip on" onclick="_kundeBrukNyeRom(null)">Legg inn alle rom</button>
+    </div>
+    ${rader}
+    <div style="padding:7px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--border)">
+      Rommene plasseres til høyre for de eksisterende, med kundens innbyrdes plassering beholdt.
+      W/m² settes fra romtype og ønsket komfort — kunden har aldri sett et tall.</div>
+  </div>`;
+}
+
+// Liten SVG-miniatyr av romformen. Ren visning, ingen tilstand.
+function _kundeRomSkisse(pts, w, h) {
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+  const sc = Math.min((w - 4) / bw, (h - 4) / bh);
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + ((p.x - minX) * sc + 2).toFixed(1) + ' ' + ((p.y - minY) * sc + 2).toFixed(1)).join(' ') + ' Z';
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">
+    <path d="${d}" fill="rgba(34,211,238,.18)" stroke="var(--accent,#22d3ee)" stroke-width="1.2"/></svg>`;
+}
 
 // ─── 029: E-post for kundelenker ───────────────────────────────────────────────
 // Klienten sender ALDRI e-post selv — ingen API-nokkel i index.html. Alt gar via
@@ -7270,7 +7774,10 @@ function openKundeReviewPanel() {
     return;
   }
   const groups = _kundeAnswerByRoom();
-  if (!groups.size) {
+  // 030: et tegn-svar har ingen vegger — bare nye rom. Uten denne grenen ville panelet sagt
+  // «rom som ikke finnes lenger» og nektet å åpne på et helt gyldig svar.
+  const nyeRom = _kundeNyeRomFraSvar().filter(r => !r.feil).length;
+  if (!groups.size && !nyeRom) {
     _showToast && _showToast('Svaret gjelder rom som ikke finnes i prosjektet lenger', 'warn');
     return;
   }
@@ -7294,6 +7801,10 @@ function _kundeRevRender(groups) {
   const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', {day:'numeric',month:'long'}) : '';
   const komm = (k.answer && k.answer.comment) ? String(k.answer.comment).slice(0, 2000) : '';
   const kundeBal = (k.answer && k.answer.axisBalance) || {};
+  // 030: et rent tegn-svar har ingen vegger. To knapper merket «Bruk alle» i samme dialog —
+  // en for rom, en for maal — er en felle, saa de har na hvert sitt navn og maal-knappene
+  // vises bare naar det FINNES maal aa bruke.
+  const harVegger = groups.size > 0;
 
   let rows = '';
   for (const [rid, g] of groups) {
@@ -7378,6 +7889,7 @@ function _kundeRevRender(groups) {
     </div>
     <div style="padding:14px 18px;overflow:auto;flex:1">
       ${komm ? `<div style="padding:8px 10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text);margin-bottom:14px;white-space:pre-wrap">${esc(komm)}</div>` : ''}
+      ${_kundeNyeRomHtml()}
       ${rows}
       <div style="font-size:11px;color:var(--dim)">Tegningen endres først når du trykker Bruk. Ctrl+Z angrer hele innarbeidingen i ett steg.</div>
     </div>
@@ -7385,8 +7897,9 @@ function _kundeRevRender(groups) {
       <button onclick="_kundeRejectAnswer()" style="padding:8px 14px;background:none;border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Avvis svaret</button>
       <span style="flex:1"></span>
       <button onclick="document.getElementById('kunde-rev-ov').remove()" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Lukk</button>
-      <button onclick="_kundeApplyAll(true)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Bruk valgte</button>
-      <button onclick="_kundeApplyAll(false)" style="padding:8px 18px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Bruk alle</button>
+      ${harVegger ? `
+      <button onclick="_kundeApplyAll(true)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Bruk valgte mål</button>
+      <button onclick="_kundeApplyAll(false)" style="padding:8px 18px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Bruk alle mål</button>` : ''}
     </div></div>`;
   document.body.appendChild(ov);
 }
@@ -7559,10 +8072,9 @@ async function _presentLoadByToken(token) {
     try { if (typeof _loadProducts === 'function') await _loadProducts(); } catch (e) { /* produktnavn er valgfritt */ }
     _restoreProject(data.data);
     _supabaseProjectId = data.id;
-    S.ui.presentPublic = true;   // offentlig visning: skjul Del/Avslutt-knapper
     ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     document.getElementById('app').style.display = 'flex';
-    _presentEnter();
+    _presentEnter(true);   // offentlig visning: skjul Del/Avslutt-knapper
     return true;
   } catch (e) { console.warn('Presentasjon-lasting feilet:', e.message); return false; }
 }
@@ -33690,6 +34202,9 @@ function initMinimapWidget() {
 
 /** Auto-show minimap when 2+ rooms exist on active floor */
 function _autoShowMinimap() {
+  // 030: minikartet er et navigasjonshjelpemiddel som hoerer sammen med sidebaren — paa
+  // kundesiden finnes ingen sidebar, og paa telefon la det seg rett oppaa tegneflaten.
+  if (S.ui && S.ui.kundeMode) return;
   const roomsOnFloor = S.rooms.filter(r => _roomIdOnActiveFloor(r.id));
   if (roomsOnFloor.length >= 2 && !S.ui.widgetMinimapVisible) {
     S.ui.widgetMinimapVisible = true;
@@ -36290,6 +36805,178 @@ function _kundelenkeRegressionTest() {
     check('G: ?kunde= og ?present= er fortsatt anonyme grener før auth', true,
       /get\('present'\)/.test(initSupabase.toString()) && /get\('kunde'\)/.test(initSupabase.toString()),
       'anonym gren mangler');
+
+    // ─── H (030) — tegn selv: gate, validering, W/m²-mapping og undo-batching ───
+    // STEG 0.1-funnet: createRoom → pushUndo → _markProjectDirty + _scheduleAutoSave →
+    // _performAutoSave → _saveToSupabase, som INSERTER en ny prosjektrad uten
+    // _supabaseProjectId. I kundemodus er kunden anonym, så RLS ville avvist den — men det er
+    // en tilfeldighet, ikke et vern. Gaten ligger i det ene punktet alle mutasjoner går gjennom.
+    // ⚠ Disse to leser SKRIPTTEKSTEN, ikke de levende bindingene. Første utgave gjorde det
+    // motsatte og feilet to ganger på rad — fordi testoppsettet mitt selv hadde stubbet
+    // funksjonene for å hindre skyskriving. En kildekode-påstand må lese kilden; en binding
+    // kan være byttet ut av hvem som helst, testen inkludert.
+    const _skriptH = _kildeUtenKommentarer(
+      [...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n'));
+    check('H: _scheduleAutoSave er gatet på kundeMode', true,
+      /function _scheduleAutoSave\(\)\s*\{[^}]*kundeMode/.test(_skriptH), 'ingen gate i kilden');
+    check('H: _performAutoSave har samme vakt', true,
+      /async function _performAutoSave\(\)\s*\{[\s\S]{0,200}?kundeMode/.test(_skriptH), 'ingen vakt i kilden');
+    // Og den virkelige oppførselen, så lenge funksjonen ikke er stubbet bort.
+    if (!/__forsok|\(\)=>\{\}/.test(String(_scheduleAutoSave))) {
+      const f = S.ui.kundeMode;
+      try {
+        clearTimeout(_autoSaveTimer); _autoSaveTimer = null;
+        S.ui.kundeMode = 'tegn'; _scheduleAutoSave();
+        check('H: ingen timer settes i kundemodus', null, _autoSaveTimer == null, _autoSaveTimer);
+        S.ui.kundeMode = null; _scheduleAutoSave();
+        check('H: timer settes som vanlig utenfor', true, _autoSaveTimer != null, _autoSaveTimer);
+      } finally {
+        clearTimeout(_autoSaveTimer); _autoSaveTimer = null;
+        S.ui.kundeMode = f;
+      }
+    }
+
+    // ⚠ FUNNET LIVE: `_presentEnter()` satte UBETINGET presentPublic=false, og begge offentlige
+    // innganger setter flagget FØR de kaller den — altså ble det nullstilt umiddelbart.
+    // «Del lenke» og «Avslutt» har vært synlige for alle med en presentasjonslenke.
+    check('H: _presentEnter tar offentlig-flagget som argument', true,
+      /presentPublic = !!/.test(_presentEnter.toString()), _presentEnter.toString().slice(0, 240));
+    (() => {
+      const u = { ...S.ui };
+      try {
+        _presentEnter(true);
+        check('H: _presentEnter(true) beholder offentlig', true, S.ui.presentPublic === true, S.ui.presentPublic);
+        _presentEnter();
+        check('H: _presentEnter() uten argument er intern som før', false, S.ui.presentPublic === false, S.ui.presentPublic);
+      } finally { S.ui = u; }
+    })();
+    check('H: kundelenken har verken PDF eller «Installert effekt»', true,
+      /_kunde \? '' : `<button class="pb-btn" onclick="_presentDownloadPDF/.test(_presentRenderBar.toString())
+      && /_kunde \? '' : `\n      <div class="pb-kpi">/.test(_presentRenderBar.toString().replace(/\r/g, '')),
+      'PDF/effekt ikke gatet');
+
+    // Svar-validering begge veier — kundesiden OG mottaket.
+    (() => {
+      const lagret = { rooms: S.rooms, st: _kundeState, link: _kundeLinkCache };
+      try {
+        S.rooms = [
+          { id: -1, name: 'OK', floorId: null, shape: 'rect', area: 128000, _kundeNy: true,
+            points: [{x:0,y:0},{x:320,y:0},{x:320,y:400},{x:0,y:400}], walls: [], _kundeRomtype: 'bathroom', _kundeKomfort: 'high' },
+          { id: -2, name: 'For få', floorId: null, shape: 'rect', area: 0, _kundeNy: true,
+            points: [{x:0,y:0},{x:10,y:0}], walls: [] },
+          { id: -3, name: 'NaN', floorId: null, shape: 'rect', area: 0, _kundeNy: true,
+            points: [{x:0,y:0},{x:NaN,y:0},{x:10,y:10}], walls: [] },
+          { id: -4, name: 'Over 100 m', floorId: null, shape: 'rect', area: 0, _kundeNy: true,
+            points: [{x:0,y:0},{x:50000,y:0},{x:50000,y:50000}], walls: [] },
+          { id: 900, name: 'Prosjektets eget', floorId: null, shape: 'rect', area: 90000,
+            points: [{x:0,y:0},{x:300,y:0},{x:300,y:300}], walls: [] },
+        ];
+        _kundeState = { token: 't', mode: 'tegn', orgName: 'O', edits: new Map(), name: '', comment: 'hei' };
+        const a = _kundeBuildTegnAnswer();
+        check('H: kun gyldige rom sendes inn', 1, a.rooms.length === 1, a.rooms.map(r => r.name));
+        check('H: prosjektets egne rom sendes ALDRI med', true,
+          !a.rooms.some(r => r.name === 'Prosjektets eget'), a.rooms.map(r => r.name));
+        check('H: komfort og romtype følger med', 'bathroom/high',
+          a.rooms[0].roomType === 'bathroom' && a.rooms[0].comfort === 'high',
+          a.rooms[0].roomType + '/' + a.rooms[0].comfort);
+
+        // Mottaket gjentar valideringen — et svar kan komme fra hva som helst.
+        _kundeLinkCache = { id: 'x', status: 'answered', answer: { rooms: [
+          { name: 'Bra', roomType: 'living', shape: 'rect', comfort: 'normal',
+            points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}] },
+          { name: 'Tomt', points: [] },
+          { name: 'Linje', points: [{x:0,y:0},{x:100,y:0},{x:200,y:0}] },   // areal 0
+          { name: 'Gigant', points: [{x:0,y:0},{x:99999,y:0},{x:99999,y:99999}] },
+        ] } };
+        const m = _kundeNyeRomFraSvar();
+        check('H: mottaket godtar det gyldige', 1, m.filter(r => !r.feil).length === 1, m.filter(r => !r.feil).map(r => r.navn));
+        check('H: og avviser de tre andre MED begrunnelse', 3,
+          m.filter(r => r.feil).length === 3 && m.filter(r => r.feil).every(r => r.feil.length > 3),
+          m.filter(r => r.feil).map(r => r.navn + ': ' + r.feil));
+      } finally { S.rooms = lagret.rooms; _kundeState = lagret.st; _kundeLinkCache = lagret.link; }
+    })();
+
+    // Komfort → W/m². Kunden ser aldri tallet; romtypen eier det, komforten justerer ±20 %.
+    check('H: Bad/Normal = romtypens egen verdi', 130, _kundeKomfortWm2('bathroom', 'normal') === 130, _kundeKomfortWm2('bathroom', 'normal'));
+    check('H: Bad/Høy = +20 %', 156, _kundeKomfortWm2('bathroom', 'high') === 156, _kundeKomfortWm2('bathroom', 'high'));
+    check('H: Bad/Lav = −20 %', 104, _kundeKomfortWm2('bathroom', 'low') === 104, _kundeKomfortWm2('bathroom', 'low'));
+    check('H: ukjent romtype gir ingen verdi', null, _kundeKomfortWm2(null, 'high') === null, _kundeKomfortWm2(null, 'high'));
+
+    // Talltastaturet: sifre skrives i meter med komma, lagres i cm.
+    (() => {
+      const b = _kpadBuf;
+      try {
+        _kpadBuf = '3,20'; check('H: 3,20 m → 320 cm', 320, _kpadCm() === 320, _kpadCm());
+        _kpadBuf = '12';   check('H: 12 m → 1200 cm', 1200, _kpadCm() === 1200, _kpadCm());
+        _kpadBuf = '';     check('H: tomt felt gir 0 (ingen vegg legges)', 0, _kpadCm() === 0, _kpadCm());
+        _kpadBuf = '0';    check('H: 0 gir 0', 0, _kpadCm() === 0, _kpadCm());
+      } finally { _kpadBuf = b; }
+    })();
+
+    // ⚠ MÅLT LIVE: createRoom kaller pushUndo SELV, så «Legg inn alle rom» ga fire snapshots
+    // for tre rom og Ctrl+Z angret ett rom om gangen. Undertrykkelsen gjør hele klikket til ETT.
+    (() => {
+      const lagret = { rooms: S.rooms, link: _kundeLinkCache, rev: _kundeRevState, floors: S.floors, af: S.ui.activeFloorId };
+      const dybdeFor = _undoStack.length;
+      try {
+        S.floors = [{ id: 1, name: '1. etasje' }]; S.ui.activeFloorId = 1;
+        const a = [{x:0,y:0},{x:300,y:0},{x:300,y:300},{x:0,y:300}];
+        S.rooms = [{ id: 900, name: 'Hall', floorId: 1, partId: null, shape: 'polygon', wallThicknessCm: 0,
+          points: a.map(p => ({...p})), walls: compWalls(a), dims: [], area: compArea(a), annotOffsets: {}, uncertainWalls: [] }];
+        _kundeRevState = null;
+        _kundeLinkCache = { id: 'z', status: 'answered', answer: { rooms: [
+          { name: 'Bad',  roomType: 'bathroom', shape: 'rect', comfort: 'high', modType: 'mat',
+            points: [{x:0,y:0},{x:320,y:0},{x:320,y:400},{x:0,y:400}] },
+          { name: 'Stue', roomType: 'living', shape: 'rect', comfort: 'normal', modType: 'foil',
+            points: [{x:420,y:0},{x:820,y:0},{x:820,y:300},{x:420,y:300}] },
+          { name: 'Hall', roomType: 'hallway', shape: 'rect', comfort: 'low', modType: 'foil',
+            points: [{x:900,y:0},{x:1200,y:0},{x:1200,y:300},{x:900,y:300}] },
+        ] } };
+        _kundeBrukNyeRom(null);
+        check('H: tre rom lagt inn', 4, S.rooms.length === 4, S.rooms.map(r => r.name));
+        check('H: ETT undo-steg for hele klikket', 1, _undoStack.length - dybdeFor === 1, _undoStack.length - dybdeFor);
+        check('H: W/m² satt fra romtype + komfort', 156,
+          (S.rooms.find(r => r.name === 'Bad') || {}).targetWm2 === 156, (S.rooms.find(r => r.name === 'Bad') || {}).targetWm2);
+        check('H: ønsket varmetype beholdt', 'mat',
+          (S.rooms.find(r => r.name === 'Bad') || {}).listModType === 'mat', (S.rooms.find(r => r.name === 'Bad') || {}).listModType);
+        check('H: navnekollisjon får (kunde)-suffiks', 'Hall (kunde)',
+          S.rooms.some(r => r.name === 'Hall (kunde)'), S.rooms.map(r => r.name));
+        const nye = S.rooms.filter(r => r._fraKunde);
+        const minXer = nye.map(r => Math.min(...r.points.map(p => p.x)));
+        check('H: plassert til høyre for de eksisterende', true, Math.min(...minXer) >= 300, minXer);
+        check('H: kundens innbyrdes avstander bevart', 480,
+          Math.round(minXer[1] - minXer[0]) === 420 && Math.round(minXer[2] - minXer[1]) === 480,
+          minXer.map((v, i, A) => i ? Math.round(v - A[i-1]) : 0));
+        undo();
+        check('H: ett Ctrl+Z fjerner ALLE tre', 1, S.rooms.length === 1, S.rooms.map(r => r.name));
+      } finally {
+        while (_undoStack.length > dybdeFor) _undoStack.pop();
+        S.rooms = lagret.rooms; _kundeLinkCache = lagret.link; _kundeRevState = lagret.rev;
+        S.floors = lagret.floors; S.ui.activeFloorId = lagret.af;
+        _invalidateStripCache();
+      }
+    })();
+
+    // Undertrykkelsen er en generell mekanisme — den må virke, og den må alltid slippes.
+    (() => {
+      const d = _undoStack.length;
+      _undoSuppress++;
+      try { pushUndo(); pushUndo(); } finally { _undoSuppress--; }
+      check('H: snapshots inni en batch hoppes over', 0, _undoStack.length - d === 0, _undoStack.length - d);
+      check('H: telleren er tilbake på null etterpå', 0, _undoSuppress === 0, _undoSuppress);
+      pushUndo();
+      check('H: pushUndo virker som før utenfor batch', 1, _undoStack.length - d === 1, _undoStack.length - d);
+      _undoStack.pop();
+    })();
+
+    // Innloggede brukere skal ikke merke 030 i det hele tatt.
+    check('H: WBW-toasten er kun gatet på kundeMode', true,
+      /kundeMode/.test(_kildeUtenKommentarer(_wbwBalanceToast).slice(0, 200)), 'ikke gatet');
+    check('H: minikartet likeså', true,
+      /kundeMode/.test(_kildeUtenKommentarer(_autoShowMinimap).slice(0, 200)), 'ikke gatet');
+    check('H: tegnemotorene selv er urørt', true,
+      !/kundeMode/.test(_kildeUtenKommentarer(addWbwWall)) && !/kundeMode/.test(_kildeUtenKommentarer(confirmDdpRect)),
+      'en tegnemotor er endret');
   } finally {
     S.rooms = saved.rooms;
     if (typeof _kundeState !== 'undefined') _kundeState = saved.state;
@@ -36740,6 +37427,9 @@ function createRoom(pts, shape, name, floorId, keepPosition=false, wallConfigs=n
   }
   S.rooms.push(room);
   exitDrawing();
+  // 030: DEN ENE kroken for tegn-modus. Maal, Polygon, L-form og WBW ender alle her, saa
+  // skjemaet og romlista trenger ingen fire parallelle kroker som kan komme ut av takt.
+  if (S.ui.kundeMode === 'tegn' && typeof _kundeRoomDrawn === 'function') setTimeout(() => _kundeRoomDrawn(room), 0);
   S.ui.selectedRoomId = room.id;
   S.ui.selectedWallId = null;
   if (!keepPosition) fitAll(); // don't jump view when room is drawn in place
@@ -41437,6 +42127,11 @@ function finishWbwRoom() {
   }
 }
 function _wbwBalanceToast(roomId, txt) {
+  // 030: ikke paa kundesiden. Toasten tilbyr «Merk veggene som usikre» — det er Kenneths eget
+  // verktoy (`uncertainWalls`), ikke noe kunden skal forholde seg til, og paa telefon la den seg
+  // rett oppaa talltastaturet. Pad-en viser uansett balansen LIVE mens veggene legges, som er
+  // bedre: der rekker man aa rette for rommet lukkes.
+  if (S.ui && S.ui.kundeMode) return;
   document.getElementById('_wbw-bal-toast')?.remove();
   const d = document.createElement('div');
   d.id = '_wbw-bal-toast';
@@ -42954,7 +43649,14 @@ let _lshapeVariant=3;
 // ─── UNDO SYSTEM ──────────────────────────────────────────────
 const _undoStack=[];
 const UNDO_MAX=50;
+// 030: en samleoperasjon som kaller flere funksjoner som HVER tar sitt eget snapshot (typisk
+// `createRoom`, som kaller pushUndo som sin andre linje) ville ellers lagt fire snapshots paa
+// stakken for ett klikk — og Ctrl+Z ville angret ett rom om gangen i stedet for hele handlingen.
+// Den som starter batchen tar ETT snapshot og hever telleren; alle snapshots inni hoppes over.
+// Prosjektet merkes fortsatt skittent, saa lagringen oppfoerer seg som for.
+let _undoSuppress = 0;
 function pushUndo() {
+  if (_undoSuppress > 0) { _markProjectDirty(); return; }
   _markProjectDirty();
   _undoStack.push({
     rooms:     S.rooms.map(r=>({...r, points:r.points.map(p=>({x:p.x,y:p.y})), walls:(r.walls||[]).map(w=>({...w}))})),
@@ -61946,11 +62648,25 @@ let _autoSaveCount = 0;
 let _autoSaveInProgress = false;
 
 function _scheduleAutoSave() {
+  // 030 — STEG 0.1-funnet, DEN ENE gaten mot skyen i kundemodus.
+  // Maalt: `createRoom` -> `pushUndo` -> `_markProjectDirty` + `_scheduleAutoSave`, og derfra
+  // `_performAutoSave` -> `_saveToSupabase`, som INSERTER en ny prosjektrad naar
+  // `_supabaseProjectId` er null. I tegn-modus er kunden anonym, saa inserten ville blitt
+  // avvist av RLS (`auth.uid() = user_id`) — men «den feiler av riktig grunn ved et uhell» er
+  // ikke et vern, det er en tilfeldighet som ryker neste gang RLS endres. I tillegg skriver
+  // `_performAutoSave` til IndexedDB UBETINGET, altsa kundens tegning i kundens egen nettleser,
+  // og den rorer lagre-indikatoren kunden ikke skal se.
+  // Presentasjonsmodus (`?present=`) slipper unna uten gate fordi den er ren lesing: ingenting
+  // muterer S, saa pushUndo kjorer aldri. Tegn-modus er den forste som faktisk tegner.
+  // Her, i det ene punktet alle mutasjonsveier gaar gjennom — ikke paa tjue kallsteder.
+  if (S.ui && S.ui.kundeMode) return;
   clearTimeout(_autoSaveTimer);
   _autoSaveTimer = setTimeout(() => _performAutoSave(), 5000); // 5s debounce
 }
 
 async function _performAutoSave() {
+  // Dobbelt vern: en timer kan alt ha vaert planlagt for kundeMode ble satt.
+  if (S.ui && S.ui.kundeMode) return;
   if (_autoSaveInProgress) return;
   _autoSaveInProgress = true;
   try {

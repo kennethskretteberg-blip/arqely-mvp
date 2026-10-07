@@ -4,6 +4,84 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Tegn selv via kundelenke — Mål/Polygon/L-form/WBW på PC, talltastatur på telefon — 2026-10-07
+
+Serien «Kundelenke» (027–030), prompt 030 — siste i serien. Krever 027 og 028.
+Elektrikeren på befaring tegner rommene selv og sender en lenke, i stedet for at Kenneth tegner
+etter en skisse på papir.
+
+**STEG 0 — fire målinger, ikke antakelser:**
+
+1. **Hva knekker i kundemodus?** `startDrawMode('wbw')` kjører rent. Det som *ikke* er trygt er
+   romopprettelsen: `createRoom` → `pushUndo` → `_markProjectDirty` + `_scheduleAutoSave` →
+   `_performAutoSave` → `_saveToSupabase`, som **inserter en ny prosjektrad** når
+   `_supabaseProjectId` er null. Kunden er anonym, så RLS (`auth.uid() = user_id`) ville avvist
+   den — men «den feiler av riktig grunn ved et uhell» er ikke et vern. I tillegg skriver
+   `_performAutoSave` til IndexedDB *ubetinget*. Presentasjonsmodus slipper unna uten gate fordi
+   den er ren lesing; tegn-modus er den første som faktisk muterer. Gaten ligger derfor i
+   `_scheduleAutoSave` — det ene punktet alle mutasjonsveier går gjennom.
+2. **Legger `wbwDirPlace` en vegg uten mus?** Ja. Fire kall fra konsollen ga et ferdig rom på
+   3,20 × 4,00. Og rommet **lukker seg selv** når en vegg lander under 10 cm fra startpunktet —
+   «Lukk rom» var altså allerede løst; knappen trengte bare å kalle `finishWbwRoom()`.
+3. **Telefonmålingen (375 px):** `#wbw-panel` passer i bredden (374 × 101), men **alle ti
+   knappene er under 48 px** — pilene 30 × 28, handlingene 28 × 28. Og `#wbw-len` er
+   `type="number"` uten `inputmode`, mens `addWbwWall` kaller `el.focus()` etter *hver* vegg:
+   mobiltastaturet ville sprettet opp på nytt for hver eneste vegg man la.
+4. **Hva trenger et komplett rom?** `createRoom` setter `roomType: null`, `targetWm2: null`.
+   `ROOM_TYPES` eier `targetWm2` og `defaultModType` per type — så komfort Lav/Normal/Høy blir
+   ±20 % av romtypens egen verdi, og kunden ser aldri et tall.
+
+**⚠ To lekkasjer funnet live, begge eldre enn 030:**
+
+- **`_presentEnter()` satte ubetinget `presentPublic = false`** — og begge offentlige inngangene
+  (`?present=` og `?kunde=`) setter flagget *før* de kaller den. Det ble altså nullstilt
+  umiddelbart, stikk i strid med kommentaren på selve linja. **«Del lenke» og «Avslutt» har vært
+  synlige for alle med en presentasjonslenke.** Flagget tas nå som argument.
+- **PDF-knappen var ikke gatet i det hele tatt.** På en kundelenke er det et direkte brudd på
+  spec regel 1 — PDF-en viser produkter og priser. Nå skjult i kundemodus, sammen med
+  «Installert effekt»-KPI-en, som er utlegget regnet om. Presentasjonslenken beholder PDF-en;
+  den *er* ment som kundens prosjektoversikt (notert i SPØRSMÅL.md).
+
+**⚠ Tre feil i mitt eget arbeid, funnet ved måling:**
+
+- **Ctrl+Z angret ett rom om gangen.** `createRoom` kaller `pushUndo` selv, så «Legg inn alle
+  rom» ga fire snapshots for tre rom. Ny `_undoSuppress`-teller: den som starter en batch tar
+  ett snapshot og hever telleren, snapshots inni hoppes over. Målt: 1 steg, og ett Ctrl+Z
+  fjerner alle rommene.
+- **Tegningen var usynlig på telefon.** `startDrawMode('wbw')` regner startvisningen ut fra
+  PC-bredde (zoom ble 0,15, minimum) og sentrerer i *hele* lerretet — men pad-en dekker de
+  nederste ~390 px, så geometrien havnet bak tastaturet. Ny `_kpadFit()` zoomer til kjeden
+  innenfor den synlige stripa over pad-en.
+- **To knapper merket «Bruk alle» i samme dialog** gjorde ulike ting (rom vs. mål). Nå «Legg inn
+  alle rom» og «Bruk alle mål», og mål-knappene vises bare når svaret faktisk har mål.
+
+**Dette er bygget:**
+- Tegn-modus aktivert i «Be kunde om mål». *027 hardkodet `mode: 'maal'` siden valget var
+  deaktivert — modusen leses nå faktisk fra radioknappen.*
+- Kundesiden i tegn-modus: verktøylinje med Mål · Polygon · L-form · Vegg for vegg, liste over
+  tegnede rom med Endre/Slett. Prosjektets egne rom er låst.
+- **Én krok**: alle fire tegnemetodene ender i `createRoom`, så romskjemaet og romlista trenger
+  ingen fire parallelle kroker.
+- Telefon-HUD: 375 × 366 px, **minste knapp 48 px** (var 28), talltastatur + piler, og
+  `#wbw-len` satt `readonly` + `inputmode="none"` — et readonly-felt åpner ikke tastaturet, så
+  `focus()`-kallet blir ufarlig uten at `addWbwWall` måtte endres for innloggede brukere.
+  Balanselinja viser live hva som gjenstår: «For å lukke: ↕ 1,60 m opp igjen · ↔ 4,00 m venstre
+  igjen».
+- Romskjema per rom: navn, romtype, etasje, ønsket varmetype, ønsket komfort, kommentar. Ingen
+  W/m²-tall, ingen produkter.
+- 028-panelet: «Nye rom fra kunde (N)» med SVG-miniatyr av romformen, W/m² utledet av romtype +
+  komfort, Bruk per rom / Legg inn alle rom. Ugyldige rom listes med begrunnelse i stedet for å
+  forsvinne stille. Navnekollisjon gir «(kunde)»-suffiks. Rommene plasseres til høyre for de
+  eksisterende med kundens innbyrdes avstander bevart.
+- WBW-balansetoasten og minikartet undertrykt i kundemodus — begge er Kenneths verktøy, og på
+  telefon la de seg oppå tegneflaten.
+
+**Ingen migrasjon.** 030 er ren klientkode; `kundelenke_answer` tar imot `rooms[]` som den er.
+
+**Regresjon:** `_kundelenkeRegressionTest` 79 → 114 sjekker. Hele batteriet grønt: **324 sjekker**.
+
+---
+
 ## Kundelenke på e-post begge veier, alle utgående lenker på varmeplan.no — 2026-10-07
 
 Serien «Kundelenke» (027–030), prompt 029. Krever 027 og 028.
