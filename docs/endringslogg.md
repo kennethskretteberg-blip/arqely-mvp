@@ -4,6 +4,74 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesiden: sidepanel, veggvalg, piltaster og gizmo — tegningen følger målene — 2026-10-07
+
+Prompt 032. Kenneth: «Siden kunden får opp ved å trykke på lenken er ikke så god … Fyll inn mål
+kan komme som bar på venstre side slik vi har det i Varmeplan i dag — da blir canvas større …
+Valgt vegg må tydelig markeres.» Erstatter 027s «geometrien tegnes ikke om på kundesiden»;
+spec regel 2 står: alt skjer lokalt i kundens nettleser til «Send inn».
+
+**STEG 0 — tre målinger:**
+1. **Bunnarket tok 53 % av vindushøyden** (det startet på y=336 av 720). Klagen er målt, ikke
+   antatt. Lerretet er nå fullhøyde og mister bare 330 px i bredden — **77 % mot 47 % før**.
+2. **Fem gates på `S.ui.present`:** mousedown, mousemove, mouseup, keydown, pluss
+   `_ctrlSCanSave` og `_editorIsEmpty`. De fire første er åpnet for `kundeMode === 'maal'`;
+   lagringsgaten er bevisst urørt.
+3. **`_applyWallLength` virker på et kunderom:** eksakt resultat, `points[0]` urørt, **null
+   lagringskall og null undo-steg**. Den er en ren geometrifunksjon, så tegningen kan følge
+   tallene uten at noe skrives.
+
+**Gizmo → vegg-rad-mappingen, som prompten ba om:** `drawMoveArrows` tegner pilene *vinkelrett*
+på den valgte veggen, og draget flytter veggen sidelengs. Den valgte veggens **egen** lengde
+endres derfor ikke i det hele tatt — det er de to **naboveggene** (idx−1 og idx+1) som blir
+lengre eller kortere. Målt: drag 50 cm utover på vegg 0 i et 400×320-rom ga vegg 1 og 3 fra
+320 → 370, mens vegg 0 sto på 400. Panelet viser derfor to rader endre seg når man drar i én
+pil, og det er riktig.
+
+**Alt regnes FRA originalen.** `_kundeState.original` er en dyp kopi av tegningen Kenneth sendte;
+`_kundeRebuildRoom` bygger rommet på nytt fra den pluss alle kundens tall, via 028s
+`_kundeApplyPlan` + `_applyWallLength`. Da er rekkefølgen likegyldig, to endringer av samme vegg
+kan ikke stable seg, og «Tilbakestill» er bare å fjerne tallet.
+
+**⚠ Fire feil funnet ved måling, alle i mitt eget arbeid:**
+- **Fem piltastetrykk ga +1 cm, ikke +5.** `compWalls()` deler ut **nye vegg-id-er** ved hver
+  ombygging, så `S.ui.selectedWallId` pekte på en vegg som ikke fantes lenger og
+  `_kundeValgtVegg()` ga null etter første trinn. Id-ene arves nå fra originalen per indeks.
+- **Piltastene var ubrukelige i praksis.** Første utgave hoppet over alle inputfelt — men etter
+  Enter flytter fokus seg til neste veggs tallfelt, så kunden står *alltid* i et felt.
+  Veggens eget felt er nå med; vi tar over fra nettleserens number-stepper, som bare endret
+  tallet uten å oppdatere tegningen (`change` fyrer først ved blur).
+- **Tre verktøy fra den innloggede editoren lakk inn:** `#wip`-boksen («VEGG · ID · Lengde ·
+  Vinkel» med en **«✕ Avslutt»**-knapp som ville tatt kunden ut av siden), rommets
+  transform-gizmo (flytter/roterer hele rommet), og minikartet. `present-mode` skjuler ingen av
+  dem — målt i nettleseren. Ny `body.kunde-maal`-klasse stenger dem.
+- **Cyan var feil markeringsfarge.** Et valgt rom tegnes allerede med cyan kontur — 16 782
+  cyan-piksler på lerretet — så den valgte veggen druknet. Den er nå **rav** (#ffa726), en farge
+  som ikke finnes andre steder: rommet er cyan, usikre mål tynne røde, gizmo-pilene rød/grønn.
+
+**To funn om berøring:** hovedlerretet har **ingen touch-håndterere** (de tre som finnes hører
+til signatur-lerretet i dokumentasjonsmodulen), og `nearMoveArrow` har **5 px** treffradius langs
+en 42 px pilstamme. Gizmo-drag med finger har altså aldri virket, heller ikke for innloggede.
+Løst uten å røre innlogget bruk: `nearMoveArrow` tar nå en valgfri toleranse med **standard 5**,
+kundesiden sender 22 på berøringsskjerm, og touch → mus videresendes kun når
+`kundeMode === 'maal'`.
+
+**Svaret bærer nå både lengder og punkter.** `answer.points[roomId]` er kundens resultat-geometri;
+028-panelet viser den som gul stiplet skygge ved siden av Kenneths resultat, så han ser *hva
+kunden så*. Målt ende til ende: kundens punkter og Kenneths «Bruk alle» er **punkt for punkt
+identiske, 0 cm avvik**. `wasCm` hentes fra originalen, ikke fra rommets nåværende lengde — som
+nå *er* kundens eget tall.
+
+**Telefon:** bunnarket er sammenleggbart. Lukket er det én linje («Fyll inn mål · Send inn») og
+tegningen får **92 %** av høyden; åpent 44 %. Tallfelt og −/+ er 44 px.
+
+**Innlogget bruk og `?present=` er uendret**, verifisert: 5 px-treff beholdt, `_movingWall`
+settes, gizmo-drag 400 → 450, undo-steg lagt til, `#wip` synlig.
+
+**Regresjon:** `_kundelenkeRegressionTest` 114 → 140 sjekker. 15 batterier grønt: **364 sjekker**.
+
+---
+
 ## E-postene skriver norsk med æ, ø og å — ASCII-regelen gjelder bare SQL — 2026-10-07
 
 Meldt av Kenneth: «Teksten er uten æ ø å i e-posten som blir sendt.» Han har rett, og det er

@@ -553,6 +553,14 @@ body.present-mode #stair-settings-panel,
 body.present-mode #snow-settings-panel,
 body.present-mode #statusbar,
 body.present-mode #render-stats{display:none !important}
+/* 032: kundesiden er presentasjon PLUSS vegg-redigering, så den kan ikke bare arve
+   present-mode-lista. #wip («VEGG · ID · Lengde · Vinkel · Rom» + en «✕ Avslutt»-knapp som
+   ville tatt kunden ut av siden) dukket opp straks en vegg ble valgt — den hører til den
+   innloggede editoren og har ingenting på en kundelenke å gjøre. Målt i nettleseren, ikke
+   antatt: present-mode skjuler den ikke. */
+body.kunde-maal #wip,
+body.kunde-maal #sb-obj-info,
+body.kunde-maal #minimap-widget{display:none !important}
 #present-bar{position:absolute;top:0;left:0;right:0;z-index:80;background:var(--surface);border-bottom:1px solid var(--border);box-shadow:0 2px 12px rgba(0,0,0,.25);padding:10px 16px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 #present-bar .pb-title{font-size:16px;font-weight:700;color:var(--text)}
 #present-bar .pb-sub{font-size:12px;color:var(--dim)}
@@ -4583,6 +4591,7 @@ function render() {
   if (S.ui.drawMode === 'import') drawImportOverlay();
   else drawPreview();
   if (S.ui.drawMode === 'wbw') drawWbwLines();
+  drawKundeValgtVegg();   // 032: tydelig markering av kundens valgte vegg, under pilene
   if (S.ui.selectedWallId) drawMoveArrows();
   drawHoveredWallHighlight();
   if (S.ui.wallThicknessMode) drawWallThicknessOverlay();
@@ -5582,7 +5591,9 @@ function drawRooms() {
   // Kenneth 18.09.2026 («Aldri to gizmoer samtidig»): selStrip()/en markert folie SETTER
   // S.ui.selectedRoomId til folien sitt rom (viser romkortet ved siden av), men rommets EGEN
   // transform-gizmo skal ikke tegnes oppå folie-gizmoen — samme unntak hindring alt hadde.
-  if (!S.ui?._pdfMode && !S.ui.selectedHindringId && S.ui.selectedStripId==null && S.ui.selectedFoilFreeId==null) drawTransformGizmo(room);
+  // 032: ...og ikke i kundemodus — gizmoen flytter/roterer HELE rommet, noe kunden verken
+  // skal eller trenger. Vegg-pilene (drawMoveArrows) er det eneste håndtaket han får.
+  if (!S.ui?._pdfMode && !S.ui.kundeMode && !S.ui.selectedHindringId && S.ui.selectedStripId==null && S.ui.selectedFoilFreeId==null) drawTransformGizmo(room);
 
   // Wall labels — always placed on the inside of the room, regardless of
   // polygon orientation. Without this, CW rooms put V1 outside and V3 inside
@@ -6848,6 +6859,8 @@ async function _kundeLoadByToken(token) {
     document.getElementById('app').style.display = 'flex';
     _presentEnter(true);
     S.ui.kundeMode = _kundeState.mode;
+    if (_kundeState.mode === 'maal') { document.body.classList.add('kunde-maal'); _kundeKobleBeroring(); }
+    _kundeLagreOriginal();   // 032: fasiten alt regnes fra
     _kundeRenderBar();
     render();
     return true;
@@ -6873,10 +6886,19 @@ function _kundeShowInvalid() {
 function _kundeKey(roomId, idx) { return roomId + '|' + idx; }
 
 function _kundeWallCm(room, idx) {
+  // 032: fallbacken må være ORIGINALEN. `room.walls[idx].length` er nå kundens egen geometri,
+  // så balansesjekken ville ellers målt resultatet mot seg selv og alltid sagt «går opp».
+  const _o = _kundeState && _kundeState.original && _kundeState.original.get(room.id);
   const e = _kundeState && _kundeState.edits.get(_kundeKey(room.id, idx));
   // Valider her, ikke bare ved innskriving: en ugyldig verdi som likevel havner i kartet ville
   // ellers forplante seg til balansesjekken og gjøre hele rommet «ikke rettvinklet».
-  return (typeof e === 'number' && isFinite(e) && e > 0) ? e : Math.round(room.walls[idx].length);
+  if (typeof e === 'number' && isFinite(e) && e > 0) return e;
+  if (_o && _o.points[idx]) {
+    const n = _o.points.length;
+    return Math.round(Math.hypot(_o.points[(idx + 1) % n].x - _o.points[idx].x,
+                                 _o.points[(idx + 1) % n].y - _o.points[idx].y));
+  }
+  return Math.round(room.walls[idx].length);
 }
 // Kundens tall der de finnes — brukes av «går målene opp?» live.
 // ÅPEN kjede lagt ut langs rommets egne veggretninger, med oppgitte lengder der de finnes.
@@ -6899,84 +6921,170 @@ function _openChainWithLengths(room, override) {
 }
 
 function _kundePointsWith(room) {
+  // 032: legg kjeden ut langs ORIGINALENS retninger. Rommets egne punkter er nå kundens
+  // resultat, og en kjede bygget på dem ville per definisjon lukket seg — samme lukket-
+  // polygon-felle som 027 og 028 gikk i, bare i ny drakt.
+  const o = _kundeState && _kundeState.original && _kundeState.original.get(room.id);
+  const basis = o ? { points: o.points } : room;
   const ov = new Map();
-  for (let i = 0; i < room.points.length; i++) ov.set(i, _kundeWallCm(room, i));
-  return _openChainWithLengths(room, ov);
+  for (let i = 0; i < basis.points.length; i++) ov.set(i, _kundeWallCm(room, i));
+  return _openChainWithLengths(basis, ov);
 }
 
 function _kundeRenderBar() {
   if (!_kundeState) return;
-  document.getElementById('_kunde-bar')?.remove();
-  const narrow = _kundeErSmal();
+  const smal = _kundeErSmal();
+  const gammel = document.getElementById('_kunde-bar');
+  const scroll = gammel ? gammel.scrollTop : 0;
+  gammel?.remove();
+
   const bar = document.createElement('div');
   bar.id = '_kunde-bar';
-  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:3000;background:var(--surface,#16171c);'
-    + 'border-top:1px solid var(--border,#2a2d35);max-height:62vh;overflow:auto;padding:14px 16px 18px;'
-    + 'font-family:system-ui,-apple-system,sans-serif;box-shadow:0 -6px 24px rgba(0,0,0,.4)';
-  const roomsHtml = S.rooms.map(r => {
+  // 032: PC får et SIDEPANEL som flex-søsken til #canvas-wrap inne i #content (som er
+  // display:flex). Da tar lerretet resten av plassen av seg selv via `flex:1`, og
+  // ResizeObserver-en på #canvas-wrap kaller resizeCanvas() — ingen CSS-krig, ingen
+  // manuell utregning. STEG 0 målte at bunnarket tok 53 % av høyden; nå er lerretet
+  // fullhøyde og mister bare 320 px i bredden.
+  if (smal) {
+    const apen = !_kundeState.kollapset;
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:3000;background:var(--surface,#16171c);'
+      + 'border-top:1px solid var(--border,#2a2d35);' + (apen ? 'max-height:62vh;overflow:auto;' : '')
+      + 'padding:' + (apen ? '12px 14px 16px' : '0') + ';font-family:system-ui,-apple-system,sans-serif;'
+      + 'box-shadow:0 -6px 24px rgba(0,0,0,.4)';
+  } else {
+    bar.style.cssText = 'flex:0 0 330px;width:330px;height:100%;overflow:auto;z-index:90;'
+      + 'background:var(--surface,#16171c);border-right:1px solid var(--border,#2a2d35);'
+      + 'padding:14px 14px 18px;font-family:system-ui,-apple-system,sans-serif';
+  }
+
+  if (_kundeState.mode === 'tegn') {
+    bar.innerHTML = _kundeTegnBar();
+    _kundeMonterBar(bar, smal);
+    return;
+  }
+
+  // 032: sammenleggbart bunnark på telefon — lukket er det én linje, så tegningen får plassen.
+  if (smal && _kundeState.kollapset) {
+    const n = _kundeState.edits.size;
+    bar.innerHTML = `<div onclick="_kundeToggleArk()" style="display:flex;align-items:center;gap:10px;padding:13px 14px;cursor:pointer">
+      <span style="flex:1;font-size:14px;font-weight:600">${n ? n + (n === 1 ? ' mål endret' : ' mål endret') : 'Fyll inn mål'}</span>
+      <button onclick="event.stopPropagation();_kundeSubmit()" style="padding:9px 18px;background:var(--accent,#4fa2b8);border:none;border-radius:8px;font-size:13px;font-weight:700;color:#0d0e10;cursor:pointer">Send inn</button>
+      <span style="font-size:17px;color:var(--dim)">▲</span></div>`;
+    _kundeMonterBar(bar, smal);
+    return;
+  }
+
+  const valgt = _kundeValgtVegg();
+  const romHtml = S.rooms.map(r => {
     const asked = _roomUncertainWalls(r);
-    // Usikre vegger først (spec: «vises først og rødt — men kunden kan rette hvilken som helst»).
     const order = [...r.walls.keys()].sort((a, b) =>
       (asked.includes(b) ? 1 : 0) - (asked.includes(a) ? 1 : 0) || a - b);
     const rows = order.map(i => {
       const unsure = asked.includes(i);
-      const cur = _kundeWallCm(r, i);
-      const orig = Math.round(r.walls[i].length);
-      const changed = cur !== orig;
-      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0">
-        <span style="flex:1;min-width:0;font-size:13px;color:${unsure ? '#f87171' : 'var(--text)'}">
+      const cur = _kundeFaktiskCm(r, i);
+      const orig = _kundeState.original?.get(r.id);
+      const var0 = orig ? Math.round(Math.hypot(
+        orig.points[(i + 1) % orig.points.length].x - orig.points[i].x,
+        orig.points[(i + 1) % orig.points.length].y - orig.points[i].y)) : cur;
+      const endret = Math.abs(cur - var0) > 0.5;
+      const erValgt = valgt && valgt.room.id === r.id && valgt.idx === i;
+      return `<div id="_kv-${r.id}-${i}" onclick="_kundeVelgVegg(${r.id},${i})"
+        style="display:flex;align-items:center;gap:7px;padding:7px 8px;cursor:pointer;border-radius:8px;
+               ${erValgt ? 'background:rgba(255,167,38,.14);outline:1px solid #ffa726' : ''}">
+        <span style="flex:1;min-width:0;font-size:13px;color:${unsure && !erValgt ? '#f87171' : 'var(--text)'};
+                     ${erValgt ? 'font-weight:700' : ''}">
           ${esc(r.walls[i].label || ('Vegg ' + (i + 1)))}${unsure ? ' <b>?</b>' : ''}</span>
-        <input type="number" inputmode="decimal" min="1" max="99999" value="${cur}"
+        ${erValgt ? `<button onclick="event.stopPropagation();_kundeNudge(-1)" title="−1 cm"
+            style="width:${smal?44:32}px;height:${smal?44:34}px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:18px;cursor:pointer">−</button>` : ''}
+        <input id="_kf-${r.id}-${i}" type="number" inputmode="decimal" min="1" max="99999" value="${cur}"
+          onclick="event.stopPropagation();_kundeVelgVegg(${r.id},${i})"
           onchange="_kundeSetWall(${r.id},${i},this.value)"
-          style="width:92px;padding:9px 10px;border:1px solid ${changed ? '#22c55e' : 'var(--border)'};border-radius:8px;
-                 background:var(--surface2);color:${changed ? '#22c55e' : 'var(--text)'};font-size:15px;text-align:right">
-        <span style="font-size:12px;color:var(--dim);width:22px">cm</span>
-        <span style="font-size:11px;color:var(--dim);width:72px">${changed ? 'var ' + orig : ''}</span>
+          onkeydown="if(event.key==='Enter'){event.preventDefault();_kundeSetWall(${r.id},${i},this.value);_kundeNesteVegg(${r.id},${i});}"
+          style="width:${smal?86:76}px;min-height:${smal?44:36}px;padding:8px 9px;border:1px solid ${endret ? '#22c55e' : 'var(--border)'};border-radius:7px;
+                 background:var(--surface2);color:${endret ? '#22c55e' : 'var(--text)'};font-size:14px;text-align:right">
+        ${erValgt ? `<button onclick="event.stopPropagation();_kundeNudge(1)" title="+1 cm"
+            style="width:${smal?44:32}px;height:${smal?44:34}px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:18px;cursor:pointer">+</button>` : ''}
+        <span style="font-size:11px;color:var(--dim)">cm</span>
+        ${endret ? `<span onclick="event.stopPropagation();_kundeTilbakestillVegg(${r.id},${i})"
+            title="Tilbakestill til ${var0} cm" style="font-size:10px;color:var(--dim);cursor:pointer;white-space:nowrap">var ${var0} ↺</span>` : ''}
       </div>`;
     }).join('');
     const bal = _axisBalanceText(_roomAxisBalance(_kundePointsWith(r), true));
-    return `<div style="margin-bottom:14px">
-      <div style="font-size:13px;font-weight:700;margin-bottom:2px">${esc(r.name || 'Rom')}</div>
+    return `<div style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:3px">${esc(r.name || 'Rom')}
+        <span style="font-weight:400;color:var(--dim);font-size:11px">${(r.area / 10000).toFixed(1).replace('.', ',')} m²</span></div>
       ${rows}
       <div style="font-size:11.5px;margin-top:4px;color:${bal ? '#f59e0b' : '#22c55e'}">
         ${bal ? '⚠ ' + esc(bal) : '✓ Målene går opp'}</div>
     </div>`;
   }).join('');
 
-  // 030: tegn-modus har sin egen bar — samme skall, annet innhold.
-  if (_kundeState.mode === 'tegn') {
-    bar.innerHTML = _kundeTegnBar();
-    document.body.appendChild(bar);
-    return;
-  }
   bar.innerHTML = `
-    <div style="font-size:15px;font-weight:700;margin-bottom:2px">Fyll inn mål</div>
-    <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
+    ${smal ? `<div onclick="_kundeToggleArk()" style="display:flex;align-items:center;cursor:pointer;margin-bottom:8px">
+       <span style="flex:1;font-size:15px;font-weight:700">Fyll inn mål</span><span style="font-size:17px;color:var(--dim)">▼</span></div>`
+     : '<div style="font-size:15px;font-weight:700;margin-bottom:2px">Fyll inn mål</div>'}
+    <div style="font-size:11.5px;color:var(--dim);margin-bottom:10px;line-height:1.45">
       ${_kundeState.note ? esc(_kundeState.note) + '<br>' : ''}
-      Rett målene du har målt. Tegningen oppdateres av Varmeplan når målene er mottatt.</div>
-    ${narrow ? '' : '<div style="font-size:11px;color:var(--dim);margin-bottom:8px">Du kan også klikke på en målelinje i tegningen.</div>'}
-    ${roomsHtml}
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+      Velg en vegg i lista eller på tegningen. Tegningen oppdateres mens du retter.</div>
+    ${valgt ? `<div style="font-size:11px;color:var(--dim);margin-bottom:9px;padding:7px 9px;background:var(--surface2);border-radius:7px;line-height:1.45">
+        <b style="color:var(--text)">${esc(valgt.room.walls[valgt.idx].label || ('Vegg ' + (valgt.idx + 1)))}</b> er valgt.
+        Piltast opp/ned endrer ±1 cm, med Shift ±10 cm. Du kan også dra pilene på tegningen.</div>` : ''}
+    ${romHtml}
+    <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:4px">
+      ${_kundeState.edits.size ? `<button onclick="_kundeTilbakestillAlt()"
+        style="padding:7px 11px;background:none;border:1px solid var(--border);border-radius:7px;font-size:11.5px;color:var(--muted);cursor:pointer">↺ Tilbakestill alt</button>` : ''}
+    </div>
+    <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
       <input id="_kunde-name" placeholder="Ditt navn (valgfritt)" value="${esc(_kundeState.name)}"
         oninput="_kundeState.name=this.value"
-        style="flex:1;min-width:150px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+        style="flex:1;min-width:130px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
       <input id="_kunde-comment" placeholder="Kommentar (valgfritt)" value="${esc(_kundeState.comment)}"
         oninput="_kundeState.comment=this.value"
-        style="flex:2;min-width:180px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+        style="flex:2;min-width:130px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
       <button id="_kunde-send" onclick="_kundeSubmit()"
-        style="padding:11px 22px;background:var(--accent,#4fa2b8);border:none;border-radius:8px;font-size:14px;font-weight:700;color:#0d0e10;cursor:pointer">Send inn</button>
+        style="flex:1;min-width:110px;min-height:${smal?48:40}px;padding:11px 18px;background:var(--accent,#4fa2b8);border:none;border-radius:8px;font-size:14px;font-weight:700;color:#0d0e10;cursor:pointer">Send inn</button>
     </div>`;
-  document.body.appendChild(bar);
+  _kundeMonterBar(bar, smal, scroll);
+}
+
+// Sidepanelet må inn i #content (flex-raden), bunnarket på body. Ett sted, så de to veiene
+// ikke kan drifte fra hverandre.
+function _kundeMonterBar(bar, smal, scroll) {
+  const content = document.getElementById('content');
+  const wrap = document.getElementById('canvas-wrap');
+  if (!smal && content && wrap) content.insertBefore(bar, wrap);
+  else document.body.appendChild(bar);
+  if (scroll) bar.scrollTop = scroll;
+  // Lerretets backing-størrelse må følge den nye bredden. ResizeObserver-en tar det
+  // vanligvis, men et eksplisitt kall gjør første tegning riktig med én gang.
+  if (typeof resizeCanvas === 'function') setTimeout(resizeCanvas, 0);
+}
+
+function _kundeToggleArk() {
+  if (!_kundeState) return;
+  _kundeState.kollapset = !_kundeState.kollapset;
+  _kundeRenderBar();
+  render();
 }
 
 function _kundeSetWall(roomId, idx, val) {
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !_kundeState) return;
   const n = parseFloat(String(val).replace(',', '.'));
-  const orig = Math.round(room.walls[idx].length);
+  // 032: sammenlign med ORIGINALEN, ikke med rommets nåværende lengde. Etter at tegningen
+  // begynte å følge tallene er `room.walls[idx].length` kundens egen forrige verdi — en
+  // sammenligning mot den ville sagt «uendret» og slettet redigeringen med én gang.
+  const orig = _kundeState.original?.get(roomId);
+  const basis = orig
+    ? Math.round(Math.hypot(orig.points[(idx + 1) % orig.points.length].x - orig.points[idx].x,
+                            orig.points[(idx + 1) % orig.points.length].y - orig.points[idx].y))
+    : Math.round(room.walls[idx].length);
   if (!isFinite(n) || n <= 0) { _kundeState.edits.delete(_kundeKey(roomId, idx)); }
-  else if (Math.round(n) === orig) { _kundeState.edits.delete(_kundeKey(roomId, idx)); }
+  else if (Math.round(n) === basis) { _kundeState.edits.delete(_kundeKey(roomId, idx)); }
   else { _kundeState.edits.set(_kundeKey(roomId, idx), Math.round(n)); }
+  // 032: tegningen følger tallet. Bygges FRA originalen (se `_kundeRebuildRoom`), aldri
+  // inkrementelt — da er rekkefølgen likegyldig og «Tilbakestill» er bare å fjerne tallet.
+  _kundeRebuildRoom(roomId);
   _kundeRenderBar();
   render();
 }
@@ -6990,14 +7098,32 @@ function _kundeBuildAnswer() {
     if (!room) continue;
     const i = parseInt(idx, 10);
     if (!(cm > 0) || !isFinite(cm)) continue;          // aldri negative/NaN inn i svaret
-    walls.push({ roomId: room.id, wallIdx: i, lengthCm: Math.round(cm), wasCm: Math.round(room.walls[i].length) });
+    // 032: `wasCm` er Kenneths opprinnelige mål — hentes fra originalen, ikke fra rommets
+    // nåværende lengde, som nå ER kundens eget tall.
+    const _o = _kundeState.original && _kundeState.original.get(room.id);
+    const wasCm = _o
+      ? Math.round(Math.hypot(_o.points[(i + 1) % _o.points.length].x - _o.points[i].x,
+                              _o.points[(i + 1) % _o.points.length].y - _o.points[i].y))
+      : Math.round(room.walls[i].length);
+    walls.push({ roomId: room.id, wallIdx: i, lengthCm: Math.round(cm), wasCm });
   }
   const axisBalance = {};
   for (const r of S.rooms) {
     const b = _roomAxisBalance(_kundePointsWith(r), true);
     if (b.rectilinear) axisBalance[r.id] = { dxCm: b.dxCm, dyCm: b.dyCm };
   }
-  return { walls, comment: (_kundeState.comment || '').slice(0, 2000), axisBalance };
+  // 032: kundens RESULTAT-geometri for rom han faktisk endret. Kenneth arbeider fortsatt inn
+  // via vegglengdene (`_applyWallLength` på hans side) — punktene er der så 028-panelet kan
+  // vise HVA KUNDEN SÅ som skygge-polygon. Uten det må Kenneth gjette på om tegningen kunden
+  // satt med stemmer med den han får.
+  const points = {};
+  const endredeRom = new Set(walls.map(w => w.roomId));
+  for (const rid of endredeRom) {
+    const r = S.rooms.find(x => x.id === rid);
+    if (!r || !r.points || r.points.length < 3) continue;
+    points[rid] = r.points.map(p => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+  }
+  return { walls, points, comment: (_kundeState.comment || '').slice(0, 2000), axisBalance };
 }
 
 async function _kundeSubmit() {
@@ -7201,6 +7327,270 @@ function _kundeCopyLink() {
     .then(() => _showToast && _showToast('Kundelenken er kopiert', 'ok'));
 }
 
+
+// ═══ 032: KUNDESIDEN — SIDEPANEL, VEGGVALG OG LEVENDE TEGNING ═════════════════
+// Kenneth 07.10.2026: «Fyll inn mål kan komme som bar på venstre side slik vi har det i
+// Varmeplan i dag — da blir canvas større … trykke på vegg i meny eller vegg på tegning …
+// piltaster … gizmo med piler … Valgt vegg må tydelig markeres.»
+//
+// STEG 0 målte at bunnarket spiste 53 % av vindushøyden (det startet på y=336 av 720), og at
+// `_applyWallLength` (028) virker helt fint på et kunderom: eksakt resultat, `points[0]` urørt,
+// NULL lagringskall og NULL undo-steg. Den er en ren geometrifunksjon, så tegningen kan følge
+// tallene lokalt uten at spec regel 2 brytes — ingenting skrives før «Send inn».
+
+// Originalen slik Kenneth sendte den. Alt kunden gjør regnes ut FRA denne, aldri inkrementelt:
+// da spiller rekkefølgen ingen rolle, «Tilbakestill» er gratis, og to redigeringer av samme
+// vegg kan ikke stable seg oppå hverandre.
+function _kundeLagreOriginal() {
+  if (!_kundeState) return;
+  _kundeState.original = new Map();
+  for (const r of S.rooms) {
+    _kundeState.original.set(r.id, {
+      points: r.points.map(p => ({ x: p.x, y: p.y })),
+      walls: (r.walls || []).map(w => ({ ...w })),
+      area: r.area,
+    });
+  }
+}
+
+// Bygg rommets geometri på nytt fra originalen + alle kundens tall.
+// Gjenbruker 028s `_kundeApplyPlan` (rekkefølge + motstående-vegg-konflikt) og
+// `_applyWallLength` (vindu-regelen), så kundesiden og Kenneths innarbeiding regner likt.
+function _kundeRebuildRoom(roomId) {
+  if (!_kundeState || !_kundeState.original) return;
+  const room = S.rooms.find(r => r.id === roomId);
+  const orig = _kundeState.original.get(roomId);
+  if (!room || !orig) return;
+  room.points = orig.points.map(p => ({ x: p.x, y: p.y }));
+  const wanted = new Map();
+  for (const [key, cm] of _kundeState.edits) {
+    const [rid, idx] = key.split('|');
+    if (String(roomId) !== rid) continue;
+    if (cm > 0 && isFinite(cm)) wanted.set(parseInt(idx, 10), cm);
+  }
+  if (wanted.size) {
+    const plan = _kundeApplyPlan(room, wanted);
+    for (const idx of plan.order) _applyWallLength(room, idx, plan.vals.get(idx));
+  }
+  room.walls = compWalls(room.points);
+  // ⚠ MÅLT: `compWalls` deler ut NYE id-er hver gang (`S.counters.nextWallId++`). Uten dette
+  // pekte `S.ui.selectedWallId` på en vegg som ikke fantes lenger etter første endring, og
+  // `_kundeValgtVegg()` ga null — fem piltastetrykk ga +1 cm, ikke +5, fordi bare det første
+  // traff noe. Id-ene arves derfor fra originalen, per indeks. Da overlever både valget,
+  // gizmoen og hit-testen en ombygging.
+  for (let i = 0; i < room.walls.length; i++) {
+    if (orig.walls[i] && orig.walls[i].id != null) room.walls[i].id = orig.walls[i].id;
+  }
+  room.area = compArea(room.points);
+}
+
+// Veggens lengde slik den er NÅ i tegningen (etter at kundens tall er arbeidet inn).
+function _kundeFaktiskCm(room, idx) {
+  return Math.round(_wallLenCm(room, idx));
+}
+
+// ── Valg av vegg ─────────────────────────────────────────────────────────────
+function _kundeVelgVegg(roomId, idx, fraTegning) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.walls[idx]) return;
+  S.ui.selectedRoomId = roomId;
+  S.ui.selectedWallId = room.walls[idx].id;
+  _kundeState.selIdx = idx;
+  _kundeRenderBar();
+  render();
+  const rad = document.getElementById(`_kv-${roomId}-${idx}`);
+  if (rad) rad.scrollIntoView({ block: 'nearest' });
+  if (fraTegning) return;                       // klikk på tegningen skal ikke stjele fokus
+  const felt = document.getElementById(`_kf-${roomId}-${idx}`);
+  if (felt) { felt.focus(); felt.select(); }
+}
+
+function _kundeFjernValg() {
+  if (!_kundeState) return;
+  S.ui.selectedWallId = null;
+  _kundeState.selIdx = null;
+  _kundeRenderBar();
+  render();
+}
+
+// Veggen som er valgt nå, som {room, idx} — eller null.
+function _kundeValgtVegg() {
+  if (!_kundeState || S.ui.selectedWallId == null) return null;
+  for (const r of S.rooms) {
+    const i = (r.walls || []).findIndex(w => w.id === S.ui.selectedWallId);
+    if (i >= 0) return { room: r, idx: i };
+  }
+  return null;
+}
+
+// ── De tre måtene å endre lengden på ender ALLE her ──────────────────────────
+// `_kundeSetWall` (027) er fortsatt sannheten for svaret; 032 legger til at tegningen
+// bygges om etterpå.
+function _kundeNudge(cm) {
+  const v = _kundeValgtVegg();
+  if (!v) return;
+  const nå = _kundeFaktiskCm(v.room, v.idx);
+  const ny = Math.max(1, nå + cm);
+  const hadde = document.activeElement?.id || '';
+  _kundeSetWall(v.room.id, v.idx, ny);
+  // Panelet bygges om av `_kundeSetWall`, så fokus forsvinner. Uten dette ville andre
+  // piltastetrykk ikke gjort noe — man måtte klikket i feltet igjen for hvert eneste trinn.
+  if (/^_kf-/.test(hadde)) {
+    const felt = document.getElementById(hadde);
+    if (felt) { felt.focus(); felt.select(); }
+  }
+}
+
+function _kundeTilbakestillVegg(roomId, idx) {
+  if (!_kundeState) return;
+  _kundeState.edits.delete(_kundeKey(roomId, idx));
+  _kundeRebuildRoom(roomId);
+  _kundeRenderBar();
+  render();
+}
+
+function _kundeTilbakestillAlt() {
+  if (!_kundeState) return;
+  if (_kundeState.edits.size && !confirm('Tilbakestille alle mål til tegningen du fikk?')) return;
+  _kundeState.edits.clear();
+  for (const r of S.rooms) _kundeRebuildRoom(r.id);
+  _kundeRenderBar();
+  render();
+}
+
+// Enter i et tallfelt → neste vegg i lista (samme rekkefølge som panelet viser).
+function _kundeNesteVegg(roomId, idx) {
+  const rekke = _kundeVeggRekkefolge();
+  const pos = rekke.findIndex(v => v.roomId === roomId && v.idx === idx);
+  const neste = rekke[(pos + 1) % rekke.length];
+  if (neste) _kundeVelgVegg(neste.roomId, neste.idx);
+}
+
+// Rekkefølgen panelet viser: rom for rom, usikre vegger først i hvert rom.
+function _kundeVeggRekkefolge() {
+  const ut = [];
+  for (const r of S.rooms) {
+    const asked = _roomUncertainWalls(r);
+    const idxs = [...(r.walls || []).keys()].sort((a, b) =>
+      (asked.includes(b) ? 1 : 0) - (asked.includes(a) ? 1 : 0) || a - b);
+    for (const i of idxs) ut.push({ roomId: r.id, idx: i });
+  }
+  return ut;
+}
+
+// ── Gizmo: fra flyttet vegg tilbake til kundens tall ─────────────────────────
+// GIZMO → VEGG-RAD-MAPPINGEN, som prompten ba om å få rapportert:
+// `drawMoveArrows` tegner pilene VINKELRETT på den valgte veggen, og draget flytter veggen
+// sidelengs. Den valgte veggens EGEN lengde endres derfor ikke i det hele tatt — det er de to
+// NABOVEGGENE (idx−1 og idx+1) som blir lengre eller kortere. Det er samme innsikt som
+// vindu-regelen i 028 bygger på, bare sett fra motsatt side.
+// Her måles de to naboene etter draget og skrives inn som kundens tall; den valgte veggen
+// røres ikke. Panelet viser derfor to rader endre seg når man drar i én pil, og det er riktig.
+function _kundeGizmoSlipp() {
+  const roomId = _mwRoomId, idx = _mwWallIdx;
+  _movingWall = false; _mwRoomId = -1; _mwWallIdx = -1;
+  canvas.style.cursor = 'grab';
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || idx < 0 || !_kundeState) { render(); return; }
+  const n = room.points.length;
+  const naboer = [(idx - 1 + n) % n, (idx + 1) % n];
+  // Skriv naboenes NYE lengder inn som kundens tall. `_kundeSetWall` bygger rommet om fra
+  // originalen etterpå, så resultatet er det samme som om tallene var tastet inn.
+  const nye = naboer.map(i => ({ i, cm: Math.round(_wallLenCm(room, i)) }));
+  for (const { i, cm } of nye) {
+    if (cm > 0) _kundeState.edits.set(_kundeKey(roomId, i), cm);
+  }
+  _kundeRebuildRoom(roomId);
+  _kundeRenderBar();
+  render();
+}
+
+// ── Tydelig markering av valgt vegg ──────────────────────────────────────────
+// Kenneth: «Valgt vegg må tydelig markeres på tegningen.» Egen tegnefunksjon, kalt fra
+// render() rett før gizmo-pilene — ikke en hale inne i en annen funksjon (lærdommen fra 030,
+// der oppblussingen lå etter to tidlige `return` og aldri tegnet seg).
+function drawKundeValgtVegg() {
+  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedWallId == null) return;
+  const v = _kundeValgtVegg();
+  if (!v) return;
+  const w = v.room.walls[v.idx];
+  if (!w) return;
+  const s1 = w2s(w.x1, w.y1), s2 = w2s(w.x2, w.y2);
+  // ⚠ MÅLT: cyan var feil valg. Et valgt ROM tegnes allerede med cyan kontur (16 782
+  // cyan-piksler på lerretet), så en cyan vegg forsvant i den. Rav finnes ingen andre steder:
+  // rommet er cyan, usikre mål er tynne røde streker, gizmo-pilene rød/grønn.
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,167,38,.95)';
+  ctx.shadowBlur = 16;
+  ctx.strokeStyle = '#ffa726';
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(s1.x, s1.y); ctx.lineTo(s2.x, s2.y); ctx.stroke();
+  ctx.restore();
+
+  // Målet forstørret ved veggen, på innsiden av rommet.
+  const cm = Math.round(_wallLenCm(v.room, v.idx));
+  const mx = (s1.x + s2.x) / 2, my = (s1.y + s2.y) / 2;
+  const cxW = v.room.points.reduce((a, p) => a + p.x, 0) / v.room.points.length;
+  const cyW = v.room.points.reduce((a, p) => a + p.y, 0) / v.room.points.length;
+  const c = w2s(cxW, cyW);
+  const dx = c.x - mx, dy = c.y - my;
+  const d = Math.hypot(dx, dy) || 1;
+  const tx = mx + (dx / d) * 26, ty = my + (dy / d) * 26;
+  ctx.save();
+  ctx.font = "700 14px 'Space Grotesk',sans-serif";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const txt = (cm / 100).toFixed(2).replace('.', ',') + ' m';
+  const bw = ctx.measureText(txt).width + 14;
+  ctx.fillStyle = 'rgba(13,14,16,.88)';
+  ctx.beginPath();
+  (ctx.roundRect ? ctx.roundRect(tx - bw / 2, ty - 12, bw, 24, 7)
+                 : ctx.rect(tx - bw / 2, ty - 12, bw, 24));
+  ctx.fill();
+  ctx.fillStyle = '#ffa726';
+  ctx.fillText(txt, tx, ty);
+  ctx.restore();
+}
+
+// ── Berøring på kundesiden ───────────────────────────────────────────────────
+// ⚠ MÅLT: hovedlerretet har INGEN touch-håndterere (de tre som finnes hører til
+// signatur-lerretet i dokumentasjonsmodulen). Et gizmo-drag med finger har derfor aldri
+// virket — heller ikke for innloggede brukere; nettleserens syntetiske musehendelser kommer
+// med forsinkelse og avbrytes av scroll.
+// Her videresendes touch → mus, men KUN når kundesiden er i mål-modus. Innlogget bruk er
+// uberørt, og det er derfor dette ikke er «å endre hvordan innloggede flytter vegger».
+function _kundeKobleBeroring() {
+  if (!canvas || canvas._kundeTouch) return;
+  canvas._kundeTouch = true;
+  const aktiv = () => S.ui && S.ui.present && S.ui.kundeMode === 'maal';
+  const videresend = (type, t, e) => {
+    canvas.dispatchEvent(new MouseEvent(type, {
+      clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true, button: 0,
+      shiftKey: e.shiftKey || false,
+    }));
+  };
+  canvas.addEventListener('touchstart', e => {
+    if (!aktiv() || e.touches.length !== 1) return;
+    _kundeTouchAktiv = true;
+    videresend('mousedown', e.touches[0], e);
+    // Bare når vi faktisk grep noe (vegg eller gizmo) stopper vi nettleserens egen
+    // scroll/zoom — ellers skal siden kunne panoreres som før.
+    if (_movingWall) e.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchmove', e => {
+    if (!aktiv() || !_kundeTouchAktiv || e.touches.length !== 1) return;
+    videresend('mousemove', e.touches[0], e);
+    if (_movingWall) e.preventDefault();
+  }, { passive: false });
+  canvas.addEventListener('touchend', e => {
+    if (!aktiv() || !_kundeTouchAktiv) return;
+    _kundeTouchAktiv = false;
+    const t = (e.changedTouches && e.changedTouches[0]) || { clientX: 0, clientY: 0 };
+    videresend('mouseup', t, e);
+  });
+}
+let _kundeTouchAktiv = false;
 
 // ═══ 030: TEGN SELV ═══════════════════════════════════════════════════════════
 // Kunden/elektrikeren tegner rommene selv. Ingen nye tegnemotorer — Mal, Polygon, L-form og
@@ -7669,15 +8059,32 @@ function _kundeNyeRomHtml() {
 }
 
 // Liten SVG-miniatyr av romformen. Ren visning, ingen tilstand.
-function _kundeRomSkisse(pts, w, h) {
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+// Kenneths resultat-punkter for et rom, uten å røre rommet — samme klone-prinsipp som
+// `_kundePreviewRoom`, bare at vi her trenger punktene i stedet for lengdene.
+function _kundeResultatPunkter(room, wanted) {
+  const klone = { points: room.points.map(p => ({ x: p.x, y: p.y })), walls: [], area: 0 };
+  if (wanted && wanted.size) {
+    const plan = _kundeApplyPlan(klone, wanted);
+    for (const idx of plan.order) _applyWallLength(klone, idx, plan.vals.get(idx));
+  }
+  return klone.points;
+}
+
+// 032: `skygge` er kundens egen resultat-geometri (answer.points). Begge formene skaleres av
+// SAMME bokstavstørrelse, ellers ville de to ikke kunne sammenlignes med øyet.
+function _kundeRomSkisse(pts, w, h, skygge) {
+  const alle = skygge && skygge.length >= 3 ? pts.concat(skygge) : pts;
+  const xs = alle.map(p => p.x), ys = alle.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
   const sc = Math.min((w - 4) / bw, (h - 4) / bh);
-  const d = pts.map((p, i) => (i ? 'L' : 'M') + ((p.x - minX) * sc + 2).toFixed(1) + ' ' + ((p.y - minY) * sc + 2).toFixed(1)).join(' ') + ' Z';
+  const bane = a => a.map((p, i) => (i ? 'L' : 'M') + ((p.x - minX) * sc + 2).toFixed(1) + ' ' + ((p.y - minY) * sc + 2).toFixed(1)).join(' ') + ' Z';
+  const skyggeBane = (skygge && skygge.length >= 3)
+    ? `<path d="${bane(skygge)}" fill="none" stroke="#f0b232" stroke-width="1" stroke-dasharray="2 2" opacity=".9"/>` : '';
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">
-    <path d="${d}" fill="rgba(34,211,238,.18)" stroke="var(--accent,#22d3ee)" stroke-width="1.2"/></svg>`;
+    <path d="${bane(pts)}" fill="rgba(34,211,238,.18)" stroke="var(--accent,#22d3ee)" stroke-width="1.2"/>
+    ${skyggeBane}</svg>`;
 }
 
 // ─── 029: E-post for kundelenker ───────────────────────────────────────────────
@@ -7855,8 +8262,12 @@ function _kundeRevRender(groups) {
       : '';
     const avvik = Array.isArray(room.maalAvvik) ? room.maalAvvik : [];
 
+    // 032: kundens egen resultat-geometri, hvis svaret bærer den. Vises som gul stiplet
+    // skygge ved siden av Kenneths — så han ser HVA KUNDEN SÅ, ikke bare hvilke tall som kom.
+    const kundePts = (k.answer && k.answer.points && k.answer.points[rid]) || null;
     rows += `<div style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="padding:8px 10px;background:var(--surface2);display:flex;align-items:center;gap:8px">
+        ${kundePts ? `<span style="width:40px;height:30px;flex:0 0 auto" title="Blått = slik det blir hos deg. Gult stiplet = slik kunden så det.">${_kundeRomSkisse(prev ? _kundeResultatPunkter(room, wanted) : room.points, 40, 30, kundePts)}</span>` : ''}
         <b style="font-size:13px">${esc(room.name || 'Rom ' + room.id)}</b>
         <span style="font-size:11px;color:var(--dim)">${prev ? (compArea(room.points)/10000).toFixed(1).replace('.',',') + ' → ' + (prev.areaCm2/10000).toFixed(1).replace('.',',') + ' m²' : ''}</span>
         <span style="flex:1"></span>
@@ -37066,6 +37477,129 @@ function _kundelenkeRegressionTest() {
     check('H: tegnemotorene selv er urørt', true,
       !/kundeMode/.test(_kildeUtenKommentarer(addWbwWall)) && !/kundeMode/.test(_kildeUtenKommentarer(confirmDdpRect)),
       'en tegnemotor er endret');
+
+    // ─── I (032) — kundesiden: lokal geometri, valg, piltaster, gizmo, svar ───
+    (() => {
+      const lagret = { rooms: S.rooms, st: _kundeState, sel: S.ui.selectedWallId,
+                       selR: S.ui.selectedRoomId, km: S.ui.kundeMode };
+      // Mål DIFFERANSEN, ikke en absolutt dybde: tidligere seksjoner i denne testen har
+      // allerede lagt snapshots på stakken. Påstanden er «kundesiden legger ikke til noe».
+      const undoFør = _undoStack.length;
+      try {
+        const a = [{x:0,y:0},{x:400,y:0},{x:400,y:320},{x:0,y:320}];
+        S.rooms = [{ id: 11, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
+          wallThicknessCm: 0, points: a.map(p => ({...p})), walls: compWalls(a), dims: [],
+          annotOffsets: {}, area: compArea(a), dimSnap: true, uncertainWalls: [1, 2] }];
+        _kundeState = { token: 't', mode: 'maal', status: 'open', note: '', orgName: 'O',
+          askedWalls: [], edits: new Map(), name: '', comment: '' };
+        S.ui.kundeMode = 'maal';
+        _kundeLagreOriginal();
+        const L = i => { const p = S.rooms[0].points, x = p[i], y = p[(i+1) % p.length];
+          return Math.round(Math.hypot(y.x - x.x, y.y - x.y)); };
+
+        check('I: originalen er lagret', 4,
+          _kundeState.original.get(11)?.points.length === 4, _kundeState.original.get(11));
+
+        // Tegningen følger tallet — det er hele poenget med 032.
+        _kundeSetWall(11, 1, 345);
+        check('I: tegningen endres av et tastet mål', 345, L(1) === 345, L(1));
+        check('I: motstående vegg følger (vindu-regelen fra 028)', 345, L(3) === 345, L(3));
+        check('I: kundesiden legger ikke til undo-steg', 0,
+          _undoStack.length - undoFør === 0, _undoStack.length - undoFør);
+
+        // ⚠ Bygges FRA originalen, ikke inkrementelt: to endringer av samme vegg må ikke
+        // stable seg oppå hverandre.
+        _kundeSetWall(11, 1, 350);
+        check('I: andre endring av samme vegg stabler ikke', 350, L(1) === 350, L(1));
+        check('I: kun én redigering i kartet', 1, _kundeState.edits.size === 1, [..._kundeState.edits]);
+
+        // ⚠ LÅSER EN FEIL FUNNET LIVE: compWalls deler ut NYE vegg-id-er ved hver ombygging.
+        // Uten at id-ene arves pekte selectedWallId på en vegg som ikke fantes, og fem
+        // piltastetrykk ga +1 cm i stedet for +5.
+        const idFør = S.rooms[0].walls.map(w => w.id);
+        _kundeSetWall(11, 1, 360);
+        check('I: vegg-id-ene overlever en ombygging', idFør.join(),
+          S.rooms[0].walls.map(w => w.id).join() === idFør.join(), S.rooms[0].walls.map(w => w.id));
+
+        // Valg + piltaster
+        _kundeVelgVegg(11, 1);
+        check('I: valget peker på riktig vegg', 1,
+          _kundeValgtVegg()?.idx === 1, _kundeValgtVegg()?.idx);
+        for (let i = 0; i < 5; i++) _kundeNudge(1);
+        check('I: fem nudge-steg gir +5 cm', 365, L(1) === 365, L(1));
+        _kundeNudge(-10);
+        check('I: Shift-steget er −10 cm', 355, L(1) === 355, L(1));
+
+        // Tilbakestilling
+        _kundeTilbakestillVegg(11, 1);
+        check('I: tilbakestill én vegg', 320, L(1) === 320, L(1));
+        _kundeSetWall(11, 0, 410);
+        _kundeState.edits.clear();
+        for (const r of S.rooms) _kundeRebuildRoom(r.id);
+        check('I: tilbakestill alt gir originalen', '400/320/400/320',
+          [L(0), L(1), L(2), L(3)].join('/') === '400/320/400/320', [L(0),L(1),L(2),L(3)].join('/'));
+
+        // Balansen må fortsatt måles mot ORIGINALENS retninger, ikke kundens resultat —
+        // ellers lukker kjeden seg per definisjon og sier alltid «går opp» (027/028-fella).
+        _kundeSetWall(11, 0, 410);
+        const b = _roomAxisBalance(_kundePointsWith(S.rooms[0]), true);
+        check('I: balansen ser kundens avvik, ikke sitt eget resultat', 10,
+          b.rectilinear && b.dxCm === 10, b.dxCm + '/' + b.dyCm);
+
+        // Svaret: lengder OG punkter.
+        _kundeSetWall(11, 1, 345);
+        const svar = _kundeBuildAnswer();
+        check('I: svaret har begge målene', 2, svar.walls.length === 2, svar.walls.length);
+        check('I: wasCm er Kenneths opprinnelige mål, ikke kundens', '400/320',
+          svar.walls.find(w => w.wallIdx === 0).wasCm === 400 &&
+          svar.walls.find(w => w.wallIdx === 1).wasCm === 320,
+          svar.walls.map(w => w.wasCm).join('/'));
+        check('I: svaret bærer kundens punkter', 4,
+          (svar.points?.[11] || []).length === 4, svar.points);
+        check('I: punktene stemmer med vegglengdene', '410/345',
+          Math.round(Math.hypot(svar.points[11][1].x - svar.points[11][0].x,
+                                svar.points[11][1].y - svar.points[11][0].y)) === 410 &&
+          Math.round(Math.hypot(svar.points[11][2].x - svar.points[11][1].x,
+                                svar.points[11][2].y - svar.points[11][1].y)) === 345, svar.points[11]);
+        check('I: points[0] er urørt — rommet har ikke flyttet seg', '0,0',
+          svar.points[11][0].x === 0 && svar.points[11][0].y === 0, svar.points[11][0]);
+
+        // Kenneths innarbeiding av DET SAMME svaret må gi kundens punkter tilbake (±1 cm).
+        const wanted = new Map(svar.walls.map(w => [w.wallIdx, w.lengthCm]));
+        const orig = _kundeState.original.get(11);
+        const kennethRom = { points: orig.points.map(p => ({...p})), walls: [], area: 0 };
+        const kennethPts = _kundeResultatPunkter(kennethRom, wanted);
+        const maxAvvik = Math.max(...kennethPts.map((p, i) =>
+          Math.hypot(p.x - svar.points[11][i].x, p.y - svar.points[11][i].y)));
+        check('I: Kenneths resultat = kundens punkter (±1 cm)', true, maxAvvik <= 1, maxAvvik);
+      } finally {
+        S.rooms = lagret.rooms; _kundeState = lagret.st;
+        S.ui.selectedWallId = lagret.sel; S.ui.selectedRoomId = lagret.selR;
+        S.ui.kundeMode = lagret.km;
+        document.getElementById('_kunde-bar')?.remove();
+        _invalidateStripCache();
+      }
+    })();
+
+    // Gatene: kundemodus åpnet, innlogget og ?present= uberørt.
+    const _skriptI = _kildeUtenKommentarer(
+      [...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n'));
+    check('I: alle fire lerret-gates kjenner kundeMode', 4,
+      (_skriptI.match(/S\.ui\.present && S\.ui\.kundeMode === 'maal'/g) || []).length >= 3
+      && /S\.ui\.present && !\(S\.ui\.kundeMode === 'maal' && _movingWall\)/.test(_skriptI),
+      (_skriptI.match(/S\.ui\.present && S\.ui\.kundeMode === 'maal'/g) || []).length);
+    check('I: Escape avslutter IKKE kundesiden', true,
+      /_kundeFjernValg\(\); return;/.test(_skriptI), 'Escape-håndtering mangler');
+    check('I: lagring er fortsatt stengt i presentasjon', true,
+      /if \(S\.ui && S\.ui\.present\) return false;/.test(_skriptI), '_ctrlSCanSave åpnet');
+    check('I: rommets transform-gizmo er stengt for kunden', true,
+      /!S\.ui\.kundeMode && !S\.ui\.selectedHindringId/.test(_skriptI), 'gizmo åpen');
+    check('I: nearMoveArrow har 5 px som STANDARD (innlogget uendret)', 5,
+      /toleranse > 0\) \? toleranse : 5/.test(_kildeUtenKommentarer(nearMoveArrow)), 'standard endret');
+    check('I: kundesiden ber om romsligere treff', 22,
+      /nearMoveArrow\(_kp\.x, _kp\.y, _kundeErSmal\(\) \? 22 : 9\)/.test(_skriptI), 'toleranse ikke sendt');
+    check('I: berøring videresendes kun i kundemodus', true,
+      /kundeMode === 'maal'/.test(_kildeUtenKommentarer(_kundeKobleBeroring)), 'ikke gatet');
   } finally {
     S.rooms = saved.rooms;
     if (typeof _kundeState !== 'undefined') _kundeState = saved.state;
@@ -43156,7 +43690,7 @@ function distSegPx(px,py,x1,y1,x2,y2) {
   return Math.hypot(px-(x1+t*dx), py-(y1+t*dy));
 }
 
-function nearMoveArrow(sx, sy) {
+function nearMoveArrow(sx, sy, toleranse) {
   // Returns parentRoom if screen pos (sx,sy) is near a wall move arrow
   if (!S.ui.selectedWallId) return null;
   let wl=null, parentRoom=null;
@@ -43167,9 +43701,13 @@ function nearMoveArrow(sx, sy) {
   const wa=Math.atan2(s2.y-s1.y,s2.x-s1.x);
   const pa=wa+Math.PI/2;
   const arr=42;
+  // 032: `toleranse` er valgfri og STANDARD 5 — altså bit-for-bit uendret for innloggede
+  // brukere. Kundesiden sender inn 22 på en berøringsskjerm: 5 px langs en 42 px pilstamme er
+  // greit med en musepeker, men umulig å treffe med en finger.
+  const tol = (typeof toleranse === 'number' && toleranse > 0) ? toleranse : 5;
   for (const dir of [1,-1]) {
     const tx=mx+Math.cos(pa)*arr*dir, ty=my+Math.sin(pa)*arr*dir;
-    if (distSegPx(sx,sy,mx,my,tx,ty) < 5) return parentRoom;   // 5px — senter pluss en liten margin
+    if (distSegPx(sx,sy,mx,my,tx,ty) < tol) return parentRoom;
   }
   return null;
 }
@@ -44174,6 +44712,32 @@ canvas.addEventListener('mousedown', e=>{
     _matFreeLastClick = { t: now, sx: e.clientX, sy: e.clientY };
     e.preventDefault(); return;
     }
+  }
+  // 032: kundesiden i mål-modus er presentasjon PLUSS vegg-redigering. Grenen ligger FØR
+  // present-grenen under, så innloggede brukere og ?present= er helt uberørt.
+  if (S.ui.present && S.ui.kundeMode === 'maal' && e.button === 0) {
+    const _kp = _evToCanvas(e);
+    // Gizmo-pilene først: de ligger oppå veggen og skal vinne klikket.
+    const _kArrowRoom = nearMoveArrow(_kp.x, _kp.y, _kundeErSmal() ? 22 : 9);
+    if (_kArrowRoom) {
+      _movingWall = true;
+      _mwStart = { x: e.clientX, y: e.clientY };
+      _mwOrigStart = { x: e.clientX, y: e.clientY };
+      _mwRoomId = _kArrowRoom.id;
+      _mwWallIdx = _kArrowRoom.walls.findIndex(w => w.id === S.ui.selectedWallId);
+      _mwOrigPts = _kArrowRoom.points.map(q => ({ x: q.x, y: q.y }));
+      canvas.style.cursor = _wallMoveCursor();
+      e.preventDefault();
+      return;
+    }
+    const _kw = s2w(_kp.x, _kp.y);
+    const _kHit = hitTest(_kw.x, _kw.y);
+    if (_kHit && _kHit.wallId != null) {
+      const _kRoom = S.rooms.find(r => (r.walls || []).some(w => w.id === _kHit.wallId));
+      const _kIdx = _kRoom ? _kRoom.walls.findIndex(w => w.id === _kHit.wallId) : -1;
+      if (_kRoom && _kIdx >= 0) { _kundeVelgVegg(_kRoom.id, _kIdx, true); e.preventDefault(); return; }
+    }
+    if (S.ui.selectedWallId != null) _kundeFjernValg();   // tomt lerret → fjern valg, så panorer
   }
   // Presentasjonsmodus: kun panorering (ingen redigering). Klikk-for-detalj
   // håndteres i mouseup (skiller tap fra drag).
@@ -45689,7 +46253,10 @@ canvas.addEventListener('mousemove', e=>{
   }
 
   // Presentasjonsmodus: kun panorering (drag) + hover-fremheving. Ingen redigering.
-  if (S.ui.present) {
+  // 032: ETT unntak — et pågående gizmo-drag på kundesiden skal falle gjennom til den
+  // vanlige `_movingWall`-grenen lenger nede, så geometrien flyttes av nøyaktig samme kode
+  // som for innloggede brukere. Ingen parallell dra-motor.
+  if (S.ui.present && !(S.ui.kundeMode === 'maal' && _movingWall)) {
     if (_panning) {
       const sc = S.view.zoom * BASE_SCALE;
       S.view.panX = _panSV.x - (e.clientX - _panStart.x) / sc;
@@ -46749,6 +47316,8 @@ canvas.addEventListener('mouseleave', () => {
 });
 
 canvas.addEventListener('mouseup', e=>{
+  // 032: gizmo-draget er sluppet — speil den nye geometrien tilbake til kundens tall.
+  if (S.ui.present && S.ui.kundeMode === 'maal' && _movingWall) { _kundeGizmoSlipp(); return; }
   // Presentasjonsmodus: avslutt panorering; tap (uten drag) velger rom under peker.
   if (S.ui.present) {
     if (_panning) {
@@ -47188,6 +47757,25 @@ document.addEventListener('keydown', e=>{
   // change state. One extra render per key is cheap insurance.
   markDirty();
 
+  // 032: piltaster på kundesiden. Escape fjerner veggvalget i stedet for å avslutte —
+  // `_presentExit()` ville tatt kunden ut av siden han nettopp ble sendt til.
+  if (S.ui.present && S.ui.kundeMode === 'maal') {
+    const ae = document.activeElement;
+    const iFelt = /^(INPUT|TEXTAREA|SELECT)$/.test(ae?.tagName || '');
+    // ⚠ MÅLT: etter Enter hopper fokus til neste veggs tallfelt — altså står kunden ALLTID i
+    // et felt når han vil bruke piltastene. Første utgave hoppet over alle felt og gjorde
+    // piltastene ubrukelige i praksis. Veggens EGET tallfelt (`_kf-…`) er derfor med:
+    // vi tar over fra nettleserens egen number-stepper, som bare ville endret tallet uten å
+    // oppdatere tegningen (`change` fyrer først ved blur). Navn/kommentar er fortsatt fredet.
+    const iVeggfelt = iFelt && /^_kf-/.test(ae.id || '');
+    if (e.key === 'Escape') { if (iFelt) ae.blur(); else _kundeFjernValg(); return; }
+    if ((!iFelt || iVeggfelt) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && S.ui.selectedWallId != null) {
+      e.preventDefault();
+      _kundeNudge((e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 10 : 1));
+      return;
+    }
+    return;
+  }
   // Presentasjonsmodus: ignorer alle redigerings-snarveier; kun Escape avslutter.
   if (S.ui.present) { if (e.key==='Escape') _presentExit(); return; }
 
