@@ -12,7 +12,18 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 | Grunnmur: tabell, RPC-er, usikre vegger, kundeside for mål | 027 | `327778f` | ✅ i `main` |
 | Mottak: merke, gjennomgang vegg for vegg, Bruk/Bruk alle, avvik | 028 | `0aee111` | ✅ i `main` |
 | E-post begge veier, alle lenker på varmeplan.no | 029 | `4c09d7a` | ✅ i `main` |
-| Tegn selv: fire metoder på PC, talltastatur på telefon | 030 | se `git log` | ✅ i `main` |
+| Tegn selv: fire metoder på PC, talltastatur på telefon | 030 | `ef636f9` | ✅ i `main` |
+| Kundesiden: sidepanel, veggvalg, piltaster og gizmo | 032 | `3540512` | ✅ i `main` |
+
+**032 erstattet en regel fra 027.** Der sto det at «geometrien tegnes ikke om på kundesiden».
+Nå følger tegningen tallene mens kunden retter — men spec regel 2 står uendret: alt skjer lokalt
+i kundens nettleser, og ingenting skrives før «Send inn». Det er mulig fordi `_applyWallLength`
+er en ren geometrifunksjon; målt at den ikke utløser et eneste lagringskall eller undo-steg.
+
+Svaret bærer derfor nå **både** vegglengder og `answer.points` — kundens resultat-geometri.
+Kenneth arbeider fortsatt inn via lengdene, men 028-panelet viser kundens punkter som gul
+stiplet skygge, så han ser *hva kunden så*. Målt ende til ende: de to er punkt for punkt
+identiske.
 
 ## Oppsett — alt er på plass
 
@@ -83,6 +94,20 @@ for kundelenkene, som treffer `varmeplan.no` uten et eneste hopp; gamle arqely-l
 - `kind='answered'` er anonym, men krever `status='answered'`, svar under 10 min gammelt, og
   maks ett varsel per lenke per 10 min. Mottakeren er alltid lenkens egen `notify_email`.
 
+## Verktøy fra den innloggede editoren som lakk inn på kundesiden
+
+Målt i nettleseren 07.10.2026 (032), ikke antatt — `present-mode` skjuler ingen av dem:
+
+| Element | Hva kunden fikk se |
+|---|---|
+| `#wip` | «VEGG · ID · Lengde · Vinkel · Rom» + en **«✕ Avslutt»**-knapp som ville tatt kunden ut av siden |
+| Rommets transform-gizmo | Håndtak for å flytte og rotere **hele** rommet |
+| Minikartet | Navigasjonshjelpemiddel som hører sammen med sidebaren |
+
+Stengt med en ny `body.kunde-maal`-klasse. Lærdommen: kundesiden er presentasjon **pluss**
+redigering, så den kan ikke bare arve `present-mode`-lista — hver nye ting som vises ved et
+valg må sjekkes eksplisitt.
+
 ## Tre åpne e-postutløsere — funnet og tettet
 
 Målt mot de deployede funksjonene 07.10.2026, ikke lest ut av koden. Alle tre er nå rettet og
@@ -118,8 +143,12 @@ Kenneth merker usikre vegger  ──►  «Be kunde om mål»  ──►  Mål e
                        kunden åpner varmeplan.no/?kunde=<token>
                        (ingen innlogging, kun geometri og romnavn)
                                           │
-                 mål: retter vegglengder  │  tegn: tegner rom med fire metoder
-                 — balansesjekk live      │  — talltastatur + piler på telefon
+                 mål: velger vegg i lista │  tegn: tegner rom med fire metoder
+                 eller på tegningen,       │  — talltastatur + piler på telefon
+                 retter med tall, piltast  │
+                 eller gizmo — tegningen   │
+                 følger med (032)          │
+                 — balansesjekk live       │
                                           ▼
                                      «Send inn»
                                           │
