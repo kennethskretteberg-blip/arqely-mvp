@@ -14,7 +14,9 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 | E-post begge veier, alle lenker på varmeplan.no | 029 | `4c09d7a` | ✅ i `main` |
 | Tegn selv: fire metoder på PC, talltastatur på telefon | 030 | se `git log` | ✅ i `main` |
 
-## Dette må Kenneth gjøre for at alt skal virke
+## Oppsett — alt er på plass
+
+Hele kjeden er operativ per 07.10.2026: migrasjoner kjørt, funksjon deployet, domene verifisert.
 
 **1. Migrasjoner — alle tre er kjørt og verifisert:**
 
@@ -22,16 +24,27 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 |---|---|---|
 | `supabase-migration-kundelenke.sql` | tabell `kundelenker` + to RPC-er | ✅ begge rutiner finnes |
 | `supabase-migration-kundelenke-028.sql` | `kundelenke_get` avviser `applied` | ✅ `avviser_applied = true` |
-| `supabase-migration-kundelenke-mail.sql` | `last_notified_at`, `invite_sent_to/at` | ⬜ **gjenstår — kjøres i SQL Editor** |
+| `supabase-migration-kundelenke-mail.sql` | `last_notified_at`, `invite_sent_to/at` | ✅ 18 kolonner bekreftet |
 
-**2. Edge Function — ikke deployet ennå:**
+**2. Edge Function — ✅ deployet og verifisert** (07.10.2026, prosjekt `nhzhffertfqdeslhzyxx`).
+
+Målt mot den live funksjonen:
+
+| Kall | Svar |
+|---|---|
+| `invite` med **anon-nøkkelen** | 401 «innlogging kreves» |
+| `invite` uten `Authorization` | 401 |
+| `answered` med ukjent token | 404 «ukjent lenke» |
+| ugyldig `kind` | 400 |
+
+Den første raden er beviset på at `verify_jwt` **ikke** hadde holdt: anon-nøkkelen er en gyldig
+JWT og slapp gjennom plattformsjekken, men ble stoppet av den eksplisitte `auth.getUser`-sjekken.
+
+Skal funksjonen deployes på nytt senere:
 
 ```bash
 supabase functions deploy kundelenke-mail
 ```
-
-Secrets (`RESEND_API_KEY`, `FROM_EMAIL`) er de samme som de øvrige e-postfunksjonene bruker.
-Uten deploy virker alt annet; bare e-postene uteblir, og lenken kan deles manuelt.
 
 **3. Avsenderdomene — ✅ ferdig.** `varmeplan.no` er verifisert i Resend, og både `FROM_EMAIL`
 og `RESEND_API_KEY` er satt (Kenneth 07.10.2026). Tas i bruk automatisk ved deploy; ingenting
