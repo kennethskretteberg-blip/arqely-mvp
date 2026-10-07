@@ -22,7 +22,7 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 |---|---|---|
 | `supabase-migration-kundelenke.sql` | tabell `kundelenker` + to RPC-er | ✅ begge rutiner finnes |
 | `supabase-migration-kundelenke-028.sql` | `kundelenke_get` avviser `applied` | ✅ `avviser_applied = true` |
-| `supabase-migration-kundelenke-mail.sql` | `last_notified_at`, `invite_sent_to/at` | ⬜ **kjøres i SQL Editor** |
+| `supabase-migration-kundelenke-mail.sql` | `last_notified_at`, `invite_sent_to/at` | ⬜ **gjenstår — kjøres i SQL Editor** |
 
 **2. Edge Function — ikke deployet ennå:**
 
@@ -33,10 +33,14 @@ supabase functions deploy kundelenke-mail
 Secrets (`RESEND_API_KEY`, `FROM_EMAIL`) er de samme som de øvrige e-postfunksjonene bruker.
 Uten deploy virker alt annet; bare e-postene uteblir, og lenken kan deles manuelt.
 
-**3. Avsenderdomene (valgfritt).** Funksjonen sender fra `noreply@arqely.no`, som er den
-adressen som faktisk sender e-post i dag. Skal det bli `noreply@varmeplan.no`, må domenet
-verifiseres i Resend (DNS-poster hos Domeneshop) og `FROM_EMAIL`-secreten settes. Ingen
-kodeendring. Lenkene *i* e-posten peker uansett på `varmeplan.no`.
+**3. Avsenderdomene — ✅ ferdig.** `varmeplan.no` er verifisert i Resend, og både `FROM_EMAIL`
+og `RESEND_API_KEY` er satt (Kenneth 07.10.2026). Tas i bruk automatisk ved deploy; ingenting
+mer å gjøre.
+
+⚠ `FROM_EMAIL` er en **prosjekt**-secret, delt av alle fem e-postfunksjonene
+(`send-invite-email`, `notify-admin-registration`, `send-feedback`, `send-warranty-email`,
+`kundelenke-mail`). Alle sender nå fra `noreply@varmeplan.no`; de tre første sendte tidligere
+fra `arqely.no` / `invite.arqely.com`. Antakelig ønsket, men ikke isolert til kundelenken.
 
 ## Domenene — målt 07.10.2026
 

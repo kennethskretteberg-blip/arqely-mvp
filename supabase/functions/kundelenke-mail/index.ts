@@ -38,11 +38,11 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// Samme standard som send-invite-email, som er den som faktisk sender e-post i dag.
-// send-warranty-email har `noreply@varmeplan.no` som standard, men den er dokumentert som
-// ikke aktiv — altsa uprovd. Blir varmeplan.no verifisert i Resend, settes FROM_EMAIL-secreten
-// og denne fallbacken rores ikke. Se SPORSMAL.md.
-const FROM_DEFAULT = "Varmeplan <noreply@arqely.no>";
+// varmeplan.no er verifisert i Resend (Kenneth, 07.10.2026), og FROM_EMAIL-secreten er satt.
+// Secreten vinner uansett — denne fallbacken fyrer bare om den skulle mangle — men de to skal
+// peke samme vei, saa ingen blir overrasket av en avsender fra et annet domene.
+// NB: FROM_EMAIL er en PROSJEKT-secret, delt av alle fem e-postfunksjonene.
+const FROM_DEFAULT = "Varmeplan <noreply@varmeplan.no>";
 const PUBLIC_BASE_URL = "https://varmeplan.no";   // spec regel 8 — aldri kallerens origin
 const NOTIFY_WINDOW_MS = 10 * 60 * 1000;
 

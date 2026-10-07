@@ -60,13 +60,15 @@ så Kenneth kan si «ok» eller «endre». Kenneth svarer til slutt.
 
 ## 029
 
-- **❓ TIL KENNETH — Resend-domenet.** `send-invite-email` sender i dag fra `noreply@arqely.no`,
-  og det virker. `send-warranty-email` har `noreply@varmeplan.no` som standard, men den er
-  dokumentert som ikke aktiv — altså uprøvd. **Valgt:** `kundelenke-mail` bruker samme standard
-  som den som faktisk sender i dag (`noreply@arqely.no`), slik at e-post virker fra første
-  deploy. Skal avsender bli `noreply@varmeplan.no`, må du verifisere domenet i Resend (DNS) og
-  deretter sette `FROM_EMAIL`-secreten — ingen kodeendring. Lenkene **i** e-posten peker
-  uansett på `varmeplan.no`; det er uavhengig av avsenderadressen.
+- **✅ BESVART — Resend-domenet.** Kenneth 07.10.2026: `varmeplan.no` er **verifisert** i
+  Resend, og både avsender og nøkkel er satt. `FROM_EMAIL`-secreten vinner over koden, så
+  `kundelenke-mail` bruker `noreply@varmeplan.no` fra første deploy uten videre oppsett.
+  Fallbacken i koden er endret til samme adresse, slik at de to peker samme vei.
+  ⚠ **Sideeffekt å kjenne til:** `FROM_EMAIL` er en *prosjekt*-secret, delt av alle fem
+  e-postfunksjonene. `send-invite-email` og `notify-admin-registration` sendte tidligere fra
+  `arqely.no`, `send-feedback` fra `invite.arqely.com` — alle bytter nå til
+  `noreply@varmeplan.no`. Antakelig ønsket (ett avsenderdomene), men ikke isolert til
+  kundelenken.
 - **❓ TIL KENNETH — Vercel-domenet (prompten §3).** Jeg kan ikke lese Vercel-prosjektets
   domeneoppsett herfra. Bekreft at `varmeplan.no` er primærdomene og at `arqely.com` redirecter
   dit — ellers havner kundelenkene på en side som kanskje sies opp. `vercel.json` har bare

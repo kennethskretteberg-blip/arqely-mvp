@@ -25,12 +25,21 @@ supabase secrets set FROM_EMAIL='Varmeplan <noreply@arqely.no>'
 Migrasjonen `supabase-migration-kundelenke-mail.sql` må være kjørt (tre nye kolonner på
 `kundelenker`).
 
-## Avsenderdomene
+## Avsenderdomene — ferdig satt opp
 
-`FROM_EMAIL` må være en adresse på et domene som er **verifisert i Resend**. I dag sender
-`send-invite-email` fra `noreply@arqely.no`, og det virker. Skal avsender bli
-`noreply@varmeplan.no`, må domenet verifiseres i Resend først (DNS-poster), ellers avvises
-sendingen. Lenkene i e-posten peker uansett på `varmeplan.no` — det er uavhengig av avsender.
+`varmeplan.no` er **verifisert i Resend** og `FROM_EMAIL` er satt (Kenneth, 07.10.2026).
+Funksjonen trenger ingen egen konfigurasjon.
+
+⚠ **`FROM_EMAIL` er en prosjekt-secret, ikke en funksjons-secret.** Den deles av alle fem
+e-postfunksjonene — `send-invite-email`, `notify-admin-registration`, `send-feedback`,
+`send-warranty-email` og denne. Når den settes til `noreply@varmeplan.no`, bytter *alle*
+avsender; de to første sendte tidligere fra `arqely.no` og den tredje fra
+`invite.arqely.com`. Det er antakelig ønsket (ett avsenderdomene for hele appen), men det er
+en sideeffekt verdt å kjenne til.
+
+Avsender**navnet** byttes per e-post til organisasjonens navn; selve adressen er alltid den
+verifiserte. `reply_to` settes til den som laget lenken, så kundens svar går dit — ikke til
+`noreply@`.
 
 ## Hvorfor funksjonen slår opp alt selv
 
