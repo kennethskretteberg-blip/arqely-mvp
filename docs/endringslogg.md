@@ -4,6 +4,59 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundelenke, grunnmur: kunden fyller inn mål uten innlogging — 2026-10-07
+
+Serien «Kundelenke» (027–030), prompt 027. Spec: `docs/kundelenke/spec-kundelenke.md`.
+Problemet: tegninger kommer uten mål, Kenneth estimerer, kunden måler på ark og sender bilde,
+og det går frem og tilbake.
+
+**STEG 0 — fire funn:**
+1. `?present=` gir anon-tilgang via ÉN `security definer`-funksjon med `revoke all from public` +
+   `grant execute to anon`; tabellens RLS åpnes aldri. Kundelenken kopierer mønsteret nøyaktig.
+2. **`wallIdx` = punktindeks.** `compWalls(pts)` bygger `walls[i]` av `points[i] → points[(i+1)%n]`
+   og kalles på nytt ved hver geometriendring (10 kallsteder) — indeksen er stabil og overlever
+   lagring. `{roomId, wallIdx}` er nok; ingen egen vegg-id i svaret.
+3. **PDF-romsiden trenger ingen egen kodevei:** `_renderRoomToImage` kaller `render()`, så
+   markeringen av usikre vegger på lerretet arves rett inn i PDF-en.
+4. `?present=`-grenen i `initSupabase` er urørt; `?kunde=` er en egen gren rett etter.
+
+- **Migrasjon `supabase-migration-kundelenke.sql`** (Kenneth kjører manuelt): tabell `kundelenker`,
+  RLS kun for org-medlemmer, og to `security definer`-funksjoner. `kundelenke_get` bygger svaret
+  med **eksplisitt feltutvalg** fra prosjektets `data` — aldri `data` rått, så kunden ser kun
+  geometri og navn (spec regel 1). `kundelenke_answer` avviser applied/expired/revoked og
+  payload over 200 kB.
+- **Usikre vegger:** `room.uncertainWalls: [wallIdx]`, toggle fra ny ctxbar-gren for valgt
+  målelinje (det fantes ingen fra før — kun dra-håndtak). Tegnes rødt, stiplet, med «?».
+- **`_roomAxisBalance(points, openChain)`** (spec regel 4b). **Rettet underveis:** første utgave
+  summerte over alle kantene i polygonet. En lukket form summerer per definisjon til null — den sa
+  derfor alltid «går opp», uansett hvor feil målene var. Balansen er bare meningsfull for en ÅPEN
+  kjede: veggene brukeren faktisk har oppgitt, før den lukkende veggen tar opp differansen.
+  Kenneths skisse 07.10 ender 30 cm og 815 cm fra startpunktet — nettopp det avviket.
+- **WBW:** live balanselinje i panelet mens man tegner, og ved «Lukk rom» en varseltoast med
+  knappen «Merk veggene som usikre» (merker hele den aksen som ikke går opp).
+- **«Be kunde om mål»** i topbaren → modal (modus, melding, gyldighet, merkede vegger) → lenke på
+  `https://varmeplan.no/?kunde=<token>`. Ny konstant `_PUBLIC_BASE_URL`; `_presentShareLink`
+  bruker den nå også, i stedet for `location.origin` (som ga arqely.com/localhost).
+- **Kundesiden:** `?kunde=<token>` → `kundelenke_get` → **minimalt `S` bygget fra svaret**.
+  `_restoreProject` gjenbrukes bevisst IKKE — den ville dratt inn produkter, utlegg og
+  kundeopplysninger. Usikre vegger først og rødt, men alle mål kan rettes. Endret verdi blir
+  grønn med «var 320» ved siden av. Liste per rom (stor touch-flate) på smal skjerm. Live
+  «går målene opp?» per rom, aldri som sperre. Geometrien tegnes ikke om — kunden retter tall.
+- Sidebar-status «Kundelenke: åpen · utløper …» med Kopier og Trekk tilbake.
+
+**Testet:** ny `_kundelenkeRegressionTest` (20 sjekker) — balansen på Kenneths skisse gir dx 30 /
+dy −815 og peker på de loddrette veggene; lukket rektangel gir 0/0; skrått rom gir
+`rectilinear:false`; usikre vegger toggler og slår på `dimSnap`; URL-bygging bruker
+`_PUBLIC_BASE_URL` og `_presentShareLink` inneholder ikke lenger `location.origin`; svar-payloaden
+avviser negative og NaN. Alle tretten øvrige grønne — **230 sjekker**.
+
+**Kenneth må:** kjøre `supabase-migration-kundelenke.sql`. «Send på e-post» står deaktivert til
+029. Tegn-modus er deaktivert til 030.
+
+**Filer:** index.html, supabase-migration-kundelenke.sql (ny), docs/kundelenke/prompter/SPØRSMÅL.md.
+
+---
+
 ## Romtype Fryserom/kjølerom + automatisk reservekabel — 2026-10-06
 
 Kenneth: «Jeg ønsker en egen funksjon for fryserom, fryselager og kjølerom … 10 W/m med CC mellom

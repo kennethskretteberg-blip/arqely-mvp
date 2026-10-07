@@ -1883,6 +1883,9 @@ body.present-mode #render-stats{display:none !important}
       <button class="file-btn btn-visma-paste" style="display:none" onclick="_showVismaPasteDialog()" title="Kopier til Visma" data-ic="clipboard"></button>
       <button class="file-btn btn-gbao10" style="display:none" onclick="_showGbao10ExportDialog()" title="Eksporter fil til Visma" data-ic="download"></button>
       <button class="file-btn" data-modules="indoor" onclick="_wfSendToMonter()" title="Send til montør" data-ic="send"></button>
+      <!-- 027: «Be kunde om mål» — kundelenke uten innlogging. Eget scope inkl. `list`, siden en
+           kalkyle-liste også kan trenge mål fra kunden. -->
+      <button class="file-btn" data-modules="indoor stair snow list" onclick="openKundeLinkModal()" title="Be kunde om mål — del tegningen uten innlogging" data-ic="link"></button>
       <!-- 017: MÅLT at Presentasjon ikke fungerer for et listeprosjekt — listerom har `points: []`,
            så lerretet tegner ingenting, og present-baren viste «0 Rom · 0.0 m² · 0 W» for et
            prosjekt med 2 rom, 10 m² og 995 W. Eget, smalere scope enn gruppa til det er løst. -->
@@ -2070,6 +2073,7 @@ body.present-mode #render-stats{display:none !important}
         </div>
         <!-- Main input row -->
         <div class="wbw-body">
+          <div id="wbw-balance" style="display:none;font-size:11px;color:#f59e0b;padding:0 2px 6px;line-height:1.35"></div>
           <input class="wbw-inp" id="wbw-len" type="number" min="1" max="99999" value="100">
           <span class="wbw-unit">cm</span>
           <!-- Keyboard mode: direction buttons -->
@@ -6754,6 +6758,375 @@ function _presentDownloadPDF() {
   if (typeof exportPDF === 'function') exportPDF();
   else _showToast && _showToast('PDF-eksport er ikke tilgjengelig.');
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// 027 · KUNDESIDEN (anonym) — kunden retter mål
+//
+// Spec regel 1: kunden ser KUN geometri og navn. Derfor bygges et minimalt S av det RPC-en
+// returnerer — vi gjenbruker IKKE `_restoreProject`, som ville dratt inn produkter, utlegg,
+// kundeopplysninger og alt annet fra prosjektfila.
+// Spec regel 2: kunden skriver aldri i prosjektet. Svaret ligger på lenken; Kenneth innarbeider.
+// Spec regel 4: geometrien tegnes IKKE om her — kunden retter tall.
+
+let _kundeState = null;   // { token, mode, note, orgName, rooms, edits: Map(roomId|idx → cm) }
+
+async function _kundeLoadByToken(token) {
+  try {
+    const { data, error } = await _db.rpc('kundelenke_get', { p_token: token });
+    if (error || !data) { _kundeShowInvalid(); return true; }
+    _kundeState = {
+      token,
+      mode: data.mode || 'maal',
+      status: data.status,
+      note: data.note || '',
+      orgName: data.org_name || 'avsenderen',
+      askedWalls: data.asked_walls || [],
+      edits: new Map(),
+      name: '', comment: '',
+    };
+    // Minimalt S — kun det kunden skal se.
+    S.project = { name: data.project_name || 'Prosjekt', parts: [{ id: 1, name: 'Plan', moduleType: 'indoor' }] };
+    S.ui.activePartId = 1;
+    S.floors = (data.floors || []).map((f, i) => ({ id: f.id, name: f.name || ('Plan ' + (i + 1)),
+      building: null, order: i, collapsed: false, partId: 1 }));
+    if (!S.floors.length) S.floors = [{ id: 1, name: 'Plan', building: null, order: 0, collapsed: false, partId: 1 }];
+    S.ui.activeFloorId = S.floors[0].id;
+    S.rooms = (data.rooms || []).map(r => ({
+      id: r.id, name: r.name || 'Rom', floorId: r.floorId ?? S.floors[0].id, partId: 1,
+      shape: 'polygon', wallThicknessCm: 0,
+      points: (r.points || []).map(p => ({ x: p.x, y: p.y })),
+      walls: [], dims: [], annotOffsets: {},
+      area: Math.abs(compArea((r.points || []).map(p => ({ x: p.x, y: p.y })))),
+      dimSnap: true,                                   // kunden SKAL se målene
+      uncertainWalls: Array.isArray(r.uncertainWalls) ? r.uncertainWalls : [],
+    }));
+    for (const r of S.rooms) r.walls = compWalls(r.points);
+    S.strips = []; S.cables = []; S.mats = []; S.plates = []; S.hindrings = []; S.zones = []; S.stairs = [];
+    S.bgs = {};
+
+    ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    document.getElementById('app').style.display = 'flex';
+    S.ui.presentPublic = true;
+    _presentEnter();
+    S.ui.kundeMode = _kundeState.mode;
+    _kundeRenderBar();
+    render();
+    return true;
+  } catch (e) {
+    console.warn('Kundelenke feilet:', e.message);
+    _kundeShowInvalid();
+    return true;
+  }
+}
+
+function _kundeShowInvalid() {
+  document.body.innerHTML = `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;
+      font-family:system-ui,-apple-system,sans-serif;background:#0d0e10;color:#e8eaed;padding:24px">
+    <div style="max-width:420px;text-align:center">
+      <div style="font-size:42px;margin-bottom:12px">🔗</div>
+      <h1 style="font-size:20px;margin:0 0 8px">Lenken er ikke lenger gyldig</h1>
+      <p style="font-size:14px;color:#9aa0a6;line-height:1.5;margin:0">
+        Den kan være utløpt eller trukket tilbake. Ta kontakt med den som sendte den, så får du en ny.</p>
+    </div></div>`;
+}
+
+// Nøkkel for en vegg i kundens redigeringer.
+function _kundeKey(roomId, idx) { return roomId + '|' + idx; }
+
+function _kundeWallCm(room, idx) {
+  const e = _kundeState && _kundeState.edits.get(_kundeKey(room.id, idx));
+  // Valider her, ikke bare ved innskriving: en ugyldig verdi som likevel havner i kartet ville
+  // ellers forplante seg til balansesjekken og gjøre hele rommet «ikke rettvinklet».
+  return (typeof e === 'number' && isFinite(e) && e > 0) ? e : Math.round(room.walls[idx].length);
+}
+// Kundens tall der de finnes — brukes av «går målene opp?» live.
+function _kundePointsWith(room) {
+  // Rommet tegnes ikke om; vi simulerer bare lengdene langs samme retninger for balansesjekken.
+  const pts = [{ x: room.points[0].x, y: room.points[0].y }];
+  for (let i = 0; i < room.points.length; i++) {
+    const a = room.points[i], b = room.points[(i + 1) % room.points.length];
+    const L = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const ux = (b.x - a.x) / L, uy = (b.y - a.y) / L;
+    const cm = _kundeWallCm(room, i);
+    const prev = pts[pts.length - 1];
+    pts.push({ x: prev.x + ux * cm, y: prev.y + uy * cm });
+  }
+  // IKKE pop: kjeden skal være ÅPEN. Avstanden fra siste punkt tilbake til start ER avviket.
+  return pts;
+}
+
+function _kundeRenderBar() {
+  if (!_kundeState) return;
+  document.getElementById('_kunde-bar')?.remove();
+  const narrow = window.innerWidth < 900 || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const bar = document.createElement('div');
+  bar.id = '_kunde-bar';
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:3000;background:var(--surface,#16171c);'
+    + 'border-top:1px solid var(--border,#2a2d35);max-height:62vh;overflow:auto;padding:14px 16px 18px;'
+    + 'font-family:system-ui,-apple-system,sans-serif;box-shadow:0 -6px 24px rgba(0,0,0,.4)';
+  const roomsHtml = S.rooms.map(r => {
+    const asked = _roomUncertainWalls(r);
+    // Usikre vegger først (spec: «vises først og rødt — men kunden kan rette hvilken som helst»).
+    const order = [...r.walls.keys()].sort((a, b) =>
+      (asked.includes(b) ? 1 : 0) - (asked.includes(a) ? 1 : 0) || a - b);
+    const rows = order.map(i => {
+      const unsure = asked.includes(i);
+      const cur = _kundeWallCm(r, i);
+      const orig = Math.round(r.walls[i].length);
+      const changed = cur !== orig;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0">
+        <span style="flex:1;min-width:0;font-size:13px;color:${unsure ? '#f87171' : 'var(--text)'}">
+          ${esc(r.walls[i].label || ('Vegg ' + (i + 1)))}${unsure ? ' <b>?</b>' : ''}</span>
+        <input type="number" inputmode="decimal" min="1" max="99999" value="${cur}"
+          onchange="_kundeSetWall(${r.id},${i},this.value)"
+          style="width:92px;padding:9px 10px;border:1px solid ${changed ? '#22c55e' : 'var(--border)'};border-radius:8px;
+                 background:var(--surface2);color:${changed ? '#22c55e' : 'var(--text)'};font-size:15px;text-align:right">
+        <span style="font-size:12px;color:var(--dim);width:22px">cm</span>
+        <span style="font-size:11px;color:var(--dim);width:72px">${changed ? 'var ' + orig : ''}</span>
+      </div>`;
+    }).join('');
+    const bal = _axisBalanceText(_roomAxisBalance(_kundePointsWith(r), true));
+    return `<div style="margin-bottom:14px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:2px">${esc(r.name || 'Rom')}</div>
+      ${rows}
+      <div style="font-size:11.5px;margin-top:4px;color:${bal ? '#f59e0b' : '#22c55e'}">
+        ${bal ? '⚠ ' + esc(bal) : '✓ Målene går opp'}</div>
+    </div>`;
+  }).join('');
+
+  bar.innerHTML = `
+    <div style="font-size:15px;font-weight:700;margin-bottom:2px">Fyll inn mål</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.45">
+      ${_kundeState.note ? esc(_kundeState.note) + '<br>' : ''}
+      Rett målene du har målt. Tegningen oppdateres av Varmeplan når målene er mottatt.</div>
+    ${narrow ? '' : '<div style="font-size:11px;color:var(--dim);margin-bottom:8px">Du kan også klikke på en målelinje i tegningen.</div>'}
+    ${roomsHtml}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+      <input id="_kunde-name" placeholder="Ditt navn (valgfritt)" value="${esc(_kundeState.name)}"
+        oninput="_kundeState.name=this.value"
+        style="flex:1;min-width:150px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+      <input id="_kunde-comment" placeholder="Kommentar (valgfritt)" value="${esc(_kundeState.comment)}"
+        oninput="_kundeState.comment=this.value"
+        style="flex:2;min-width:180px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+      <button id="_kunde-send" onclick="_kundeSubmit()"
+        style="padding:11px 22px;background:var(--accent,#4fa2b8);border:none;border-radius:8px;font-size:14px;font-weight:700;color:#0d0e10;cursor:pointer">Send inn</button>
+    </div>`;
+  document.body.appendChild(bar);
+}
+
+function _kundeSetWall(roomId, idx, val) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !_kundeState) return;
+  const n = parseFloat(String(val).replace(',', '.'));
+  const orig = Math.round(room.walls[idx].length);
+  if (!isFinite(n) || n <= 0) { _kundeState.edits.delete(_kundeKey(roomId, idx)); }
+  else if (Math.round(n) === orig) { _kundeState.edits.delete(_kundeKey(roomId, idx)); }
+  else { _kundeState.edits.set(_kundeKey(roomId, idx), Math.round(n)); }
+  _kundeRenderBar();
+  render();
+}
+
+// Svar-format fra spec: { walls: [{roomId, wallIdx, lengthCm, wasCm}], comment } + axisBalance per rom.
+function _kundeBuildAnswer() {
+  const walls = [];
+  for (const [key, cm] of _kundeState.edits) {
+    const [rid, idx] = key.split('|');
+    const room = S.rooms.find(r => String(r.id) === rid);
+    if (!room) continue;
+    const i = parseInt(idx, 10);
+    if (!(cm > 0) || !isFinite(cm)) continue;          // aldri negative/NaN inn i svaret
+    walls.push({ roomId: room.id, wallIdx: i, lengthCm: Math.round(cm), wasCm: Math.round(room.walls[i].length) });
+  }
+  const axisBalance = {};
+  for (const r of S.rooms) {
+    const b = _roomAxisBalance(_kundePointsWith(r), true);
+    if (b.rectilinear) axisBalance[r.id] = { dxCm: b.dxCm, dyCm: b.dyCm };
+  }
+  return { walls, comment: (_kundeState.comment || '').slice(0, 2000), axisBalance };
+}
+
+async function _kundeSubmit() {
+  const btn = document.getElementById('_kunde-send');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sender …'; }
+  const answer = _kundeBuildAnswer();
+  try {
+    const { data, error } = await _db.rpc('kundelenke_answer', {
+      p_token: _kundeState.token, p_answer: answer, p_name: (_kundeState.name || '').slice(0, 120) || null });
+    if (error || data === false) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Send inn'; }
+      alert('Kunne ikke sende inn — lenken kan være utløpt eller allerede innarbeidet. Ta kontakt med den som sendte den.');
+      return;
+    }
+    document.getElementById('_kunde-bar').innerHTML =
+      `<div style="text-align:center;padding:22px 8px">
+        <div style="font-size:34px;margin-bottom:8px">✓</div>
+        <div style="font-size:16px;font-weight:700;margin-bottom:4px">Takk — målene er sendt til ${esc(_kundeState.orgName)}</div>
+        <div style="font-size:12.5px;color:var(--dim);line-height:1.5">
+          ${answer.walls.length} ${answer.walls.length === 1 ? 'mål' : 'mål'} mottatt.
+          Du kan rette og sende på nytt så lenge lenken er åpen.</div>
+        <button onclick="_kundeRenderBar()" style="margin-top:12px;padding:8px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text);cursor:pointer">Rett flere mål</button>
+      </div>`;
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send inn'; }
+    alert('Nettverksfeil — prøv igjen.');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 027 · KUNDELENKE — «Be kunde om mål» (innlogget side)
+// Spec regel 7: lang tilfeldig kode, utløper, kan trekkes tilbake, én lenke = ett prosjekt.
+// Anonyme kall går KUN gjennom `kundelenke_get`/`kundelenke_answer` (security definer) —
+// tabellens RLS åpnes aldri for anon. Samme mønster som `?present=`.
+
+function _kundeAskedWalls() {
+  const out = [];
+  for (const r of S.rooms) {
+    for (const idx of _roomUncertainWalls(r)) out.push({ roomId: r.id, wallIdx: idx });
+  }
+  return out;
+}
+function _kundeAskedSummary() {
+  const byRoom = new Map();
+  for (const w of _kundeAskedWalls()) {
+    const r = S.rooms.find(x => x.id === w.roomId);
+    const nm = (r && r.name) || 'Rom';
+    if (!byRoom.has(nm)) byRoom.set(nm, []);
+    byRoom.get(nm).push('vegg ' + (w.wallIdx + 1));
+  }
+  return [...byRoom.entries()].map(([nm, ws]) => `${nm}: ${ws.join(', ')}`);
+}
+
+function openKundeLinkModal() {
+  if (!_supabaseProjectId) {
+    _showToast && _showToast('Lagre prosjektet i skyen først — kundelenken peker på det lagrede prosjektet', 'warn');
+    return;
+  }
+  const marked = _kundeAskedSummary();
+  document.getElementById('_kunde-ov')?.remove();
+  const ov = document.createElement('div');
+  ov.id = '_kunde-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center';
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(540px,94vw);max-height:88vh;overflow:auto;padding:24px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <div style="font-size:17px;font-weight:700;color:var(--text)">Be kunde om mål</div>
+      <button onclick="document.getElementById('_kunde-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
+    </div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:16px">Kunden får en lenke som viser tegningen uten innlogging — kun geometri og romnavn. Ingen produkter, priser eller kundeopplysninger.</div>
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px">Hva skal kunden gjøre?</div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:13px;cursor:pointer;margin-bottom:5px">
+        <input type="radio" name="kunde-mode" value="maal" checked> Fylle inn mål på vegger
+      </label>
+      <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--dim);cursor:not-allowed">
+        <input type="radio" name="kunde-mode" value="tegn" disabled> Tegne rommene selv <span style="font-size:11px">(kommer i 030)</span>
+      </label>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px">Melding til kunden <span style="color:var(--dim);font-weight:400">(valgfri)</span></div>
+      <textarea id="kunde-note" rows="2" placeholder="F.eks. «Kan du måle veggene som er merket røde?»"
+        style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:13px;font-family:inherit;resize:vertical"></textarea>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+      <span style="font-size:12px;font-weight:600">Gyldig i</span>
+      <input id="kunde-days" type="number" min="1" max="365" value="30" style="width:66px;padding:5px 7px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text)">
+      <span style="font-size:12px;color:var(--dim)">dager</span>
+    </div>
+
+    <div style="font-size:12px;margin-bottom:16px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface2)">
+      <div style="font-weight:600;margin-bottom:3px">Merkede vegger</div>
+      ${marked.length
+        ? `<div style="color:var(--dim);line-height:1.5">${marked.map(esc).join('<br>')}</div>`
+        : `<div style="color:var(--dim)">Ingen vegger merket som usikre. Kunden kan rette <b>alle</b> mål uansett — merking styrer bare hva som vises først og rødt.</div>`}
+    </div>
+
+    <div id="kunde-result" style="display:none;margin-bottom:14px"></div>
+
+    <div style="display:flex;justify-content:flex-end;gap:9px">
+      <button onclick="document.getElementById('_kunde-ov').remove()" style="padding:8px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
+      <button id="kunde-create" onclick="_kundeCreateLink()" style="padding:8px 19px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:600;color:#0d0e10;cursor:pointer">Lag lenke</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+}
+
+async function _kundeCreateLink() {
+  const btn = document.getElementById('kunde-create');
+  const res = document.getElementById('kunde-result');
+  if (btn) { btn.disabled = true; btn.textContent = 'Lager …'; }
+  const days = Math.max(1, Math.min(365, parseInt(document.getElementById('kunde-days')?.value, 10) || 30));
+  const note = (document.getElementById('kunde-note')?.value || '').trim() || null;
+  const token = (crypto.randomUUID ? crypto.randomUUID() : null);
+  if (!token) { if (res) { res.style.display = 'block'; res.textContent = 'Nettleseren støtter ikke crypto.randomUUID.'; } return; }
+  const row = {
+    token,
+    project_id: _supabaseProjectId,
+    org_id: _userOrg ? _userOrg.id : null,
+    mode: 'maal',
+    asked_walls: _kundeAskedWalls(),
+    note,
+    status: 'open',
+    expires_at: new Date(Date.now() + days * 86400000).toISOString(),
+    created_by: _currentUser ? _currentUser.id : null,
+    notify_email: _currentUser ? _currentUser.email : null,
+  };
+  const { error } = await _db.from('kundelenker').insert(row);
+  if (btn) { btn.disabled = false; btn.textContent = 'Lag lenke'; }
+  if (error) {
+    if (res) { res.style.display = 'block'; res.style.color = '#e5484d';
+      res.textContent = 'Kunne ikke lage lenken: ' + error.message + ' — er migrasjonen kjørt?'; }
+    return;
+  }
+  const url = _PUBLIC_BASE_URL + '/?kunde=' + token;
+  if (res) {
+    res.style.display = 'block';
+    res.innerHTML = `<div style="font-size:12px;font-weight:600;margin-bottom:5px;color:var(--accent)">✓ Lenken er klar</div>
+      <div style="display:flex;gap:7px;align-items:center">
+        <input readonly value="${esc(url)}" onclick="this.select()" style="flex:1;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px">
+        <button onclick="navigator.clipboard.writeText('${esc(url)}').then(()=>_showToast&&_showToast('Kundelenke kopiert','ok'))" style="padding:7px 13px;background:var(--accent);border:none;border-radius:7px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
+        <button disabled title="E-post kommer i 029" style="padding:7px 13px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--dim);cursor:not-allowed">Send på e-post</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px">Utløper ${new Date(row.expires_at).toLocaleDateString('nb-NO')}. Kan trekkes tilbake fra prosjektinfo.</div>`;
+  }
+  _kundeRefreshStatus();
+}
+
+// Prosjektinfo i sidebaren: nyeste åpne lenke.
+let _kundeLinkCache = null;
+async function _kundeRefreshStatus() {
+  if (!_supabaseProjectId || !_db) { _kundeLinkCache = null; return; }
+  try {
+    const { data } = await _db.from('kundelenker').select('*')
+      .eq('project_id', _supabaseProjectId).order('created_at', { ascending: false }).limit(5);
+    _kundeLinkCache = (data || []).find(k => k.status === 'open' || k.status === 'answered') || null;
+  } catch (e) { _kundeLinkCache = null; }
+  if (typeof renderSidebar === 'function') renderSidebar();
+}
+async function _kundeRevokeLink(id) {
+  if (!id) return;
+  await _db.from('kundelenker').update({ status: 'revoked' }).eq('id', id);
+  _showToast && _showToast('Kundelenken er trukket tilbake', 'ok');
+  _kundeRefreshStatus();
+}
+function _kundeStatusHtml() {
+  const k = _kundeLinkCache;
+  if (!k) return '';
+  const url = _PUBLIC_BASE_URL + '/?kunde=' + k.token;
+  const exp = k.expires_at ? new Date(k.expires_at).toLocaleDateString('nb-NO') : '—';
+  const lbl = k.status === 'answered' ? 'svar mottatt' : 'åpen';
+  return `<div style="font-size:11px;color:var(--dim);padding:6px 0;border-top:1px solid var(--border);margin-top:6px">
+    <div style="margin-bottom:4px">Kundelenke: <b style="color:${k.status==='answered'?'var(--accent)':'var(--text)'}">${lbl}</b> · utløper ${exp}</div>
+    <div style="display:flex;gap:6px">
+      <button class="snap-chip" onclick="navigator.clipboard.writeText('${esc(url)}').then(()=>_showToast&&_showToast('Kopiert','ok'))">Kopier lenke</button>
+      <button class="snap-chip" onclick="_kundeRevokeLink('${esc(k.id)}')">Trekk tilbake</button>
+    </div></div>`;
+}
+
+// 027 (spec regel 8): ÉN konstant for alle utsendte lenker. Aldri `location.origin`.
+const _PUBLIC_BASE_URL = 'https://varmeplan.no';
+
 async function _presentShareLink() {
   if (!_db || !_supabaseProjectId) {
     _showToast && _showToast('Lagre prosjektet i skyen først for å dele.');
@@ -6774,7 +7147,9 @@ async function _presentShareLink() {
       return;
     }
   }
-  const url = location.origin + location.pathname + '?present=' + token;
+  // 027 (spec regel 8): alle lenker som sendes ut skal gå til varmeplan.no — `location.origin`
+  // gir arqely.com eller localhost, som kunden ikke kan bruke.
+  const url = _PUBLIC_BASE_URL + '/?present=' + token;
   try { await navigator.clipboard.writeText(url); _showToast && _showToast('Delelenke kopiert til utklippstavle'); }
   catch (e) { window.prompt('Kopier delelenke:', url); }
 }
@@ -33928,10 +34303,16 @@ function _drawDimAnnotationsForRoom(room) {
     const nx=Math.cos(perpAng)*outDir,ny=Math.sin(perpAng)*outDir;
     const ox1=s1.x+nx*baseOff,oy1=s1.y+ny*baseOff;
     const ox2=s2.x+nx*baseOff,oy2=s2.y+ny*baseOff;
-    const col=isSel?_lc('rgba(8,80,130,0.95)','rgba(34,211,238,0.95)'):_lc('rgba(26,111,204,0.8)','rgba(71,180,255,0.65)');
-    ctx.strokeStyle=col; ctx.lineWidth=isSel?1.5:1; ctx.fillStyle=col;
-    ctx.setLineDash([]);
+    // 027: usikre vegger tegnes RØDT og stiplet, med «?» etter tallet. `_renderRoomToImage`
+    // kaller render(), så PDF-romsiden arver markeringen uten en egen kodevei.
+    const _wIdx = room.walls.indexOf(wl);
+    const _unsure = _isWallUncertain(room, _wIdx);
+    const col = _unsure ? _lc('rgba(200,30,40,0.95)','rgba(248,113,113,0.95)')
+              : (isSel?_lc('rgba(8,80,130,0.95)','rgba(34,211,238,0.95)'):_lc('rgba(26,111,204,0.8)','rgba(71,180,255,0.65)'));
+    ctx.strokeStyle=col; ctx.lineWidth=_unsure?1.6:(isSel?1.5:1); ctx.fillStyle=col;
+    ctx.setLineDash(_unsure?[5,3]:[]);
     ctx.beginPath();ctx.moveTo(ox1,oy1);ctx.lineTo(ox2,oy2);ctx.stroke();
+    ctx.setLineDash([]);   // T-endene og teksten skal ikke være stiplet
     // T-ende: tverr-strek VINKELRETT på målestreken (perpAng), sentrert på endepunktet
     const tx=Math.cos(perpAng)*TICK,ty=Math.sin(perpAng)*TICK;
     ctx.beginPath();
@@ -33939,14 +34320,15 @@ function _drawDimAnnotationsForRoom(room) {
     ctx.moveTo(ox2-tx,oy2-ty);ctx.lineTo(ox2+tx,oy2+ty);
     ctx.stroke();
     const len=Math.round(wl.length);
+    const _lbl = len + ' cm' + (_unsure ? ' ?' : '');
     const drawAng=(wallAng>Math.PI/2||wallAng<-Math.PI/2)?wallAng+Math.PI:wallAng;
     ctx.save();
     ctx.translate((ox1+ox2)/2,(oy1+oy2)/2);ctx.rotate(drawAng);
     ctx.textAlign='center';ctx.textBaseline='middle';
     ctx.fillStyle=_lc('rgba(240,244,248,0.88)','rgba(13,14,16,0.7)');
-    const tw=ctx.measureText(len+' cm').width;
+    const tw=ctx.measureText(_lbl).width;
     ctx.fillRect(-tw/2-3,-7,tw+6,14);
-    ctx.fillStyle=col;ctx.fillText(len+' cm',0,0);
+    ctx.fillStyle=col;ctx.fillText(_lbl,0,0);
     ctx.restore();
     if(isSel){
       const arr=42,omx=(ox1+ox2)/2,omy=(oy1+oy2)/2;
@@ -35202,6 +35584,205 @@ function roomAreas(room){
     return a;
   },0);
   return{gross,hindArea,zoneArea,net:Math.max(0,gross-hindArea-zoneArea)};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 027 (spec-kundelenke regel 4b): «Går målene opp?» — ÉN funksjon, brukt tre steder
+// (WBW når Kenneth tegner fra skisse, kundesiden mens kunden retter, og 028-panelet).
+//
+// En lukket romform har ikke uavhengige vegglengder. For et rom der alle vegger er
+// vann-/loddrette gjelder: Σ høyre = Σ venstre, og Σ opp = Σ ned. Går de ikke opp, er det
+// et enkeltmål som er feil — men ingen sier HVILKET. Denne funksjonen sier i det minste
+// hvilken AKSE som mangler, og hvor mye.
+//
+// Kenneths skisse 07.10.2026 er fasiten: enkeltmålene stemte hver for seg, men høyre side
+// summerte til 8,15 m mot venstreveggens oppgitte 11,25 m — 3,10 m forsvant.
+const _AXIS_TOL_DEG = 1;
+// 027: låser svar-validering, URL-bygging og «går målene opp?»-regnestykket.
+function _kundelenkeRegressionTest() {
+  const saved = { rooms: S.rooms, state: typeof _kundeState !== 'undefined' ? _kundeState : null };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    // ─── A — _roomAxisBalance ───
+    const rekt = [{x:0,y:0},{x:320,y:0},{x:320,y:400},{x:0,y:400}];
+    let b = _roomAxisBalance(rekt);            // lukket polygon → alltid 0/0
+    check('A: lukket rektangel går opp', '0/0',
+      b.rectilinear && b.dxCm === 0 && b.dyCm === 0, `${b.dxCm}/${b.dyCm}`);
+    // Åpen kjede med den lukkende veggen oppgitt: 320 → 400 → 320 tilbake → 400 opp = lukker.
+    const kjede = [{x:0,y:0},{x:320,y:0},{x:320,y:400},{x:0,y:400},{x:0,y:0}];
+    b = _roomAxisBalance(kjede, true);
+    check('A: åpen kjede som lukker → 0/0', '0/0',
+      b.rectilinear && b.dxCm === 0 && b.dyCm === 0, `${b.dxCm}/${b.dyCm}`);
+    const skrå = [{x:0,y:0},{x:400,y:120},{x:300,y:400},{x:0,y:300}];
+    check('A: skrått rom → rectilinear false', false,
+      _roomAxisBalance(skrå).rectilinear === false, _roomAxisBalance(skrå).rectilinear);
+
+    // Kenneths skisse 07.10: 440 → opp 272 → 15 → ned 35 → 190 → opp 435 → 190 tilbake
+    //  → ned 100 → 15 → opp 243 → 440 tilbake. Høyre side summerer til 815, venstre oppgitt 1125.
+    const skisse = [];
+    let x = 0, y = 0;
+    const mv = (dx, dy) => { x += dx; y += dy; skisse.push({ x, y }); };
+    skisse.push({ x, y });
+    mv(440, 0); mv(0, -272); mv(15, 0); mv(0, 35); mv(190, 0); mv(0, -435);
+    mv(-190, 0); mv(0, 100); mv(15, 0); mv(0, -243); mv(-440, 0);
+    b = _roomAxisBalance(skisse, true);   // ÅPEN kjede — den lukkende veggen er ikke oppgitt
+    check('A: skissen er rettvinklet', true, b.rectilinear, b.rectilinear);
+    check('A: dxCm = 30 (vannrett går nesten opp)', 30, b.dxCm === 30, b.dxCm);
+    check('A: dyCm = −815 (loddrett mangler)', -815, b.dyCm === -815, b.dyCm);
+    const txt = _axisBalanceText(b);
+    check('A: melding nevner loddrett', true, /loddrett/.test(txt || ''), txt);
+    const susp = _axisBalanceSuspectWalls(b);
+    check('A: den lukkende veggen ville blitt skrå (dx og dy begge ulik 0)', true,
+      b.dxCm !== 0 && b.dyCm !== 0, `${b.dxCm}/${b.dyCm}`);
+    check('A: peker på de LODDRETTE veggene', 'y-akse',
+      susp.length > 0 && susp.every(i => {
+        const a2 = skisse[i], c = skisse[(i + 1) % skisse.length];
+        return Math.abs(c.x - a2.x) < 0.01;
+      }), susp);
+
+    // ─── B — usikre vegger ───
+    S.rooms = [{ id: 994001, name: 'T', floorId: null, partId: null, shape: 'polygon',
+      wallThicknessCm: 0, points: rekt.map(p => ({...p})), walls: compWalls(rekt), dims: [],
+      area: 128000, annotOffsets: {} }];
+    check('B: ingen usikre i utgangspunktet', 0, _roomUncertainWalls(S.rooms[0]).length === 0, 0);
+    toggleWallUncertain(994001, 2);
+    check('B: vegg 2 merket', true, _isWallUncertain(S.rooms[0], 2), _roomUncertainWalls(S.rooms[0]));
+    check('B: dimSnap slås på så markeringen synes', true, S.rooms[0].dimSnap === true, S.rooms[0].dimSnap);
+    toggleWallUncertain(994001, 2);
+    check('B: toggler av igjen', 0, _roomUncertainWalls(S.rooms[0]).length === 0, _roomUncertainWalls(S.rooms[0]));
+
+    // ─── C — URL-bygging bruker _PUBLIC_BASE_URL, ikke location.origin ───
+    check('C: basis-URL er varmeplan.no', 'https://varmeplan.no',
+      _PUBLIC_BASE_URL === 'https://varmeplan.no', _PUBLIC_BASE_URL);
+    const u = _PUBLIC_BASE_URL + '/?kunde=' + 'abc-123';
+    check('C: kundelenke peker på varmeplan.no', true,
+      u.startsWith('https://varmeplan.no/?kunde='), u);
+    check('C: ikke location.origin i delelenken', false,
+      /location\.origin/.test(_presentShareLink.toString()), 'location.origin funnet');
+
+    // ─── D — svar-payload valideres ───
+    S.rooms = [{ id: 994002, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
+      wallThicknessCm: 0, points: rekt.map(p => ({...p})), walls: compWalls(rekt), dims: [],
+      area: 128000, annotOffsets: {}, uncertainWalls: [] }];
+    _kundeState = { token: 't', mode: 'maal', note: '', orgName: 'Org', askedWalls: [],
+      edits: new Map(), name: 'Ola', comment: 'test' };
+    _kundeState.edits.set(_kundeKey(994002, 0), 350);
+    _kundeState.edits.set(_kundeKey(994002, 1), -5);      // ugyldig
+    _kundeState.edits.set(_kundeKey(994002, 2), NaN);     // ugyldig
+    const ans = _kundeBuildAnswer();
+    check('D: kun det gyldige målet kom med', 1, ans.walls.length === 1, ans.walls.length);
+    check('D: riktige felt', 'roomId/wallIdx/lengthCm/wasCm',
+      ans.walls[0] && ans.walls[0].roomId === 994002 && ans.walls[0].wallIdx === 0
+      && ans.walls[0].lengthCm === 350 && ans.walls[0].wasCm === 320, JSON.stringify(ans.walls[0]));
+    check('D: kommentar med', 'test', ans.comment === 'test', ans.comment);
+    check('D: axisBalance per rom', true, !!ans.axisBalance[994002], ans.axisBalance);
+  } finally {
+    S.rooms = saved.rooms;
+    if (typeof _kundeState !== 'undefined') _kundeState = saved.state;
+    _invalidateStripCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_kundelenkeRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// ⚠ RETTET UNDERVEIS 07.10.2026: første utgave summerte over ALLE kantene i polygonet, også den
+// lukkende. En lukket form summerer per definisjon til null — da sa funksjonen alltid «går opp»,
+// uansett hvor feil målene var. Balansen er bare meningsfull for en ÅPEN KJEDE: veggene brukeren
+// faktisk har oppgitt, FØR den lukkende veggen tar opp differansen. Derfor `openChain`.
+// Kenneths skisse 07.10 ender 30 cm og 815 cm fra startpunktet — det er nettopp det avviket som
+// skal rapporteres, og den lukkende veggen blir skrå når det finnes.
+function _roomAxisBalance(points, openChain) {
+  const pts = points || [];
+  const out = { rectilinear: true, dxCm: 0, dyCm: 0, walls: [], openChain: !!openChain };
+  if (pts.length < 3) return { ...out, rectilinear: false };
+  const n = openChain ? pts.length - 1 : pts.length;   // åpen kjede: hopp over den lukkende kanten
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.01) continue;
+    const ang = Math.abs(Math.atan2(dy, dx) * 180 / Math.PI);
+    const horiz = ang < _AXIS_TOL_DEG || Math.abs(ang - 180) < _AXIS_TOL_DEG;
+    const vert  = Math.abs(ang - 90) < _AXIS_TOL_DEG;
+    if (!horiz && !vert) { out.rectilinear = false; return out; }
+    if (horiz) { out.dxCm += dx; out.walls.push({ idx: i, axis: 'x', dir: dx > 0 ? 1 : -1, lenCm: len }); }
+    else       { out.dyCm += dy; out.walls.push({ idx: i, axis: 'y', dir: dy > 0 ? 1 : -1, lenCm: len }); }
+  }
+  out.dxCm = Math.round(out.dxCm * 100) / 100;
+  out.dyCm = Math.round(out.dyCm * 100) / 100;
+  return out;
+}
+
+// Kort, lesbar melding — eller null når målene går opp (eller rommet ikke er rettvinklet).
+function _axisBalanceText(bal) {
+  if (!bal || !bal.rectilinear) return null;
+  const parts = [];
+  const m = cm => (Math.abs(cm) / 100).toFixed(2).replace('.', ',') + ' m';
+  if (Math.abs(bal.dyCm) > 2) {
+    parts.push(bal.dyCm > 0
+      ? `${m(bal.dyCm)} for mye i loddrette mål`
+      : `${m(bal.dyCm)} mangler i loddrette mål`);
+  }
+  if (Math.abs(bal.dxCm) > 2) {
+    parts.push(bal.dxCm > 0
+      ? `${m(bal.dxCm)} for mye i vannrette mål`
+      : `${m(bal.dxCm)} mangler i vannrette mål`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+// Veggene som inngår i den aksen som ikke går opp — kandidatene for «merk som usikre».
+function _axisBalanceSuspectWalls(bal) {
+  if (!bal || !bal.rectilinear) return [];
+  const axis = Math.abs(bal.dyCm) >= Math.abs(bal.dxCm) ? 'y' : 'x';
+  if (Math.abs(axis === 'y' ? bal.dyCm : bal.dxCm) <= 2) return [];
+  return bal.walls.filter(w => w.axis === axis).map(w => w.idx);
+}
+
+// ── Usikre vegger ───────────────────────────────────────────────────────────
+// Lagres som `room.uncertainWalls: [wallIdx]`. `wallIdx` er PUNKTINDEKSEN: STEG 0.2 målte at
+// `compWalls(pts)` bygger `walls[i]` av `points[i] → points[(i+1) % n]`, og at den kalles på
+// nytt ved hver geometriendring (10 kallsteder) — så indeksen er stabil og overlever lagring.
+function _roomUncertainWalls(room) {
+  return (room && Array.isArray(room.uncertainWalls)) ? room.uncertainWalls : [];
+}
+function _isWallUncertain(room, idx) {
+  return _roomUncertainWalls(room).includes(idx);
+}
+function toggleWallUncertain(roomId, wallIdx) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return;
+  pushUndo();
+  const list = _roomUncertainWalls(room).slice();
+  const i = list.indexOf(wallIdx);
+  if (i >= 0) list.splice(i, 1); else list.push(wallIdx);
+  room.uncertainWalls = list.sort((a, b) => a - b);
+  if (!room.dimSnap && list.length) room.dimSnap = true;   // ellers ser man ikke markeringen
+  renderSidebar(); updateObjInfo(); render();
+}
+// Brukes av WBW-toasten: merk HELE den aksen som ikke går opp.
+function _markAxisAndToast(roomId) {
+  const n = markAxisWallsUncertain(roomId);
+  if (typeof _showToast === 'function') {
+    _showToast(n ? `${n} vegger merket som usikre — be kunden om målene` : 'Målene går opp', n ? 'ok' : 'info');
+  }
+  updateCtxBar();
+}
+
+function markAxisWallsUncertain(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return 0;
+  const idxs = _axisBalanceSuspectWalls(_roomAxisBalance(room.points, true));
+  if (!idxs.length) return 0;
+  pushUndo();
+  const set = new Set(_roomUncertainWalls(room));
+  idxs.forEach(i => set.add(i));
+  room.uncertainWalls = [...set].sort((a, b) => a - b);
+  room.dimSnap = true;
+  renderSidebar(); render();
+  return idxs.length;
 }
 
 function compWalls(pts) {
@@ -40061,19 +40642,63 @@ function undoWbwWall() {
   const wbw=S.drawing.wbw;
   if (wbw.walls.length>0) { wbw.walls.pop(); S.counters.nextWallId--; updWbw(); render(); }
 }
+// 027 (spec regel 4b): de vannrette/loddrette veggene som ER lagt så langt, pluss den
+// lukkende veggen tilbake til startpunktet — altså rommet slik det VILLE blitt.
+function _wbwPointsSoFar(wbw) {
+  if (!wbw || !wbw.startPoint || !wbw.walls || wbw.walls.length < 2) return null;
+  return [wbw.startPoint, ...wbw.walls.map(w => ({ x: w.x2, y: w.y2 }))];
+}
+function _wbwUpdateBalanceLine(wbw) {
+  const el = document.getElementById('wbw-balance');
+  if (!el) return;
+  const pts = _wbwPointsSoFar(wbw);
+  const txt = pts ? _axisBalanceText(_roomAxisBalance(pts, true)) : null;
+  // Mens man tegner er et avvik HELT NORMALT (rommet er ikke lukket ennå) — linja er en
+  // veiledning, ikke en feil. Den skal fortelle hvor mye som gjenstår på hver akse.
+  el.style.display = txt ? 'block' : 'none';
+  el.textContent = txt ? ('↔ ' + txt) : '';
+}
+
 function finishWbwRoom() {
   const wbw=S.drawing.wbw; if (wbw.walls.length<3) return;
   let pts=[wbw.startPoint,...wbw.walls.map(w=>({x:w.x2,y:w.y2}))];
   // Remove closing duplicate if last point equals start
   const last=pts[pts.length-1];
   if (Math.hypot(last.x-wbw.startPoint.x, last.y-wbw.startPoint.y)<1) pts=pts.slice(0,-1);
+  // 027: fang avviket FØR rommet lages, så vi kan tilby «merk de usikre» på det ferdige rommet.
+  const bal = _roomAxisBalance(pts, true);   // åpen kjede: lukkeveggen er ikke oppgitt
+  const balTxt = _axisBalanceText(bal);
   createRoom(pts,'wbw',S.ui.pendingRoomName,S.ui.pendingFloorId,true, null, true);
+  if (balTxt) {
+    // Den typiske skisse-feilen: hvert enkeltmål stemmer, men summen gjør det ikke. Rommet er
+    // allerede tegnet (den lukkende veggen tok forskjellen) — vi sier hvor feilen MÅ ligge.
+    const room = S.rooms[S.rooms.length - 1];
+    _wbwBalanceToast(room ? room.id : null, balTxt);
+  }
+}
+function _wbwBalanceToast(roomId, txt) {
+  document.getElementById('_wbw-bal-toast')?.remove();
+  const d = document.createElement('div');
+  d.id = '_wbw-bal-toast';
+  d.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:28px;z-index:4000;'
+    + 'background:var(--surface,#16171c);border:1px solid #f59e0b;border-radius:10px;padding:12px 15px;'
+    + 'box-shadow:0 6px 24px rgba(0,0,0,.45);max-width:min(520px,92vw);font-size:13px;color:var(--text)';
+  d.innerHTML = `<div style="font-weight:700;color:#f59e0b;margin-bottom:3px">⚠ Målene går ikke opp</div>
+    <div style="color:var(--dim);font-size:12px;line-height:1.4;margin-bottom:9px">${esc(txt)}.
+      Den lukkende veggen tok forskjellen — ett av enkeltmålene er trolig feil.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="snap-chip" onclick="document.getElementById('_wbw-bal-toast').remove()">Lukk</button>
+      ${roomId != null ? `<button class="snap-chip on" onclick="_markAxisAndToast(${roomId});document.getElementById('_wbw-bal-toast').remove()">Merk veggene som usikre</button>` : ''}
+    </div>`;
+  document.body.appendChild(d);
+  setTimeout(() => document.getElementById('_wbw-bal-toast')?.remove(), 20000);
 }
 function updWbw() {
   const wbw=S.drawing.wbw;
   const mouseMode = wbw.mouseMode;
   document.getElementById('wbw-panel-title').textContent=
     'Vegg '+(wbw.walls.length+1)+(mouseMode?' · 🖱':' · ⌨');
+  _wbwUpdateBalanceLine(wbw);   // 027 (spec 4b): «går målene opp?» mens man tegner
   document.getElementById('wbw-add-btn').disabled=false;
   document.getElementById('wbw-undo-btn').disabled=wbw.walls.length===0;
   document.getElementById('wbw-finish-btn').disabled=wbw.walls.length<3;
@@ -46271,6 +46896,25 @@ function _ctxBarItems() {
   }
 
   // Wall selected
+  // 027: valgt målelinje → «Usikkert mål»-toggle. Det fantes ingen ctxbar-gren for
+  // `selectedAnnot` i det hele tatt før (kun dra-håndtak), så dette er en ny inngang.
+  if (ui.selectedAnnot) {
+    const _ar = S.rooms.find(r => r.id === ui.selectedAnnot.roomId);
+    const _ai = _ar && _ar.walls ? _ar.walls.findIndex(w => w.id === ui.selectedAnnot.wallId) : -1;
+    if (_ar && _ai >= 0) {
+      const _on = _isWallUncertain(_ar, _ai);
+      // Et FERDIG tegnet rom er alltid geometrisk konsistent (polygonet lukker), så en
+      // balansesjekk her ville alltid vært stille. Linja hører hjemme i WBW (mens man tegner),
+      // på kundesiden (kundens tall) og i 028-panelet — ikke på et ferdig rom.
+      const _txt = null;
+      return `<span class="ctxbar-lbl">Mål</span>
+        <span style="font-size:11px;color:var(--dim)">${esc(_ar.name || 'Rom')} · ${_ar.walls[_ai].label || ('Vegg ' + (_ai+1))}: ${Math.round(_ar.walls[_ai].length)} cm</span>
+        <button class="snap-chip${_on?' on':''}" onclick="toggleWallUncertain(${_ar.id},${_ai})" title="Merk målet som usikkert — kunden blir bedt om å måle det">${_on?'✓ ':''}⚠ Usikkert mål</button>
+        ${_txt ? `<span class="tc-sep"></span><span style="font-size:11px;color:#f59e0b">⚠ ${esc(_txt)}</span>
+        <button class="snap-chip" onclick="_markAxisAndToast(${_ar.id})" title="Merk alle veggene på den aksen som ikke går opp">Merk de usikre</button>` : ''}`;
+    }
+  }
+
   if (ui.selectedWallId) {
     let _wl=null,_rm=null;
     for(const r of S.rooms){_wl=r.walls.find(w=>w.id===ui.selectedWallId);if(_wl){_rm=r;break;}}
@@ -60039,6 +60683,9 @@ async function initSupabase() {
     // Offentlig read-only presentasjon via ?present=<token> (ingen innlogging).
     const _presTok = new URLSearchParams(location.search).get('present');
     if (_presTok) { const ok = await _presentLoadByToken(_presTok); if (ok) return; }
+    // 027: kundelenke (?kunde=<token>) — egen gren, samme mønster. `?present=` er urørt.
+    const _kundeTok = new URLSearchParams(location.search).get('kunde');
+    if (_kundeTok) { const ok = await _kundeLoadByToken(_kundeTok); if (ok) return; }
     // Check for existing session
     const { data: { session } } = await _db.auth.getSession();
     if (session?.user) {
