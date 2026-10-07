@@ -83,13 +83,30 @@ for kundelenkene, som treffer `varmeplan.no` uten et eneste hopp; gamle arqely-l
 - `kind='answered'` er anonym, men krever `status='answered'`, svar under 10 min gammelt, og
   maks ett varsel per lenke per 10 min. Mottakeren er alltid lenkens egen `notify_email`.
 
-## To funn som gjelder eldre kode
+## Tre åpne e-postutløsere — funnet og tettet
 
-1. **`send-invite-email` tar både mottaker og lenke-URL rett fra klientens body**, uten å lese
-   `Authorization`. Den kan altså sende en vilkårlig lenke til en vilkårlig adresse med Varmeplan
-   som avsender. Ikke rørt i denne serien — fortjener en egen oppgave.
-2. **Presentasjonslenken viste «Del lenke» og «Avslutt» til alle**, fordi `_presentEnter()`
-   nullstilte `presentPublic` rett etter at den var satt. Rettet i 030.
+Målt mot de deployede funksjonene 07.10.2026, ikke lest ut av koden. Alle tre er nå rettet og
+redeployet; verifisert at ingen av dem sender på et uautentisert kall.
+
+| Funksjon | Før | Etter |
+|---|---|---|
+| `send-invite-email` | nådde vår kode uten `Authorization`; mottaker **og** lenke-URL fra klientens body | 401 uten innlogget bruker; tar kun `token`, slår opp alt selv |
+| `notify-admin-registration` | **sendte e-post på tomt POST-kall** (200) | 400 uten `user_id`, 404 på ukjent, krever konto under 15 min gammel |
+| `send-feedback` | **sendte e-post på tomt POST-kall** (200) | 401 uten innlogging; identitet fra JWT, ikke fra body |
+
+`send-invite-email` var en ferdig phishing-kanal på vårt eget verifiserte domene, med
+`org_name`/`invited_by` interpolert uescapet inn i HTML-en. De to andre kunne hvem som helst
+bruke til å fylle `ADMIN_EMAIL` og tømme Resend-kvoten, slik at ekte invitasjoner stoppet.
+
+**Presentasjonslenken viste «Del lenke» og «Avslutt» til alle**, fordi `_presentEnter()`
+nullstilte `presentPublic` rett etter at den var satt. Rettet i 030.
+
+## Norsk i e-postene
+
+ASCII-regelen i `prompter/000-KJØR-MEG.md` gjelder **SQL-kommentarer**, ikke e-posttekst. Den ble
+feilaktig dratt over på kundeteksten i 029 («Apne», «maalene»); rettet i 031. Alle fem funksjoner
+har nå `<meta charset="utf-8">` og `charset=utf-8` mot Resend, og
+`scripts/sjekk-norsk-i-epost.sh` fanger det hvis det sniker seg inn igjen.
 
 ## Flyten, ende til ende
 
