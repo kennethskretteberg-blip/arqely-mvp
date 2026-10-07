@@ -14,6 +14,8 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 | E-post begge veier, alle lenker på varmeplan.no | 029 | `4c09d7a` | ✅ i `main` |
 | Tegn selv: fire metoder på PC, talltastatur på telefon | 030 | `ef636f9` | ✅ i `main` |
 | Kundesiden: sidepanel, veggvalg, piltaster og gizmo | 032 | `3540512` | ✅ i `main` |
+| E-postene skriver norsk med æøå + «<Org> Varmeplan» | 031 | `b16c4c5`, `5f8758b` | ✅ i `main` |
+| Kundesiden: hjørner, markør som i Varmeplan, fast tabell | 033 | `d640505` | ✅ i `main` |
 
 **032 erstattet en regel fra 027.** Der sto det at «geometrien tegnes ikke om på kundesiden».
 Nå følger tegningen tallene mens kunden retter — men spec regel 2 står uendret: alt skjer lokalt
@@ -21,9 +23,24 @@ i kundens nettleser, og ingenting skrives før «Send inn». Det er mulig fordi 
 er en ren geometrifunksjon; målt at den ikke utløser et eneste lagringskall eller undo-steg.
 
 Svaret bærer derfor nå **både** vegglengder og `answer.points` — kundens resultat-geometri.
-Kenneth arbeider fortsatt inn via lengdene, men 028-panelet viser kundens punkter som gul
-stiplet skygge, så han ser *hva kunden så*. Målt ende til ende: de to er punkt for punkt
-identiske.
+
+**033 la til at kunden kan flytte hjørner**, og da sier svaret hvem som er fasit:
+
+| `answer.geometryMode` | Når | Hva Kenneth får i 028 |
+|---|---|---|
+| `'walls'` | kunden har bare tastet mål | vegg-for-vegg som før; kundens punkter vises som gul stiplet skygge i miniatyren |
+| `'points'` | kunden har flyttet et hjørne | én knapp, «Bruk kundens rom», som erstatter polygonet eksakt. Avkryssing og vegg-knapper er borte — de ville gitt et annet rom enn kunden så |
+
+Et rom med et fritt flyttet hjørne kan ikke uttrykkes som vegglengder, og da er punktene den
+eneste sannheten. Rette vinkler tvinges **ikke** — det er samme oppførsel som Varmeplan har for
+innloggede (målt: hjørne 0 flyttet 50 cm i X på et 400×320-rom gir vegg 0 = 449,9 og vegg 3 =
+323,9 cm skrå).
+
+**To lag som begge rører samme vegg.** `_kundeRebuildRoom` regner alltid *original →
+vegglengder → hjørne-deltaer*, i den rekkefølgen, så resultatet er likt uansett hva kunden gjorde
+først. Når et tastet tall gjelder en vegg med **ett** flyttet endepunkt, justeres punktet langs
+veggens retning så tallet gjelder. Er **begge** flyttet, kan tallet ikke oppfylles — og avviket
+vises («Du ba om 5,00 m, men hjørnene gir 5,04 m») i stedet for å skjules.
 
 ## Oppsett — alt er på plass
 
@@ -103,6 +120,7 @@ Målt i nettleseren 07.10.2026 (032), ikke antatt — `present-mode` skjuler ing
 | `#wip` | «VEGG · ID · Lengde · Vinkel · Rom» + en **«✕ Avslutt»**-knapp som ville tatt kunden ut av siden |
 | Rommets transform-gizmo | Håndtak for å flytte og rotere **hele** rommet |
 | Minikartet | Navigasjonshjelpemiddel som hører sammen med sidebaren |
+| Hjørne-gizmoen (033) | Lå *inne i* `drawTransformGizmo`, som 032 stengte — kunden fikk aldri hjørne-pilene. Trukket ut som egen `drawVertexGizmo()`, kalt fra begge |
 
 Stengt med en ny `body.kunde-maal`-klasse. Lærdommen: kundesiden er presentasjon **pluss**
 redigering, så den kan ikke bare arve `present-mode`-lista — hver nye ting som vises ved et
@@ -143,12 +161,12 @@ Kenneth merker usikre vegger  ──►  «Be kunde om mål»  ──►  Mål e
                        kunden åpner varmeplan.no/?kunde=<token>
                        (ingen innlogging, kun geometri og romnavn)
                                           │
-                 mål: velger vegg i lista │  tegn: tegner rom med fire metoder
-                 eller på tegningen,       │  — talltastatur + piler på telefon
-                 retter med tall, piltast  │
-                 eller gizmo — tegningen   │
-                 følger med (032)          │
-                 — balansesjekk live       │
+                 mål: velger vegg ELLER    │  tegn: tegner rom med fire metoder
+                 hjørne, i lista eller på  │  — talltastatur + piler på telefon
+                 tegningen; retter med     │
+                 tall, piltast eller gizmo │
+                 — tegningen følger med    │
+                 (032/033)                 │
                                           ▼
                                      «Send inn»
                                           │
