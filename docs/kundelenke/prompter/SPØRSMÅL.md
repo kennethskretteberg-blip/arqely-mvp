@@ -29,7 +29,34 @@ så Kenneth kan si «ok» eller «endre». Kenneth svarer til slutt.
 
 ## 028
 
--
+- **Promptens §2-regel ble målt og forkastet.** «Flytt `points[i+1 … n−1]`» gjør et rektangel
+  skjevt (lukkeveggen havner på −98,9°). **Valgt:** vindu-regelen — flytt nøyaktig to punkter
+  langs veggens egen retning, så kant `i+2` absorberer. Verifisert for alle vegger i rektangel
+  og L-form. Dette er en informert kursendring, ikke en misforståelse av prompten.
+- **Den lukkende veggen kan settes som alle andre.** Promptens §2 antydet at den «absorberer
+  endringen» og dermed ikke kunne settes selv. Med vindu-regelen speilvendt (bakover-vindu
+  `{i, i−1}`) kan den det. **Valgt:** alle vegger er likeverdige, som spec regel 3 sier.
+- **Balansesjekken ble delt i to.** «Går kundens tall opp som en lukket romform?» gir bare
+  mening når kunden har oppgitt *alle* veggene — ved et delvis sett bærer de andre fortsatt
+  tegningens gamle tall, og kjeden lukker naturligvis ikke uten at noe er galt. **Valgt:**
+  balanselinja vises kun ved fullt sett; for delvise sett vises i stedet «n av m mål kan ikke
+  oppfylles samtidig», som er det spørsmålet som faktisk gjelder da.
+- **Rekkefølgen «Bruk alle»:** største `|delta|` først, som prompten ba om. Med vindu-regelen
+  er det også det som gir minst etterslep, siden den største endringen forplanter seg mest.
+- **Kontrollrunden markerer rommet, den retter ikke.** Spec regel 4: ingen automatisk fordeling
+  av differansen. `room.maalAvvik` lagres i prosjektet og vises som gul ⚠ til Kenneth klikker
+  den vekk.
+- **Avvis-knappen setter `revoked` med merknad i `note`**, ikke en ny statusverdi — tabellen har
+  ikke en `rejected`-status, og `revoked` er det spec regel 10 lister.
+- **Prosjektlista fikk et eget lite spørsmål**, ikke en join. `_fetchProjectList` er en
+  fallback-stige av tolv kolonnesett; en join måtte vært duplisert tolv ganger og kunne veltet
+  hele lista på et eldre skjema.
+- **027 etterlot `_kundeStatusHtml()` som død kode** — definert, aldri kalt, så kundelenkens
+  status fantes ikke i grensesnittet. Rettet her, på statiske sidebar-rader (aldri innerHTML-
+  ombygging av `#sb-proj-info`).
+- **Ny migrasjon:** `supabase-migration-kundelenke-028.sql`. 027 lot `kundelenke_get` slippe
+  gjennom `applied`-lenker — kunden kunne åpnet lenken igjen etter innarbeiding og trodd han
+  fortsatt kunne rette mål. Nå avviser begge RPC-ene samme statusliste.
 
 ## 029
 

@@ -1944,6 +1944,11 @@ body.present-mode #render-stats{display:none !important}
         <div class="spi-row" id="spi-contact" style="display:none"></div>
         <div class="spi-row spi-name" id="proj-name-disp" onclick="event.stopPropagation();editProjName()">Prosjekt</div>
         <div class="spi-row" id="spi-responsible" style="display:none"></div>
+        <!-- 028: kundelenke-status + «Svar fra kunde — Gå gjennom». STATISKE rader (samme
+             lærdom som proj-name-disp over): _renderSbProjInfo() toggler kun tekst/display,
+             aldri innerHTML-ombygging av blokka. -->
+        <div class="spi-row" id="spi-kundelenke" style="display:none" onclick="event.stopPropagation()"></div>
+        <div class="spi-row" id="spi-kundesvar" style="display:none" onclick="event.stopPropagation();openKundeReviewPanel()"></div>
         <div class="spi-row spi-save-row">
           <span id="save-indicator" class="tb-save"></span>
         </div>
@@ -4558,6 +4563,7 @@ function render() {
   drawGeoFeatures();   // 006: bygningsomriss som vektor oppå kartet, under rommene
   if (S.ui.showGrid !== false) drawGrid();
   drawRooms();
+  drawKundeHighlight();   // 028: kort oppblussing av rom som nettopp fikk kundens maal
   if (S.ui.present) drawPresentFloorTextures();   // subtil gulvtekstur UNDER leggemønsteret
   drawStrips();
   drawFoilFree();   // F4a: roterbar folie — samme lag som vanlig folie (heating elements)
@@ -5602,6 +5608,30 @@ function drawRooms() {
       ctx.fillText('V'+(wi+1)+' '+Math.round(wl.length)+' cm', 0, 0);
       ctx.restore();
     });
+  }
+}
+
+// 028: rommene som nettopp fikk kundens maal lyser opp i 2,5 sekunder, sa Kenneth ser HVA som
+// skjedde i det han trykker Bruk.
+// ⚠ MAALT LIVE: dette laa foerst som en hale INNE i drawRooms() — og tegnet seg aldri. Pass 2
+// der inne starter med `if (!room ...) return; if (!_roomOnActiveFloor(room)) return;`, saa uten
+// et VALGT rom kom funksjonen aldri til halen. Samme lerdom som klikk-kaskaden: a legge noe
+// «sist i funksjonen» er ikke det samme som «til slutt» naar funksjonen har tidlige utganger.
+// Derfor et eget lag, kalt fra render() rett etter drawRooms — foer varmeelementene, slik at
+// utlegget fortsatt er lesbart oppaa markeringen (lagrekkefolgen i CLAUDE.md).
+function drawKundeHighlight() {
+  if (!_kundeHlRooms || !_kundeHlRooms.size) return;
+  for (const room of S.rooms) {
+    if (!_kundeHlRooms.has(room.id)) continue;
+    if (!_roomOnActiveFloor(room) || !room.points || room.points.length < 3) continue;
+    const hp = room.points.map(p => w2s(p.x, p.y));
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(hp[0].x, hp[0].y);
+    for (let i = 1; i < hp.length; i++) ctx.lineTo(hp[i].x, hp[i].y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(91,201,140,0.16)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(91,201,140,0.95)'; ctx.lineWidth = 2.5; ctx.setLineDash([]); ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -6839,19 +6869,29 @@ function _kundeWallCm(room, idx) {
   return (typeof e === 'number' && isFinite(e) && e > 0) ? e : Math.round(room.walls[idx].length);
 }
 // Kundens tall der de finnes — brukes av «går målene opp?» live.
-function _kundePointsWith(room) {
-  // Rommet tegnes ikke om; vi simulerer bare lengdene langs samme retninger for balansesjekken.
+// ÅPEN kjede lagt ut langs rommets egne veggretninger, med oppgitte lengder der de finnes.
+// Rommet tegnes ikke om av denne — den er KUN inngangsverdien til balansesjekken, og er delt
+// av kundesiden (027) og gjennomgangspanelet (028) slik at de to aldri kan svare ulikt.
+// `override`: Map(wallIdx → cm). Mangler en vegg, brukes tegningens egen lengde.
+function _openChainWithLengths(room, override) {
   const pts = [{ x: room.points[0].x, y: room.points[0].y }];
   for (let i = 0; i < room.points.length; i++) {
     const a = room.points[i], b = room.points[(i + 1) % room.points.length];
     const L = Math.hypot(b.x - a.x, b.y - a.y) || 1;
     const ux = (b.x - a.x) / L, uy = (b.y - a.y) / L;
-    const cm = _kundeWallCm(room, i);
+    const o = override && override.get(i);
+    const cm = (typeof o === 'number' && isFinite(o) && o > 0) ? o : L;
     const prev = pts[pts.length - 1];
     pts.push({ x: prev.x + ux * cm, y: prev.y + uy * cm });
   }
   // IKKE pop: kjeden skal være ÅPEN. Avstanden fra siste punkt tilbake til start ER avviket.
   return pts;
+}
+
+function _kundePointsWith(room) {
+  const ov = new Map();
+  for (let i = 0; i < room.points.length; i++) ov.set(i, _kundeWallCm(room, i));
+  return _openChainWithLengths(room, ov);
 }
 
 function _kundeRenderBar() {
@@ -7110,18 +7150,302 @@ async function _kundeRevokeLink(id) {
   _showToast && _showToast('Kundelenken er trukket tilbake', 'ok');
   _kundeRefreshStatus();
 }
-function _kundeStatusHtml() {
+// 028: erstatter 027s `_kundeStatusHtml()`, som var DØD KODE — den bygget HTML ingen kalte.
+// Statuslinja bor na pa de statiske radene #spi-kundelenke / #spi-kundesvar, satt av
+// _renderSbProjInfo(); herfra trengs bare kopi-handlingen.
+function _kundeCopyLink() {
   const k = _kundeLinkCache;
-  if (!k) return '';
-  const url = _PUBLIC_BASE_URL + '/?kunde=' + k.token;
-  const exp = k.expires_at ? new Date(k.expires_at).toLocaleDateString('nb-NO') : '—';
-  const lbl = k.status === 'answered' ? 'svar mottatt' : 'åpen';
-  return `<div style="font-size:11px;color:var(--dim);padding:6px 0;border-top:1px solid var(--border);margin-top:6px">
-    <div style="margin-bottom:4px">Kundelenke: <b style="color:${k.status==='answered'?'var(--accent)':'var(--text)'}">${lbl}</b> · utløper ${exp}</div>
-    <div style="display:flex;gap:6px">
-      <button class="snap-chip" onclick="navigator.clipboard.writeText('${esc(url)}').then(()=>_showToast&&_showToast('Kopiert','ok'))">Kopier lenke</button>
-      <button class="snap-chip" onclick="_kundeRevokeLink('${esc(k.id)}')">Trekk tilbake</button>
+  if (!k) return;
+  navigator.clipboard.writeText(_PUBLIC_BASE_URL + '/?kunde=' + k.token)
+    .then(() => _showToast && _showToast('Kundelenken er kopiert', 'ok'));
+}
+
+
+// ─── 028: Gjennomgang av kundens svar ──────────────────────────────────────────
+// Kundens svar er et FORSLAG (spec regel 2) — det ligger på kundelenken, aldri i prosjektet.
+// Her ser Kenneth sine egne mål ved siden av kundens, hva resultatet BLIR, og velger selv.
+// `_kundeRevState` holder bare det panelet trenger: hvilke rader som er avkrysset.
+let _kundeRevState = null;
+
+// Kundens svar gruppert per rom, kun for rom som FINNES i prosjektet nå.
+// «Endre rom kunden ikke ga tall på» er forbudt — derfor er dette den eneste kilden.
+function _kundeAnswerByRoom() {
+  const k = _kundeLinkCache;
+  const out = new Map();
+  const walls = (k && k.answer && Array.isArray(k.answer.walls)) ? k.answer.walls : [];
+  for (const w of walls) {
+    const room = S.rooms.find(r => r.id === w.roomId);
+    if (!room) continue;
+    const idx = parseInt(w.wallIdx, 10);
+    if (!(idx >= 0 && idx < room.points.length)) continue;
+    const cm = Math.round(Number(w.lengthCm));
+    if (!(cm > 0) || !isFinite(cm)) continue;          // samme vern som på kundesiden
+    if (!out.has(room.id)) out.set(room.id, { room, walls: [] });
+    out.get(room.id).walls.push({ wallIdx: idx, kundeCm: cm, wasCm: Math.round(Number(w.wasCm) || 0) });
+  }
+  for (const g of out.values()) g.walls.sort((a, b) => {
+    const ua = _isWallUncertain(g.room, a.wallIdx) ? 0 : 1;
+    const ub = _isWallUncertain(g.room, b.wallIdx) ? 0 : 1;
+    return ua - ub || a.wallIdx - b.wallIdx;           // usikre vegger først (§1)
+  });
+  return out;
+}
+
+function openKundeReviewPanel() {
+  const k = _kundeLinkCache;
+  if (!k || k.status !== 'answered') {
+    _showToast && _showToast('Ingen svar fra kunde å gå gjennom', 'info');
+    return;
+  }
+  const groups = _kundeAnswerByRoom();
+  if (!groups.size) {
+    _showToast && _showToast('Svaret gjelder rom som ikke finnes i prosjektet lenger', 'warn');
+    return;
+  }
+  // Alt avkrysset som standard — Kenneth fjerner det han ikke vil ha.
+  if (!_kundeRevState || _kundeRevState.linkId !== k.id) {
+    _kundeRevState = { linkId: k.id, picked: new Set() };
+    for (const [rid, g] of groups) for (const w of g.walls) _kundeRevState.picked.add(rid + '|' + w.wallIdx);
+  }
+  _kundeRevRender(groups);
+}
+
+function _kundeRevRender(groups) {
+  groups = groups || _kundeAnswerByRoom();
+  const k = _kundeLinkCache;
+  document.getElementById('kunde-rev-ov')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'kunde-rev-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px';
+
+  const hvem = k.answered_by_name ? esc(k.answered_by_name) : 'kunden';
+  const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', {day:'numeric',month:'long'}) : '';
+  const komm = (k.answer && k.answer.comment) ? String(k.answer.comment).slice(0, 2000) : '';
+  const kundeBal = (k.answer && k.answer.axisBalance) || {};
+
+  let rows = '';
+  for (const [rid, g] of groups) {
+    const room = g.room;
+    const wanted = new Map(g.walls.filter(w => _kundeRevState.picked.has(rid + '|' + w.wallIdx))
+                                  .map(w => [w.wallIdx, w.kundeCm]));
+    // §3: BALANSEN FØR «Bruk», regnet med kundens tall — så Kenneth ser om det skurrer først.
+    const prev = wanted.size ? _kundePreviewRoom(room, wanted) : null;
+    const balTxt = prev ? _axisBalanceText(prev.balance) : null;
+    const kb = kundeBal[rid];
+    const kbTxt = kb ? _axisBalanceText({ rectilinear: true, dxCm: kb.dxCm, dyCm: kb.dyCm, walls: [] }) : null;
+
+    const given = new Set(g.walls.map(w => w.wallIdx));
+    let wallRows = '';
+    for (const w of g.walls) {
+      const key = rid + '|' + w.wallIdx;
+      const est = _wallLenCm(room, w.wallIdx);
+      const diff = w.kundeCm - est;
+      const blir = prev ? prev.after[w.wallIdx] : null;
+      const stemmer = blir == null ? null : Math.abs(blir - w.kundeCm) <= 1;
+      const uns = _isWallUncertain(room, w.wallIdx);
+      wallRows += `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:5px 8px"><input type="checkbox" ${_kundeRevState.picked.has(key)?'checked':''}
+             onchange="_kundeRevPick('${key}',this.checked)"></td>
+        <td style="padding:5px 8px;${uns?'color:#ff6b6b;font-weight:600':''}">Vegg ${w.wallIdx+1}${uns?' ?':''}</td>
+        <td style="padding:5px 8px;text-align:right;color:var(--muted)">${_fmtM(est)}</td>
+        <td style="padding:5px 8px;text-align:right;font-weight:600">${_fmtM(w.kundeCm)}</td>
+        <td style="padding:5px 8px;text-align:right;color:${Math.abs(diff)<1?'var(--dim)':(diff>0?'#5bc98c':'#f0b232')}">${Math.abs(diff)<1?'—':(diff>0?'+':'')+(diff/100).toFixed(2).replace('.',',')+' m'}</td>
+        <td style="padding:5px 8px;text-align:right;color:${stemmer===false?'#f0b232':'var(--muted)'}">${blir==null?'—':_fmtM(blir)}${stemmer===false?' ⚠':''}</td>
+      </tr>`;
+    }
+    // Følge-endringer: vegger kunden IKKE ga tall på, men som flytter seg likevel (§2, test 2).
+    let followRows = '';
+    if (prev) {
+      for (let i = 0; i < room.points.length; i++) {
+        if (given.has(i)) continue;
+        const est = Math.round(_wallLenCm(room, i) * 10) / 10;
+        if (Math.abs(prev.after[i] - est) <= 1) continue;
+        followRows += `<tr style="border-top:1px solid var(--border);color:var(--dim)">
+          <td style="padding:4px 8px"></td><td style="padding:4px 8px">Vegg ${i+1} <span style="font-size:10px">(følger)</span></td>
+          <td style="padding:4px 8px;text-align:right">${_fmtM(est)}</td>
+          <td style="padding:4px 8px;text-align:right">—</td><td style="padding:4px 8px"></td>
+          <td style="padding:4px 8px;text-align:right">${_fmtM(prev.after[i])}</td></tr>`;
+      }
+    }
+    const notes = (prev && prev.notes.length)
+      ? prev.notes.map(nt => `<div style="font-size:11px;color:${nt.kind==='conflict'?'#f0b232':'var(--dim)'};margin-top:4px">${nt.kind==='conflict'?'⚠ ':''}${esc(nt.text)}</div>`).join('')
+      : '';
+    const avvik = Array.isArray(room.maalAvvik) ? room.maalAvvik : [];
+
+    rows += `<div style="margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <div style="padding:8px 10px;background:var(--surface2);display:flex;align-items:center;gap:8px">
+        <b style="font-size:13px">${esc(room.name || 'Rom ' + room.id)}</b>
+        <span style="font-size:11px;color:var(--dim)">${prev ? (compArea(room.points)/10000).toFixed(1).replace('.',',') + ' → ' + (prev.areaCm2/10000).toFixed(1).replace('.',',') + ' m²' : ''}</span>
+        <span style="flex:1"></span>
+        <button class="snap-chip" onclick="_kundeApplyRoom(${room.id})">Bruk</button>
+      </div>
+      <div style="padding:6px 10px">
+        ${prev && prev.uoppfylt.length
+            ? `<div style="font-size:11px;color:#f0b232;margin-bottom:4px">⚠ ${prev.uoppfylt.length} av ${wanted.size} mål kan ikke oppfylles samtidig — se «Blir»-kolonnen</div>`
+            : `<div style="font-size:11px;color:#5bc98c;margin-bottom:4px">✓ Alle kundens mål går opp</div>`}
+        ${balTxt ? `<div style="font-size:11px;color:#f0b232;margin-bottom:4px">⚠ Som lukket romform: ${esc(balTxt)}</div>` : ''}
+        ${kbTxt ? `<div style="font-size:10px;color:var(--dim);margin-bottom:4px">Kunden fikk selv beskjed: ${esc(kbTxt)}</div>` : ''}
+        ${avvik.length ? `<div style="font-size:11px;color:#f0b232;margin-bottom:4px">⚠ Uløst avvik fra forrige innarbeiding: ${avvik.map(a=>'vegg '+(a.wallIdx+1)).join(', ')}</div>` : ''}
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr style="color:var(--dim);font-size:10px;text-transform:uppercase">
+            <th style="padding:2px 8px"></th><th style="padding:2px 8px;text-align:left">Vegg</th>
+            <th style="padding:2px 8px;text-align:right">Estimert</th><th style="padding:2px 8px;text-align:right">Kunde</th>
+            <th style="padding:2px 8px;text-align:right">Avvik</th><th style="padding:2px 8px;text-align:right">Blir</th></tr>
+          ${wallRows}${followRows}
+        </table>
+        ${notes}
+      </div></div>`;
+  }
+
+  ov.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(760px,96vw);max-height:90vh;display:flex;flex-direction:column">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      <div><div style="font-size:16px;font-weight:700;color:var(--text)">Svar fra kunde</div>
+        <div style="font-size:11px;color:var(--dim)">${hvem}${nar?' · '+nar:''}</div></div>
+      <span style="flex:1"></span>
+      <button onclick="document.getElementById('kunde-rev-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
+    </div>
+    <div style="padding:14px 18px;overflow:auto;flex:1">
+      ${komm ? `<div style="padding:8px 10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text);margin-bottom:14px;white-space:pre-wrap">${esc(komm)}</div>` : ''}
+      ${rows}
+      <div style="font-size:11px;color:var(--dim)">Tegningen endres først når du trykker Bruk. Ctrl+Z angrer hele innarbeidingen i ett steg.</div>
+    </div>
+    <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
+      <button onclick="_kundeRejectAnswer()" style="padding:8px 14px;background:none;border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Avvis svaret</button>
+      <span style="flex:1"></span>
+      <button onclick="document.getElementById('kunde-rev-ov').remove()" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Lukk</button>
+      <button onclick="_kundeApplyAll(true)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Bruk valgte</button>
+      <button onclick="_kundeApplyAll(false)" style="padding:8px 18px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Bruk alle</button>
     </div></div>`;
+  document.body.appendChild(ov);
+}
+
+function _kundeRevPick(key, on) {
+  if (!_kundeRevState) return;
+  if (on) _kundeRevState.picked.add(key); else _kundeRevState.picked.delete(key);
+  _kundeRevRender();           // «Blir»-kolonnen regnes på nytt — den ER innarbeidingen på en klone
+}
+
+// Innarbeiding. ÉN pushUndo for hele «Bruk»-klikket (§2), uansett antall rom og vegger.
+function _kundeApplyWalls(groups, onlyPicked) {
+  let pushed = false, applied = 0;
+  const touched = [];
+  const avvikTxt = [];
+  for (const [rid, g] of groups) {
+    const room = g.room;
+    const wanted = new Map(g.walls
+      .filter(w => !onlyPicked || _kundeRevState.picked.has(rid + '|' + w.wallIdx))
+      .map(w => [w.wallIdx, w.kundeCm]));
+    if (!wanted.size) continue;
+    if (!pushed) { pushUndo(); pushed = true; }
+    const plan = _kundeApplyPlan(room, wanted);
+    for (const idx of plan.order) {
+      const r = _applyWallLength(room, idx, plan.vals.get(idx));
+      if (r.ok) applied++;
+    }
+    // §3 KONTROLLRUNDE: mål resultatet mot det kunden ba om. Ingen automatisk fordeling av
+    // differansen — rommet får en gul markering og Kenneth avgjør.
+    const avvik = [];
+    for (const [idx, cm] of plan.vals) {
+      const ble = Math.round(_wallLenCm(room, idx) * 10) / 10;
+      if (Math.abs(ble - cm) > 1) {
+        avvik.push({ wallIdx: idx, kundeCm: cm, bleCm: ble });
+        avvikTxt.push(`${room.name || 'Rom ' + room.id} vegg ${idx + 1}: kunde ${_fmtM(cm)} → ble ${_fmtM(ble)}`);
+      }
+    }
+    // Alltid NY array — pushUndo deler `{...r}` med snapshotet, så en mutasjon i plass
+    // ville korrumpert angre-stakken (samme disiplin som `uncertainWalls`).
+    room.maalAvvik = avvik.length ? avvik : undefined;
+    // Vegger som fikk mål er ikke lenger usikre (§4).
+    const uns = _roomUncertainWalls(room).filter(i => !plan.vals.has(i));
+    room.uncertainWalls = uns;
+    touched.push(room.id);
+  }
+  return { applied, touched, avvikTxt, pushed };
+}
+
+function _kundeApplyRoom(roomId) {
+  const all = _kundeAnswerByRoom();
+  const one = new Map();
+  if (all.has(roomId)) one.set(roomId, all.get(roomId));
+  _kundeFinishApply(_kundeApplyWalls(one, true), all);
+}
+
+function _kundeApplyAll(onlyPicked) {
+  const groups = _kundeAnswerByRoom();
+  _kundeFinishApply(_kundeApplyWalls(groups, !!onlyPicked), groups);
+}
+
+function _kundeFinishApply(res, groups) {
+  if (!res.applied) { _showToast && _showToast('Ingen vegger valgt', 'info'); return; }
+  // Rommene lyser opp i tegningen samtidig, så Kenneth ser hva som skjedde (§1).
+  _kundeHighlight(res.touched);
+  _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache();
+  renderSidebar(); updateWip(); updateObjInfo(); render();
+  if (res.avvikTxt.length) {
+    _showToast && _showToast('⚠ ' + res.avvikTxt[0] + (res.avvikTxt.length > 1 ? ` (+${res.avvikTxt.length - 1} flere)` : '') + ' — rommet går ikke opp', 'warn');
+  } else {
+    _showToast && _showToast(`${res.applied} ${res.applied === 1 ? 'vegg' : 'vegger'} innarbeidet`, 'ok');
+  }
+  // §4: alle vegger i svaret behandlet → lenken er ferdig.
+  let rest = 0;
+  for (const [rid, g] of groups) for (const w of g.walls) {
+    const room = g.room;
+    if (Math.abs(_wallLenCm(room, w.wallIdx) - w.kundeCm) > 1 &&
+        !(Array.isArray(room.maalAvvik) && room.maalAvvik.some(a => a.wallIdx === w.wallIdx))) rest++;
+  }
+  if (!rest) _kundeMarkApplied();
+  if (document.getElementById('kunde-rev-ov')) _kundeRevRender();
+}
+
+async function _kundeMarkApplied() {
+  const k = _kundeLinkCache;
+  if (!k) return;
+  // Den LOKALE oppryddingen skjer uansett. Bare selve statusskrivingen krever databasen —
+  // feiler den (eller er man ikke pakoblet), er maalene likevel innarbeidet i tegningen, og da
+  // skal ikke panelet bli staaende og paastaa at noe gjenstaar.
+  if (_db) {
+    try { await _db.from('kundelenker').update({ status: 'applied' }).eq('id', k.id); }
+    catch (e) { _showToast && _showToast('Målene er innarbeidet, men status kunne ikke lagres — prøv igjen senere', 'warn'); }
+  }
+  _kundeRevState = null;
+  document.getElementById('kunde-rev-ov')?.remove();
+  if (_kundeLinkCache) _kundeLinkCache = { ..._kundeLinkCache, status: 'applied' };
+  if (typeof renderSidebar === 'function') renderSidebar();
+  _kundeRefreshStatus();
+}
+
+async function _kundeRejectAnswer() {
+  const k = _kundeLinkCache;
+  if (!k || !_db) return;
+  if (!confirm('Avvis kundens svar? Lenken trekkes tilbake og målene brukes ikke.')) return;
+  const merknad = prompt('Merknad (valgfri) — hvorfor avvises svaret?') || '';
+  try {
+    await _db.from('kundelenker').update({ status: 'revoked',
+      note: (k.note ? k.note + '\n' : '') + 'Avvist: ' + merknad }).eq('id', k.id);
+  } catch (e) {}
+  _kundeRevState = null;
+  document.getElementById('kunde-rev-ov')?.remove();
+  _showToast && _showToast('Svaret er avvist og lenken trukket tilbake', 'ok');
+  _kundeRefreshStatus();
+}
+
+// Kort oppblussing av de berørte rommene. Ren UI-tilstand, aldri lagret.
+let _kundeHlRooms = null, _kundeHlTimer = 0;
+function _kundeHighlight(roomIds) {
+  if (!roomIds || !roomIds.length) return;
+  _kundeHlRooms = new Set(roomIds);
+  clearTimeout(_kundeHlTimer);
+  _kundeHlTimer = setTimeout(() => { _kundeHlRooms = null; render(); }, 2500);
+  render();
+}
+
+// Gul «⚠ Mål går ikke opp» på rommet. Klikk fjerner den (§3).
+function clearRoomMaalAvvik(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.maalAvvik) return;
+  pushUndo();
+  room.maalAvvik = undefined;
+  renderSidebar(); render();
 }
 
 // 027 (spec regel 8): ÉN konstant for alle utsendte lenker. Aldri `location.origin`.
@@ -35600,7 +35924,9 @@ function roomAreas(room){
 const _AXIS_TOL_DEG = 1;
 // 027: låser svar-validering, URL-bygging og «går målene opp?»-regnestykket.
 function _kundelenkeRegressionTest() {
-  const saved = { rooms: S.rooms, state: typeof _kundeState !== 'undefined' ? _kundeState : null };
+  const saved = { rooms: S.rooms, state: typeof _kundeState !== 'undefined' ? _kundeState : null,
+                  link: typeof _kundeLinkCache !== 'undefined' ? _kundeLinkCache : null,
+                  rev: typeof _kundeRevState !== 'undefined' ? _kundeRevState : null };
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
   try {
@@ -35677,10 +36003,153 @@ function _kundelenkeRegressionTest() {
       && ans.walls[0].lengthCm === 350 && ans.walls[0].wasCm === 320, JSON.stringify(ans.walls[0]));
     check('D: kommentar med', 'test', ans.comment === 'test', ans.comment);
     check('D: axisBalance per rom', true, !!ans.axisBalance[994002], ans.axisBalance);
+
+    // ─── E (028) — innarbeiding: _applyWallLength + plan + kontrollrunde ───
+    // Promptens egen §2-regel («flytt points[i+1 … n−1]») ble MÅLT og forkastet her: den gjør et
+    // rektangel skjevt. Testen låser vindu-regelen som faktisk virker — og at ALLE vegger kan
+    // settes, ikke bare noen.
+    const r0 = () => ({ id: 994003, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
+      wallThicknessCm: 0, points: [{x:0,y:0},{x:400,y:0},{x:400,y:320},{x:0,y:320}],
+      walls: compWalls([{x:0,y:0},{x:400,y:0},{x:400,y:320},{x:0,y:320}]), dims: [],
+      area: 128000, annotOffsets: {}, uncertainWalls: [] });
+    for (let i = 0; i < 4; i++) {
+      const rm = r0();
+      const was = _wallLenCm(rm, i);
+      const res = _applyWallLength(rm, i, was + 50);
+      const got = Math.round(_wallLenCm(rm, i) * 100) / 100;
+      const rettv = _roomAxisBalance(rm.points).rectilinear;
+      check(`E: vegg ${i} settes eksakt`, was + 50, res.ok && Math.abs(got - (was + 50)) < 0.01, got);
+      check(`E: vegg ${i} — rommet er fortsatt rettvinklet`, true, rettv, rettv);
+      check(`E: vegg ${i} — points[0] er urørt`, '0,0',
+        rm.points[0].x === 0 && rm.points[0].y === 0, `${rm.points[0].x},${rm.points[0].y}`);
+    }
+    // Test 1 i prompten: 3,20 × 4,00 → kunde 3,45 (vegg 1, den loddrette) og 4,10 (vegg 0).
+    const rm1 = r0();
+    let plan = _kundeApplyPlan(rm1, new Map([[0, 410], [1, 345]]));
+    for (const idx of plan.order) _applyWallLength(rm1, idx, plan.vals.get(idx));
+    check('E: vegg 0 ble 4,10 m', 410, Math.abs(_wallLenCm(rm1, 0) - 410) < 0.01, _wallLenCm(rm1, 0));
+    check('E: vegg 1 ble 3,45 m', 345, Math.abs(_wallLenCm(rm1, 1) - 345) < 0.01, _wallLenCm(rm1, 1));
+    const ar = compArea(rm1.points) / 10000;
+    check('E: areal = 3,45 × 4,10 = 14,145 m²', 14.145, Math.abs(ar - 14.145) < 0.01, ar);
+    check('E: points[0] urørt etter begge', '0,0',
+      rm1.points[0].x === 0 && rm1.points[0].y === 0, `${rm1.points[0].x},${rm1.points[0].y}`);
+    check('E: fortsatt rettvinklet', true, _roomAxisBalance(rm1.points).rectilinear, true);
+
+    // Test 3: motstående vegger som IKKE kan begge stemme → ingen stille gjennomsnitt.
+    plan = _kundeApplyPlan(r0(), new Map([[0, 345], [2, 360]]));
+    check('E: avvik > 2 cm gir konflikt-merknad, ikke snitt', 'conflict',
+      plan.notes.some(n => n.kind === 'conflict') && plan.vals.get(0) === 345 && plan.vals.get(2) === 360,
+      JSON.stringify(plan.notes.map(n => n.kind)));
+    plan = _kundeApplyPlan(r0(), new Map([[0, 345], [2, 346]]));
+    check('E: avvik ≤ 2 cm → snitt brukes', 346,
+      plan.notes.some(n => n.kind === 'avg') && plan.vals.get(0) === plan.vals.get(2), plan.vals.get(0));
+
+    // Forhåndsvisningen ER innarbeidingen på en klone — samme tall, og originalen urørt.
+    const rm2 = r0();
+    const prev = _kundePreviewRoom(rm2, new Map([[0, 450]]));
+    check('E: «blir» for den endrede veggen', 450, Math.abs(prev.after[0] - 450) < 0.1, prev.after[0]);
+    check('E: «blir» viser følge-endringen på motstående vegg', 450,
+      Math.abs(prev.after[2] - 450) < 0.1, prev.after[2]);
+    check('E: forhåndsvisning rører ikke originalen', 400,
+      Math.abs(_wallLenCm(rm2, 0) - 400) < 0.01, _wallLenCm(rm2, 0));
+    // ⚠ LÅSER EN FEIL SOM BLE FUNNET LIVE: en konflikt må ALDRI komme forbi panelet som «✓».
+    // Første utgave målte balansen på resultat-polygonet, som alltid er lukket og derfor alltid
+    // «går opp» — panelet sa «✓» midt i en åpenbar konflikt. Samme felle som 027.
+    const konfPrev = _kundePreviewRoom(r0(), new Map([[0, 345], [2, 360]]));
+    check('E: konflikten listes som uoppfylt mål', 1,
+      konfPrev.uoppfylt.length === 1 && konfPrev.uoppfylt[0].wallIdx === 0, konfPrev.uoppfylt);
+    const okPrev = _kundePreviewRoom(r0(), new Map([[0, 410], [1, 345]]));
+    check('E: konsistente mål — ingen uoppfylte', 0, okPrev.uoppfylt.length === 0, okPrev.uoppfylt);
+    // ⚠ LÅSER EN ANDRE FEIL FUNNET LIVE: oppblussingen lå først som en hale inne i drawRooms(),
+    // etter to tidlige `return` — den tegnet seg aldri uten et valgt rom. Nå er den sitt eget
+    // lag, kalt fra render(). Testen holder begge delene fast.
+    check('E: oppblussing er et EGET lag, ikke en hale i drawRooms', true,
+      typeof drawKundeHighlight === 'function' && !/_kundeHlRooms/.test(drawRooms.toString()),
+      typeof drawKundeHighlight);
+    check('E: render() kaller oppblussingen', true,
+      /drawKundeHighlight\(\)/.test(render.toString()), false);
+    check('E: oppblussingen krever IKKE et valgt rom', true,
+      !/selectedRoomId/.test(drawKundeHighlight.toString()), true);
+
+    // ⚠ MÅLT LIVE: et DELVIS sett skal ikke gi balanse-advarsel. Gir kunden to av fire vegger i
+    // et rektangel, bærer de to andre fortsatt tegningens gamle tall — kjeden lukker ikke, uten
+    // at noe er galt. Første utgave varslet her og ville ropt ulv ved hver eneste delvise måling.
+    check('E: delvis sett gir ingen balanse-påstand', null,
+      okPrev.balance === null && okPrev.full === false, okPrev.balance);
+    const heltPrev = _kundePreviewRoom(r0(), new Map([[0, 410], [1, 345], [2, 410], [3, 345]]));
+    check('E: fullt, konsistent sett → balansen går opp', null,
+      heltPrev.full === true && _axisBalanceText(heltPrev.balance) === null, _axisBalanceText(heltPrev.balance));
+    const heltSkjevt = _kundePreviewRoom(r0(), new Map([[0, 410], [1, 345], [2, 380], [3, 345]]));
+    check('E: fullt, selvmotsigende sett → balansen varsler', true,
+      _axisBalanceText(heltSkjevt.balance) !== null, _axisBalanceText(heltSkjevt.balance));
+    // Kundesidens kjede og panelets kjede er SAMME funksjon — ett svar, ikke to.
+    const kj = _openChainWithLengths(r0(), new Map([[0, 450]]));
+    check('E: delt kjedebygger — åpen kjede har n+1 punkter', 5, kj.length === 5, kj.length);
+
+    // L-form (test 2): 3 vegger endret → fortsatt rettvinklet, alle tre eksakte.
+    const lp = [{x:0,y:0},{x:400,y:0},{x:400,y:200},{x:200,y:200},{x:200,y:320},{x:0,y:320}];
+    const rmL = { id: 994004, name: 'L', floorId: null, partId: null, shape: 'polygon',
+      wallThicknessCm: 0, points: lp.map(p => ({...p})), walls: compWalls(lp), dims: [],
+      area: compArea(lp), annotOffsets: {}, uncertainWalls: [] };
+    const wantL = new Map([[0, 450], [3, 170], [5, 370]]);
+    const planL = _kundeApplyPlan(rmL, wantL);
+    for (const idx of planL.order) _applyWallLength(rmL, idx, planL.vals.get(idx));
+    check('E: L-form fortsatt rettvinklet', true, _roomAxisBalance(rmL.points).rectilinear, true);
+    check('E: L-form points[0] urørt', '0,0',
+      rmL.points[0].x === 0 && rmL.points[0].y === 0, `${rmL.points[0].x},${rmL.points[0].y}`);
+
+    // ─── F (028) — hele mottaket: svar → gjennomgang → Bruk → status ───
+    S.rooms = [r0()];
+    S.rooms[0].uncertainWalls = [0, 1];
+    _kundeLinkCache = { id: 'x', token: 't', status: 'answered', answered_by_name: 'Ola',
+      answered_at: new Date().toISOString(),
+      answer: { walls: [
+        { roomId: 994003, wallIdx: 0, lengthCm: 410, wasCm: 400 },
+        { roomId: 994003, wallIdx: 1, lengthCm: 345, wasCm: 320 },
+        { roomId: 999999, wallIdx: 0, lengthCm: 500, wasCm: 400 },   // rom finnes ikke
+        { roomId: 994003, wallIdx: 9, lengthCm: 500, wasCm: 400 },   // vegg finnes ikke
+        { roomId: 994003, wallIdx: 2, lengthCm: -5,  wasCm: 400 },   // ugyldig
+      ], comment: 'målt med laser' } };
+    let grp = _kundeAnswerByRoom();
+    check('F: kun det gyldige rommet kom med', 1, grp.size === 1, grp.size);
+    check('F: ugyldige vegger silt bort', 2, grp.get(994003).walls.length === 2, grp.get(994003).walls.length);
+    _kundeRevState = { linkId: 'x', picked: new Set(['994003|0', '994003|1']) };
+    const applyRes = _kundeApplyWalls(grp, true);
+    check('F: to vegger innarbeidet', 2, applyRes.applied === 2, applyRes.applied);
+    check('F: vegg 0 = 4,10 m', 410, Math.abs(_wallLenCm(S.rooms[0], 0) - 410) < 0.01, _wallLenCm(S.rooms[0], 0));
+    check('F: vegg 1 = 3,45 m', 345, Math.abs(_wallLenCm(S.rooms[0], 1) - 345) < 0.01, _wallLenCm(S.rooms[0], 1));
+    check('F: areal 14,145 m²', 14.145, Math.abs(compArea(S.rooms[0].points) / 10000 - 14.145) < 0.01,
+      compArea(S.rooms[0].points) / 10000);
+    check('F: ingen uløst avvik', true, !S.rooms[0].maalAvvik, S.rooms[0].maalAvvik);
+    check('F: usikre vegger ryddet for de som fikk mål', 0,
+      _roomUncertainWalls(S.rooms[0]).length === 0, _roomUncertainWalls(S.rooms[0]));
+    check('F: angre gir 4,00 × 3,20 tilbake i ETT steg', '400/320', (() => {
+      undo();
+      return Math.abs(_wallLenCm(S.rooms[0], 0) - 400) < 0.01
+          && Math.abs(_wallLenCm(S.rooms[0], 1) - 320) < 0.01;
+    })(), `${Math.round(_wallLenCm(S.rooms[0], 0))}/${Math.round(_wallLenCm(S.rooms[0], 1))}`);
+
+    // Konflikt-tilfellet ende til ende: motstående vegger 3,45 og 3,60 → avviket SKAL vises.
+    S.rooms = [r0()];
+    _kundeLinkCache = { id: 'y', token: 't', status: 'answered', answer: { walls: [
+      { roomId: 994003, wallIdx: 0, lengthCm: 345, wasCm: 400 },
+      { roomId: 994003, wallIdx: 2, lengthCm: 360, wasCm: 400 },
+    ], comment: '' } };
+    grp = _kundeAnswerByRoom();
+    _kundeRevState = { linkId: 'y', picked: new Set(['994003|0', '994003|2']) };
+    const konf = _kundeApplyWalls(grp, true);
+    check('F: konflikten rapporteres som avvik', true, konf.avvikTxt.length > 0, konf.avvikTxt);
+    check('F: rommet er merket «går ikke opp»', true,
+      Array.isArray(S.rooms[0].maalAvvik) && S.rooms[0].maalAvvik.length > 0, S.rooms[0].maalAvvik);
+    check('F: rommet er LIKEVEL rettvinklet (ikke skjevt i stillhet)', true,
+      _roomAxisBalance(S.rooms[0].points).rectilinear, false);
+    undo();
   } finally {
     S.rooms = saved.rooms;
     if (typeof _kundeState !== 'undefined') _kundeState = saved.state;
-    _invalidateStripCache();
+    if (typeof _kundeLinkCache !== 'undefined') _kundeLinkCache = saved.link;
+    if (typeof _kundeRevState !== 'undefined') _kundeRevState = saved.rev;
+    _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache();
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_kundelenkeRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
@@ -35739,6 +36208,135 @@ function _axisBalanceSuspectWalls(bal) {
   const axis = Math.abs(bal.dyCm) >= Math.abs(bal.dxCm) ? 'y' : 'x';
   if (Math.abs(axis === 'y' ? bal.dyCm : bal.dxCm) <= 2) return [];
   return bal.walls.filter(w => w.axis === axis).map(w => w.idx);
+}
+
+
+// ── 028: Innarbeiding av kundens mål — sett en veggs lengde ────────────────────
+// ⚠ PROMPTENS §2-REGEL VAR GEOMETRISK FEIL, målt i STEG 0 før noe ble skrevet.
+// Den sa: «flytt points[i+1 … n−1] med u·delta — i et rektangel/L-form gir det et rom som
+// fortsatt er rettvinklet». Målingen viste det motsatte. Rektangel 400×320, vegg 0 → 450:
+//     promptens regel → lengder 450/320/400/323,9 og lukkeveggen på −98,9° (SKJEVT rom)
+//     vindu-regelen   → lengder 450/320/450/320, alle vinkler 0/90/180/−90 (rektangel)
+// Hvorfor: flyttes HELE resten av kjeden, blir den lukkende kanten points[n−1]→points[0]
+// forskjøvet på tvers av sin egen akse. Den kan ikke absorbere en forskyvning langs en akse
+// den selv ikke ligger i.
+//
+// REGELEN SOM FAKTISK VIRKER — «vindu av to punkter»:
+// I et rettvinklet polygon veksler kantene mellom x- og y-akse, så kant i+2 er PARALLELL med
+// kant i. Flytter vi nøyaktig to punkter — points[i+1] og points[i+2] — langs veggens egen
+// retning u, skjer dette:
+//   kant i      : ett endepunkt flyttet langs u → lengden endres med delta, retning uendret
+//   kant i+1    : begge endepunktene flyttet likt → helt uendret
+//   kant i+2    : ett endepunkt flyttet langs u, og kanten er PARALLELL med u → lengden
+//                 endres med −delta, retning uendret. Det er denne som «absorberer».
+//   alle andre  : urørt
+// Rommet blir dermed fortsatt rettvinklet, og det er naboen to kanter bort som gir/tar plass —
+// som i virkeligheten: i et rektangel kan man ikke endre én vegg uten at den motstående følger.
+//
+// points[0] er rommets ankerpunkt og flyttes ALDRI (ellers forskyves rommet i forhold til
+// nabo-rom og underlag). Når forover-vinduet {i+1, i+2} ville røre points[0] — altså for de to
+// siste veggene — brukes bakover-vinduet {i, i−1} med motsatt fortegn. Det er samme regel
+// speilvendt: da er det kant i−2 som absorberer.
+// Verifisert for ALLE vegger i både rektangel (4) og L-form (6): eksakt mållengde, rettvinklet
+// bevart, points[0] urørt i alle 10 tilfellene.
+function _applyWallLength(room, wallIdx, newCm) {
+  if (!room || !Array.isArray(room.points)) return { ok: false, reason: 'ugyldig rom' };
+  const pts = room.points, n = pts.length;
+  if (!(wallIdx >= 0 && wallIdx < n)) return { ok: false, reason: 'ugyldig veggindeks' };
+  const target = Math.round(Number(newCm) * 100) / 100;
+  if (!isFinite(target) || target <= 0) return { ok: false, reason: 'ugyldig lengde' };
+  const a = pts[wallIdx], b = pts[(wallIdx + 1) % n];
+  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+  if (len < 0.01) return { ok: false, reason: 'vegg uten lengde' };
+  const delta = target - len;
+  if (Math.abs(delta) < 0.01) return { ok: true, reason: 'uendret', deltaCm: 0 };
+  const ux = dx / len, uy = dy / len;
+  const fwd = [(wallIdx + 1) % n, (wallIdx + 2) % n];
+  const bwd = [wallIdx, (wallIdx - 1 + n) % n];
+  let win = null, sign = 1;
+  if (!fwd.includes(0)) { win = fwd; sign = 1; }
+  else if (!bwd.includes(0)) { win = bwd; sign = -1; }
+  else return { ok: false, reason: 'for få vegger — begge vinduer rører ankerpunktet' };
+  for (const k of win) { pts[k].x += ux * delta * sign; pts[k].y += uy * delta * sign; }
+  // Samme etterarbeid som vegg-draget (STEG 0.2 målte at `_movingWall` gjør NØYAKTIG dette og
+  // ingenting mer): compWalls + compArea. Hindringer, soner, folie, kabel, matte og manuelle
+  // målelinjer røres IKKE — cachene er medlemskaps-cacher (roomId → objekter), ikke geometri,
+  // så de er korrekte uten invalidering, og folie/matte klippes på nytt ved tegning.
+  room.walls = compWalls(pts);
+  room.area = compArea(pts);
+  return { ok: true, deltaCm: Math.round(delta * 100) / 100 };
+}
+
+function _wallLenCm(room, idx) {
+  const pts = room && room.points; if (!pts || !pts.length) return 0;
+  const a = pts[idx], b = pts[(idx + 1) % pts.length];
+  if (!a || !b) return 0;
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+// Rekkefølge + konfliktbehandling for ett rom. Ren funksjon av (rom, ønskede lengder) —
+// brukt BÅDE av forhåndsvisningen («blir»-kolonnen) og av den ekte innarbeidingen, så de to
+// aldri kan drifte fra hverandre.
+//   wanted: Map(wallIdx → cm)
+// Regel: størst |delta| først (§2). Motstående vegger i et firkantrom (i og i+2) er bundet til
+// hverandre av geometrien — gir kunden to tall som avviker ≤ 2 cm, brukes gjennomsnittet
+// (måletoleranse); avviker de mer, anvendes det med størst |delta| og det andre blir stående
+// som et avvik (§3). Ingen stille fordeling av feilen.
+function _kundeApplyPlan(room, wanted) {
+  const n = room.points.length;
+  const vals = new Map(wanted);
+  const notes = [];
+  if (n === 4) {
+    for (const i of [0, 1]) {
+      const j = i + 2;
+      if (vals.has(i) && vals.has(j)) {
+        const a = vals.get(i), b = vals.get(j);
+        if (Math.abs(a - b) <= 2) {
+          const avg = Math.round((a + b) / 2);
+          vals.set(i, avg); vals.set(j, avg);
+          notes.push({ kind: 'avg', walls: [i, j], cm: avg,
+            text: `Vegg ${i + 1} og ${j + 1} er motstående — ${_fmtM(a)} og ${_fmtM(b)} avviker ${Math.abs(a - b).toFixed(0)} cm, snittet ${_fmtM(avg)} brukes` });
+        } else {
+          notes.push({ kind: 'conflict', walls: [i, j],
+            text: `Vegg ${i + 1} (${_fmtM(a)}) og vegg ${j + 1} (${_fmtM(b)}) er motstående og kan ikke begge stemme — avviket vises etter innarbeiding` });
+        }
+      }
+    }
+  }
+  const order = [...vals.keys()].sort((x, y) =>
+    Math.abs(vals.get(y) - _wallLenCm(room, y)) - Math.abs(vals.get(x) - _wallLenCm(room, x)));
+  return { order, vals, notes };
+}
+
+function _fmtM(cm) { return (Number(cm) / 100).toFixed(2).replace('.', ',') + ' m'; }
+
+// «Blir»-forhåndsvisning: kjør PRESIS samme plan på en klone av punktene og mål resultatet.
+// Det er derfor ingen egen prognose-formel finnes — forhåndsvisningen ER innarbeidingen,
+// utført på en kopi (samme prinsipp som `_offsetCableClone` i 025: klon, ikke nytt utlegg).
+function _kundePreviewRoom(room, wanted) {
+  const clone = { points: room.points.map(p => ({ x: p.x, y: p.y })), walls: [], area: 0 };
+  const plan = _kundeApplyPlan(clone, wanted);
+  for (const idx of plan.order) _applyWallLength(clone, idx, plan.vals.get(idx));
+  const n = clone.points.length;
+  const after = [];
+  for (let i = 0; i < n; i++) after.push(Math.round(_wallLenCm(clone, i) * 10) / 10);
+  // To ULIKE sporsmaal, begge maalt live for de ble skilt:
+  //
+  // `balance` — «gaar kundens tall opp som en lukket romform?» Maa regnes paa den AAPNE kjeden
+  //   av kundens tall; foerste utgave regnet den paa resultat-polygonet, som alltid er lukket og
+  //   derfor alltid svarte «✓ gaar opp» — ogsaa midt i en aapenbar konflikt. Samme felle som
+  //   027s foerste `_roomAxisBalance`. Men: sporsmaalet er bare MENINGSFULLT naar kunden har
+  //   oppgitt ALLE veggene. Har han maalt to av fire, baerer de to andre fortsatt tegningens
+  //   gamle tall, og kjeden lukker naturligvis ikke — uten at noe er galt. Derfor `full`.
+  //
+  // `uoppfylt` — «overlever hvert av kundens tall innarbeidingen?» Det er det som faktisk
+  //   gjelder for et delvis sett, og det er dette §3-kontrollrunden maaler etterpaa. Her kjores
+  //   den FOER «Bruk», paa klonen, saa Kenneth ser konflikten fer han trykker.
+  const full = wanted.size === n;
+  const uoppfylt = [];
+  for (const [idx, cm] of wanted) if (Math.abs(after[idx] - cm) > 1) uoppfylt.push({ wallIdx: idx, kundeCm: cm, bleCm: after[idx] });
+  return { after, areaCm2: compArea(clone.points), notes: plan.notes, uoppfylt, full,
+           balance: full ? _roomAxisBalance(_openChainWithLengths(room, wanted), true) : null };
 }
 
 // ── Usikre vegger ───────────────────────────────────────────────────────────
@@ -38732,6 +39330,22 @@ function _roomTypeIcon(room) {
   return '⬡';
 }
 
+// 027/028: to sma markeringer i rom-raden.
+//   «?»  rommet har vegger merket som usikre — ventes mal fra kunden.
+//   «⚠»  forrige innarbeiding ga et resultat som ikke gikk opp (§3). Klikk fjerner den; da har
+//        Kenneth selv sett pa det. Aldri automatisk fordeling av differansen.
+function _roomMaalBadge(room) {
+  let out = '';
+  const uns = _roomUncertainWalls(room);
+  if (uns.length) out += ` <span style="color:#ff6b6b" title="Usikre mål: vegg ${uns.map(i => i + 1).join(', ')}">?</span>`;
+  const av = Array.isArray(room.maalAvvik) ? room.maalAvvik : [];
+  if (av.length) {
+    const t = av.map(a => `Vegg ${a.wallIdx + 1}: kunde ${_fmtM(a.kundeCm)} → ble ${_fmtM(a.bleCm)}`).join(' · ');
+    out += ` <span style="color:#f0b232;cursor:pointer" title="Mål går ikke opp — ${esc(t)}. Klikk for å fjerne markeringen." onclick="event.stopPropagation();clearRoomMaalAvvik(${room.id})">⚠</span>`;
+  }
+  return out;
+}
+
 // ─── COMPACT ROOM ITEM (sidebar tree) ──────────────────────
 function roomItemHtml(room, indented) {
   const sel = room.id === S.ui.selectedRoomId;
@@ -38751,7 +39365,7 @@ function roomItemHtml(room, indented) {
     <span class="room-type-ico">${ico}</span>
     <div class="room-info">
       <span class="room-nm" title="${esc(room.name)}">${esc(room.name)}</span>
-      <span class="room-area">${area} m²</span>
+      <span class="room-area">${area} m²${_roomMaalBadge(room)}</span>
     </div>
     <span style="display:flex;gap:2px;align-items:center;margin-left:auto;flex-shrink:0">
       <button onclick="event.stopPropagation();startRename(${room.id},this.closest('.room-item'))" title="Gi nytt navn" style="width:20px;height:20px;border:none;border-radius:3px;background:transparent;color:var(--dim);cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
@@ -49094,6 +49708,31 @@ function _renderSbProjInfo() {
   if (respEl) {
     if (p.responsible) { const t = 'Prosjektert av ' + p.responsible; respEl.textContent = t; respEl.title = t; respEl.style.display = ''; }
     else respEl.style.display = 'none';
+  }
+  // 028: kundelenke. STEG 0-funn: `_kundeStatusHtml()` ble definert i 027 men ALDRI kalt —
+  // statusraden fantes altsaa ikke i brukergrensesnittet. Her er den koblet inn, pa de statiske
+  // radene over (ingen innerHTML-ombygging av #sb-proj-info selv).
+  const lenkeEl = document.getElementById('spi-kundelenke');
+  const svarEl  = document.getElementById('spi-kundesvar');
+  const k = (typeof _kundeLinkCache !== 'undefined') ? _kundeLinkCache : null;
+  if (lenkeEl) {
+    if (k && k.status === 'open') {
+      const exp = k.expires_at ? ' · utløper ' + new Date(k.expires_at).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}) : '';
+      lenkeEl.innerHTML = '<span style="color:var(--muted)">Kundelenke: åpen' + exp + '</span>' +
+        ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="_kundeCopyLink()">Kopier</span>' +
+        ' <span style="color:var(--dim);cursor:pointer;text-decoration:underline" onclick="_kundeRevokeLink(\'' + k.id + '\')">Trekk tilbake</span>';
+      lenkeEl.style.display = '';
+    } else lenkeEl.style.display = 'none';
+  }
+  if (svarEl) {
+    if (k && k.status === 'answered') {
+      const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}) : '';
+      const hvem = k.answered_by_name ? ', ' + esc(k.answered_by_name) : '';
+      svarEl.innerHTML = '<span style="color:#f0b232;font-weight:600">✉ Svar fra kunde' +
+        (nar ? ' (' + nar + hvem + ')' : hvem) + '</span>' +
+        ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Gå gjennom</span>';
+      svarEl.style.display = '';
+    } else svarEl.style.display = 'none';
   }
 }
 // DEL F: infoblokkens ENESTE inngang til å bytte kunde — samme _quickSetCustomer-velger som
@@ -60744,6 +61383,25 @@ initSupabase();
 
 // ─── PROJECT CLOUD STORAGE (Supabase) ────────────────────────
 
+// 028: prosjekter som venter pa gjennomgang. Tom Map ved feil — merket er en bonus, aldri en
+// forutsetning for at prosjektlista laster.
+let _cachedKundeSvar = new Map();
+async function _fetchKundeAnswered() {
+  if (!_db) return new Map();
+  try {
+    const { data, error } = await _db.from('kundelenker')
+      .select('project_id, answered_at, answered_by_name')
+      .eq('status', 'answered');
+    if (error || !data) return new Map();
+    const m = new Map();
+    for (const r of data) {
+      const prev = m.get(r.project_id);
+      if (!prev || String(r.answered_at) > String(prev.answered_at)) m.set(r.project_id, r);
+    }
+    return m;
+  } catch (e) { return new Map(); }
+}
+
 async function _fetchProjectList() {
   if (!_db) return [];
   try {
@@ -61893,6 +62551,18 @@ function _filterProjectsList(projects, f = {}) {
   return out;
 }
 
+// 028: «Svar fra kunde» i prosjektlista. Apnes prosjektet, star gjennomgangspanelet klart i
+// sidebaren (#spi-kundesvar) — merket her er bare sa Kenneth ser HVILKET prosjekt det gjelder
+// uten a apne dem etter tur.
+function _plKundeSvarBadge(pid) {
+  const r = _cachedKundeSvar && _cachedKundeSvar.get(pid);
+  if (!r) return '';
+  const hvem = r.answered_by_name ? ', ' + esc(r.answered_by_name) : '';
+  const nar = r.answered_at ? new Date(r.answered_at).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}) : '';
+  return ' <span style="display:inline-block;background:#f0b23222;color:#f0b232;border:1px solid #f0b23255;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:600;vertical-align:middle"' +
+    ' title="Svar fra kunde' + (nar ? ' ' + nar : '') + hvem + ' — åpne prosjektet og gå gjennom">✉ Svar fra kunde</span>';
+}
+
 async function _renderProjectList() {
   const tbody = document.getElementById('pl-tbody');
   const empty = document.getElementById('pl-empty');
@@ -61902,7 +62572,13 @@ async function _renderProjectList() {
 
   // Fetch or use cache
   if (_projectListDirty || !_cachedProjects) {
-    const fetched = await _fetchProjectList();
+    // 028: kundesvar hentes i SAMME runde, men som et EGET, lite sporsmal — ikke som en ny
+    // kolonne i _fetchProjectList. STEG 0.3 malte at den funksjonen er en fallback-stige av
+    // tolv kolonnesett (for skjemaer uten status/deleted_at/project_no); en join der ville matt
+    // dupliseres tolv ganger og kunne velte hele lista pa et eldre skjema. Feiler dette kallet,
+    // forsvinner bare merket — lista laster som for.
+    const [fetched, svar] = await Promise.all([_fetchProjectList(), _fetchKundeAnswered()]);
+    _cachedKundeSvar = svar;
     if (fetched === null) {
       // Henting feilet — ikke blank ut lista. Behold forrige gode resultat.
       if (_cachedProjects) {
@@ -61980,7 +62656,7 @@ async function _renderProjectList() {
     return `<tr class="pl-tr" onclick="_openCloudProject('${p.id}')">
       <td class="pl-td pl-td-check" onclick="event.stopPropagation()"><input type="checkbox" class="pl-check pl-row-check" data-pid="${p.id}"${checked} onchange="_toggleProjectSelect('${p.id}',this.checked)"></td>
       <td class="pl-td pl-td-firma" title="${esc(custName)}">${firmaCell}</td>
-      <td class="pl-td pl-td-proj" title="${esc(p.name)}"><span class="pl-proj-name pl-proj-name-project">${esc(p.name)}</span>${subLine ? '<span class="pl-td-sub">'+subLine+'</span>' : ''}</td>
+      <td class="pl-td pl-td-proj" title="${esc(p.name)}"><span class="pl-proj-name pl-proj-name-project">${esc(p.name)}</span>${_plKundeSvarBadge(p.id)}${subLine ? '<span class="pl-td-sub">'+subLine+'</span>' : ''}</td>
       <td class="pl-td pl-td-resp" title="${esc(p._responsible || '')}">${responsible}</td>
       <td class="pl-td pl-td-type" title="${esc(typeObj.label)}"><span class="pl-type-ico">${IC(_PL_TYPE_ICON[type]||_MOD_ICON[type]||'home',18)}</span></td>
       <td class="pl-td" onclick="event.stopPropagation()"><select class="pl-status-sel" style="background:${statusObj.color}22;color:${statusObj.color};border:1px solid ${statusObj.color}44;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;cursor:pointer;appearance:none;-webkit-appearance:none;outline:none" onchange="_quickSetStatus('${p.id}',this.value,this)">${SALES_STATUSES.map(s=>`<option value="${s.id}"${s.id===status?' selected':''}>${s.label}</option>`).join('')}</select>${_prosjekteringBridgeHtml(p) || _deliveryCellHtml(p)}</td>

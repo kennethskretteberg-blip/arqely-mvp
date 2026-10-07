@@ -4,6 +4,80 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesvar: gjennomgang vegg for vegg, Bruk / Bruk alle, avvik som vises — 2026-10-07
+
+Serien «Kundelenke» (027–030), prompt 028. Krever 027.
+Kunden har sendt inn tall. Nå skal de ses ved siden av Kenneths egne, velges, og arbeides inn —
+uten at rommet blir skjevt i stillhet.
+
+**STEG 0 — tre funn:**
+1. **Det fantes ingen funksjon som setter en veggs lengde fra et tall.** Den eneste
+   vegg-mutasjonen er dra-i-vegg (`_movingWall`), og den flytter veggen *på tvers* av seg selv —
+   begge endepunktene like mye. Den endrer altså *naboveggenes* lengder, aldri sin egen. Ingen
+   redigering av målelinjer, ingen reåpning av WBW. `_applyWallLength` måtte skrives.
+2. **Dra-i-vegg gjør nøyaktig to ting etterpå:** `compWalls` + `compArea`. Hindringer, soner,
+   folie, kabel, matte og manuelle målelinjer røres *ikke* — ingen re-klipping, ingen sletting,
+   ingen cache-invalidering. Cachene er medlemskaps-cacher (`roomId → objekter`), ikke geometri,
+   så de er korrekte uansett. Innarbeidingen speiler dette nøyaktig.
+3. **Prosjektlista** henter via en fallback-stige av tolv kolonnesett (for eldre skjemaer). En
+   join mot `kundelenker` måtte vært duplisert tolv ganger og kunne veltet hele lista. Derfor et
+   eget, lite spørsmål i samme runde (`Promise.all`) — feiler det, forsvinner bare merket.
+
+**⚠ Promptens egen §2-regel var geometrisk feil, og ble målt før noe ble skrevet.**
+Den sa: «flytt `points[i+1 … n−1]` langs veggen — i et rektangel/L-form gir det et rom som
+fortsatt er rettvinklet». Målingen på et rektangel 400×320, vegg 0 → 450:
+
+| regel | lengder | vinkler |
+|---|---|---|
+| promptens | 450 / 320 / 400 / **323,9** | 0 / 90 / 180 / **−98,9°** — skjevt |
+| vindu-regelen | 450 / 320 / 450 / 320 | 0 / 90 / 180 / −90° — rektangel |
+
+Flyttes hele resten av kjeden, blir den lukkende kanten forskjøvet på tvers av sin egen akse, og
+den kan ikke absorbere en forskyvning langs en akse den ikke ligger i.
+
+**Regelen som virker — «vindu av to punkter»:** i et rettvinklet polygon veksler kantene mellom
+x- og y-akse, så kant `i+2` er *parallell* med kant `i`. Flyttes nøyaktig `points[i+1]` og
+`points[i+2]` langs veggens egen retning, endres kant `i` med delta, kant `i+1` ikke i det hele
+tatt, og kant `i+2` absorberer — alle retninger bevart. `points[0]` er rommets ankerpunkt og
+flyttes aldri; for de to siste veggene brukes bakover-vinduet `{i, i−1}` med motsatt fortegn.
+Verifisert for **alle** vegger i både rektangel og L-form: eksakt mållengde, rettvinklet bevart,
+`points[0]` urørt i alle ti tilfellene.
+
+**To feil funnet live under testing, begge rettet og låst i testen:**
+- **Panelet sa «✓ Målene går opp» midt i en åpenbar konflikt.** Balansen ble regnet på
+  resultat-polygonet, som alltid er lukket og derfor alltid summerer til null — nøyaktig samme
+  felle som 027s første `_roomAxisBalance` gikk i. Rettet, og samtidig delt i to spørsmål som
+  ikke er det samme: *går kundens tall opp som en lukket romform?* (bare meningsfullt når han
+  har oppgitt alle veggene) og *overlever hvert enkelt av kundens mål innarbeidingen?* (det som
+  faktisk gjelder for et delvis sett). Kjedebyggeren er nå delt med kundesiden, så de to aldri
+  kan svare ulikt.
+- **Oppblussingen av rommene tegnet seg aldri.** Den lå som en hale inne i `drawRooms()` — men
+  pass 2 der inne begynner med to tidlige `return` når ingen rom er valgt, så halen ble aldri
+  nådd. Samme lærdom som klikk-kaskaden: «sist i funksjonen» er ikke «til slutt» når funksjonen
+  har tidlige utganger. Nå et eget lag, `drawKundeHighlight()`, kalt fra `render()`.
+
+**Dette er bygget:**
+- Prosjektlista og sidebaren merker prosjekter med ubehandlet svar («✉ Svar fra kunde»).
+  *027s `_kundeStatusHtml()` var død kode — definert, aldri kalt. Statuslinja finnes nå faktisk.*
+- Gjennomgangspanel per rom: `Vegg | Estimert | Kunde | Avvik | Blir`, usikre vegger først og
+  røde, følge-endringer på vegger kunden ikke målte vist som egne grå rader. «Blir»-kolonnen er
+  ikke en prognoseformel — den **er** innarbeidingen, kjørt på en klone av punktene.
+- Bruk / Bruk valgte / Bruk per rom / Avvis. Én `pushUndo` per klikk, uansett antall vegger.
+- Motstående vegger som avviker ≤ 2 cm: snittet brukes (måletoleranse). Avviker de mer: begge
+  står, det med størst endring anvendes, og resten rapporteres som avvik. Ingen stille fordeling.
+- Kontrollrunde etter innarbeiding: «Vegg 1: kunde 3,45 m → ble 3,60 m». Rommet får gul ⚠ i
+  sidebaren til Kenneth klikker den vekk.
+- Vegger som fikk mål er ikke lenger usikre; alle behandlet → `status='applied'`.
+
+**Migrasjon:** `supabase-migration-kundelenke-028.sql` — `kundelenke_get` avviser nå også
+`applied`, så lenken blir ugyldig når målene er innarbeidet (027 avviste bare `revoked`/`expired`,
+mens `kundelenke_answer` avviste `applied` allerede — nå er de to enige).
+
+**Regresjon:** `_kundelenkeRegressionTest` utvidet fra 20 til 65 sjekker. Hele batteriet
+(14 tester) grønt: **275 sjekker**.
+
+---
+
 ## Kundelenke, grunnmur: kunden fyller inn mål uten innlogging — 2026-10-07
 
 Serien «Kundelenke» (027–030), prompt 027. Spec: `docs/kundelenke/spec-kundelenke.md`.
