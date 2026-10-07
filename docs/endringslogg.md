@@ -4,6 +4,79 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Sett vegglengde: riktig ende flytter seg — skjev nabo rettes opp — 2026-10-07
+
+Prompt 035. Kenneth: «Jeg ønsker å endre lengden på en vegg slik at det blir vinkelrette hjørner.
+Det som skjer feil nå, er at feil vegg følger etter … Det funker ok hvis jeg markerer hjørnet og
+drar, men ikke hvis jeg taster riktig lengde eller bruker pilene.»
+
+**STEG 0 — målt på Kenneths eget rom** (`P0(0,0) P1(579,0) P2(579,200) P3(379,200) P4(379,400)
+P5(79,400)` — topp 579, bunn 300+200, venstrevegg 407,7 skjev):
+
+| | Før | Etter |
+|---|---|---|
+| `_applyWallLength(room, 0, 500)` | V3 krympet **200 → 121**, V6 sto på **407,7** | V3 står på 200, V6 ble **400 og loddrett** |
+| Hjørnevinkler | **helt uendret** (78,8° / 101,2°) — skjevheten ble flyttet, ikke rettet | alle seks **90°** |
+
+Hjørnevinkelen måles mellom de to kantene som møtes der, altså 78,8° ved P0. Promptens «101°» er
+supplementvinkelen til samme hjørne; avviket fra 90° er 11,2° uansett konvensjon.
+
+**De to blindsonene i 028s vindu-regel.** Den flyttet (1) alltid slutt-enden, aldri start-enden,
+fordi `points[0]` er ankerpunkt — og Kenneths vegg *er* vegg 0, så det var nettopp start-enden
+som måtte flytte. Og den bevarte (2) alltid naboveggen, mens det er nettopp den skjeve naboen som
+skal endre seg. Dra-hjørnet virket fordi det flytter **ett** punkt; det er den operasjonen tasting
+og piltaster også trengte.
+
+**Nå velges ende og metode av geometrien:**
+- Hjørnet i enden som flyttes er **rett** (90° ± 1°) → **vindu** som før: to punkter, vegg i±2
+  absorberer, rommet forblir rettvinklet.
+- Hjørnet er **skjevt** → **ett punkt**: bare endepunktet flyttes langs veggens retning.
+  Naboveggen endrer vinkel og lengde, ingenting annet rører seg. Samme operasjon som hjørne-draget.
+
+`'auto'`: begge rette → slutt-enden med vindu (dagens oppførsel). Ett skjevt → flytt det, med
+ett-punkt. Begge skjeve → regn begge kandidatene og velg minst samlet vinkelavvik; uavgjort gir
+slutt-enden, så valget er bestemt. Verifisert på et asymmetrisk trapes: 33,3 mot 35,3, og `auto`
+valgte det beste.
+
+**Ankerpunktet via translasjon.** Flyttes start-enden av vegg 0, berøres `points[0]`. Løsningen
+er å utføre flyttingen og translatere hele polygonet tilbake. Translasjon endrer verken lengder
+eller vinkler, og rommets plassering mot nabo-rom og underlag står. 028s «for få vegger»-gren er
+dermed fjernet.
+
+**⚠ Men translasjonen alene ga en regresjon.** Med den blir forover- og bakover-vinduet
+likeverdige *opp til posisjon* — og da ville jeg alltid valgt forover. Målt: L-form vegg 4 og 5
+ble `450/200/200/120/250/320` mot 028s `400/200/150/120/250/320`. Det er to gyldige, men ULIKE
+polygoner. Derfor følger `'auto'` nå 028s vindu-preferanse slavisk (forover med mindre det rører
+`points[0]`, da bakover), mens et eksplisitt brukervalg bruker sitt vindu og lar translasjonen
+ordne ankeret. **Alle 10 tilfellene fra 028 er bit-for-bit identiske.**
+
+**Brukeren kan overstyre.** Ny «Fast»-kolonne i 033-tabellen med to låseknapper per rad
+(`🔒⟶` fast start / `⟵🔒` fast slutt), og en hengelås på tegningen ved den enden som står fast —
+også i `'auto'`, så kunden ser hva som *kommer* til å skje før han endrer noe. Klikk på den andre
+enden flytter låsen. Valget lagres per vegg, følger med i svaret (`answer.walls[].fixedEnd`) og
+brukes av 028s «Bruk» og «blir»-kolonne, så Kenneth får samme rom som kunden så.
+Fire produksjons-kallsteder fikk `opts`.
+
+**028s konfliktlogikk justert.** «Motstående vegger er bundet til hverandre» gjelder bare i et
+*rettvinklet* firkantrom. I et skjevt rom er de ikke koblet, og et gjennomsnitt ville vært en
+oppdiktet sammenheng. Nå gatet på `rectilinear`; verifisert at snittet fortsatt brukes i et
+rektangel og aldri i et trapes.
+
+**To feil funnet i skjermbildet:**
+- **Balanselinja sa «Skrå vegger» om et rom som nettopp var blitt rettvinklet.** Den regnet på en
+  kjede lagt ut langs *originalens* retninger (032-arven). Nå måles resultatet, som 033 §2 ba om:
+  rettvinklet → «✓ Målene går opp», skjevt → ingen oppgjørssjekk (med vilje — et skjevt rom kan
+  være helt riktig).
+- **V6 ble vist som om kunden satte den selv** (grønt felt, aktiv ↺) enda den bare fulgte etter.
+  Nå skilles kundens eget tall fra en følge-endring.
+
+**Alle tre veiene gir samme resultat**, målt: tast 500, 79 × ArrowDown, og 79 klikk på «−».
+033-regelen holder med den nye kolonnen: **0 px hopp** ved veggvalg, låseklikk og tastet tall.
+
+**Regresjon:** `_kundelenkeRegressionTest` 166 → 185 sjekker. 15 batterier grønt: **409 sjekker**.
+
+---
+
 ## Kundesiden: hjørner kan flyttes, markør som i Varmeplan, panelet som fast tabell — 2026-10-07
 
 Prompt 033, etter 032. Kenneth: «Ønsker å kunne flytte hjørnene også … markør som endrer seg når
