@@ -107,6 +107,21 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // ⚠ MAALT MOT DEN DEPLOYEDE FUNKSJONEN: et `invite`-kall UTEN innlogging fikk
+    // 404 «ukjent lenke» i stedet for 401 — altsa ble lenken slaatt opp FOR autentiseringen.
+    // Tokenet er en v4-UUID, saa oppregning er praktisk umulig, men svaret rapet likevel om et
+    // gitt token finnes, til en kaller som ikke hadde noe der aa gjore. Autentiser foerst,
+    // gjor arbeid etterpa: billigere, og ingenting lekker.
+    let bruker: { id: string } | null = null;
+    if (kind === "invite") {
+      const auth = req.headers.get("Authorization") || "";
+      const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (!jwt) return json({ error: "innlogging kreves" }, 401);
+      const { data: userRes } = await db.auth.getUser(jwt);
+      if (!userRes?.user) return json({ error: "innlogging kreves" }, 401);
+      bruker = userRes.user;
+    }
+
     const { data: link, error: linkErr } = await db
       .from("kundelenker").select("*").eq("token", token).maybeSingle();
     if (linkErr) return json({ error: "oppslag feilet" }, 500);
@@ -124,18 +139,11 @@ Deno.serve(async (req) => {
 
     // ───────────────────────── invite ─────────────────────────
     if (kind === "invite") {
-      // Lag 1: en EKTE bruker, ikke bare en gyldig JWT (se punkt 1 i toppkommentaren).
-      const auth = req.headers.get("Authorization") || "";
-      const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-      if (!jwt) return json({ error: "innlogging kreves" }, 401);
-      const { data: userRes } = await db.auth.getUser(jwt);
-      const user = userRes?.user;
-      if (!user) return json({ error: "innlogging kreves" }, 401);
-
+      // Lag 1 (en EKTE bruker, ikke bare en gyldig JWT) er alt gjort over, FOR oppslaget.
       // Lag 2: brukeren maa vere medlem av lenkens organisasjon.
       if (!link.org_id) return json({ error: "lenken mangler organisasjon" }, 403);
       const { data: medlem } = await db.from("organization_members")
-        .select("user_id").eq("org_id", link.org_id).eq("user_id", user.id).maybeSingle();
+        .select("user_id").eq("org_id", link.org_id).eq("user_id", bruker!.id).maybeSingle();
       if (!medlem) return json({ error: "ikke medlem av organisasjonen" }, 403);
 
       if (link.status === "revoked" || link.status === "expired" || link.status === "applied") {
