@@ -1,12 +1,12 @@
 -- ============================================================================
--- Migration 027: Kundelenke — kunden fyller inn maal eller tegner rommene selv.
+-- Migration 027: Kundelenke - kunden fyller inn maal eller tegner rommene selv.
 -- Kjores manuelt i Supabase SQL Editor. Idempotent (trygg aa kjore flere ganger).
 -- Ren ASCII.
 --
 -- Sikkerhetsmodellen er den SAMME som ?present= (supabase-migration-presentation.sql):
 --   * Tabellens RLS apnes ALDRI for anon.
 --   * To SECURITY DEFINER-funksjoner er de ENESTE inngangene for anonyme kall.
---   * kundelenke_get velger felt EKSPLISITT fra prosjektets data — aldri `data` raatt,
+--   * kundelenke_get velger felt EKSPLISITT fra prosjektets data - aldri `data` raatt,
 --     slik at kunden bare ser geometri og navn (spec regel 1). Ingen produkter, ingen
 --     priser, intet kundenavn, ingen andre prosjekter.
 -- ============================================================================
@@ -53,7 +53,7 @@ create policy kundelenker_member_update on public.kundelenker
   using (org_id in (select om.org_id from public.organization_members om where om.user_id = auth.uid()))
   with check (org_id in (select om.org_id from public.organization_members om where om.user_id = auth.uid()));
 
--- 3) Anonym henting — EKSPLISITT feltutvalg ------------------------------------
+-- 3) Anonym henting - EKSPLISITT feltutvalg ------------------------------------
 -- Returnerer null naar token ikke finnes, er revoked/applied/expired, eller utlopt.
 create or replace function public.kundelenke_get(p_token uuid)
 returns jsonb

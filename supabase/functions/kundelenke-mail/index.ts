@@ -9,6 +9,11 @@
 // Deploy:  supabase functions deploy kundelenke-mail
 // Secrets: RESEND_API_KEY, FROM_EMAIL   (SUPABASE_URL / SERVICE_ROLE_KEY er innebygd)
 //
+// 031: ALL tekst kunden leser skrives med æ, ø og å. ASCII-regelen i 000-KJØR-MEG.md gjelder
+// SQL-KOMMENTARER (Supabase SQL Editor), ikke e-posttekst — jeg dro den feilaktig hit i 029.
+// Fila er UTF-8; tankestreken «—» har alltid kommet riktig fram, så det var aldri et
+// tegnsett-problem, bare feil ordvalg.
+//
 // ⚠ SIKKERHET — STEG 0-funn som formet denne funksjonen:
 //
 // 1) Plattformens `verify_jwt` er IKKE det samme som «innlogget bruker». Supabase godtar
@@ -70,7 +75,7 @@ async function sendEmail(opts: { to: string[]; subject: string; html: string; fr
   if (opts.replyTo) body.reply_to = opts.replyTo;
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Resend-feil ${res.status}: ${await res.text()}`);
@@ -78,12 +83,15 @@ async function sendEmail(opts: { to: string[]; subject: string; html: string; fr
 }
 
 function shell(inner: string) {
-  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:560px;margin:0 auto;padding:36px 24px;color:#1a1d21">
+  // <meta charset> først: HTML-en vår har ingen <head>, og noen e-postklienter gjetter da
+  // på tegnsettet. Uten den kan æ/ø/å komme fram som rusk hos mottakeren.
+  return `<meta charset="utf-8">
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:560px;margin:0 auto;padding:36px 24px;color:#1a1d21">
     <div style="font-size:20px;font-weight:700;color:#0891b2;margin-bottom:2px">Varmeplan</div>
     <div style="color:#6b7280;font-size:13px;margin-bottom:24px">Prosjektering av elektrisk varme</div>
     ${inner}
     <div style="color:#9ca3af;font-size:11px;margin-top:28px;border-top:1px solid #e5e7eb;padding-top:14px">
-      Denne e-posten ble sendt fra Varmeplan. Svar gaar til avsenderen av lenken.
+      Denne e-posten ble sendt fra Varmeplan. Svar går til avsenderen av lenken.
     </div></div>`;
 }
 
@@ -162,13 +170,13 @@ Deno.serve(async (req) => {
         to: [rcpt],
         fromName: orgName,
         replyTo: link.notify_email || undefined,
-        subject: `${orgName} ber deg fylle inn maal for ${projectName}`,
+        subject: `${orgName} ber deg fylle inn mål for ${projectName}`,
         html: shell(`
-          <div style="font-size:17px;font-weight:600;margin-bottom:10px">${esc(orgName)} ber deg fylle inn maal</div>
+          <div style="font-size:17px;font-weight:600;margin-bottom:10px">${esc(orgName)} ber deg fylle inn mål</div>
           <p style="font-size:14px;line-height:1.55;margin:0 0 4px">Prosjekt: <b>${esc(projectName)}</b></p>
-          <p style="font-size:14px;line-height:1.55;color:#4b5563">Apne lenken under, sa ser du tegningen og kan rette maalene direkte. Du trenger ingen innlogging.</p>
+          <p style="font-size:14px;line-height:1.55;color:#4b5563">Åpne lenken under, så ser du tegningen og kan rette målene direkte. Du trenger ingen innlogging.</p>
           ${msg ? `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0891b2;border-radius:8px;padding:12px 14px;margin:16px 0;font-size:13px;white-space:pre-wrap">${esc(msg)}</div>` : ""}
-          ${button(kundeUrl, "Fyll inn maal")}
+          ${button(kundeUrl, "Fyll inn mål")}
           ${utlop ? `<p style="font-size:12px;color:#6b7280;margin-top:16px">Lenken er gyldig til ${esc(utlop)}.</p>` : ""}`),
       });
 
@@ -182,7 +190,7 @@ Deno.serve(async (req) => {
     // Anonymt kall. Tre lag som til sammen gjor den ubrukelig som e-postkanon.
     if (link.status !== "answered") return json({ error: "lenken har ikke et nytt svar" }, 403);
     if (!link.answered_at || Date.now() - new Date(link.answered_at).getTime() > NOTIFY_WINDOW_MS) {
-      return json({ error: "svaret er for gammelt til aa varsle om" }, 403);
+      return json({ error: "svaret er for gammelt til å varsle om" }, 403);
     }
     if (link.last_notified_at && Date.now() - new Date(link.last_notified_at).getTime() < NOTIFY_WINDOW_MS) {
       return json({ ok: true, skipped: "allerede varslet" });
@@ -198,15 +206,15 @@ Deno.serve(async (req) => {
 
     await sendEmail({
       to: [link.notify_email],
-      subject: `${hvem} har sendt inn maal for ${projectName}`,
+      subject: `${hvem} har sendt inn mål for ${projectName}`,
       html: shell(`
         <div style="font-size:17px;font-weight:600;margin-bottom:10px">Svar fra kunde</div>
         <p style="font-size:14px;line-height:1.55;margin:0 0 4px"><b>${esc(hvem)}</b> har sendt inn
-          <b>${antallVegger} ${antallVegger === 1 ? "maal" : "maal"}</b> fordelt paa
+          <b>${antallVegger} ${antallVegger === 1 ? "mål" : "mål"}</b> fordelt på
           <b>${antallRom} ${antallRom === 1 ? "rom" : "rom"}</b> for <b>${esc(projectName)}</b>.</p>
         ${svar.comment ? `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0891b2;border-radius:8px;padding:12px 14px;margin:16px 0;font-size:13px;white-space:pre-wrap">${esc(String(svar.comment).slice(0, 2000))}</div>` : ""}
-        <p style="font-size:13px;color:#4b5563">Tegningen er ikke endret — maalene ligger som et forslag til du gaar gjennom dem.</p>
-        ${button(apneUrl, "Apne i Varmeplan")}`),
+        <p style="font-size:13px;color:#4b5563">Tegningen er ikke endret — målene ligger som et forslag til du går gjennom dem.</p>
+        ${button(apneUrl, "Åpne i Varmeplan")}`),
     });
 
     await db.from("kundelenker")

@@ -34,7 +34,7 @@ async function sendEmail(to: string[], subject: string, html: string) {
   if (!apiKey) throw new Error("RESEND_API_KEY mangler (sett som secret).");
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify({ from, to, subject, html }),
   });
   if (!res.ok) throw new Error(`Resend-feil ${res.status}: ${await res.text()}`);
@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
       const prods = (c.certificate_products ?? [])
         .map((p: any) => `<li>${esc(p.product_name)} — ${esc(p.effect_w)} W, nominell ${esc(p.nominal_ohm)} Ω</li>`).join("");
       subject = `Garantibevis ${esc(c.garanti_id)} — ${esc(c.project_name)}`;
-      html = `
+      html = `<meta charset="utf-8">
         <h2>Garantibevis ${esc(c.garanti_id)}</h2>
         <p><b>Prosjekt:</b> ${esc(c.project_name)}<br>
            <b>Adresse:</b> ${esc(c.project_address)}<br>
@@ -93,7 +93,7 @@ Deno.serve(async (req) => {
       if (cl.customer_email && !recipients.includes(cl.customer_email)) recipients.push(cl.customer_email);
       const cert = cl.warranty_certificates ?? {};
       subject = `Reklamasjonssak ${esc(cl.claim_no)} opprettet`;
-      html = `
+      html = `<meta charset="utf-8">
         <h2>Reklamasjonssak ${esc(cl.claim_no)}</h2>
         <p>Det er registrert en feilmelding på varmeanlegget på <b>${esc(cert.project_address)}</b> (${esc(cert.room_name)}).</p>
         <p><b>Beskrivelse:</b> ${esc(cl.fault_description)}</p>

@@ -85,14 +85,14 @@ Deno.serve(async (req) => {
     const emailRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         Authorization: `Bearer ${RESEND_API_KEY}`,
       },
       body: JSON.stringify({
         from: FROM_EMAIL,
         to: [ADMIN_EMAIL],
         subject: `${typeLabel} fra ${user_name || user_email || "bruker"}`,
-        html: `
+        html: `<meta charset="utf-8">
           <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 40px 24px;">
             <h2 style="color: #0891b2; font-size: 24px; margin-bottom: 24px;">Ny tilbakemelding</h2>
             <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 24px;">

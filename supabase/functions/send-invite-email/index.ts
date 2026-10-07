@@ -52,7 +52,7 @@ Deno.serve(async (req) => {
     const token = String(body?.token || "").trim();
     if (!token) {
       // Eldre klienter sendte `to` + `invite_url`. Den kontrakten finnes ikke lenger.
-      return json({ error: "token kreves (last siden paa nytt)" }, 400);
+      return json({ error: "token kreves (last siden på nytt)" }, 400);
     }
 
     const db = createClient(
@@ -71,7 +71,7 @@ Deno.serve(async (req) => {
     const { data: inv } = await db.from("org_invitations")
       .select("*").eq("token", token).maybeSingle();
     if (!inv) return json({ error: "ukjent invitasjon" }, 404);
-    if (inv.status !== "pending") return json({ error: "invitasjonen er ikke lenger aapen" }, 409);
+    if (inv.status !== "pending") return json({ error: "invitasjonen er ikke lenger åpen" }, 409);
     if (!inv.email) return json({ error: "invitasjonen mangler mottaker" }, 409);
 
     // Lag 2: kalleren maa ha rett til aa invitere til NETTOPP denne organisasjonen.
@@ -110,12 +110,12 @@ Deno.serve(async (req) => {
 
     const emailRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers: { "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         from: Deno.env.get("FROM_EMAIL") ?? FROM_DEFAULT,
         to: [inv.email],
         subject: `Du er invitert til ${orgNavn}`,
-        html: `
+        html: `<meta charset="utf-8">
           <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:560px;margin:0 auto;padding:40px 24px">
             <h2 style="color:#0891b2;font-size:24px;margin-bottom:8px">Varmeplan</h2>
             <p style="color:#666;font-size:14px;margin-bottom:24px">Prosjektering av elektrisk varme</p>
@@ -125,13 +125,13 @@ Deno.serve(async (req) => {
                 <strong>${esc(invitertAv)}</strong> har invitert deg til <strong>${esc(orgNavn)}</strong>.
               </p>
               <p style="color:#475569;font-size:14px;line-height:1.6;margin:0">
-                Klikk paa knappen under for aa opprette kontoen din.
+                Klikk på knappen under for å opprette kontoen din.
               </p>
             </div>
             <a href="${esc(url)}" style="display:inline-block;background:#0891b2;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-size:15px;font-weight:600">Opprett konto</a>
             <p style="color:#94a3b8;font-size:12px;margin-top:32px;line-height:1.5">
               Hvis du ikke forventet denne invitasjonen, kan du se bort fra e-posten.<br>
-              Lenken virker kun en gang.
+              Lenken virker kun én gang.
             </p>
           </div>`,
       }),

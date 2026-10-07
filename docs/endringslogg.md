@@ -4,6 +4,50 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## E-postene skriver norsk med æ, ø og å — ASCII-regelen gjelder bare SQL — 2026-10-07
+
+Meldt av Kenneth: «Teksten er uten æ ø å i e-posten som blir sendt.» Han har rett, og det er
+min feil: ASCII-regelen i `000-KJØR-MEG.md` gjelder **SQL-kommentarer** (de limes inn i Supabase
+SQL Editor), og jeg dro den feilaktig over på e-posttekst i 029. Kunden fikk «Åpne» skrevet som
+«Apne» og «målene» som «maalene».
+
+Det var aldri et tegnsett-problem: filene er UTF-8, og tankestreken «—» har hele tiden kommet
+riktig fram. Bare feil ordvalg.
+
+**Rettet i to funksjoner:**
+- **`kundelenke-mail`** — ti steder: begge emnelinjene, «Åpne lenken under, så ser du tegningen
+  og kan rette målene direkte», knappene «Fyll inn mål» og «Åpne i Varmeplan», «Tegningen er
+  ikke endret — målene ligger som et forslag til du går gjennom dem», bunnteksten «Svar går til
+  avsenderen av lenken», og feilmeldingen «for gammelt til å varsle om».
+- **`send-invite-email`** — «Klikk på knappen under for å opprette kontoen din», «Lenken virker
+  kun **én** gang», og to feilmeldinger («last siden på nytt», «ikke lenger åpen»).
+
+`notify-admin-registration`, `send-feedback` og `send-warranty-email` hadde **ingen**
+erstatninger i tekst — bare i kodekommentarer, som ingen mottaker leser.
+
+**Tegnsett sikret i alle fem:** `<meta charset="utf-8">` først i hver e-post-HTML (de mangler
+`<head>`, og da gjetter enkelte e-postklienter), og `Content-Type: application/json; charset=utf-8`
+på kallet mot Resend.
+
+**⚠ To ting målingen avslørte:**
+1. **Min første skanning bommet.** Jeg brukte `\b` i awk — macOS' awk støtter det ikke, så
+   `paa` og `aa` i `send-invite-email` gikk rett gjennom. Jeg fant dem ved å *lese* fila.
+   Skanningen er nå `grep -E` med eksplisitte bokstavgrenser.
+2. **ASCII-regelen følges ikke i repoet forøvrig.** 24 av 26 `supabase-migration-*.sql`
+   inneholder allerede æøå og har kjørt fint i SQL Editor. Regelen er altså en konvensjon for
+   kundelenke-serien, ikke repoets praksis — sjekken nedenfor er derfor avgrenset til
+   `supabase-migration-kundelenke*.sql`, ellers ville den flagget 24 filer som virker.
+   `supabase-migration-kundelenke.sql` hadde forresten tre tankestreker i en fil hvis egen
+   topptekst sier «Ren ASCII»; de er byttet til bindestrek (kun kommentarer, trenger ikke kjøres
+   på nytt).
+
+**Ny sjekk i repoet:** `scripts/sjekk-norsk-i-epost.sh`. Den flagger ASCII-erstatninger utenfor
+kommentarer, manglende `charset`, og ikke-ASCII i kundelenke-seriens SQL. Verifisert at den
+**fanger** en innført feil, ikke bare består: med «Fyll inn maal» satt inn igjen gir den exit 1
+og peker på linja.
+
+---
+
 ## Tre åpne e-postutløsere tettet — send-invite-email, notify-admin-registration, send-feedback — 2026-10-07
 
 Oppfølging av funnet i 029. Jeg undersøkte `send-invite-email` og fant at problemet var større
