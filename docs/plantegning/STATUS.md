@@ -42,13 +42,17 @@ bort fra tegningen uten at noe så galt ut.
 
 ### Den ekte arkitekttegningen (`Forprosjekt golvplan 23.09.26.pdf`)
 
-| | før 047b | etter 047c |
-|---|---|---|
-| vegger | 372 | **253** |
-| røde rester | 10 489 | **134** |
-| dekning | 13,2 % | **53,4 %** |
-| lukkede rom | 8 (ett på 2218 m²) | **0** |
-| rom-labels lest | — | **34/34** med nummer, navn og areal |
+| | før 047b | etter 047c | etter 047d |
+|---|---|---|---|
+| vegger | 372 | 253 | **168** (97 var duplikater) |
+| røde rester | 10 489 | 134 | 177 |
+| dekning | 13,2 % | 53,4 % | 48,3 % |
+| lukkede rom | 8 (ett på 2218 m²) | 0 | **4**, alle med riktig navn og nummer |
+| arealsjekk OK | — | — | **3 av 4** |
+| rom-labels lest | — | **34/34** | 34/34 |
+
+Rester og dekning går «feil vei» i 047d med vilje: kjedingen finner flere *ekte*
+vegg-kandidater, og de som ikke parer seg blir røde prikker i stedet for å være usynlige.
 
 **Tykkelses-histogrammet motsa planens antagelse.** Tegningen har 6 fylte rektangler (2/16/32
 cm), ikke «28 à 20 cm, 16 à 10 cm, 28 à 5 cm». Veggene er **doble linjer** — 252 av 372
@@ -82,6 +86,22 @@ polygonene er søppel fordi veggene er det. Tittelen vinner, som den skal.
 - **Label-vinduet stod i PDF-punkter.** En DXF i millimeter har 200 mm mellom linjene, ikke 8,4
   pt, så nummer og navn falt utenfor og rommene kom tilbake navnløse. Vinduet er nå i virkelige
   meter.
+- **114 av 368 vegger var duplikater av en annen vegg** (047d). Rundt ett rom lå tre nesten
+  identiske senterlinjer. `_merge_collinear` fanger dem ikke: den krever sammenfallende
+  *ender*, mens duplikater overlapper i hele lengden.
+- **Vegger sendt som fragmenter er usynlige for hele motoren.** 7851 av 11 174 segmenter er
+  kortere enn 25 cm, og `MIN_WALL_LEN_CM` kaster hver enkelt. Toppveggen over ett av rommene
+  finnes ikke som en lang strek — etter kjeding er den 293 cm. Kjedingen må skje *før*
+  kandidatvalget; `_merge_collinear` kjører på vegger og kommer for sent.
+- **Rommene var senterlinje-areal, ikke innvendig** (047d) — defekten med størst konsekvens i
+  hele serien. `polygonize` lukker senterlinjer, så polygonet går vegg-midt til vegg-midt,
+  mens appens grunnregel er at `room.points` er den innvendige grensen og varmen dimensjoneres
+  på arealet. Hvert rom flyten lagde var systematisk ~1,2× for stort. Og fixturens oppgitte
+  arealer var satt nær senterlinje-arealet, så tre arealtester *bestod* ved å låse den gale
+  konvensjonen.
+- **`segment_widths` er en tom liste for DWG, ikke `None`** — «ingen informasjon», som
+  `centerlines` slipper gjennom. Første utgave av kjedingen bygget en ny liste med 0.0 per
+  kjede, altså «informasjon om at streken er 0 tykk», og da forsvant alle 6 DXF-veggene.
 - **Et redigeringsanker jeg antok var unikt fantes to steder** og slettet 1475 linjer i
   `index.html`. Fanget på linjetallet, rullet tilbake, gjort om med unike ankere og
   `assert s.count(anker)==1`.
@@ -92,7 +112,7 @@ polygonene er søppel fordi veggene er det. Tittelen vinner, som den skal.
 
 - **arqely:** 17 batterier, **618 sjekker**, alle grønne. Det nye batteriet `_planRegressionTest`
   dekker A–I (lagring, undo, snap, dekning, rom fra vegger, «Ikke navngitt», DWG-valget, origo).
-- **lumelo-backend:** **102 tester** grønne (`uv run pytest`), `ruff` og `mypy app` rene.
+- **lumelo-backend:** **107 tester** grønne (`uv run pytest`), `ruff` og `mypy app` rene.
   `/import/pdf`, `/import/dwg` og `/import/dwg/background` er uendret og låst med tester.
   020s feilskille består: **415** = ingen konverterer finnes, **400** = en fantes men klarte
   ikke fila.
@@ -112,15 +132,19 @@ polygonene er søppel fordi veggene er det. Tittelen vinner, som den skal.
 
 **Du må svare på (står i `prompter/SPØRSMÅL.md`):**
 
-1. **Skal jeg gjøre 047d?** Den ekte tegningen lukker 0 rom. To ting gjenstår, målt og
-   prioritert: dobbel-paringen finner ikke alle vegger (`PAIR_MIN_OVERLAP = 0.60` er trolig for
-   strengt når en vegg er delt av døråpninger, og paringen er grådig), og den ytre rammen
-   droppes ikke — et polygon på 2151 m² overlever. Alternativet er å la vegg-sjekken være måten
-   du retter de siste veggene manuelt; flyten er bygget for nettopp det.
+1. **30 av 34 rom lukker seg fortsatt ikke.** 047d tok det fra 0 til 4, og begge hypotesene i
+   mitt eget 047d-forslag viste seg målt feil (se `SPØRSMÅL.md`). Jeg har ikke flere målte
+   hypoteser som er en terskeljustering. Neste steg vil i så fall være et **flomfyll fra
+   romlabelene med døråpningene lukket først** — en annen motor, ikke en innstilling. Prototypen
+   jeg målte ga 8 av 34 fordi den lekker gjennom døråpningene. Si fra om du vil at jeg går den
+   veien, eller om vegg-sjekken er god nok som manuell oppretting.
 2. **Dekningsgrensen er 90 %.** På en ekte arkitekttegning er 53 % kanskje normalen. Skal
    grensen ned, eller skal teksten si «N vegger mangler» i stedet for en prosent?
 3. **Skal høyreklikk → Importer plantegning fortsatt gi valgdialogen?** Den gikk tidligere rett
    til underlag; jeg rutet den om til dialogen fordi ordene var de samme. Si fra hvis høyreklikk
    skal være snarveien «bare legg et underlag, ikke spør».
-4. Småting: skal `m2` uten superskrift godtas i arealene (bare `m²` er målt), og skal
+4. **Skal en flate uten romlabel forkastes?** Motoren lager 20 slike tittelfelt-flater på din
+   tegning. Regelen ville fjernet dem alle — men også «Ikke navngitt», som du avklarte skal
+   finnes. Jeg lot dem stå.
+5. Småting: skal `m2` uten superskrift godtas i arealene (bare `m²` er målt), og skal
    romtype-gjenkjenningen fra navn utvides?

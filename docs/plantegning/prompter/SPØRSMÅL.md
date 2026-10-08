@@ -117,3 +117,33 @@ Kenneth svarer til slutt.
   prikker / 53,4 % dekning / 0 lukkede rom.
 - **Dekningsgrensen (046) er fortsatt 90 %.** Si fra om den skal ned, eller byttes til
   «N vegger mangler».
+
+## 047d
+
+- **Begge hypotesene i mitt eget 047d-forslag var feil, og det er målt.**
+  `PAIR_MIN_OVERLAP = 0.60` er ikke flaskehalsen: av 3363 par som avvises *bare* av
+  overlapp-testen er medianen 0.000 og **maks 0.590** — terskel 0,5 gir 7 nye par, 0,1 gir 40.
+  Grunnen hypotesen var feil: nevneren er den *korteste* av de to, så en kort innervegg mot en
+  lang ytterlinje gir overlapp 1,0 — nettopp døråpningstilfellet jeg trodde feilet.
+  Og `_drop_outer_frame` feiler ikke fordi kriteriet er for strengt, men fordi `polygonize`
+  lager en **plan oppdeling**: ark-flaten inneholder 0 av 17 andre polygoner.
+- **Seks tilnærminger ble målt før noe ble skrevet.** Ingen lukket rommene ved å skru på en
+  terskel. `MIN_STROKE_PT` ned til 0 ga 87 polygoner, men 2 av 34 med riktig areal. Et
+  raster-**flomfyll** fra romlabelene ga 8 av 34 — det lekker gjennom døråpningene.
+- **Fire defekter ble funnet og rettet:** 114 av 368 vegger var duplikater; 7851 av 11 174
+  segmenter er kortere enn 25 cm så vegger sendt i fragmenter var usynlige; ark-flaten ble
+  «rom 1» på 2149 m²; og — den med størst konsekvens — **rommene var senterlinje-areal, ikke
+  innvendig.**
+- **Den siste er verdt å merke seg:** `polygonize` lukker senterlinjer, så polygonet går
+  vegg-midt til vegg-midt. Appens grunnregel er at `room.points` er den *innvendige* grensen,
+  og varmen dimensjoneres på arealet. Hvert rom plantegning-flyten lagde var altså for stort,
+  systematisk ~1,2×. Rettet i både `/import/plan` og `/plan/rooms`.
+- **Resultat på din tegning: 0 → 4 lukkede rom**, alle med riktig navn og nummer, 3 av 4 med
+  arealsjekk OK. 168 vegger (mot 253), 177 røde prikker, dekning 48,3 %.
+- **Jeg lot 20 navnløse flater stå.** En regel «en flate uten romlabel er ikke et rom» ville
+  fjernet alle de 20 tittelfelt-flatene motoren lager — men den ville også fjernet «Ikke
+  navngitt», som du avklarte eksplisitt skal finnes. Si fra om du vil ha regelen likevel, evt.
+  bare for flater som ligger utenfor alle romlabelenes område.
+- **Fortsatt ubesvart:** 30 av 34 rom lukker seg ikke. Resten av veggene må rettes i
+  vegg-sjekken. Jeg har ikke flere målte hypoteser — det neste steget er i så fall et
+  flomfyll med døråpningene lukket først, som er en annen motor, ikke en terskel.
