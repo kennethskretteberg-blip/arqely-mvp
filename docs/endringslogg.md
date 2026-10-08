@@ -4,6 +4,86 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesiden: fri hjørnedrag, én hengelås, ryddigere veggliste — 2026-10-08
+
+Prompt 045.
+
+### STEG 0 — tre målinger
+
+**0.1 Fri drag var uoppnåelig i kundemodus.** `hitVertexFreeDrag` returnerte `true` i
+gizmo-senteret, men grenen fantes bare i den innloggede mousedown-en — kundegrenen håndterte
+`hitXArrow`/`hitYArrow` og falt ellers gjennom. Målt: klikk i senteret ga `_vdDragging: false`.
+Markørkaskaden manglet den av samme grunn; 036 kunne ikke ta den med, for grenen fantes ikke.
+
+**0.2 `_kundeHjorneSlipp` skrev allerede `{dx, dy}` på begge akser,** så fri drag kunne gjenbruke
+den uendret. Ingen ny kode der.
+
+**0.3 Panelet før:** 330 px bredt, **7 kolonner** (Vegg 70 · Før 40 · Nytt 60 · −/+ 44 · Δ 24 ·
+Fast 40 · ↺ 22), radhøyde **34 px**, og «Fast» rommet **to** knapper på **17×17 px** — ↺ var
+11×15. Tallfeltet var `type=number` med nettleserens stepper. Kommentar: `<input>`, 37 px.
+
+### Etter
+
+Tre kolonner (**Vegg · Mål (cm) · ±**), 44 px rader på både PC og telefon, alle fire knapper
+28 px på PC og 44 px på telefon. «Før» og «Δ» er flyttet ned i «var 320 · +25»-linja under
+navnet — det frigjorde 64 px bredde. Stepperen er skjult, scopet til `#_kunde-bar` så
+hovedmodulen beholder sin. Kommentaren er en `textarea rows=3` som vokser til seks og så får
+scroll.
+
+Fri drag: senteret i hjørne-gizmoen starter `_vdConstraint:'free'`, markøren er `move`, og
+X-/Y-pilene står. `hitVertexFreeDrag` fikk en valgfri toleranse (22 px på telefon, 14 som før
+uten argument) — målt at en finger 20 px unna bommer med 14 og treffer med 22.
+
+### Fire ting målingen endret underveis
+
+**1. Hjørnet landet ikke på hele cm.** Prompten sa «snap som innlogget», men målt: `S.snap.grid`
+er `false` på kundesiden, og `GRID` er **50 cm** — altså verken snap eller et brukbart snap for
+en kunde som retter mål. Et fritt drag ga 536,5 cm. Nå rundes selve PUNKTET i slippet, ikke
+deltaet, så `basis + delta` blir et helt tall uansett hvor basis ligger.
+
+**2. Hjelpelinja ble kuttet.** 311 px tekst i et 300 px felt. «hjørne» og «veggen» er
+underforstått; nå 300/300.
+
+**3. Hjelperaden fikk radene til å hoppe 22 px** ved hvert veggvalg, fordi den bare fantes for
+valgt vegg. 033-regelen er at alt ligger i DOM-en hele tiden; nå 0 px hopp i alle fire
+overganger (ingen valg → vegg 1 → vegg 3 → avvalg).
+
+**4. ⚠ Hjelpelinja løy — to ganger.**
+
+*Først:* i et **perfekt rektangel** gir «fast start» og «fast slutt» **nøyaktig samme rom**.
+`_applyWallLength` rapporterer ulik `movedEnd`, men 035 bevarer ankeret ved å translatere
+polygonet tilbake, og for et rektangel er de to resultatene like opp til nettopp den
+translasjonen. Målt identiske punkter på vegg 0, 1 og 2. I et L-rom og et skjevt rom er de
+ULIKE på **hver eneste vegg** (L vegg 2: `579/450/200/50/300/408` mot `579/450/200/200/300/655`).
+Panelet spør derfor først `_kundeLaasBetyrNoe()` og sier «Rettvinklet rom — begge ender gir
+samme rom» når det er sant.
+
+*Så:* beskrivelsen motsa seg selv i L-rommet — «Øvre høyre står fast — vokser **oppover**».
+Årsaken var at punktet (579,200) ligger nøyaktig på midtlinja i L-ens omsluttende boks, så
+`p.y > my` ble et terningkast. Enden beskrives nå relativt til **veggen**, ikke til rommet:
+«Høyre ende står fast — vokser mot venstre».
+
+### Hengelåsen
+
+Én knapp per rad som veksler. `_kundeFastIdx` er den ene kilden — tegning, panel og veksling
+leser den; før lå auto-oppløsningen inne i tegnefunksjonen, så en veksling fra 'auto' måtte
+gjette hva tegningen viste. Fra 'auto' settes det motsatte av det auto viste, så det første
+klikket alltid flytter låsen. Låsen på tegningen er 22 px med hvit ring og glir 150 ms når den
+flytter seg. Offseten over hjørnet er én delt konstant (`_KUNDE_LAAS_DY`) — den gikk fra 16 til
+20 px, og uten en delt konstant ville treffsonen blitt stående 4 px for lavt.
+
+### Om tegneretningen
+
+Kenneth spurte om det har noe å si at de alltid tegner fra nede til venstre og legger veggene
+mot høyre. Svar: det er allerede tatt høyde for — `points[0]` er ankeret, og 035s `auto` holder
+start-enden fast på en rettvinklet vegg. Verifisert i testen («auto på en rettvinklet vegg holder
+STARTEN»). For et rektangel spiller det som nevnt ingen rolle; for L-rom gjør det det.
+
+Regresjon: `_kundelenkeRegressionTest` + 23 sjekker i seksjon Q. **555 sjekker grønne i 16
+batterier**, seks negative kontroller.
+
+---
+
 ## Kundeforslag hos Cenika: Godkjenn/Avslå per rom → nytt utlegg — 2026-10-08
 
 Prompt 044. Kenneth: «Vi får melding om at kunden ønsker endring, vi trykker godkjenn forslag,
