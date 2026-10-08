@@ -4,6 +4,75 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Vegg-sjekk: motorens vegger oppå tegningen før de blir rom — 2026-10-08
+
+Prompt 046, første i plantegning-serien. Kenneth: «La appen finne veggene, men la meg se og
+rette dem før de blir rom.»
+
+Bygget **før** motoren, med vilje: 020 bygde automatisk romgjenkjenning uten en sjekk-flate og
+ga 590 «rom» som Kenneth kalte «rot». Vegg-sjekken er det som skiller denne serien fra 020, så
+den må finnes før motoren kan vurderes. 046 kjører mot syntetisk utdata (`_planDevFixture`) og
+definerer kontrakten 047/048 skal oppfylle.
+
+### STEG 0 — fire målinger, to som endret prompten
+
+**0.1 Hypotesen var historisk riktig, men utdatert.** 021b-funnet («bare én av tre innganger ble
+rettet») holdt ikke lenger: alle fem rutene som skal gjennom valgdialogen gjorde det allerede
+(lerret-slipp :27873, etasjerad :44130, `_importPlanToDraw` :53684, `_emptyDrop` :53756,
+`_emptyPickImport` :53812). **Men jeg fant en sjette med samme navn som ikke gjorde det:**
+høyreklikk-menyens «Importer plantegning» (:50369) gikk rett til `handleBgFile` — altså underlag
+uten valgdialog, med nøyaktig samme ord som knappen som gir valget. Rutet om.
+`_addBgToFloor`/`_replaceFloorBg`/`confirmAddFloorWithBg`/`openBgImportPanel` beholder sin egen
+vei: de målretter en bestemt etasje-slot og skal med vilje bare legge et underlag.
+
+**0.2 Prompten min sa verdens-cm. Det ville vært feil.** Målt: `bg.widthCm`, `heightCm`,
+`originX` og `originY` endres ALLE etter at bakgrunnen er installert — av kalibreringen
+(:42677), av «Flytt underlag» (:49090) og ved «Bytt plantegning» (:42374). Vegger i verdens-cm
+ville drevet bort fra tegningen, stille, og først blitt synlig som rom i feil størrelse.
+Planveggene lagres derfor **sidenormalisert** (u,v ∈ 0..1 av underlagsbildet, origo øverst til
+venstre). Målt at det virker: samme vegg traff tegningen eksakt før kalibrering (121 cm bredt
+underlag), etter kalibrering (2000 cm) og etter «Flytt underlag» (+500/+300) — og vegglengden
+ble riktig 700 cm etter kalibrering.
+
+**0.3** `S.bgs[floorId]`; `planWalls`/`planMeta` nøkles likt.
+
+**0.4** `drawMode`-verdiene i bruk er `bg-calibrate`, `bg-straighten`, `mat-freehand`,
+`skillevegg`, `dim`, `hindring`, `hindring-polygon`. `plan-review` er ledig, og `_editorIsEmpty()`
+returnerer false når `drawMode` er satt, så tom-tilstanden slåss ikke med modusen.
+
+### Funn under bygging: Ctrl+Z var en stille no-op
+
+Live-testen viste at flytt, slett og tegn ikke kunne angres — og at mine tre påfølgende tester
+derfor målte feil tilstand (snap-testen «bommet» fordi veggen allerede var flyttet). Rotårsak:
+**`pushUndo` tok ikke snapshot av `S.planWalls`.** Det er nøyaktig samme hull `matPaths` og
+`floatingDims` hadde, beskrevet i kommentarene rett over — tredje gang samme feilklasse. Lagt
+inn i både `pushUndo` og `undo`, og låst med både en kildekode- og en atferdssjekk.
+
+### Bygget
+
+`S.planWalls` / `S.planMeta` per etasje, lagret i prosjektet. `drawPlanWalls()` kalles fra
+`render()` — ikke som hale i `drawRooms()`, som 030 lærte at aldri kjører. Senterlinje i rav
+(`#ffa726`, en farge som ikke finnes i arkitekttegninger) med halvtransparent bredde lik
+veggtykkelsen, så treff/bom mot den svarte veggen under er synlig på en meters avstand. Røde
+prikker på `leftovers`.
+
+Verktøylinje: Flytt (dra, snap til motorens egne råsegmenter — ikke piksler) · Slett ·
+Tegn (klikk–klikk, arver tykkelse) · Snap av/på · Dekning i % med gul advarsel under 90 ·
+Avbryt · Lag rom. Esc avbryter påbegynt vegg, så modusen. Delete sletter valgt vegg.
+Treff-toleransen er en parameter (10 px / 22 px på smal skjerm), samme mønster `nearMoveArrow`
+og `hitVertexFreeDrag` bruker.
+
+Dialogen fikk et tredje valg, «Finn vegger og rom automatisk», merket **Ny**. «Anbefalt» står
+fortsatt på «La appen finne rommene» — det flyttes i 049, når flyten lager rom.
+
+**046 lager ingen rom.** «Lag rom» validerer og logger kontrakten som går videre; 049 kobler den
+til gjennomgangsskjermen.
+
+Regresjon: ny `_planRegressionTest` med 28 sjekker. **595 sjekker grønne i 17 batterier**, tre
+negative kontroller.
+
+---
+
 ## Presentasjonslenken virket ikke: RPC-en returnerer en liste — 2026-10-08
 
 Prompt 041. Kenneth: «Presentasjonsfunksjonen genererer en lenke, men den virker ikke. Jeg

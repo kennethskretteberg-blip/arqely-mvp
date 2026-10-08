@@ -3982,6 +3982,17 @@ const S = {
   varmematte: { gapCm: null },
   documentation: {},  // keyed by roomId: {checklist, measurements, photos, signature, notes}
   bgs: {},   // keyed by floor id (number) or '__global__' — the ACTIVE plantegning (én per etasje, LÅST regel)
+  // ─── 046 · PLANVEGGER (motorens FORSLAG, ikke rom) ───────────────────────────────────────
+  // Nøklet per etasje som `bgs`, og hører sammen med etasjens plantegning.
+  //
+  // ⚠ KOORDINATENE ER SIDENORMALISERTE (u,v ∈ 0..1 av underlagsbildet, origo øverst til
+  // venstre) — IKKE verdens-cm. STEG 0.2 målte at `bg.widthCm`, `heightCm`, `originX` og
+  // `originY` ALLE endres etter at bakgrunnen er installert: av kalibreringen (:42677), av
+  // «Flytt underlag» (:49090) og ved «Bytt plantegning» (:42374). Vegger lagret i verdens-cm
+  // ville derfor drevet bort fra tegningen hver gang brukeren kalibrerte — stille, og først
+  // synlig som rom i feil størrelse. Normaliserte koordinater følger underlaget gratis.
+  planWalls: {},   // { floorId: [{ id, a:{u,v}, b:{u,v}, thickness_cm, source }] }
+  planMeta: {},    // { floorId: { coverage:{pct,...}, leftovers:[{a,b}], calibration:{...} } }
   // Serie «Stedfestet tegneflate» (005): georeferanse per etasje for kart-bakgrunner —
   // valgt bygg, omriss i verdens-cm og kandidatliste. Kun for etasjer hentet fra kart.
   geo: {},   // keyed by floor id
@@ -4608,6 +4619,7 @@ function render() {
   if (S.ui.showGrid !== false) drawGrid();
   drawRooms();
   drawKundeHighlight();   // 028: kort oppblussing av rom som nettopp fikk kundens maal
+  drawPlanWalls();        // 046: motorens vegger oppå underlaget (egen funksjon, ikke hale i drawRooms)
   drawForslagMerker();    // 043: grønn hake / gul ! på rom kunden har ment noe om
   if (S.ui.present) drawPresentFloorTextures();   // subtil gulvtekstur UNDER leggemønsteret
   drawStrips();
@@ -5671,6 +5683,365 @@ function drawRooms() {
 // «sist i funksjonen» er ikke det samme som «til slutt» naar funksjonen har tidlige utganger.
 // Derfor et eget lag, kalt fra render() rett etter drawRooms — foer varmeelementene, slik at
 // utlegget fortsatt er lesbart oppaa markeringen (lagrekkefolgen i CLAUDE.md).
+// ═══ 046 · PLANVEGGER — motorens forslag oppå underlaget ══════════════════════════════════
+// 020 bygde automatisk romgjenkjenning uten en sjekk-flate og ga 590 «rom»; Kenneth kalte det
+// «rot». Vegg-sjekken er det som skiller denne serien fra 020: ingenting blir rom før brukeren
+// har sett veggene. Derfor bygges denne flaten FØR motoren, mot syntetisk utdata.
+
+const PLAN_FARGE = '#ffa726';   // rav — finnes ikke i arkitekttegninger, så treff/bom er tydelig
+
+function _planFloorId() {
+  return (S.ui.activeFloorId != null) ? S.ui.activeFloorId
+    : ((S.floors[0] && S.floors[0].id) ?? null);
+}
+function _planBg(floorId) {
+  const bg = S.bgs[(floorId != null) ? floorId : _planFloorId()];
+  return (bg && bg.img && bg.widthCm > 0 && bg.heightCm > 0) ? bg : null;
+}
+function _planList(floorId) {
+  const fid = (floorId != null) ? floorId : _planFloorId();
+  if (fid == null) return [];
+  return S.planWalls[fid] || (S.planWalls[fid] = []);
+}
+function _planMeta(floorId) {
+  const fid = (floorId != null) ? floorId : _planFloorId();
+  if (fid == null) return null;
+  return S.planMeta[fid] || (S.planMeta[fid] = { coverage: null, leftovers: [], calibration: null });
+}
+// u,v (0..1 av underlagsbildet, origo øverst til venstre) → verdens-cm. Hele poenget med
+// normaliseringen: denne regner ut på nytt hver gang, så kalibrering og «Flytt underlag»
+// flytter veggene med seg av seg selv.
+function _planUVtoW(bg, p) {
+  return { x: bg.originX + p.u * bg.widthCm, y: bg.originY + p.v * bg.heightCm };
+}
+function _planWtoUV(bg, x, y) {
+  return { u: (x - bg.originX) / bg.widthCm, v: (y - bg.originY) / bg.heightCm };
+}
+// Tykkelsen er et FYSISK mål i cm, altså allerede i verdens-enheter — ingen omregning.
+// Er underlaget ukalibrert (`widthCm` er en innpasningsgjetning), blir den tegnede bredden
+// omtrentlig; den blir riktig i samme øyeblikk kalibreringen er. Det er med vilje: en vegg som
+// ser for tykk ut på et ukalibrert underlag er nettopp signalet om at skalaen mangler.
+function _planTykkelseW(w) { return Math.max(0, w.thickness_cm || 0); }
+
+function drawPlanWalls() {
+  if (!_planAktiv()) return;
+  const bg = _planBg();
+  if (!bg) return;
+  const liste = _planList();
+  const meta = _planMeta() || {};
+  ctx.save();
+  // 1) Halvtransparent bredde — viser om senterlinja dekker den svarte veggen under.
+  for (const w of liste) {
+    const a = w2s(..._planPt(bg, w.a)), b = w2s(..._planPt(bg, w.b));
+    const tw = _planTykkelseW(w) * S.view.zoom * BASE_SCALE;
+    if (tw >= 2) {
+      ctx.strokeStyle = 'rgba(255,167,38,.28)';
+      ctx.lineWidth = tw; ctx.lineCap = 'butt';
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+  // 2) Senterlinja oppå, tynn og skarp.
+  for (const w of liste) {
+    const a = w2s(..._planPt(bg, w.a)), b = w2s(..._planPt(bg, w.b));
+    const valgt = S.ui.planSelId === w.id;
+    ctx.strokeStyle = PLAN_FARGE;
+    ctx.lineWidth = valgt ? 3 : 1.6;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    if (valgt) {
+      ctx.fillStyle = PLAN_FARGE;
+      for (const p of [a, b]) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill(); }
+    }
+  }
+  // 3) Røde prikker der motoren fant strek den ikke klarte å gjøre til vegg.
+  ctx.fillStyle = '#e5484d';
+  for (const r of (meta.leftovers || [])) {
+    const a = _planPt(bg, r.a), b = _planPt(bg, r.b);
+    const m = w2s((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    ctx.beginPath(); ctx.arc(m.x, m.y, 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+// `w2s` tar (x, y) — denne gir paret, så kallene over slipper to variabler per punkt.
+function _planPt(bg, p) { const w = _planUVtoW(bg, p); return [w.x, w.y]; }
+
+function _planAktiv() { return S.ui.drawMode === 'plan-review'; }
+
+// ── Kontrakten fra `/import/plan` (047/048 skal levere nøyaktig denne) ─────────────────────
+// walls:       [{ a:[u,v], b:[u,v], thickness_cm, source:'rect'|'double'|'single' }]
+// rooms:       [{ polygon:[[u,v],…], label_id|null, stated_area_m2|null }]
+// labels:      [{ id, number, name, stated_area_m2, at:[u,v] }]
+// calibration: { meters_per_point, method:'title'|'areas'|'insunits'|'none', confidence }
+// coverage:    { used_length, total_length, pct }
+// leftovers:   [{ a:[u,v], b:[u,v] }]
+//
+// ⚠ u,v er brøkdeler av UNDERLAGSBILDET, origo øverst til venstre — samme bilde appen viser.
+// Motoren må altså normalisere selv; da slipper klienten å kjenne sidestørrelsen i punkter, og
+// kalibrering/flytting av underlaget treffer veggene gratis (STEG 0.2).
+function _planApplyResponse(res, floorId) {
+  const fid = (floorId != null) ? floorId : _planFloorId();
+  if (fid == null || !res) return 0;
+  const uv = p => ({ u: Array.isArray(p) ? p[0] : p.u, v: Array.isArray(p) ? p[1] : p.v });
+  S.planWalls[fid] = (res.walls || []).map((w, i) => ({
+    id: i + 1, a: uv(w.a), b: uv(w.b),
+    thickness_cm: w.thickness_cm || 0, source: w.source || 'single',
+  }));
+  S.planMeta[fid] = {
+    coverage: res.coverage || null,
+    leftovers: (res.leftovers || []).map(r => ({ a: uv(r.a), b: uv(r.b) })),
+    calibration: res.calibration || null,
+    rooms: res.rooms || [],
+    labels: res.labels || [],
+  };
+  S.counters.nextPlanWallId = S.planWalls[fid].length + 1;
+  return S.planWalls[fid].length;
+}
+
+// Syntetisk motor-utdata. 046 har ingen motor — dette er formen 047 skal levere, og det 046
+// testes mot. Ett rektangulært rom, ett L-rom, én manglende vegg og én rest.
+function _planDevFixture(floorId) {
+  const res = {
+    walls: [
+      // Rektangel (u,v): 0.10–0.45 × 0.15–0.55
+      { a: [0.10, 0.15], b: [0.45, 0.15], thickness_cm: 20, source: 'rect' },
+      { a: [0.45, 0.15], b: [0.45, 0.55], thickness_cm: 20, source: 'rect' },
+      { a: [0.45, 0.55], b: [0.10, 0.55], thickness_cm: 20, source: 'rect' },
+      { a: [0.10, 0.55], b: [0.10, 0.15], thickness_cm: 20, source: 'double' },
+      // L-rom 0.55–0.90 × 0.15–0.70, med hakk — og MANGLENDE vegg på undersiden (0.55→0.72)
+      { a: [0.55, 0.15], b: [0.90, 0.15], thickness_cm: 10, source: 'rect' },
+      { a: [0.90, 0.15], b: [0.90, 0.45], thickness_cm: 10, source: 'rect' },
+      { a: [0.90, 0.45], b: [0.72, 0.45], thickness_cm: 10, source: 'double' },
+      { a: [0.72, 0.45], b: [0.72, 0.70], thickness_cm: 10, source: 'rect' },
+      { a: [0.55, 0.15], b: [0.55, 0.70], thickness_cm: 10, source: 'rect' },
+    ],
+    rooms: [], labels: [],
+    calibration: { meters_per_point: 0.1134, method: 'title', confidence: 0.9, title_scale: '1:100' },
+    coverage: { used_length: 9.6, total_length: 10.0, pct: 96 },
+    leftovers: [{ a: [0.20, 0.30], b: [0.28, 0.30] }],   // møbelstrek
+  };
+  const n = _planApplyResponse(res, floorId);
+  _planEnter();
+  _showToast && _showToast(n + ' vegger lagt inn fra testdata', 'ok');
+  return n;
+}
+
+// Fra fil til vegg-sjekk: samme underlags-vei som «Jeg tegner selv» (`_loadFileAsBackground`
+// — den eier PDF-rendering, DWG→SVG, sidevelger og kalibrering), og så inn i modusen når
+// underlaget faktisk er på plass. Venter på bildet, for `_planBg()` krever `img` og `widthCm`.
+async function _planStartFraFil(file) {
+  _startMethod = null; _emptyStateDismissed = true;
+  _loadFileAsBackground(file);
+  // ⚠ `_loadFileAsBackground` er asynkron på flere nivåer (PDF-render, DWG→SVG, sidevelger som
+  // VENTER på brukeren). Derfor pollet, ikke et fast timeout: modusen åpner i det øyeblikket
+  // etasjen har et underlag, og gir opp etter 60 s i stedet for å henge.
+  const start = Date.now();
+  while (Date.now() - start < 60000) {
+    await new Promise(r => setTimeout(r, 200));
+    if (_planBg()) { _planEnter(); return true; }
+  }
+  _showToast && _showToast('Fikk ikke lagt inn plantegningen — prøv «Jeg tegner selv»', 'warn');
+  return false;
+}
+
+// ── Treff og interaksjon ──────────────────────────────────────────────────
+// Toleransen er en PARAMETER, ikke en ny konstant — samme mønster `nearMoveArrow` og
+// `hitVertexFreeDrag` (045) bruker, så en finger på smal skjerm treffer.
+function _planHitWall(sx, sy, tol) {
+  const bg = _planBg(); if (!bg) return null;
+  const t = tol || (_kundeErSmal() ? 22 : 10);
+  let best = null, bestD = Infinity;
+  for (const w of _planList()) {
+    const a = _planUVtoW(bg, w.a), b = _planUVtoW(bg, w.b);
+    const sa = w2s(a.x, a.y), sb = w2s(b.x, b.y);
+    const d = distSegPx(sx, sy, sa.x, sa.y, sb.x, sb.y);
+    if (d < t && d < bestD) { bestD = d; best = w; }
+  }
+  return best;
+}
+// Snap til tegningen: motorens EGNE råsegmenter (vegger + rester), ikke piksler. Returnerer
+// verdens-punktet snappet til nærmeste endepunkt eller linje, eller null.
+function _planSnapW(bg, wx, wy, unntaId) {
+  if (!_planSnap) return null;
+  const tolCm = 14 / (S.view.zoom * BASE_SCALE);   // 14 px omregnet til verden
+  let best = null, bestD = tolCm;
+  const kand = [];
+  for (const w of _planList()) { if (w.id === unntaId) continue; kand.push([_planUVtoW(bg, w.a), _planUVtoW(bg, w.b)]); }
+  for (const r of ((_planMeta() || {}).leftovers || [])) kand.push([_planUVtoW(bg, r.a), _planUVtoW(bg, r.b)]);
+  for (const [a, b] of kand) {
+    for (const p of [a, b]) {   // endepunkt først — de er sterkere enn en linje
+      const d = Math.hypot(wx - p.x, wy - p.y);
+      if (d < bestD) { bestD = d; best = { x: p.x, y: p.y }; }
+    }
+  }
+  if (best) return best;
+  return null;
+}
+
+let _planDrag = null;        // { id, uv0a, uv0b, startW }
+let _planTegnStart = null;   // {u,v} mens en ny vegg tegnes
+
+function _planMouseDown(e) {
+  const bg = _planBg();
+  if (!bg) { _showToast && _showToast('Etasjen mangler plantegning', 'warn'); return true; }
+  const sp = _evToCanvas(e);
+  const wp = s2w(sp.x, sp.y);
+
+  if (_planVerktoy === 'slett') {
+    const w = _planHitWall(sp.x, sp.y);
+    if (w) {
+      pushUndo();
+      const liste = _planList();
+      liste.splice(liste.indexOf(w), 1);
+      S.ui.planSelId = null;
+      _planRenderBar(); render();
+    }
+    return true;
+  }
+  if (_planVerktoy === 'tegn') {
+    const snapped = _planSnapW(bg, wp.x, wp.y, null) || wp;
+    const uv = _planWtoUV(bg, snapped.x, snapped.y);
+    if (!_planTegnStart) { _planTegnStart = uv; render(); return true; }
+    pushUndo();
+    const liste = _planList();
+    const forrige = liste[liste.length - 1];
+    liste.push({ id: (S.counters.nextPlanWallId = (S.counters.nextPlanWallId || liste.length + 1) + 1) - 1,
+      a: _planTegnStart, b: uv,
+      thickness_cm: forrige ? forrige.thickness_cm : 10, source: 'single' });
+    _planTegnStart = null;
+    _planRenderBar(); render();
+    return true;
+  }
+  // flytt
+  const w = _planHitWall(sp.x, sp.y);
+  S.ui.planSelId = w ? w.id : null;
+  if (w) {
+    pushUndo();
+    _planDrag = { id: w.id, uv0a: { ...w.a }, uv0b: { ...w.b }, startW: { x: wp.x, y: wp.y } };
+    canvas.style.cursor = 'move';
+    render();
+    return true;
+  }
+  render();
+  return false;   // tomt klikk → la panorering ta over
+}
+
+function _planMouseMove(e) {
+  const bg = _planBg(); if (!bg) return false;
+  const sp = _evToCanvas(e);
+  if (_planDrag) {
+    const wp = s2w(sp.x, sp.y);
+    const w = _planList().find(x => x.id === _planDrag.id);
+    if (!w) { _planDrag = null; return false; }
+    let dx = wp.x - _planDrag.startW.x, dy = wp.y - _planDrag.startW.y;
+    // Snap gjelder veggens START-ende; hele veggen følger etter, så den beholder retningen.
+    const a0 = _planUVtoW(bg, _planDrag.uv0a);
+    const snapped = _planSnapW(bg, a0.x + dx, a0.y + dy, w.id);
+    if (snapped) { dx = snapped.x - a0.x; dy = snapped.y - a0.y; }
+    const b0 = _planUVtoW(bg, _planDrag.uv0b);
+    w.a = _planWtoUV(bg, a0.x + dx, a0.y + dy);
+    w.b = _planWtoUV(bg, b0.x + dx, b0.y + dy);
+    render();
+    return true;
+  }
+  // Markør: viser hva verktøyet vil gjøre her
+  const over = _planHitWall(sp.x, sp.y);
+  canvas.style.cursor = _planVerktoy === 'tegn' ? 'crosshair'
+    : over ? (_planVerktoy === 'slett' ? 'pointer' : 'move') : 'default';
+  return false;
+}
+
+function _planMouseUp() {
+  if (!_planDrag) return false;
+  _planDrag = null;
+  canvas.style.cursor = 'default';
+  _planRenderBar(); render();
+  return true;
+}
+
+// ── Modus ─────────────────────────────────────────────────────────────────
+let _planVerktoy = 'flytt';      // 'flytt' | 'slett' | 'tegn'
+let _planSnap = true;
+function _planEnter() {
+  S.ui.drawMode = 'plan-review';
+  S.ui.planSelId = null;
+  _planVerktoy = 'flytt';
+  _planRenderBar();
+  resizeCanvas();
+  render();
+}
+function _planExit() {
+  if (S.ui.drawMode === 'plan-review') S.ui.drawMode = null;
+  S.ui.planSelId = null;
+  document.getElementById('_plan-bar')?.remove();
+  canvas.style.cursor = 'default';
+  resizeCanvas();
+  render();
+}
+
+function _planRenderBar() {
+  document.getElementById('_plan-bar')?.remove();
+  if (!_planAktiv()) return;
+  const meta = _planMeta() || {};
+  const n = _planList().length;
+  const pct = meta.coverage ? Math.round(meta.coverage.pct) : null;
+  const lav = pct != null && pct < 90;
+  const kn = (id, tegn, tit) =>
+    `<button onclick="_planSettVerktoy('${id}')" title="${tit}"
+      style="min-height:34px;padding:0 13px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+             border:1px solid ${_planVerktoy === id ? PLAN_FARGE : 'var(--border)'};
+             background:${_planVerktoy === id ? 'rgba(255,167,38,.18)' : 'var(--surface2)'};
+             color:var(--text)">${tegn}</button>`;
+  const d = document.createElement('div');
+  d.id = '_plan-bar';
+  d.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);top:12px;z-index:85;'
+    + 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(100vw - 24px);'
+    + 'background:var(--surface);border:1px solid var(--border);border-radius:12px;'
+    + 'box-shadow:0 6px 24px rgba(0,0,0,.3);padding:9px 12px';
+  d.innerHTML = `
+    <span style="font-size:12px;font-weight:700;color:${PLAN_FARGE}">Vegg-sjekk</span>
+    <span style="font-size:11.5px;color:var(--dim)">${n} vegger</span>
+    <span style="width:1px;height:22px;background:var(--border)"></span>
+    ${kn('flytt', '✥ Flytt', 'Dra en vegg på plass')}
+    ${kn('slett', '✕ Slett', 'Klikk en vegg for å fjerne den')}
+    ${kn('tegn', '✎ Tegn', 'Klikk–klikk for en ny vegg')}
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--text)">
+      <input type="checkbox" ${_planSnap ? 'checked' : ''} onchange="_planSnap=this.checked">Snap til tegning</label>
+    <span style="width:1px;height:22px;background:var(--border)"></span>
+    <span style="font-size:12px;color:${lav ? '#f0b232' : 'var(--dim)'}">
+      Dekning: <b>${pct != null ? pct + ' %' : '–'}</b>${lav ? ' — noen vegger mangler, se røde markører' : ''}</span>
+    <button onclick="_planExit()" style="min-height:34px;padding:0 13px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--muted);font-size:12.5px;cursor:pointer">Avbryt</button>
+    <button onclick="_planLagRom()" ${n ? '' : 'disabled'}
+      style="min-height:34px;padding:0 17px;border:none;border-radius:8px;font-size:13px;font-weight:700;
+             cursor:${n ? 'pointer' : 'default'};background:${n ? 'var(--accent)' : 'var(--surface2)'};
+             color:${n ? '#0d0e10' : 'var(--dim)'}">Lag rom</button>`;
+  document.body.appendChild(d);
+}
+// Esc: avbryt en påbegynt vegg først, så hele modusen — samme trapp som andre tegnemoduser.
+function _planEsc() {
+  if (!_planAktiv()) return false;
+  if (_planTegnStart) { _planTegnStart = null; render(); return true; }
+  _planExit();
+  return true;
+}
+function _planSettVerktoy(v) {
+  _planVerktoy = v;
+  _planTegnStart = null;
+  S.ui.planSelId = null;
+  _planRenderBar();
+  render();
+}
+
+// 046 lager INGEN rom — det er 049. Her valideres bare at det finnes vegger, og kontrakten
+// som skal videre logges, så 049 og 047 kan måles mot samme form.
+function _planLagRom() {
+  const n = _planList().length;
+  if (!n) { _showToast && _showToast('Ingen vegger å lage rom av', 'warn'); return null; }
+  const ut = { floorId: _planFloorId(), walls: _planList().map(w => ({ ...w })), meta: _planMeta() };
+  console.log('[046] «Lag rom» — dette sendes videre til 049/motoren:', ut);
+  _showToast && _showToast(n + ' vegger klare. Rom lages i 049.', 'ok');
+  return ut;
+}
+
+
 function drawKundeHighlight() {
   if (!_kundeHlRooms || !_kundeHlRooms.size) return;
   for (const room of S.rooms) {
@@ -18820,6 +19191,144 @@ function _kundeforslagRegressionTest() {
 
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error']('_kundeforslagRegressionTest: ' + (allOk ? 'BESTÅTT' : 'FEILET'), results);
+  return { ok: allOk, results };
+}
+
+// ═══ 046 · REGRESJON: PLANVEGGER ══════════════════════════════════════════════════════════
+// Låser STEG 0-funnene, som alle var overraskelser:
+//  0.1  Fem import-ruter gikk alt gjennom valgdialogen (021b holdt) — men en SJETTE med samme
+//       navn gjorde ikke: høyreklikk-menyens «Importer plantegning».
+//  0.2  `bg.widthCm/originX/originY` ENDRES etter installering (kalibrering, «Flytt underlag»,
+//       bytte). Vegger i verdens-cm ville drevet bort fra tegningen. Derfor sidenormaliserte.
+//  0.3  `floatingDims`/`groups` forsvant stille fra lagring én gang. Rundturen låses her.
+//       Og under bygging: `pushUndo` manglet `planWalls` — Ctrl+Z var en stille no-op.
+function _planRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'skal IKKE finnes', got });
+  const u = _kildeUtenKommentarer;
+  const skript = u([...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n'))
+    .replace(/function _planRegressionTest\(\)[\s\S]*?\n\}/, '');
+
+  const lagret = {
+    planWalls: S.planWalls, planMeta: S.planMeta, bgs: S.bgs, floors: S.floors,
+    drawMode: S.ui.drawMode, aktiv: S.ui.activeFloorId, selId: S.ui.planSelId,
+  };
+  try {
+    // ── A: koordinatmodellen ──
+    S.planWalls = {}; S.planMeta = {};
+    S.floors = [{ id: 1, name: 'P', building: null, order: 0, collapsed: false, partId: 1 }];
+    S.ui.activeFloorId = 1;
+    S.bgs = { 1: { img: {}, widthCm: 1000, heightCm: 700, originX: 0, originY: -700, visible: true } };
+    const n = _planApplyResponse({
+      walls: [{ a: [0.10, 0.20], b: [0.60, 0.20], thickness_cm: 20, source: 'rect' }],
+      coverage: { pct: 96 }, leftovers: [{ a: [0.2, 0.3], b: [0.3, 0.3] }],
+      calibration: { meters_per_point: 0.1134, method: 'title', confidence: 0.9 },
+    }, 1);
+    check('A: kontrakten gir vegger på etasjen', 1, n === 1 && _planList(1).length === 1, n);
+    check('A: koordinatene er u,v — ikke x,y', true,
+      _planList(1)[0].a.u === 0.10 && _planList(1)[0].a.v === 0.20
+      && _planList(1)[0].a.x === undefined, JSON.stringify(_planList(1)[0].a));
+    // ⚠ Kjernen i STEG 0.2: samme vegg, tre ulike bakgrunnstilstander, alltid samme sted PÅ
+    // tegningen. Med verdens-cm ville den stått igjen på 100 cm mens tegningen flyttet seg.
+    const sted = () => { const b = S.bgs[1], w = _planList(1)[0];
+      return [Math.round(b.originX + w.a.u * b.widthCm), Math.round(b.originY + w.a.v * b.heightCm)]; };
+    const ukal = sted();
+    check('A: før kalibrering', '[100,-560]', JSON.stringify(ukal) === '[100,-560]', JSON.stringify(ukal));
+    S.bgs[1].widthCm = 2000; S.bgs[1].heightCm = 1400; S.bgs[1].originY = -1400;
+    const kal = sted();
+    check('A: etter kalibrering følger veggen tegningen', '[200,-1120]',
+      JSON.stringify(kal) === '[200,-1120]', JSON.stringify(kal));
+    S.bgs[1].originX += 500; S.bgs[1].originY += 300;
+    const flyttet = sted();
+    check('A: etter «Flytt underlag» likedan', '[700,-820]',
+      JSON.stringify(flyttet) === '[700,-820]', JSON.stringify(flyttet));
+    check('A: vegglengden i verden er 0.50 × 2000 = 1000 cm', 1000, (() => {
+      const b = S.bgs[1], w = _planList(1)[0];
+      return Math.round(Math.hypot((w.b.u - w.a.u) * b.widthCm, (w.b.v - w.a.v) * b.heightCm)) === 1000;
+    })(), 'feil lengde');
+    check('A: meta bærer dekning, rester og kalibrering', true,
+      _planMeta(1).coverage.pct === 96 && _planMeta(1).leftovers.length === 1
+      && _planMeta(1).calibration.method === 'title', JSON.stringify(_planMeta(1).coverage));
+
+    // ── B: etasjeskille ──
+    S.floors.push({ id: 2, name: 'P2', building: null, order: 1, collapsed: false, partId: 1 });
+    S.ui.activeFloorId = 2;
+    check('B: planvegger er nøklet per etasje, som bgs', 0, _planList().length === 0, _planList().length);
+    S.ui.activeFloorId = 1;
+    check('B: og er tilbake på sin egen etasje', 1, _planList().length === 1, _planList().length);
+
+    // ── C: lagring og angre ──
+    // ⚠ Nøyaktig hullet `floatingDims` og `groups` falt i. Og `pushUndo` manglet `planWalls`
+    // under bygging — Ctrl+Z var en stille no-op etter flytt/slett/tegn.
+    check('C: _buildSaveData tar med planWalls OG planMeta', true,
+      /planWalls: JSON\.parse\(JSON\.stringify\(S\.planWalls \|\| \{\}\)\)/.test(u(_buildSaveData))
+      && /planMeta:  JSON\.parse\(JSON\.stringify\(S\.planMeta  \|\| \{\}\)\)/.test(u(_buildSaveData)),
+      'hull i lagringen');
+    check('C: _restoreProject leser dem tilbake', true,
+      /S\.planWalls = JSON\.parse\(JSON\.stringify\(data\.planWalls \|\| \{\}\)\)/.test(u(_restoreProject)),
+      'hull i gjenopprettingen');
+    check('C: pushUndo tar snapshot av planWalls', true,
+      /planWalls: JSON\.parse\(JSON\.stringify\(S\.planWalls \|\| \{\}\)\)/.test(u(pushUndo)), 'Ctrl+Z blir no-op');
+    check('C: undo legger dem tilbake', true,
+      /S\.planWalls = prev\.planWalls;/.test(u(undo)), 'undo ignorerer dem');
+    // Oppførsel, ikke bare kilde: flytt → angre → tilbake.
+    pushUndo();
+    _planList(1)[0].a = { u: 0.9, v: 0.9 };
+    undo();
+    check('C: angre gir veggen tilbake', 0.10, _planList(1)[0].a.u === 0.10, _planList(1)[0].a.u);
+
+    // ── D: rendering og modus ──
+    check('D: drawPlanWalls kalles fra render(), ikke som hale i drawRooms', true,
+      /drawPlanWalls\(\)/.test(u(render)) && !/drawPlanWalls/.test(u(drawRooms)), 'feil sted');
+    check('D: modusnavnet kolliderer ikke med en eksisterende drawMode', true, (() => {
+      const andre = ['bg-calibrate', 'bg-straighten', 'mat-freehand', 'skillevegg', 'dim', 'hindring', 'hindring-polygon'];
+      return !andre.includes('plan-review');
+    })(), 'kollisjon');
+    S.ui.drawMode = 'plan-review';
+    check('D: _planAktiv() følger drawMode', true, _planAktiv() === true, _planAktiv());
+    S.ui.drawMode = null;
+    check('D: og er av ellers', false, _planAktiv() === false, _planAktiv());
+
+    // ── E: treff og toleranse ──
+    check('E: treff-toleransen er en parameter, ikke en ny konstant', true,
+      /function _planHitWall\(sx, sy, tol\)/.test(skript)
+      && /tol \|\| \(_kundeErSmal\(\) \? 22 : 10\)/.test(skript), 'fast toleranse');
+    check('E: snap leser motorens EGNE segmenter, ikke piksler', true,
+      /_planList\(\)/.test(u(_planSnapW)) && /leftovers/.test(u(_planSnapW))
+      && !/getImageData|pixel/i.test(u(_planSnapW)), 'snapper mot piksler');
+
+    // ── F: inngangene (STEG 0.1) ──
+    check('F: seks ruter gjennom dispatcheren', 6,
+      (skript.match(/_startImportFile\(/g) || []).length === 6,
+      (skript.match(/_startImportFile\(/g) || []).length);
+    check('F: høyreklikk-menyens «Importer plantegning» går gjennom dispatcheren', true,
+      /_bgCtxMenuItems[\s\S]{0,700}?_emptyPickImport\(\)/.test(skript), 'rett til underlag');
+    checkIkke('F: og ikke lenger rett til bg-file-inp',
+      /_bgCtxMenuItems[\s\S]{0,700}?bg-file-inp/.test(skript), 'fortsatt snarvei');
+    // De bevisste underlag-rutene skal BEHOLDE sin egen vei — de målretter en etasje-slot.
+    check('F: _addBgToFloor og _replaceFloorBg beholder bg-file-inp', true,
+      /bg-file-inp/.test(u(_addBgToFloor)) && /bg-file-inp/.test(u(_replaceFloorBg)), 'rutet feil');
+    check('F: dialogen har et tredje valg', true, /_rasterChoose\('plan'\)/.test(skript), 'mangler');
+    check('F: _rasterChoose(\'plan\') går til vegg-sjekken', true,
+      /if \(mode === 'plan'\) \{ _planStartFraFil\(file\); return; \}/.test(u(_rasterChoose)), 'feil ruting');
+
+    // ── G: 046 lager INGEN rom ──
+    checkIkke('G: ingen createRoom i vegg-sjekken',
+      /createRoom\(/.test(u(_planLagRom) + u(_planApplyResponse) + u(_planMouseDown) + u(_planEnter)),
+      'lager rom');
+    S.ui.drawMode = 'plan-review';
+    S.planWalls[1] = [];
+    check('G: «Lag rom» krever minst én vegg', null, _planLagRom() === null, 'godtok tomt');
+  } catch (e) {
+    check('Z: testen kjørte uten å kaste', true, false, e.message);
+  } finally {
+    S.planWalls = lagret.planWalls; S.planMeta = lagret.planMeta; S.bgs = lagret.bgs;
+    S.floors = lagret.floors; S.ui.drawMode = lagret.drawMode;
+    S.ui.activeFloorId = lagret.aktiv; S.ui.planSelId = lagret.selId;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error']('_planRegressionTest: ' + (allOk ? 'BESTÅTT' : 'FEILET'), results);
   return { ok: allOk, results };
 }
 
@@ -47020,6 +47529,11 @@ function pushUndo() {
     stairs:    S.stairs.map(s=>({...s, surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
     // F4a (Kenneth 17.09.2026): fri folie — egen liste, egen id-teller (nextFoilFreeId).
     foilFree:  (S.foilFree||[]).map(f=>({...f})),
+    // ⚠ 046: planveggene MÅ være her. Målt i live-test: uten dette var Ctrl+Z en stille no-op
+    // etter flytt/slett/tegn, og de påfølgende testene mine målte derfor feil tilstand. Dette
+    // er NØYAKTIG samme hull `matPaths` og `floatingDims` hadde (se kommentarene over) — tredje
+    // gang samme feilklasse. Dyp klone: `a`/`b` er egne objekter som mutere i plass under drag.
+    planWalls: JSON.parse(JSON.stringify(S.planWalls || {})),
     groups:    S.groups.map(g=>({...g, stripIds:[...g.stripIds]})),
     floors:    S.floors.map(f=>({...f})),
     parts:     S.project.parts.map(p=>({...p})),
@@ -47060,6 +47574,11 @@ function undo() {
   if (prev.groups !== undefined) {
     S.groups = prev.groups;
     S.counters.nextGroupId = prev.nextGroupId;
+  }
+  if (prev.planWalls !== undefined) {
+    S.planWalls = prev.planWalls;                         // 046
+    if (S.ui.planSelId != null && !(_planList() || []).some(w => w.id === S.ui.planSelId)) S.ui.planSelId = null;
+    if (typeof _planRenderBar === 'function' && _planAktiv()) _planRenderBar();
   }
   if (prev.zones !== undefined) {
     S.zones = prev.zones;
@@ -47432,6 +47951,11 @@ canvas.addEventListener('mousedown', e=>{
   if (_merkemodus && e.button === 0) { _merkemodusKlikk(e); e.preventDefault(); return; }
   // 032: kundesiden i mål-modus er presentasjon PLUSS vegg-redigering. Grenen ligger FØR
   // present-grenen under, så innloggede brukere og ?present= er helt uberørt.
+  // 046: vegg-sjekken eier lerretet mens den står på — den ligger derfor FØRST i kaskaden.
+  // Returnerer false på tomt klikk, så panorering fortsatt virker.
+  if (_planAktiv() && e.button === 0) {
+    if (_planMouseDown(e)) { e.preventDefault(); return; }
+  }
   if (S.ui.present && S.ui.kundeMode === 'maal' && e.button === 0) {
     const _kp = _evToCanvas(e);
     const _kTol = _kundeErSmal() ? 22 : 9;
@@ -49030,6 +49554,9 @@ canvas.addEventListener('mousemove', e=>{
   // 032: ETT unntak — et pågående gizmo-drag på kundesiden skal falle gjennom til den
   // vanlige `_movingWall`-grenen lenger nede, så geometrien flyttes av nøyaktig samme kode
   // som for innloggede brukere. Ingen parallell dra-motor.
+  if (_planAktiv() && !_panning) {
+    if (_planMouseMove(e)) return;
+  }
   if (S.ui.present && S.ui.kundeMode === 'maal' && !_movingWall && !_vdDragging && !_panning) {
   // 033: markøren som i Varmeplan — men KUN de grenene som finnes på kundesiden, i samme
     // rekkefølge og med samme funksjoner som innlogget. STEG 0.1 målte at den innloggede
@@ -50128,6 +50655,7 @@ canvas.addEventListener('mouseleave', () => {
 
 canvas.addEventListener('mouseup', e=>{
   // 032: gizmo-draget er sluppet — speil den nye geometrien tilbake til kundens tall.
+  if (_planAktiv() && _planMouseUp()) return;
   if (S.ui.present && S.ui.kundeMode === 'maal' && _movingWall) { _kundeGizmoSlipp(); return; }
   if (S.ui.present && S.ui.kundeMode === 'maal' && _vdDragging) { _kundeHjorneSlipp(); return; }
   // Presentasjonsmodus: avslutt panorering; tap (uten drag) velger rom under peker.
@@ -50366,7 +50894,13 @@ function _bgCtxMenuItems() {
   const bg = _activeBgLayer();
   if (!bg || !bg.img) {
     // No background yet → offer import.
-    return `<div class="ctx-item" onclick="document.getElementById('bg-file-inp').click();hideCtx()">${IC('map',14)} Importer plantegning</div>`;
+    // ⚠ 046 (STEG 0.1-funn): denne het NØYAKTIG det samme som verktøylinjens «Importer
+    // plantegning», men gikk rett til `handleBgFile` — underlag, ingen valgdialog. Samme ord,
+    // ulik oppførsel. Den går nå gjennom `_emptyPickImport`, altså samme dispatcher som de fem
+    // andre inngangene. `_addBgToFloor`/`_replaceFloorBg`/`confirmAddFloorWithBg`/
+    // `openBgImportPanel` beholder `bg-file-inp`: de målretter en bestemt etasje-slot først, og
+    // skal med vilje bare legge et underlag.
+    return `<div class="ctx-item" onclick="_emptyPickImport();hideCtx()">${IC('map',14)} Importer plantegning</div>`;
   }
   if (bg._needsCalibration) {
     return `<div class="ctx-sub-lbl">Plantegning</div>
@@ -50575,6 +51109,21 @@ document.addEventListener('keydown', e=>{
 
   // 034: Esc = ferdig med merkemodus. Må stå før alt annet, ellers tar en av grenene under den.
   if (_merkemodus) { if (e.key === 'Escape') { e.preventDefault(); _kundeAvsluttMerkemodus(true); } return; }
+  // 046: vegg-sjekken eier tastaturet mens den står på — Esc avbryter påbegynt vegg, så modusen.
+  if (_planAktiv()) {
+    const _pae = document.activeElement;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(_pae?.tagName || '')) return;
+    if (e.key === 'Escape') { e.preventDefault(); _planEsc(); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (S.ui.planSelId != null) {
+        e.preventDefault(); pushUndo();
+        const l = _planList(); const i = l.findIndex(w => w.id === S.ui.planSelId);
+        if (i >= 0) l.splice(i, 1);
+        S.ui.planSelId = null; _planRenderBar(); render();
+      }
+      return;
+    }
+  }
   // 032: piltaster på kundesiden. Escape fjerner veggvalget i stedet for å avslutte —
   // `_presentExit()` ville tatt kunden ut av siden han nettopp ble sendt til.
   if (S.ui.present && S.ui.kundeMode === 'maal') {
@@ -53955,6 +54504,13 @@ function _rasterMethodChoice(file){
       <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('check',15)} La appen finne rommene <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#0d0e10;background:var(--accent);border-radius:5px;padding:2px 7px">Anbefalt</span></div>
       <div style="font-size:12px;color:var(--dim);margin-top:3px">Appen tolker tegningen og foreslår rommene — du bekrefter og justerer.</div>
     </button>
+    <!-- 046: tredje vei. «Anbefalt»-merket står FORTSATT på «La appen finne rommene» — det
+         flyttes hit i 049, når flyten virker ende til ende. Å flytte det nå ville anbefalt noe
+         som ennå ikke lager rom. -->
+    <button style="${card}" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="_rasterChoose('plan')">
+      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('map',15)} Finn vegger og rom automatisk <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:2px 7px">Ny</span></div>
+      <div style="font-size:12px;color:var(--dim);margin-top:3px">Appen finner veggene og viser dem oppå tegningen. Du ser at de ligger riktig, retter det som trengs, og lager rommene selv.</div>
+    </button>
     <button style="${card};margin-bottom:0" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="_rasterChoose('manual')">
       <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('pencil',15)} Jeg tegner selv</div>
       <div style="font-size:12px;color:var(--dim);margin-top:3px">Legg tegningen som underlag og tegn rommene oppå (rektangel, polygon, L-form, vegg-for-vegg).</div>
@@ -53966,6 +54522,9 @@ function _rasterChoose(mode){
   document.getElementById('_raster-choice-ov')?.remove();
   const file = _rasterChoiceFile; _rasterChoiceFile = null;
   if (!file) return;
+  // 046: 'plan' legger tegningen som underlag (samme vei som 'manual') og går så inn i
+  // vegg-sjekken. Motoren kalles i 047 — i 046 fylles veggene av `_planDevFixture`.
+  if (mode === 'plan') { _planStartFraFil(file); return; }
   if (mode === 'auto') { _autoReadStart(file); }                       // bakgrunn+kalibrering → auto-deteksjon → gjennomgang
   else { _startMethod = null; _emptyStateDismissed = true; _loadFileAsBackground(file); }   // underlag → bruker tegner selv
 }
@@ -54939,6 +55498,12 @@ function _buildSaveData() {
         .filter(([,bg]) => bg.dataUrl)
         .map(([k, bg]) => [k, _serializeBgFields(bg)])
     ),
+    // 046: planveggene hører til etasjens plantegning og må overleve lagring. ⚠ Nøyaktig dette
+    // hullet tok `floatingDims` og `groups` en gang (se kommentaren over dem) — de ble bygget,
+    // brukt, og forsvant stille ved hver lagring fordi ingen la dem her. Rundturen er låst med
+    // en regresjonssjekk.
+    planWalls: JSON.parse(JSON.stringify(S.planWalls || {})),
+    planMeta:  JSON.parse(JSON.stringify(S.planMeta  || {})),
     // DEL C (Kenneth 25.08.2026, «flere plantegninger per etasje»): referanser lagres per etasje
     // som en array, samme feltsett som den aktive (_serializeBgFields — delt, ikke duplisert, for
     // å unngå at de to driver fra hverandre slik bgs/bgLayers en gang gjorde).
@@ -55297,6 +55862,10 @@ function _restoreProject(data) {
   // Restore background images per floor. The image onload is ASYNC: guard it with the load
   // generation so a background still decoding from a PREVIOUSLY-opened project can't write itself
   // into the project opened after it (this caused a bg to «leak» onto other projects until refresh).
+  // 046: planveggene gjenopprettes FØR bakgrunnene — de er ren data (ingen async dekoding),
+  // og `drawPlanWalls` tåler at underlaget ennå ikke er lastet (den tegner ingenting da).
+  S.planWalls = JSON.parse(JSON.stringify(data.planWalls || {}));
+  S.planMeta  = JSON.parse(JSON.stringify(data.planMeta  || {}));
   S.bgs = {};
   const _myBgGen = _bgRestoreGen;
   // STEG 3 (etasje-vanntett, migrasjon, Kenneth 19.08.2026): S.bgLayers (flere lag på SAMME
