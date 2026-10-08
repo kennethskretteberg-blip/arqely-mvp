@@ -4,6 +4,50 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## «Be kunde om mål»: knappen først, så alle mål eller utvalgte vegger — ingen balanse-advarsel for innlogget — «Tegn selv» parkert — 2026-10-07
+
+Prompt 034. Kenneth: «Jeg trenger ikke advarsel om at rommet ikke går opp — det forstår jeg selv …
+Jeg ønsker å kunne trykke på en knapp, da kan valgene komme opp … Å tegne rommet selv tenker jeg
+er uaktuelt i denne settingen.»
+
+**Rekkefølgen er snudd.** Før måtte man merke vegger via kontekstmenyen *først*, så trykke
+knappen. Nå kommer knappen først, og modalen gir to valg:
+
+| Valg | `asked_walls` | Kundesiden |
+|---|---|---|
+| **Sjekke alle mål** (standard) | `[]` | ingen røde vegger, vanlig rekkefølge, «Sjekk alle mål og rett det som er feil» |
+| **Bare utvalgte vegger** | de merkede | røde «?» først, «De røde veggene er de vi er mest usikre på — men du kan rette alle» |
+
+«Merk vegger på tegningen» lukker modalen og starter en **merkemodus**: banner øverst med teller,
+klikk på vegg toggler, Esc = ferdig, Avbryt gir utgangspunktet tilbake uberørt. Den bruker
+`toggleWallUncertain` — **samme setter som kontekstmenyens «⚠ Usikkert mål»** (STEG 0.2), ikke en
+parallell vei inn i `room.uncertainWalls`. 0 merkede ved «Lag lenke» gir en toast i stedet for en
+tom lenke.
+
+**STEG 0.1 — hva som ble fjernet og hva som står:**
+
+| Fjernet (innlogget) | Står |
+|---|---|
+| `#wbw-balance` i markupen og `_wbwUpdateBalanceLine` som fylte den | `_roomAxisBalance`, `_axisBalanceText`, `_axisBalanceSuspectWalls` som **funksjoner** |
+| `_wbwBalanceToast` ved lukking av WBW | Kundesidens ene stille linje |
+| `_markAxisAndToast` + `markAxisWallsUncertain` — de fantes bare for toastens «Merk veggene»-knapp | 028-panelets visning av **kundens** tall |
+| En død ctxbar-gren der `_txt` var hardkodet `null` | Kontekstmenyens «⚠ Usikkert mål» |
+
+Verifisert med Kenneths egen skisse fra 07.10 (lukkevegg 941 cm fra start, maksimalt ubalansert):
+**ingen linje, ingen toast, ingenting som nevner balansen** — og rommet lukkes som før.
+
+**«Tegn selv» (030) er parkert**, ikke slettet. `KUNDE_TEGN_ENABLED = false` skjuler valget når
+en *ny* lenke lages; `_kundeLoadByToken` åpner fortsatt eksisterende tegn-lenker med alle fire
+verktøyene, så ingen utsendt lenke brytes — verifisert. Grunnen er Kenneths: å be kunden tegne
+rommet er uaktuelt i denne settingen. Erstattes senere av «elektriker legger inn mål i Varmeplan
+og sender forespørsel» (egen sak i Notion).
+
+**Regresjon:** testen som sjekket at WBW-toasten var gatet på kundemodus er snudd — den sjekker nå
+at toasten og de to hjelpefunksjonene er **borte**, at `#wbw-balance` ikke finnes, og at
+`_roomAxisBalance`/`_axisBalanceText` likevel er beholdt. 15 batterier grønt: **411 sjekker**.
+
+---
+
 ## Sett vegglengde: riktig ende flytter seg — skjev nabo rettes opp — 2026-10-07
 
 Prompt 035. Kenneth: «Jeg ønsker å endre lengden på en vegg slik at det blir vinkelrette hjørner.
