@@ -4,6 +4,51 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesvar: status hentes ved prosjektåpning, panelet åpner seg selv — 2026-10-08
+
+Prompt 037. Kenneth: «Går jeg rett inn på prosjektet som har merknaden, får jeg ikke opp
+handlingsboksen … Jeg må gå inn på lenken i e-posten — og den åpner seg i en ny fane. Tungvint.»
+
+**Det var ikke panelet som manglet — statusen ble aldri hentet.** `_openCloudProject` kalte
+`_loadFromSupabase` → `_restoreProject` og var ferdig. 029-kommentaren påsto at den «ender med
+`_kundeRefreshStatus()` via renderSidebar-kjeden», men `_renderSbProjInfo` **leser** bare
+`_kundeLinkCache` — den henter ingenting. Merket i prosjektlista kom fra en egen, lett spørring
+og var riktig hele tiden; det var derfor merknaden syntes mens panelet uteble.
+
+**⚠ STEG 0.1 — stale cache bekreftet, og den var verre enn «panelet mangler».** Målt: åpnet man
+prosjekt A via e-postlenken og deretter prosjekt B fra lista, viste B fortsatt
+«✉ Svar fra kunde (8. okt., Ola)» — **As lenke**. Hadde Kenneth trykket «Gå gjennom» der, ville
+han fått As svar presentert mot Bs rom.
+
+**STEG 0.2 — elleve steder setter `_supabaseProjectId`**, men alle ti innlastingsveiene (fil,
+versjon, gjenoppretting, konvertering, sky, presentasjon) går gjennom **`_restoreProject`**.
+Nullstillingen hører derfor hjemme der, i det ene punktet — ikke spredt på elleve.
+
+**STEG 0.3 — e-postknappen har ingen `target`**, så den arver mottakerens standard. Ny fane er
+e-postklientens valg, ikke vårt. Punkt 2 løser uansett det Kenneth ba om: han trenger ikke
+lenger gå via e-posten.
+
+**Dette er gjort:**
+- `_restoreProject` nullstiller `_kundeLinkCache` og `_kundeReviewShownFor`.
+- `_openCloudProject` henter statusen (`await`) og kaller `_kundeMaybeOpenReview()`.
+- `_kundeMaybeOpenReview` åpner panelet kun ved `status === 'answered'`, og **én gang per
+  åpning** — etter Lukk kommer det ikke tilbake, men raden «✉ Svar fra kunde — Gå gjennom» står
+  igjen i sidebaren som veien tilbake. Åpnes prosjektet på nytt, vises det igjen.
+- E-postveien bruker nå nøyaktig samme kode; dens eget `_kundeRefreshStatus`-kall og den
+  feilaktige 029-kommentaren er fjernet.
+- Merket i lista har ingen egen klikkvei — det bobler til radens `_openCloudProject`, så
+  punkt 4 i prompten var allerede dekket.
+
+**⚠ Fjerde gang på én dag gikk jeg i inverterings-fella** i regresjonstestene:
+`check(navn, false, betingelse, …)` feiler nettopp når koden er riktig, fordi tredje argument
+*er* påstanden. Løsningen er ikke «vær mer forsiktig», men et eget navn: ny `checkIkke(navn,
+betingelse, fikk)` finnes nå i begge testbatteriene, så en negativ påstand kan skrives som det
+den er.
+
+**Regresjon:** 15 batterier grønt, **428 sjekker**.
+
+---
+
 ## Kundesidens musemarkør identisk med hovedmodulen — 2026-10-08
 
 Prompt 036. Kenneth: «Normalt en pil. Kryss når den føres over en vegg. Hånd over et hjørne.

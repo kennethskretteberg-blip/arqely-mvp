@@ -37532,9 +37532,11 @@ function _edgeMailRegressionTest() {
   const results = [];
   // ⚠ TREDJE ARGUMENT ER PÅSTANDEN SOM MÅ VÆRE SANN. `expected` er kun visning.
   // Det er lett å skrive `check('ingen X', false, /X/.test(kode), …)` og tro at `false` er
-  // forventningen — da feiler sjekken nettopp når koden er RIKTIG. Skjedde i 029 og igjen her.
-  // Skriv alltid `check('ingen X', true, !/X/.test(kode), …)`.
+  // forventningen — da feiler sjekken nettopp når koden er RIKTIG. Jeg gikk i den fella fire
+  // ganger på én dag (029, 034, 036, 037), så løsningen er ikke «vær mer forsiktig», men et
+  // eget navn for den negative påstanden: bruk `checkIkke` når noe IKKE skal være der.
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'skal IKKE finnes', got });
   try {
     // ⚠ Testen må fjerne SEG SELV fra høystakken. Første utgave gjorde ikke det, og feilet på
     // fire påstander fordi dens egne regexer inneholder nettopp ordene den leter etter
@@ -37596,6 +37598,10 @@ function _kundelenkeRegressionTest() {
                   rev: typeof _kundeRevState !== 'undefined' ? _kundeRevState : null };
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  // ⚠ Samme felle som i _edgeMailRegressionTest: `check(navn, false, betingelse, …)` feiler
+  // nettopp når koden er riktig. `checkIkke` finnes så en negativ påstand kan skrives som det
+  // den er. Jeg gikk i fella fire ganger på én dag før jeg laget den.
+  const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'skal IKKE finnes', got });
   try {
     // ─── A — _roomAxisBalance ───
     const rekt = [{x:0,y:0},{x:320,y:0},{x:320,y:400},{x:0,y:400}];
@@ -38365,6 +38371,70 @@ function _kundelenkeRegressionTest() {
     check('L: pan-slipp gir pil i kundemodus, hånd i ren presentasjon', true,
       /const _hvile = \(S\.ui\.kundeMode === 'maal'\) \? 'default' : 'grab'/.test(_skriptJ),
       'pan-slipp ikke skilt');
+
+    // ─── M (037) — status hentes ved prosjektåpning, panelet åpner seg selv ───
+    // ⚠ MÅLT FØR FIKSEN: åpnet man prosjekt A via e-postlenken og deretter prosjekt B fra
+    // lista, viste B fortsatt «✉ Svar fra kunde (8. okt., Ola)» — As lenke. «Gå gjennom» ville
+    // da gitt As svar på Bs rom. Årsaken var at `_openCloudProject` aldri hentet statusen;
+    // 029-kommentaren påsto at renderSidebar-kjeden gjorde det, men `_renderSbProjInfo` bare
+    // LESER cachen.
+    check('M: _openCloudProject henter kundelenke-status', true,
+      /await _kundeRefreshStatus\(\);/.test(_kildeUtenKommentarer(_openCloudProject)),
+      'henter ikke status');
+    check('M: ...og lar panelet åpne seg selv', true,
+      /_kundeMaybeOpenReview\(\);/.test(_kildeUtenKommentarer(_openCloudProject)),
+      'åpner ikke panelet');
+    check('M: _restoreProject nullstiller cachen — DET ENE punktet alle lastinger går gjennom', true,
+      /_kundeLinkCache = null;/.test(_kildeUtenKommentarer(_restoreProject))
+      && /_kundeReviewShownFor = null;/.test(_kildeUtenKommentarer(_restoreProject)),
+      'nullstiller ikke');
+    checkIkke('M: e-postveien har ikke lenger sitt eget hent-kall',
+      /await _kundeRefreshStatus\(\)/.test(_kildeUtenKommentarer(_kundeOpenFromMail)), 'dobbelt hent');
+
+    // Panelet åpner KUN ved 'answered', og kun én gang per åpning.
+    (() => {
+      const lagret = { link: _kundeLinkCache, vist: _kundeReviewShownFor,
+                       pid: _supabaseProjectId, rev: _kundeRevState, rooms: S.rooms };
+      try {
+        document.getElementById('kunde-rev-ov')?.remove();
+        const a = [{x:0,y:0},{x:400,y:0},{x:400,y:320},{x:0,y:320}];
+        S.rooms = [{ id: 1, name: 'Stue', floorId: null, partId: null, shape: 'polygon',
+          wallThicknessCm: 0, points: a.map(p => ({...p})), walls: compWalls(a), dims: [],
+          annotOffsets: {}, area: compArea(a), uncertainWalls: [] }];
+        _supabaseProjectId = 'p1'; _kundeRevState = null;
+
+        _kundeLinkCache = null; _kundeReviewShownFor = null;
+        _kundeMaybeOpenReview();
+        checkIkke('M: ingen lenke → ingen panel', !!document.getElementById('kunde-rev-ov'), 'panel åpnet');
+
+        _kundeLinkCache = { id: 'x', status: 'open' };
+        _kundeMaybeOpenReview();
+        checkIkke('M: status «open» → ingen panel', !!document.getElementById('kunde-rev-ov'), 'panel åpnet');
+
+        _kundeLinkCache = { id: 'x', status: 'applied', answer: { walls: [] } };
+        _kundeMaybeOpenReview();
+        checkIkke('M: status «applied» → ingen panel', !!document.getElementById('kunde-rev-ov'), 'panel åpnet');
+
+        _kundeLinkCache = { id: 'x', status: 'answered', answered_at: new Date().toISOString(),
+          answer: { walls: [{ roomId: 1, wallIdx: 0, lengthCm: 410, wasCm: 400 }] } };
+        _kundeMaybeOpenReview();
+        check('M: status «answered» → panelet åpnes', true, !!document.getElementById('kunde-rev-ov'), false);
+
+        document.getElementById('kunde-rev-ov')?.remove();
+        _kundeMaybeOpenReview();
+        checkIkke('M: ...men bare én gang per åpning',
+          !!document.getElementById('kunde-rev-ov'), 'popper opp igjen etter Lukk');
+
+        _kundeReviewShownFor = null;   // ny åpning av samme prosjekt
+        _kundeMaybeOpenReview();
+        check('M: en ny åpning viser det igjen', true, !!document.getElementById('kunde-rev-ov'), false);
+      } finally {
+        document.getElementById('kunde-rev-ov')?.remove();
+        _kundeLinkCache = lagret.link; _kundeReviewShownFor = lagret.vist;
+        _supabaseProjectId = lagret.pid; _kundeRevState = lagret.rev; S.rooms = lagret.rooms;
+        _invalidateStripCache();
+      }
+    })();
 
     // ─── K (035) — hvilken ende flytter seg, og hvorfor ───
     // ⚠ MÅLT på Kenneths rom før noe ble skrevet:
@@ -53296,6 +53366,14 @@ function _migrateV1ToV2(data) {
 let _bgRestoreGen = 0;   // bumped on every project load → invalidates stale async bg image loads
 function _restoreProject(data) {
   if (!data._version||!data.project||!data.rooms) { alert('Ugyldig prosjektfil.'); return; }
+  // ⚠ 037: kundelenke-cachen tilhører prosjektet som var åpent, og MÅ nullstilles her.
+  // Målt før fiksen: åpnet man prosjekt A via e-postlenken og deretter prosjekt B fra lista,
+  // viste B fortsatt «✉ Svar fra kunde (8. okt., Ola)» — As lenke. «Gå gjennom» ville da gitt
+  // As svar på Bs rom. `_restoreProject` er det ENE punktet alle ti innlastingsveiene går
+  // gjennom (fil, versjon, gjenoppretting, konvertering, sky, presentasjon), så det er her
+  // nullstillingen hører hjemme — ikke spredt på elleve steder som setter _supabaseProjectId.
+  _kundeLinkCache = null;
+  _kundeReviewShownFor = null;
   _bgRestoreGen++;   // any background image still loading from a previously-opened project is now stale
   _matFree = null; _matFreeLastClick = null;   // avbryt evt. påbegynt frihånds-matte fra forrige prosjekt
   // Migrate old v1 projects to v2 (add parts + partId)
@@ -63919,11 +63997,12 @@ async function _kundeOpenFromMail() {
   // aldri ble apnet.
   if (_supabaseProjectId !== pid) return;
   if (!svarId) return;
-  // _openCloudProject ender med _kundeRefreshStatus() via renderSidebar-kjeden, men den er
-  // asynkron — vent på den eksplisitt i stedet for å gjette på en timeout.
-  await _kundeRefreshStatus();
-  if (_kundeLinkCache && _kundeLinkCache.status === 'answered') openKundeReviewPanel();
-  else _showToast && _showToast('Svaret er enten allerede innarbeidet eller trukket tilbake', 'info');
+  // 037: `_openCloudProject` henter nå statusen og åpner panelet selv — e-postveien og
+  // lista går gjennom nøyaktig samme kode. (029-kommentaren her påsto at renderSidebar-kjeden
+  // hentet statusen; det stemte ikke, og det var hele grunnen til at panelet uteble fra lista.)
+  if (!_kundeLinkCache || _kundeLinkCache.status !== 'answered') {
+    _showToast && _showToast('Svaret er enten allerede innarbeidet eller trukket tilbake', 'info');
+  }
 }
 
 async function initSupabase() {
@@ -65782,6 +65861,24 @@ async function _openCloudProject(id) {
   // til en bar prikk (den kjenner ikke databasens updated_at, bare selve JSON-blobben). Her, i
   // den faktiske åpne-fra-lista-flyten, HAR vi radas ekte lagretidspunkt — bruk det.
   if (row.updated_at) _updateSaveIndicator('saved', { at: new Date(row.updated_at) });
+  // 037 (Kenneth 08.10.2026): «Går jeg rett inn på prosjektet som har merknaden, får jeg ikke
+  // opp handlingsboksen.» Årsaken var ikke panelet, men at statusen aldri ble hentet herfra:
+  // 029-kommentaren påsto at `renderSidebar`-kjeden gjorde det, men `_renderSbProjInfo` bare
+  // LESER `_kundeLinkCache` — den henter ingenting. Nå hentes den her, i prosjektåpningen,
+  // som er der den hører hjemme.
+  await _kundeRefreshStatus();
+  _kundeMaybeOpenReview();
+}
+
+// 037: panelet åpner seg selv når et prosjekt med ubehandlet kundesvar åpnes — fra lista OG
+// fra e-postlenken, samme kode. Én gang per åpning, så det ikke popper opp igjen etter Lukk;
+// raden «✉ Svar fra kunde — Gå gjennom» står igjen i sidebaren som veien tilbake.
+let _kundeReviewShownFor = null;
+function _kundeMaybeOpenReview() {
+  if (!_kundeLinkCache || _kundeLinkCache.status !== 'answered') return;
+  if (!_supabaseProjectId || _kundeReviewShownFor === _supabaseProjectId) return;
+  _kundeReviewShownFor = _supabaseProjectId;
+  openKundeReviewPanel();
 }
 
 let _pendingDeleteId = null;
