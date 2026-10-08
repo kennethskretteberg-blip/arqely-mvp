@@ -89,8 +89,31 @@ Kenneth svarer til slutt.
 
 ## 049
 
--
+- **«Anbefalt»-merket er flyttet**, slik 046 varslet: PDF og DWG anbefaler nå «Finn vegger og
+  rom automatisk». De to gamle valgene står urørt ved siden av.
+- **Rom uten varme ble borte, ikke uvarmet.** Første versjon av `_reviewCommit` droppet rader
+  med romtype «ingen varme» helt. Det er feil tolkning av avklaringen din: rommet skal
+  *finnes* på tegningen, bare uten varmeprodukt. Nå opprettes det med `calcType: 'none'`.
+- **`rr.calcType || 'foil'`** gjorde at «ingen varme» likevel fikk folie, fordi `'none'` er
+  sant men falt gjennom en senere gren. Rettet; regresjonstest låser det.
+- **«Ikke navngitt» er en sammenslått gruppe**, ikke N rader. Et rom motoren ikke fant navnet
+  på får ikke et gjettet navn — gruppa kan åpnes og navngis, eller bekreftes som den er.
+- Si fra om gjenkjenningen av romtype fra navn skal utvides. Den bruker nå `_pdfGuessRoomType`
+  utvidet med arkitekttegningens ord (sov/stue/bad/vask/gang/wc/kjøkken/teknisk/bod).
 
 ## 050
 
--
+- **Fylte flater finnes ikke i DWG** — CAD-vegger er doble linjer. `rect`-veien i 047 er
+  ubrukt for DWG, og `double`-tersklene bærer alt. Verdt å vite før du justerer terskler.
+- **$INSUNITS gir eksakt målestokk** (`confidence: 1.0`), bedre enn både tittelfelt og
+  arealkryss. Derfor står «Anbefalt» på plan-veien også for DWG.
+- **Tre feller, alle målt og rettet:** (1) bakgrunnen beskjærer til `MAX_BACKGROUND_SEGMENTS`
+  og målte utstrekningen av den beskårne mengden — nå delt kilde, ellers driver veggene bort
+  fra underlaget på store tegninger; (2) origo er ikke (0,0) i en DWG, så normaliseringen må
+  trekke det fra; (3) **label-vinduet stod i PDF-punkter** og brakk på en DXF i millimeter —
+  rommene kom tilbake navnløse. Vinduet er nå i virkelige meter.
+- **Ubesvart fra 047c:** skal jeg gjøre 047d (dobbel-paringen + ytre ramme), eller er
+  vegg-sjekken den manuelle opprettingen? Den ekte tegningen står på 253 vegger / 134 røde
+  prikker / 53,4 % dekning / 0 lukkede rom.
+- **Dekningsgrensen (046) er fortsatt 90 %.** Si fra om den skal ned, eller byttes til
+  «N vegger mangler».
