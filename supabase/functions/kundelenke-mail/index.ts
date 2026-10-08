@@ -196,6 +196,12 @@ Deno.serve(async (req) => {
         ? new Date(link.expires_at).toLocaleDateString("nb-NO", { day: "numeric", month: "long", year: "numeric" })
         : null;
 
+      // 039: instruksjonsvideo. Id-en leses fra en secret ved HVERT kall, ikke fra koden —
+      // da kan videoen byttes uten a deploye funksjonen pa nytt. Tom secret = ingen linje.
+      const videoId = (Deno.env.get("KUNDE_VIDEO_ID") ?? "").trim();
+      const videoUrl = videoId
+        ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}` : "";
+
       await sendEmail({
         to: [rcpt],
         fromName: _avsenderNavn(orgName),
@@ -207,6 +213,7 @@ Deno.serve(async (req) => {
           <p style="font-size:14px;line-height:1.55;color:#4b5563">Åpne lenken under, så ser du tegningen og kan rette målene direkte. Du trenger ingen innlogging.</p>
           ${msg ? `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0891b2;border-radius:8px;padding:12px 14px;margin:16px 0;font-size:13px;white-space:pre-wrap">${esc(msg)}</div>` : ""}
           ${button(kundeUrl, "Fyll inn mål")}
+          ${videoUrl ? `<p style="font-size:13px;line-height:1.55;margin:14px 0 0"><a href="${esc(videoUrl)}" style="color:#0891b2;font-weight:600">▶ Se instruksjonsvideo (1 min)</a></p>` : ""}
           ${utlop ? `<p style="font-size:12px;color:#6b7280;margin-top:16px">Lenken er gyldig til ${esc(utlop)}.</p>` : ""}`),
       });
 

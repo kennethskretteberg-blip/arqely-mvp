@@ -149,6 +149,13 @@ Stengt med en ny `body.kunde-maal`-klasse. Lærdommen: kundesiden er presentasjo
 redigering, så den kan ikke bare arve `present-mode`-lista — hver nye ting som vises ved et
 valg må sjekkes eksplisitt.
 
+**039 fant en femte, av en annen type:** 030 la inn en gate i `_presentRenderBar()` —
+`const _kunde = !!(S.ui && S.ui.kundeMode)` — som skulle skjule «⬇ PDF» og de tre KPI-ene
+(Rom / Oppvarmet / Installert effekt) på en kundelenke. Gaten fyrte aldri: `S.ui.kundeMode`
+ble satt på linja **under** `_presentEnter(true)`, altså etter at baren allerede var tegnet.
+Målt i live HTML 08.10.2026. Her var det ikke gaten som manglet, men **rekkefølgen** — en
+riktig skrevet regel kan stå død fordi den leses før flagget finnes.
+
 ## Tre åpne e-postutløsere — funnet og tettet
 
 Målt mot de deployede funksjonene 07.10.2026, ikke lest ut av koden. Alle tre er nå rettet og

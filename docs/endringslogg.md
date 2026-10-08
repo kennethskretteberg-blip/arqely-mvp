@@ -4,6 +4,52 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesiden: «Instruksjonsvideo»-knapp med kapitler — 2026-10-08
+
+Prompt 039. Kenneth: «Jeg ønsker å ta opp skjermen min og vise hvordan kunden endrer målene …
+en egen knapp oppe til høyre.»
+
+**STEG 0.2 — CSP:** det finnes ingen. `vercel.json` har bare en redirect, og `index.html` har
+ingen `Content-Security-Policy`-meta. Ingen `frame-src` å utvide; iframen slipper gjennom, og
+konsollen er ren ved åpning.
+
+**STEG 0.1 — knappen skulle «til venstre for PDF-knappen», men det er ingen PDF der.** Verre:
+den var der, og skulle ikke vært det. 030 la inn `const _kunde = !!(S.ui && S.ui.kundeMode)` i
+`_presentRenderBar()` for å skjule PDF og KPI-ene på en kundelenke — men `S.ui.kundeMode` ble
+satt på linja **under** `_presentEnter(true)`, som allerede hadde tegnet baren. Målt i live
+HTML: kundesiden viste «⬇ PDF» og «1 Rom · 0.0 m² · 0 W». Flagget settes nå først. Uten den
+rettelsen ville videoknappens egen gate hatt nøyaktig samme feil.
+
+**Knappen havnet i `.pb-kpis` i `#present-bar`** — eneste knapp der på en kundelenke, 16 px fra
+høyre kant. «▶ Instruksjonsvideo» på PC, «▶ Video» på telefon.
+
+**Videoen ligger ikke i repoet.** `KUNDE_VIDEO` tar enten `youtubeId` (bygges inn via
+`youtube-nocookie.com`) eller `src` (Supabase Storage → `<video>`); begge veiene er kodet og
+målt. Kenneth fyller inn id og kapitteltider når opptaket er klart — **tom konfigurasjon gir
+ingen knapp, ingen boble.** Det er tilstanden i repoet nå.
+
+**Ingen autoplay ved åpning.** Et kapittelklikk laster iframen på nytt med `start=t` **og**
+`autoplay=1` — da er avspillingen kundens egen handling, ikke sidens. `playsinline` alltid med.
+
+Boblen «Ny her? Se videoen (1 min)» vises én gang per nettleser (`localStorage`
+`kunde_video_sett`), forsvinner ved klikk eller etter 8 s. Flagget brennes **ikke** når det ikke
+finnes en video — ellers ville boblen vært oppbrukt den dagen id-en legges inn.
+
+Esc fanges i capture-fasen så appens egen Esc ikke fyrer bak modalen, og lytteren ryddes ved
+lukking. Lukking målt på alle fire veier: ✕, Esc, klikk utenfor, og at klikk **inne i** boksen
+ikke lukker.
+
+**E-postlinja ble tatt med** (7 linjer, budsjettet var 15): invitasjonen får «▶ Se
+instruksjonsvideo (1 min)» når secreten `KUNDE_VIDEO_ID` er satt. Id-en leses ved hvert kall, så
+videoen kan byttes uten ny deploy.
+
+Regresjon: **460 sjekker grønne i 15 batterier** (17 nye i seksjon O). Negativ kontroll på alle
+seks kildekode-påstandene — den første versjonen av «boblen sjekker video før localStorage»
+besto av feil grunn (`indexOf(a) < indexOf(b)` er sann også når `a` mangler, −1 < n); strammet
+til å kreve at begge finnes.
+
+---
+
 ## Prosjektlista: «Venter på mål» (oransje) og «Mål mottatt» (grønn), bredere liste — 2026-10-08
 
 Prompt 038. Kenneth ville se forskjell på en kundelenke som er **sendt** og en som er **besvart**,

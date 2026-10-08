@@ -6666,6 +6666,7 @@ function _presentRenderBar() {
       <div class="pb-kpi"><b>${st.rooms}</b><span>Rom</span></div>
       <div class="pb-kpi"><b>${st.heated.toFixed(1)} m²</b><span>Oppvarmet</span></div>
       <div class="pb-kpi"><b>${st.totalW} W</b><span>Installert effekt</span></div>`}
+      ${(_kunde && _kundeVideoFor()) ? `<button class="pb-btn" id="_kunde-video-knapp" onclick="_kundeVideoModal()" title="Kort video som viser hvordan du retter målene">▶ ${_kundeErSmal() ? 'Video' : 'Instruksjonsvideo'}</button>` : ''}
       ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentShareLink()" title="Kopier delelenke for kunde/elektriker">🔗 Del lenke</button>`}
       ${_kunde ? '' : `<button class="pb-btn" onclick="_presentDownloadPDF()" title="Last ned prosjektoversikt som PDF">⬇ PDF</button>`}
       ${S.ui.presentPublic ? '' : `<button class="pb-btn" onclick="_presentExit()">✕ Avslutt</button>`}
@@ -6850,6 +6851,155 @@ function _presentDownloadPDF() {
 
 let _kundeState = null;   // { token, mode, note, orgName, rooms, edits: Map(roomId|idx → cm) }
 
+// ── 039 · INSTRUKSJONSVIDEO ────────────────────────────────────────────────────────────────
+// Videoen ligger IKKE i repoet: ingen båndbredde på Vercel/Supabase, og YouTube håndterer
+// telefon, båndbredde og undertekster selv. Lastes opp som «unlisted» og bygges inn via
+// `youtube-nocookie.com` — ingen sporing før kunden faktisk trykker play.
+// Faller Kenneth ned på Supabase Storage i stedet: sett `src` i stedet for `youtubeId`, så
+// bytter modalen til <video> av seg selv. Begge veiene er ferdig kodet.
+//
+// ⚠ Knappen vises BARE når en id eller src er satt. Tom konfigurasjon = ingen knapp, ingen
+// boble, ingen tom modal. Kenneth fyller inn id-en (delen etter `v=`) og kapitteltidene når
+// opptaket er lastet opp — ingen annen kode skal røres.
+const KUNDE_VIDEO = {
+  maal: { youtubeId: '', src: '', kapitler: [
+    // { t: 0,  tittel: 'Hva siden er' },
+    // { t: 12, tittel: 'Velg vegg og tast mål' },
+    // { t: 35, tittel: 'Dra vegg med pilene' },
+    // { t: 50, tittel: 'Flytt et hjørne' },
+    // { t: 65, tittel: 'Send inn' },
+  ] },
+  // Telefonvarianten (bunnark, − / +) kan tas opp senere. Står den tom, får telefonen
+  // PC-videoen — bedre enn ingen video.
+  maalMobil: { youtubeId: '', src: '', kapitler: [] },
+};
+const _KUNDE_VIDEO_SETT = 'kunde_video_sett';   // localStorage: boblen vises bare første gang
+
+function _kundeVideoHar(v) {
+  return !!(v && (String(v.youtubeId || '').trim() || String(v.src || '').trim()));
+}
+// Hvilken video gjelder akkurat nå? Smal skjerm får telefonvarianten HVIS den finnes —
+// ellers faller den tilbake på PC-videoen. Ingen video konfigurert → null (ingen knapp).
+function _kundeVideoFor() {
+  if (typeof KUNDE_VIDEO === 'undefined' || !KUNDE_VIDEO) return null;
+  if (_kundeErSmal() && _kundeVideoHar(KUNDE_VIDEO.maalMobil)) return KUNDE_VIDEO.maalMobil;
+  return _kundeVideoHar(KUNDE_VIDEO.maal) ? KUNDE_VIDEO.maal : null;
+}
+function _kundeVideoTid(t) {
+  const s = Math.max(0, Math.round(Number(t) || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+// `autoplay` settes KUN når kunden selv har trykket på et kapittel — da er avspillingen hans
+// egen handling. Første åpning av modalen er alltid uten autoplay og uten lyd.
+function _kundeVideoYtSrc(v, t, auto) {
+  const p = ['rel=0', 'modestbranding=1', 'playsinline=1'];
+  if (t > 0) p.push('start=' + Math.round(t));
+  if (auto) p.push('autoplay=1');
+  return 'https://www.youtube-nocookie.com/embed/'
+    + encodeURIComponent(String(v.youtubeId).trim()) + '?' + p.join('&');
+}
+
+let _kundeVideoEsc = null;
+
+function _kundeVideoLukk() {
+  const el = document.getElementById('_kunde-video');
+  if (el) el.remove();
+  if (_kundeVideoEsc) { document.removeEventListener('keydown', _kundeVideoEsc, true); _kundeVideoEsc = null; }
+}
+
+function _kundeVideoHopp(t) {
+  const v = _kundeVideoFor(); if (!v) return;
+  const ram = document.getElementById('_kunde-video-ramme');
+  if (!ram) return;
+  if (ram.tagName === 'VIDEO') { try { ram.currentTime = t; ram.play(); } catch (e) {} }
+  else ram.src = _kundeVideoYtSrc(v, t, true);
+  for (const b of document.querySelectorAll('#_kunde-video [data-kap]'))
+    b.style.borderColor = (Number(b.dataset.kap) === t) ? 'var(--accent,#4fa2b8)' : 'var(--border,#333)';
+}
+
+function _kundeVideoModal() {
+  const v = _kundeVideoFor(); if (!v) return;
+  _kundeVideoHintBort();
+  _kundeVideoLukk();
+  const smal = _kundeErSmal();
+
+  const bak = document.createElement('div');
+  bak.id = '_kunde-video';
+  bak.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,.74);'
+    + 'display:flex;align-items:center;justify-content:center;padding:' + (smal ? '0' : '24px');
+  bak.onclick = e => { if (e.target === bak) _kundeVideoLukk(); };
+
+  const kap = (v.kapitler || []).filter(k => k && Number.isFinite(Number(k.t)));
+  const spiller = String(v.src || '').trim()
+    ? `<video id="_kunde-video-ramme" controls playsinline preload="metadata" src="${esc(String(v.src).trim())}"
+         style="position:absolute;inset:0;width:100%;height:100%;background:#000"></video>`
+    : `<iframe id="_kunde-video-ramme" src="${esc(_kundeVideoYtSrc(v, 0, false))}"
+         allow="accelerometer; encrypted-media; picture-in-picture; fullscreen"
+         referrerpolicy="strict-origin-when-cross-origin" title="Instruksjonsvideo"
+         style="position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>`;
+
+  bak.innerHTML = `
+    <div style="background:var(--surface,#16171c);color:var(--text,#eee);width:100%;
+                max-width:${smal ? 'none' : '960px'};max-height:100%;overflow:auto;
+                border-radius:${smal ? '0' : '12px'};box-shadow:0 14px 48px rgba(0,0,0,.5)">
+      <div style="display:flex;align-items:center;gap:10px;padding:12px 14px">
+        <b style="flex:1;font-size:15px">Instruksjonsvideo</b>
+        <button onclick="_kundeVideoLukk()" aria-label="Lukk"
+                style="cursor:pointer;border:1px solid var(--border,#333);border-radius:7px;
+                       background:var(--surface2,#1d1f26);color:inherit;font-size:15px;
+                       line-height:1;padding:7px 11px">✕</button>
+      </div>
+      <div style="position:relative;width:100%;aspect-ratio:16/9;background:#000">${spiller}</div>
+      ${kap.length ? `
+      <div style="padding:12px 14px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+                    color:var(--dim,#8b8f99);margin-bottom:7px">Hopp til</div>
+        <div style="display:flex;flex-wrap:wrap;gap:7px">
+          ${kap.map(k => `<button data-kap="${Number(k.t)}" onclick="_kundeVideoHopp(${Number(k.t)})"
+             style="cursor:pointer;border:1px solid var(--border,#333);border-radius:7px;
+                    background:var(--surface2,#1d1f26);color:inherit;padding:8px 11px;
+                    font-size:12.5px;font-weight:600;min-height:38px">
+             <span style="color:var(--dim,#8b8f99);font-variant-numeric:tabular-nums">${_kundeVideoTid(k.t)}</span>
+             &nbsp;${esc(k.tittel || '')}</button>`).join('')}
+        </div>
+      </div>` : '<div style="height:12px"></div>'}
+    </div>`;
+
+  document.body.appendChild(bak);
+  // Capture, slik at Esc lukker videoen og ikke faller gjennom til appens egen Esc-håndtering
+  // (som avbryter tegning / tømmer valg bak modalen).
+  _kundeVideoEsc = e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); _kundeVideoLukk(); }
+  };
+  document.addEventListener('keydown', _kundeVideoEsc, true);
+}
+
+// ── Boble første gang ──────────────────────────────────────────────────────
+function _kundeVideoHintBort() {
+  const el = document.getElementById('_kunde-video-hint');
+  if (el) el.remove();
+}
+function _kundeVideoHintKanskje() {
+  if (!_kundeVideoFor()) return;                       // ingen video → ingen boble
+  let sett = '1';
+  try { sett = localStorage.getItem(_KUNDE_VIDEO_SETT); } catch (e) { sett = '1'; }
+  if (sett) return;
+  try { localStorage.setItem(_KUNDE_VIDEO_SETT, '1'); } catch (e) {}   // aldri igjen etterpå
+  const knapp = document.getElementById('_kunde-video-knapp');
+  if (!knapp) return;
+  const r = knapp.getBoundingClientRect();
+  const b = document.createElement('div');
+  b.id = '_kunde-video-hint';
+  b.onclick = _kundeVideoHintBort;
+  b.style.cssText = 'position:fixed;z-index:3900;max-width:220px;cursor:pointer;'
+    + 'background:var(--accent,#4fa2b8);color:#fff;border-radius:9px;padding:9px 12px;'
+    + 'font-size:12.5px;font-weight:600;line-height:1.35;box-shadow:0 6px 20px rgba(0,0,0,.35);'
+    + 'top:' + Math.round(r.bottom + 9) + 'px;right:' + Math.round(window.innerWidth - r.right) + 'px';
+  b.textContent = 'Ny her? Se videoen (1 min)';
+  document.body.appendChild(b);
+  setTimeout(_kundeVideoHintBort, 8000);
+}
+
 async function _kundeLoadByToken(token) {
   try {
     const { data, error } = await _db.rpc('kundelenke_get', { p_token: token });
@@ -6886,8 +7036,13 @@ async function _kundeLoadByToken(token) {
 
     ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     document.getElementById('app').style.display = 'flex';
-    _presentEnter(true);
+    // ⚠ 039 (MÅLT, ikke lest): `kundeMode` sto PÅ LINJA UNDER `_presentEnter(true)` — altså
+    // etter at `_presentRenderBar()` allerede hadde tegnet topplinja. 030-gaten
+    // `const _kunde = !!(S.ui && S.ui.kundeMode)` var derfor alltid false på første render, og
+    // kundesiden viste både «⬇ PDF» og de tre KPI-ene (Rom / Oppvarmet / Installert effekt).
+    // Målt i live HTML på en kundelenke 08.10.2026. Flagget settes nå FØR baren tegnes.
     S.ui.kundeMode = _kundeState.mode;
+    _presentEnter(true);
     if (_kundeState.mode === 'maal') {
       document.body.classList.add('kunde-maal');
       _kundeKobleBeroring();
@@ -6898,6 +7053,7 @@ async function _kundeLoadByToken(token) {
     _kundeLagreOriginal();   // 032: fasiten alt regnes fra
     _kundeRenderBar();
     render();
+    _kundeVideoHintKanskje();   // 039: boble ved knappen — kun aller første gang i denne nettleseren
     return true;
   } catch (e) {
     console.warn('Kundelenke feilet:', e.message);
@@ -38538,6 +38694,96 @@ function _kundelenkeRegressionTest() {
     check('N: merket overlever et langt prosjektnavn (navnet krymper, ikke merket)', true,
       /\.pl-proj-line \.pl-proj-name\{flex:0 1 auto/.test(_css)
       && /\.pl-proj-line > span\[title\]\{flex:0 0 auto\}/.test(_css), 'merket kan kuttes');
+
+    // ─── O (039) — instruksjonsvideo ───
+    // ⚠ MÅLT i live HTML på en kundelenke 08.10.2026: `S.ui.kundeMode` ble satt på linja ETTER
+    // `_presentEnter(true)`, altså etter at `_presentRenderBar()` hadde tegnet topplinja. 030s
+    // PDF-gate (`const _kunde = !!(S.ui && S.ui.kundeMode)`) fyrte derfor aldri, og kundesiden
+    // viste både «⬇ PDF» og de tre KPI-ene. Rekkefølgen er selve regresjonen her — uten den
+    // ville også videoknappens egen gate vært død.
+    (() => {
+      const kilde = _kildeUtenKommentarer(_kundeLoadByToken);
+      const iMode = kilde.indexOf('S.ui.kundeMode = _kundeState.mode');
+      const iBar  = kilde.indexOf('_presentEnter(true)');
+      check('O: kundeMode settes FØR present-baren tegnes', true,
+        iMode > -1 && iBar > -1 && iMode < iBar, 'kundeMode=' + iMode + ' presentEnter=' + iBar);
+      check('O: baren gater PDF og KPI på kundeMode', true,
+        /const _kunde = !!\(S\.ui && S\.ui\.kundeMode\)/.test(_kildeUtenKommentarer(_presentRenderBar)),
+        'gate borte');
+
+      // Tom konfigurasjon → ingen knapp. Kenneth har ennå ikke tatt opp videoen, så DETTE er
+      // tilstanden som faktisk står i repoet.
+      const pcId = KUNDE_VIDEO.maal.youtubeId, pcSrc = KUNDE_VIDEO.maal.src;
+      const mId = KUNDE_VIDEO.maalMobil.youtubeId, mSrc = KUNDE_VIDEO.maalMobil.src;
+      try {
+        KUNDE_VIDEO.maal.youtubeId = ''; KUNDE_VIDEO.maal.src = '';
+        KUNDE_VIDEO.maalMobil.youtubeId = ''; KUNDE_VIDEO.maalMobil.src = '';
+        check('O: tom konfigurasjon → _kundeVideoFor() er null (ingen knapp)', null,
+          _kundeVideoFor() === null, _kundeVideoFor());
+
+        // Smal skjerm velger mobilvarianten KUN når den finnes; ellers PC-videoen, for en
+        // video på telefon er bedre enn ingen.
+        const smal = _kundeErSmal();
+        KUNDE_VIDEO.maal.youtubeId = 'PC1';
+        check('O: tom mobilvariant → faller tilbake på maal', true,
+          _kundeVideoFor() === KUNDE_VIDEO.maal, _kundeVideoFor());
+        KUNDE_VIDEO.maalMobil.youtubeId = 'MOB1';
+        check('O: smal skjerm velger maalMobil når den finnes', smal ? 'maalMobil' : 'maal',
+          _kundeVideoFor() === (smal ? KUNDE_VIDEO.maalMobil : KUNDE_VIDEO.maal),
+          smal ? 'smal' : 'bred');
+
+        // Bare `src` satt (Supabase Storage i stedet for YouTube) teller også som «har video».
+        KUNDE_VIDEO.maal.youtubeId = ''; KUNDE_VIDEO.maalMobil.youtubeId = '';
+        KUNDE_VIDEO.maal.src = 'https://x/y.mp4';
+        check('O: bare src satt teller som video', true,
+          _kundeVideoFor() === KUNDE_VIDEO.maal, _kundeVideoFor());
+
+        // Blanke tegn er ikke en video.
+        KUNDE_VIDEO.maal.src = '   ';
+        check('O: bare mellomrom er ikke en video', null,
+          _kundeVideoFor() === null, _kundeVideoFor());
+      } finally {
+        KUNDE_VIDEO.maal.youtubeId = pcId; KUNDE_VIDEO.maal.src = pcSrc;
+        KUNDE_VIDEO.maalMobil.youtubeId = mId; KUNDE_VIDEO.maalMobil.src = mSrc;
+      }
+
+      check('O: tidsformat 0:00 / 0:12 / 1:05', '0:00/0:12/1:05',
+        _kundeVideoTid(0) === '0:00' && _kundeVideoTid(12) === '0:12' && _kundeVideoTid(65) === '1:05',
+        [_kundeVideoTid(0), _kundeVideoTid(12), _kundeVideoTid(65)].join('/'));
+
+      // Innbyggingen: nocookie-domenet, ingen autoplay før kunden selv trykker på et kapittel.
+      const v = { youtubeId: 'abc123', src: '', kapitler: [] };
+      const ved0 = _kundeVideoYtSrc(v, 0, false), ved35 = _kundeVideoYtSrc(v, 35, true);
+      check('O: bygges inn fra youtube-nocookie.com', true,
+        ved0.startsWith('https://www.youtube-nocookie.com/embed/abc123?'), ved0);
+      checkIkke('O: ingen autoplay ved åpning', /autoplay/.test(ved0), ved0);
+      check('O: kapittelhopp gir start= og autoplay (kundens eget klikk)', true,
+        /[?&]start=35(&|$)/.test(ved35) && /autoplay=1/.test(ved35), ved35);
+      check('O: playsinline alltid med (telefon spiller i siden, ikke fullskjerm)', true,
+        /playsinline=1/.test(ved0) && /playsinline=1/.test(ved35), ved0);
+
+      // Boblen skal ALDRI brenne localStorage-flagget når det ikke finnes en video — ellers
+      // ville den vært oppbrukt den dagen Kenneth legger inn id-en.
+      const k = _kildeUtenKommentarer(_kundeVideoHintKanskje);
+      // ⚠ Skrevet først som `indexOf(a) < indexOf(b)` — den er sann også når `a` er HELT borte
+      // (-1 < n). Negativ kontroll avslørte det; begge må finnes, og i riktig rekkefølge.
+      const iVid = k.indexOf('_kundeVideoFor()'), iSet = k.indexOf('setItem');
+      check('O: boblen sjekker video FØR localStorage settes', true,
+        iVid > -1 && iSet > -1 && iVid < iSet, 'video=' + iVid + ' setItem=' + iSet);
+      check('O: boblen setter flagget så den aldri vises igjen', true,
+        /setItem\(_KUNDE_VIDEO_SETT/.test(k), 'flagg ikke satt');
+
+      // Lukkingen skal rydde Esc-lytteren, ellers hoper de seg opp for hver åpning.
+      check('O: _kundeVideoLukk fjerner Esc-lytteren', true,
+        /removeEventListener\('keydown', _kundeVideoEsc, true\)/.test(_kildeUtenKommentarer(_kundeVideoLukk)),
+        'lytter lekker');
+      check('O: Esc fanges i capture-fasen så appens egen Esc ikke fyrer bak modalen', true,
+        /addEventListener\('keydown', _kundeVideoEsc, true\)/.test(_kildeUtenKommentarer(_kundeVideoModal)),
+        'ikke capture');
+      // Videoen skal ikke ligge i repoet.
+      checkIkke('O: ingen videofil bygget inn i konfigurasjonen',
+        /\.mp4|\.mov|\.webm/.test(JSON.stringify(KUNDE_VIDEO)), JSON.stringify(KUNDE_VIDEO));
+    })();
 
     // ─── K (035) — hvilken ende flytter seg, og hvorfor ───
     // ⚠ MÅLT på Kenneths rom før noe ble skrevet:
