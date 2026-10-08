@@ -16,6 +16,7 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 | Kundesiden: sidepanel, veggvalg, piltaster og gizmo | 032 | `3540512` | ✅ i `main` |
 | E-postene skriver norsk med æøå + «<Org> Varmeplan» | 031 | `b16c4c5`, `5f8758b` | ✅ i `main` |
 | Kundesiden: hjørner, markør som i Varmeplan, fast tabell | 033 | `d640505` | ✅ i `main` |
+| Vegglengde: riktig ende flytter seg, brukervalgt fast ende | 035 | `9408319` | ⬜ upushet |
 
 **032 erstattet en regel fra 027.** Der sto det at «geometrien tegnes ikke om på kundesiden».
 Nå følger tegningen tallene mens kunden retter — men spec regel 2 står uendret: alt skjer lokalt
@@ -35,6 +36,28 @@ Et rom med et fritt flyttet hjørne kan ikke uttrykkes som vegglengder, og da er
 eneste sannheten. Rette vinkler tvinges **ikke** — det er samme oppførsel som Varmeplan har for
 innloggede (målt: hjørne 0 flyttet 50 cm i X på et 400×320-rom gir vegg 0 = 449,9 og vegg 3 =
 323,9 cm skrå).
+
+**035: hvilken ende av veggen som flytter seg.** 028s vindu-regel hadde to blindsoner — den
+flyttet alltid slutt-enden (fordi `points[0]` er ankerpunkt) og bevarte alltid naboveggen. Målt
+på Kenneths eget rom: å sette den for lange veggen til riktig mål krympet feil nabovegg
+(200 → 121) og lot den skjeve veggen stå på 407,7, med hjørnevinklene helt uendret.
+
+Nå velges ende og metode av geometrien:
+
+| Hjørnet i enden som flyttes | Metode | Resultat |
+|---|---|---|
+| Rett (90° ± 1°) | **vindu** — to punkter, vegg i±2 absorberer | rommet forblir rettvinklet (uendret fra 028) |
+| Skjevt | **ett punkt** — bare endepunktet flyttes langs veggens retning | den skjeve naboen rettes opp, som ved hjørne-drag |
+
+Brukeren kan overstyre med «Fast»-kolonnen i tabellen eller hengelåsen på tegningen; valget
+følger med i svaret som `answer.walls[].fixedEnd`, så Kenneths «Bruk» gir samme rom som kunden
+så. Ankerpunktet bevares ved å translatere hele polygonet tilbake — translasjon endrer verken
+lengder eller vinkler.
+
+⚠ **Translasjonen alene ville vært en regresjon.** Med den blir forover- og bakover-vinduet
+likeverdige *opp til posisjon*, men de gir ulike polygoner. `'auto'` følger derfor 028s
+vinduvalg slavisk; bare et eksplisitt brukervalg bruker sitt eget vindu. Alle 10 tilfellene fra
+028 er bit-for-bit identiske.
 
 **To lag som begge rører samme vegg.** `_kundeRebuildRoom` regner alltid *original →
 vegglengder → hjørne-deltaer*, i den rekkefølgen, så resultatet er likt uansett hva kunden gjorde
