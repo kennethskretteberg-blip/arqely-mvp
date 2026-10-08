@@ -42,6 +42,21 @@ Kenneth svarer til slutt.
 - Begge hører hjemme i et 047b, eller i 050 der STEG 0.3 allerede spør om nettopp dette.
   Si fra hvilket du vil ha.
 
+## 047b
+
+- **Begge fiksene er gjort og målt.** Rester 10 489 → 134, dekning 13,2 % → 53,4 % på den ekte
+  tegningen. Syntetisk fixtur: 100 % dekning, 0 rester.
+- **Men den ekte tegningen lukker nå 0 rom** (mot 8 søppelrom før, ett på 2218 m²). Null er
+  ærligere enn åtte gale, men det er ikke målet.
+- **Diagnosen for hvorfor, målt på 506 veggender:** 267 snapper ende-mot-ende, **60 er
+  T-kryss** (ende mot en annen veggs midtparti, median 6,4 cm unna), 179 er frittsvevende.
+  `_snap_segments` snapper punkter, men `polygonize` krever at kryssveggen **deles** i
+  treffpunktet. `_bridge_gaps` kobler ende-til-ende, ikke ende-til-linje.
+- **Forslag til 047c:** del kryssvegger i T-punkter før `polygonize`. Det er trolig
+  enkeltfiksen som gir mest. De 179 frittsvevende må diagnostiseres videre.
+- **Dekningsgrensen i 046 er 90 %.** På en ekte tegning er 53 % kanskje normalen. Si fra om
+  grensen skal ned, eller om teksten heller skal si «N vegger mangler» enn en prosent.
+
 ## 048
 
 - **Alt i 048 er verifisert mot den ekte tegningen** og virker: 34/34 rom-labels med nummer,
