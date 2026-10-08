@@ -36,7 +36,21 @@ Kenneth svarer til slutt.
 
 ## 043
 
--
+- **Skal kunden kunne foreslå en annen KABELTYPE (17T ↔ 10T)?** Jeg snevret pilelista til samme
+  `watt_per_m`, altså samme T-serie, fordi spec-en holder «bytte produktfamilie» utenfor v1 og
+  ditt eget eksempel er en serie innenfor én type. Men `getProductFamily` blander dem (44
+  produkter), og 10T gir faktisk et bedre utlegg i testrommet: 800 W på 17T ga CC 34 cm, som er
+  **over** anbefalt maks, mens 800 W på 10T gir CC 20 cm. Si fra hvis kunden skal få se begge.
+- **«Flateeffekt» og «W/m²» er samme tall for kabel.** W/m ÷ CC = productW / nettoM² — algebraisk
+  identisk. Spec-en ber om begge, men kortet viste da «50 W/m² · 50 W/m²». Jeg viser det én gang
+  som «Flateeffekt». Si fra hvis du vil ha begge likevel.
+- **Navn er påkrevd ved Send forslag** (som spec-en antydet). Bekreftet i koden.
+- **Forslagslenka varer 90 dager** og gjenbrukes per prosjekt. Målforespørselen er 30. Si fra
+  hvis presentasjonen skal ha en annen levetid.
+- **Presentasjonslenka gir i dag ut HELE prosjekt-JSON-en anonymt** (`get_present_project`
+  returnerer `data` ubeskåret, og `_restoreProject` laster alt) — kundenavn, kontaktperson og
+  prosjektnummer ligger i nyttelasten selv om de ikke vises. 043 utvider ikke dette, men det bør
+  bli en egen sak: strippe `customer*`/`contact*`/`project_no` i RPC-en.
 
 ## 044
 

@@ -4,6 +4,74 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundeforslag: forslagskort i presentasjonen — 2026-10-08
+
+Prompt 043. Kunden ser presentasjonen som før, trykker på et rom og kan si «OK som det er» eller
+foreslå annet produkt / ønsket flateeffekt / retning. Ingenting tegnes om hos kunden, ingenting
+skrives i prosjektet.
+
+### STEG 0 — fire målinger, tre overraskelser
+
+**0.1 Kortet var hover-drevet, ikke klikk.** `_presentHover` setter `presentRoomId` på hver
+mousemove, så kortet forsvinner når musa forlater rommet. Et kort med piler, tallfelt og
+kommentarboks kan ikke oppføre seg slik. I forslagsmodus velges rommet nå med **klikk**, hover
+rører ikke valget, og kortet har fått et ✕.
+
+**0.1b (funn, ikke bestilt):** kortet viste **`Artikkelnr` ubetinget** — altså til alle med en
+presentasjons- eller kundelenke. Spec regel 2 forbyr artikkelnummer for kunden. Nå gatet på
+`presentPublic`; den innloggede presentasjonen i appen beholder det.
+
+**0.2 `selectCableByPower` gir alt som trengs** — `candidates[{productW, cc_cm, wm2, valid,
+ccOverMax}]` + `below`/`above`. Ingen egen formel på kundesiden.
+
+**0.3 Familiene oppfører seg ulikt — det styrer hele pilefunksjonen:**
+
+| Familie | Antall | Varierer i | Piling |
+|---|---|---|---|
+| InFloor 17T (kabel) | 25 | lengde ved fast 17 W/m → effekt | over effekt |
+| EcoMat (matte) | 57 | **60/100/150 W/m²** og lengde | over W/m² (3 valg) |
+| FlexFoil (folie) | 8 | kun bredde, alle 60 W/m² | **ingen piler** |
+
+**⚠ Og den som nesten gikk galt:** `getProductFamily('InFloor 17T 800W 47m')` returnerer **44**
+produkter som **blander 17T og 10T** — kategori 2 inneholder begge, så den felles navneprefiksen
+blir bare «InFloor». Pilene ville hoppet fra 17T til 10T, altså bytte av kabeltype, som spec-en
+holder utenfor v1. Innsnevringen trenger ingen navneparsing: kabeltypen **er** `watt_per_m`
+(målt: 17 W/m → 25 produkter, 10 W/m → 19). `getProductFamily` er urørt — Varmeplans eget
+forslagspanel får fortsatt hele familien.
+
+**0.4 `get_present_project` leverer hele `data`-jsonb-en**, ubeskåret. Designet beholder
+prosjekthentingen på `?present=` og bruker `kundelenke_get` bare til lenkestatus, så
+forslagslenka viser **ikke ett felt mer** enn en vanlig presentasjonslenke gjør i dag. At
+presentasjonslenka i det hele tatt gir ut kundenavn m.m. i nyttelasten er notert i SPØRSMÅL.md
+som egen sak.
+
+### Bygget
+
+Lenka er `?present=<present_token>&forslag=<token>`. Delingsdialogen fra 042 fikk avkryssingen
+«Kunden kan foreslå endringer» (standard på); forslagslenka **gjenbrukes** per prosjekt, ellers
+ville hver deling laget en ny rad og 044 ikke visst hvilken som gjelder.
+
+Kortet: ▼/▲ mellom gyldige kandidater (ugyldige er med, men grå og hoppes over), ønsket
+flateeffekt → nærmeste under/over med «Velg», retning (som nå / vannrett / loddrett), kommentar,
+og «OK som det er» / «Foreslå endring». Grønn ✓ og gul ! tegnes på rommene fra `render()` —
+ikke som hale i `drawRooms`, som 030 lærte at aldri kjører. Bunnlinje med «N rom OK · M forslag»
+og Send, der navn er påkrevd.
+
+**Målt og rettet underveis:** for kabel er «flateeffekt» og «W/m²» **samme tall** (W/m ÷ CC =
+productW / nettoM², algebraisk identisk) — spec-en ber om begge fordi Kenneth sa det slik, men
+50 og 50 ved siden av hverandre ser ut som en feil. Vises én gang. På telefon lå kortet oppå
+«Send forslag» fordi jeg gjettet bunnlinja til 66 px; den er 74 — høyden leses nå av. ✕ var
+30 px, nå 44 på telefon.
+
+Migrasjon `supabase-migration-kundeforslag.sql`: **eneste** skjemaendring er CHECK-constrainten
+på `mode`, som sto `in ('maal','tegn')` — et forsøk på 'forslag' ville feilet med 23514.
+
+Regresjon: ny `_kundeforslagRegressionTest` med 33 sjekker. **509 sjekker grønne i 16 batterier.**
+042s egen P-sjekk fanget at `_presentShareModal` fikk et nytt argument — den er strammet til å
+handle om atferden, ikke argumentlista.
+
+---
+
 ## Del presentasjon/kundelenke: ferdig hyperlenketekst med Kopier — 2026-10-08
 
 Prompt 042 (serien Kundeforslag). Kenneth: «Jeg vil ha en fast tekst med lenken som jeg kan

@@ -4602,6 +4602,7 @@ function render() {
   if (S.ui.showGrid !== false) drawGrid();
   drawRooms();
   drawKundeHighlight();   // 028: kort oppblussing av rom som nettopp fikk kundens maal
+  drawForslagMerker();    // 043: grønn hake / gul ! på rom kunden har ment noe om
   if (S.ui.present) drawPresentFloorTextures();   // subtil gulvtekstur UNDER leggemønsteret
   drawStrips();
   drawFoilFree();   // F4a: roterbar folie — samme lag som vanlig folie (heating elements)
@@ -6732,6 +6733,10 @@ function _presentHover(e) {
   const r = _presentRoomAt(e);
   const id = r ? r.id : null;
   canvas.style.cursor = id != null ? 'pointer' : 'grab';
+  // ⚠ 043: i forslagsmodus VELGES rommet med klikk. Kortet har piler, et tallfelt og en
+  // kommentarboks — det kan ikke bytte rom hver gang musa beveger seg. Hover setter fortsatt
+  // markøren, men rører ikke valget.
+  if (_forslagAktiv()) return;
   if (id !== S.ui.presentRoomId) {
     S.ui.presentRoomId = id;
     _presentRenderDetail();
@@ -6759,7 +6764,11 @@ function _presentRoomDetailHtml(room) {
   const rows = [];
   if (prod) {
     rows.push(row('Produkt', esc(prod.name || '—')));
-    if (prod.article_no) rows.push(row('Artikkelnr', esc(String(prod.article_no))));
+    // ⚠ 043 (MÅLT): artikkelnummeret sto her UBETINGET, altså også for alle med en
+    // presentasjons- eller kundelenke. Spec-kundeforslag regel 2: kunden ser produktnavn,
+    // effekt, flateeffekt, W/m² og CC — aldri priser eller artikkelnummer. Innlogget
+    // presentasjon i appen beholder det.
+    if (prod.article_no && !(S.ui && S.ui.presentPublic)) rows.push(row('Artikkelnr', esc(String(prod.article_no))));
   } else {
     rows.push(row('Produkt', '<span style="color:var(--dim)">ikke plassert</span>'));
   }
@@ -6780,8 +6789,502 @@ function _presentRoomDetailHtml(room) {
   return `<div style="font-size:15px;font-weight:700;margin-bottom:6px;border-left:4px solid ${room.color || '#4fa2b8'};padding-left:10px">${esc(room.name || 'Rom')}</div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:10px">${(room.area / 10000).toFixed(2)} m²${rt ? ' · ' + esc(rt.label) : ''}</div>
     <div style="font-size:13px">${rows.join('')}</div>
-    ${compat}`;
+    ${compat}
+    ${_forslagKortHtml(room)}`;
 }
+// ═══ 043 · KUNDEFORSLAG ═══════════════════════════════════════════════════════════════════
+// Kunden ser presentasjonen som før og kan, per rom, si «OK som det er» eller foreslå et annet
+// produkt / en ønsket flateeffekt / en annen retning. Ingenting tegnes om hos kunden
+// (spec regel 5) og ingenting skrives i prosjektet (spec-kundelenke regel 2) — forslaget
+// lagres som svar på en kundelenke med mode='forslag'.
+//
+// ⚠ STEG 0 målte tre ting som styrte designet:
+//  1. Romkortet er HOVER-drevet (`_presentHover` setter `presentRoomId` på hver mousemove).
+//     Et kort med piler, tallfelt og radioknapper kan ikke forsvinne når musa flytter seg —
+//     i forslagsmodus velges rommet med KLIKK, og hover rører ikke valget.
+//  2. Kortet viste `Artikkelnr` ubetinget. Spec regel 2 forbyr artikkelnummer for kunden.
+//     Nå skjules det for alle offentlige visninger (`presentPublic`), ikke bare forslag.
+//  3. Familiene er ulike: kabel varierer i EFFEKT (44 InFloor 17T-lengder ved fast 17 W/m),
+//     matte i W/m² (EcoMat 60/100/150) OG lengde, folie BARE i bredde (FlexFoil, alle 60 W/m²).
+//     Bredde og lengde er motorens valg, ikke kundens — derfor piles det over effekt for kabel
+//     og over W/m² for matte/folie, og FlexFoil får ingen piler i det hele tatt.
+
+let _forslagState = null;   // { token, note, orgName, status, valg: Map(roomId → valg), navn, kommentar }
+
+function _forslagAktiv() { return !!(_forslagState && S.ui && S.ui.kundeMode === 'forslag'); }
+function _forslagValg(roomId) {
+  if (!_forslagState) return null;
+  return _forslagState.valg.get(roomId) || null;
+}
+
+// Alternativlista for et rom. Returnerer null når rommet ikke har et produkt å pile mellom.
+//   { type:'kabel'|'flate', liste:[{productId, navn, W, lengdeM, wm2, flateeffekt, cc, valid,
+//     overMax, advarsel}], naaIdx, prod }
+// Tallene kommer fra `selectCableByPower` — samme kandidater Varmeplans eget forslagspanel
+// bruker. Ingen egen formel på kundesiden (spec regel 3).
+function _forslagAlternativer(room) {
+  if (!room) return null;
+  const prod = _presentRoomProduct(room);
+  if (!prod) return null;
+  const familie = getProductFamily(prod.id);
+  if (!familie.length) return null;
+
+  // Kabel: effekt varierer med lengden. `selectCableByPower` gir CC, W/m² og gyldighet.
+  if (prod.cable_length_m && prod.watt_per_m) {
+    const naaWm2 = _forslagNaaWm2(room) || 100;
+    const res = selectCableByPower(room.id, _forslagKabelSerie(familie, prod), naaWm2);
+    if (!res || !res.candidates.length) return null;
+    const liste = res.candidates.slice()
+      .sort((a, b) => a.productW - b.productW)
+      .map(c => ({
+        productId: c.product.id,
+        navn: c.product.name,
+        W: Math.round(c.productW),
+        lengdeM: c.product.cable_length_m,
+        wm2: Math.round(c.wm2),
+        // Flateeffekt for kabel = W/m ÷ CC (samme regel som romdetaljene, 024).
+        flateeffekt: c.cc_cm > 0 ? Math.round(c.product.watt_per_m / (c.cc_cm / 100)) : 0,
+        cc: Math.round(c.cc_cm * 10) / 10,
+        valid: !!c.valid,
+        overMax: !!c.ccOverMax,
+        advarsel: c.valid ? (c.ccOverMax ? 'over anbefalt avstand' : '')
+                          : (!c.ccValid ? (c.cc_cm < _ccLimits(c.product).minSp ? 'for tett' : 'for langt mellom')
+                                        : 'for trang bøy'),
+      }));
+    const naaIdx = liste.findIndex(x => x.productId === prod.id);
+    return { type: 'kabel', liste, naaIdx, prod, res };
+  }
+
+  // Matte/folie: kunden piler mellom W/m²-VARIANTENE, aldri mellom bredder eller lengder —
+  // dem velger utleggsmotoren. FlexFoil har bare én W/m², og får da ingen piler.
+  if (prod.watt_per_m2) {
+    const perWm2 = new Map();
+    for (const f of familie) {
+      const w = f.watt_per_m2;
+      if (!w) continue;
+      if (!perWm2.has(w)) perWm2.set(w, f);
+    }
+    const liste = [...perWm2.entries()].sort((a, b) => a[0] - b[0]).map(([w, rep]) => ({
+      productId: rep.id,
+      targetWm2: w,
+      navn: _forslagFlateNavn(rep, w),
+      W: 0,
+      wm2: w,
+      flateeffekt: w,
+      cc: 0,
+      valid: true,
+      overMax: false,
+      advarsel: '',
+    }));
+    const naaIdx = liste.findIndex(x => x.wm2 === prod.watt_per_m2);
+    return { type: 'flate', liste, naaIdx, prod };
+  }
+  return null;
+}
+
+// ⚠ MÅLT 08.10.2026: `getProductFamily('InFloor 17T 800W 47m')` gir **44** produkter som
+// BLANDER 17T og 10T — kategori 2 inneholder begge, så den felles navneprefiksen blir bare
+// «InFloor». Pilene ville dermed hoppet fra 17T til 10T, altså bytte av kabeltype, som spec-en
+// holder utenfor v1 («det er en samtale, ikke et klikk»). Kenneths eget eksempel er en serie
+// innenfor ÉN type: «InFloor 10T 600 W, 700 W, 800 W …».
+//
+// Skillet trenger ingen navneparsing: kabeltypen ER `watt_per_m` (målt: 17 W/m → 25 produkter,
+// 10 W/m → 19). Varmeplans eget forslagspanel får fortsatt hele familien — `getProductFamily`
+// er urørt; det er bare kundens pileliste som er snevret inn.
+function _forslagKabelSerie(familie, prod) {
+  const wpm = prod.watt_per_m;
+  const serie = familie.filter(p => p.watt_per_m === wpm && p.cable_length_m);
+  return serie.length ? serie : familie;
+}
+
+// «EcoMat 60T 0.5x4m» → «EcoMat 60T» : kunden skal se varianten, ikke den ene lengden
+// motoren tilfeldigvis la ut.
+function _forslagFlateNavn(rep, wm2) {
+  const n = String(rep.name || '').trim();
+  const m = n.match(/^(\S+\s+\S*?\d+\s*T)\b/i);
+  if (m) return m[1];
+  // FlexFoil navngis på BREDDE («FlexFoil B=140cm»), ikke på W/m² — bredden er motorens valg
+  // og skal ikke stå i et valg kunden tar. Da er familienavnet + W/m² det ærlige.
+  const utenBredde = n.replace(/\s*B=\s*\d+\s*cm\s*/i, ' ').trim();
+  return (utenBredde || n.split(/\s+/)[0]) + ' · ' + wm2 + ' W/m²';
+}
+
+// Dagens flateeffekt i rommet, samme regel som romkortet bruker.
+function _forslagNaaWm2(room) {
+  try {
+    const st = _computeRoomStats(room);
+    return st.cableLenM > 0 ? st.cableWm2 : st.wm2Heated;
+  } catch (e) { return 0; }
+}
+
+// ── Oppstart ───────────────────────────────────────────────────────────────
+// Lenken er `?present=<present_token>&forslag=<token>`: prosjektet hentes nøyaktig som før via
+// get_present_project, og `kundelenke_get` brukes BARE til lenkas status. Da utvides ikke
+// eksponeringsflaten i det hele tatt — forslagslenka viser ikke ett felt mer enn en vanlig
+// presentasjonslenke gjør i dag.
+async function _forslagStart(token) {
+  if (!_db || !token) return false;
+  let d = null;
+  try { const r = await _db.rpc('kundelenke_get', { p_token: token }); d = r && r.data; } catch (e) { d = null; }
+  if (!d || d.mode !== 'forslag') return false;
+  _forslagState = {
+    token,
+    status: d.status,
+    note: d.note || '',
+    orgName: d.org_name || 'avsenderen',
+    valg: new Map(),
+    navn: '',
+    kommentar: '',
+    sendt: d.status === 'answered',
+  };
+  S.ui.kundeMode = 'forslag';
+  document.body.classList.add('kunde-forslag');
+  _presentRenderBar();
+  _forslagRenderBunn();
+  render();
+  return true;
+}
+
+// ── Valg per rom ───────────────────────────────────────────────────────────
+function _forslagSettValg(roomId, endring) {
+  if (!_forslagState) return;
+  const naa = _forslagState.valg.get(roomId) || { ok: false, productId: null, targetWm2: null, direction: null, comment: '' };
+  _forslagState.valg.set(roomId, Object.assign(naa, endring));
+  _forslagRenderBunn();
+  _presentRenderDetail();
+  render();
+}
+function _forslagNullstill(roomId) {
+  if (!_forslagState) return;
+  _forslagState.valg.delete(roomId);
+  _forslagRenderBunn();
+  _presentRenderDetail();
+  render();
+}
+function _forslagTelling() {
+  let ok = 0, forslag = 0;
+  if (_forslagState) for (const v of _forslagState.valg.values()) {
+    if (v.ok) ok++;
+    else if (v.productId || v.targetWm2 || v.direction || (v.comment || '').trim()) forslag++;
+  }
+  return { ok, forslag };
+}
+
+// Pil opp/ned i alternativlista. Hopper over ugyldige (for tett / for langt) — de vises grå
+// og kan ikke velges (spec regel 3: alternativene er de REELLE produktene).
+function _forslagPil(roomId, retning) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const alt = _forslagAlternativer(room);
+  if (!alt || alt.liste.length < 2) return;
+  const v = _forslagValg(roomId);
+  let i = alt.liste.findIndex(x => v && v.productId === x.productId);
+  if (i < 0) i = alt.naaIdx >= 0 ? alt.naaIdx : 0;
+  for (let steg = i + retning; steg >= 0 && steg < alt.liste.length; steg += retning) {
+    if (alt.liste[steg].valid) {
+      const k = alt.liste[steg];
+      _forslagSettValg(roomId, { ok: false, productId: k.productId, targetWm2: k.targetWm2 || null });
+      return;
+    }
+  }
+}
+
+// ── Kortet ─────────────────────────────────────────────────────────────────
+function _forslagKortHtml(room) {
+  if (!_forslagAktiv() || !room) return '';
+  const alt = _forslagAlternativer(room);
+  const v = _forslagValg(room.id) || {};
+  const rid = room.id;
+  const smal = _kundeErSmal();
+  const knapp = (txt, fn, aktiv) =>
+    `<button onclick="${fn}" style="flex:1;min-height:${smal ? 46 : 38}px;cursor:pointer;border-radius:8px;font-size:12.5px;font-weight:600;
+      border:1px solid ${aktiv ? 'var(--accent)' : 'var(--border)'};
+      background:${aktiv ? 'var(--accent)' : 'var(--surface2)'};color:${aktiv ? '#0d0e10' : 'var(--text)'}">${txt}</button>`;
+
+  let valgtIdx = -1, valgt = null;
+  if (alt) {
+    valgtIdx = v.productId ? alt.liste.findIndex(x => x.productId === v.productId) : alt.naaIdx;
+    valgt = alt.liste[valgtIdx] || null;
+  }
+  const endret = !!(valgt && alt && valgtIdx !== alt.naaIdx);
+
+  // Pilraden. Vises bare når det FINNES noe å pile mellom (FlexFoil har bare én variant).
+  let pilHtml = '';
+  if (alt && alt.liste.length > 1 && valgt) {
+    const pilKnapp = (tegn, d, av) =>
+      `<button ${av ? 'disabled' : ''} onclick="_forslagPil(${rid},${d})" aria-label="${d > 0 ? 'Høyere' : 'Lavere'}"
+        style="width:${smal ? 46 : 34}px;height:${smal ? 46 : 34}px;flex:0 0 auto;cursor:${av ? 'default' : 'pointer'};
+        border:1px solid var(--border);border-radius:8px;background:var(--surface2);
+        color:${av ? 'var(--dim)' : 'var(--text)'};font-size:14px">${tegn}</button>`;
+    const harOver = alt.liste.slice(valgtIdx + 1).some(x => x.valid);
+    const harUnder = alt.liste.slice(0, Math.max(0, valgtIdx)).some(x => x.valid);
+    // ⚠ MÅLT: for kabel er «flateeffekt» og «W/m²» SAMME tall, ikke to.
+    //   flateeffekt = watt_per_m / (cc/100),  cc = (nettoM² / lengde) * 100
+    //   ⇒ flateeffekt = watt_per_m * lengde / nettoM² = productW / nettoM² = W/m²
+    // Spec-en ber om «flateeffekt, W/m² og CC» fordi Kenneth sa det slik, men å vise 50 og 50
+    // ved siden av hverandre ser ut som en feil. Vises én gang, som Flateeffekt.
+    const tall = alt.type === 'kabel'
+      ? `${valgt.W} W · ${valgt.lengdeM} m<br><span style="color:var(--dim)">Flateeffekt ${valgt.flateeffekt} W/m² · CC ${valgt.cc} cm</span>`
+      : `${valgt.wm2} W/m²`;
+    pilHtml = `
+      <div style="margin-top:12px;padding-top:11px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:6px">Alternativ</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${pilKnapp('▼', -1, !harUnder)}
+          <div style="flex:1;min-width:0;font-size:12.5px;line-height:1.45;text-align:center">
+            <b>${esc(valgt.navn)}</b>${!endret ? ' <span style="color:var(--dim);font-weight:400;font-size:11px">(som nå)</span>' : ''}<br>${tall}
+            ${valgt.overMax ? '<br><span style="color:#f59e0b;font-size:11px">⚠ over anbefalt avstand</span>' : ''}
+          </div>
+          ${pilKnapp('▲', 1, !harOver)}
+        </div>
+        ${endret ? `<div style="font-size:11px;color:var(--dim);margin-top:6px;text-align:center">Nå: ${esc((alt.liste[alt.naaIdx] || {}).navn || '—')} · <a href="#" onclick="event.preventDefault();_forslagNullstill(${rid})" style="color:var(--accent)">tilbakestill</a></div>` : ''}
+      </div>`;
+  }
+
+  // Ønsket flateeffekt — bare for kabel, der `selectCableByPower` kan svare under/over.
+  let onsketHtml = '';
+  if (alt && alt.type === 'kabel') {
+    onsketHtml = `
+      <div style="margin-top:11px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:5px">Ønsket flateeffekt</div>
+        <div style="display:flex;gap:7px;align-items:center">
+          <input id="_fors-wm2" type="number" inputmode="decimal" min="10" max="300" placeholder="f.eks. 80"
+            value="${v.targetWm2 != null && alt.type === 'kabel' ? esc(String(v.targetWm2)) : ''}"
+            style="width:88px;padding:${smal ? '11px' : '7px'} 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:13px">
+          <span style="font-size:12px;color:var(--dim)">W/m²</span>
+          <button onclick="_forslagOnsket(${rid})" style="margin-left:auto;min-height:${smal ? 44 : 32}px;padding:0 13px;cursor:pointer;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px;font-weight:600">Finn</button>
+        </div>
+        <div id="_fors-naer" style="font-size:12px;margin-top:7px"></div>
+      </div>`;
+  }
+
+  // Retning — ingen omtegning (spec regel 5), bare en pil som viser hva kunden mener.
+  const retn = (val, tekst, pil) => {
+    const paa = (v.direction || null) === val;
+    return `<button onclick="_forslagSettValg(${rid},{direction:${val === null ? 'null' : "'" + val + "'"}})"
+      style="flex:1;min-height:${smal ? 44 : 34}px;cursor:pointer;border-radius:8px;font-size:12px;font-weight:600;
+      border:1px solid ${paa ? 'var(--accent)' : 'var(--border)'};background:${paa ? 'rgba(79,162,184,.18)' : 'var(--surface2)'};
+      color:var(--text)">${pil} ${tekst}</button>`;
+  };
+
+  return `
+    <div style="margin-top:14px;padding-top:12px;border-top:2px solid var(--accent)">
+      <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:2px">Hva synes du?</div>
+      <div style="font-size:11.5px;color:var(--dim);line-height:1.45">Si fra om rommet er greit som det er, eller foreslå noe annet. Ingenting endres før ${esc(_forslagState.orgName)} godkjenner.</div>
+      ${pilHtml}
+      ${onsketHtml}
+      <div style="margin-top:11px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:5px">Retning</div>
+        <div style="display:flex;gap:6px">${retn(null, 'Som nå', '')}${retn('h', 'Vannrett', '↔')}${retn('v', 'Loddrett', '↕')}</div>
+      </div>
+      <div style="margin-top:11px">
+        <textarea id="_fors-komm" rows="2" placeholder="Kommentar (valgfritt)"
+          oninput="_forslagKomm(${rid}, this.value)"
+          style="width:100%;padding:8px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12.5px;font-family:inherit;resize:vertical">${esc(v.comment || '')}</textarea>
+      </div>
+      <div style="display:flex;gap:7px;margin-top:11px">
+        ${knapp('✓ OK som det er', `_forslagSettValg(${rid},{ok:true,productId:null,targetWm2:null,direction:null})`, !!v.ok)}
+        ${knapp('Foreslå endring', `_forslagForeslaa(${rid})`, !v.ok && !!(v.productId || v.targetWm2 || v.direction || (v.comment || '').trim()))}
+      </div>
+    </div>`;
+}
+
+// Kommentaren skrives uten å tegne kortet på nytt — ellers mister feltet fokus for hver tast.
+function _forslagKomm(roomId, tekst) {
+  if (!_forslagState) return;
+  const v = _forslagState.valg.get(roomId) || { ok: false, productId: null, targetWm2: null, direction: null, comment: '' };
+  v.comment = tekst;
+  if (tekst.trim()) v.ok = false;
+  _forslagState.valg.set(roomId, v);
+  _forslagRenderBunn();
+  render();
+}
+function _forslagForeslaa(roomId) {
+  const v = _forslagValg(roomId);
+  if (!v || (!v.productId && !v.targetWm2 && !v.direction && !(v.comment || '').trim())) {
+    _showToast && _showToast('Velg et alternativ, en retning eller skriv en kommentar først', 'warn');
+    return;
+  }
+  _forslagSettValg(roomId, { ok: false });
+  _showToast && _showToast('Forslaget er notert — husk å trykke «Send forslag» til slutt', 'ok');
+}
+
+// Ønsket flateeffekt → nærmeste under og over, med tallene sine (spec regel 4).
+function _forslagOnsket(roomId) {
+  const felt = document.getElementById('_fors-wm2');
+  const ut = document.getElementById('_fors-naer');
+  if (!felt || !ut) return;
+  const mål = parseFloat(String(felt.value).replace(',', '.'));
+  if (!(mål > 0)) { ut.innerHTML = '<span style="color:var(--dim)">Skriv et tall, f.eks. 80.</span>'; return; }
+  const room = S.rooms.find(r => r.id === roomId);
+  const alt = _forslagAlternativer(room);
+  if (!alt || alt.type !== 'kabel') return;
+  const prod = alt.prod;
+  const res = selectCableByPower(roomId, _forslagKabelSerie(getProductFamily(prod.id), prod), mål);
+  if (!res) { ut.textContent = 'Fant ingen alternativer.'; return; }
+  const rad = (c, merke) => c ? `<div style="display:flex;align-items:center;gap:7px;padding:5px 0">
+      <span style="flex:1;min-width:0"><b>${esc(c.product.name)}</b><br>
+        <span style="color:var(--dim);font-size:11.5px">${Math.round(c.wm2)} W/m² · CC ${c.cc_cm.toFixed(1)} cm</span></span>
+      <span style="font-size:10.5px;color:var(--dim);text-transform:uppercase">${merke}</span>
+      <button onclick="_forslagSettValg(${roomId},{ok:false,productId:${c.product.id},targetWm2:${mål}})"
+        style="min-height:32px;padding:0 11px;cursor:pointer;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px;font-weight:600">Velg</button>
+    </div>` : '';
+  const u = res.below[0], o = res.above[0];
+  ut.innerHTML = (u || o)
+    ? rad(u, 'under') + rad(o, 'over')
+    : '<span style="color:var(--dim)">Ingen gyldige alternativer for dette tallet.</span>';
+}
+
+// ── Bunnlinje: teller + Send ───────────────────────────────────────────────
+function _forslagRenderBunn() {
+  document.getElementById('_fors-bunn')?.remove();
+  if (!_forslagAktiv()) return;
+  const t = _forslagTelling();
+  const smal = _kundeErSmal();
+  const d = document.createElement('div');
+  d.id = '_fors-bunn';
+  d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:82;background:var(--surface);'
+    + 'border-top:1px solid var(--border);box-shadow:0 -4px 18px rgba(0,0,0,.25);'
+    + 'padding:' + (smal ? '10px 12px' : '10px 16px') + ';display:flex;align-items:center;gap:12px;flex-wrap:wrap';
+  const sendt = _forslagState.sendt;
+  d.innerHTML = `
+    <div style="flex:1;min-width:0;font-size:12.5px;line-height:1.4">
+      <b>${t.ok}</b> <span style="color:var(--dim)">rom OK</span>
+      · <b>${t.forslag}</b> <span style="color:var(--dim)">forslag</span>
+      ${sendt ? '<br><span style="color:#22c55e;font-size:11.5px">✓ Sendt — du kan sende på nytt om du ombestemmer deg</span>'
+              : '<br><span style="color:var(--dim);font-size:11.5px">Klikk et rom i tegningen for å si din mening</span>'}
+    </div>
+    <button onclick="_forslagSendModal()" ${(t.ok + t.forslag) ? '' : 'disabled'}
+      style="min-height:${smal ? 46 : 38}px;padding:0 18px;border-radius:9px;font-size:13px;font-weight:700;
+             border:none;cursor:${(t.ok + t.forslag) ? 'pointer' : 'default'};
+             background:${(t.ok + t.forslag) ? 'var(--accent)' : 'var(--surface2)'};
+             color:${(t.ok + t.forslag) ? '#0d0e10' : 'var(--dim)'}">Send forslag</button>`;
+  document.body.appendChild(d);
+}
+
+function _forslagSendModal() {
+  const t = _forslagTelling();
+  if (!(t.ok + t.forslag)) return;
+  document.getElementById('_fors-ov')?.remove();
+  const ov = document.createElement('div');
+  ov.id = '_fors-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3200;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  // «Godkjenn hele prosjektet» (044 regel 9) tilbys bare når kunden ikke har noen innvendinger.
+  const alleOk = t.forslag === 0 && t.ok > 0;
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(460px,96vw);padding:22px;color:var(--text)">
+    <div style="font-size:17px;font-weight:700;margin-bottom:4px">Send til ${esc(_forslagState.orgName)}</div>
+    <div style="font-size:12.5px;color:var(--dim);margin-bottom:14px">${t.ok} rom OK · ${t.forslag} forslag. Du kan sende på nytt så lenge forslaget ikke er behandlet.</div>
+    <input id="_fors-navn" placeholder="Ditt navn" value="${esc(_forslagState.navn || '')}"
+      style="width:100%;padding:9px 10px;margin-bottom:9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">
+    <textarea id="_fors-tekst" rows="3" placeholder="Kommentar til hele prosjektet (valgfritt)"
+      style="width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px;font-family:inherit;resize:vertical">${esc(_forslagState.kommentar || '')}</textarea>
+    ${alleOk ? `<label style="display:flex;align-items:flex-start;gap:8px;margin-top:11px;font-size:12.5px;cursor:pointer">
+      <input type="checkbox" id="_fors-godkjenn" style="margin-top:2px">
+      <span><b>Godkjenn hele prosjektet</b><br><span style="color:var(--dim);font-size:11.5px">Du sier at løsningen er slik du vil ha den. Navnet og datoen lagres.</span></span></label>` : ''}
+    <div id="_fors-feil" style="display:none;font-size:12px;color:#e5484d;margin-top:9px"></div>
+    <div style="display:flex;justify-content:flex-end;gap:9px;margin-top:16px">
+      <button onclick="document.getElementById('_fors-ov').remove()" style="padding:9px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Avbryt</button>
+      <button id="_fors-send" onclick="_forslagSend()" style="padding:9px 18px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:700;color:#0d0e10;cursor:pointer">Send</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  document.getElementById('_fors-navn')?.focus();
+}
+
+function _forslagPayload() {
+  const rooms = [];
+  for (const [roomId, v] of _forslagState.valg) {
+    const r = S.rooms.find(x => x.id === roomId);
+    const rad = { roomId, roomName: (r && r.name) || 'Rom', ok: !!v.ok };
+    if (!v.ok) {
+      if (v.productId) rad.productId = v.productId;
+      if (v.targetWm2 != null) rad.targetWm2 = v.targetWm2;
+      if (v.direction) rad.direction = v.direction;
+      if ((v.comment || '').trim()) rad.comment = v.comment.trim();
+    }
+    rooms.push(rad);
+  }
+  return { rooms, comment: (_forslagState.kommentar || '').trim() || undefined };
+}
+
+async function _forslagSend() {
+  if (!_forslagState) return;
+  const navn = (document.getElementById('_fors-navn')?.value || '').trim();
+  const feil = document.getElementById('_fors-feil');
+  // Kenneth skal vite hvem som har ment noe — et anonymt forslag er ikke til å handle på.
+  if (!navn) {
+    if (feil) { feil.style.display = 'block'; feil.textContent = 'Skriv navnet ditt, så vet vi hvem forslaget er fra.'; }
+    document.getElementById('_fors-navn')?.focus();
+    return;
+  }
+  _forslagState.navn = navn;
+  _forslagState.kommentar = (document.getElementById('_fors-tekst')?.value || '').trim();
+  const payload = _forslagPayload();
+  if (document.getElementById('_fors-godkjenn')?.checked) {
+    payload.approveAll = { name: navn, at: new Date().toISOString() };
+  }
+  const btn = document.getElementById('_fors-send');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sender …'; }
+  let ok = false;
+  try {
+    const { data, error } = await _db.rpc('kundelenke_answer',
+      { p_token: _forslagState.token, p_answer: payload, p_name: navn });
+    ok = !error && data === true;
+  } catch (e) { ok = false; }
+  if (!ok) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
+    if (feil) { feil.style.display = 'block'; feil.textContent = 'Kunne ikke sende. Lenken kan være utløpt eller allerede behandlet.'; }
+    return;
+  }
+  _forslagState.sendt = true;
+  document.getElementById('_fors-ov')?.remove();
+  _forslagRenderBunn();
+  _forslagTakk();
+  try { await _db.functions.invoke('kundelenke-mail', { body: { token: _forslagState.token, kind: 'forslag_answered' } }); }
+  catch (e) { /* 029: e-post er en bonus, svaret er lagret uansett */ }
+}
+
+function _forslagTakk() {
+  document.getElementById('_fors-takk')?.remove();
+  const d = document.createElement('div');
+  d.id = '_fors-takk';
+  d.style.cssText = 'position:fixed;inset:0;z-index:3300;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px';
+  d.onclick = () => d.remove();
+  d.innerHTML = `<div style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(420px,96vw);padding:26px;text-align:center;color:var(--text)">
+    <div style="font-size:34px;line-height:1;margin-bottom:10px">✓</div>
+    <div style="font-size:17px;font-weight:700;margin-bottom:6px">Takk — forslaget er sendt</div>
+    <div style="font-size:13px;color:var(--dim);line-height:1.5">${esc(_forslagState.orgName)} går gjennom det og tar kontakt. Du kan la siden stå åpen — den viser hva som blir godkjent.</div>
+    <button onclick="document.getElementById('_fors-takk').remove()" style="margin-top:16px;padding:9px 20px;background:var(--accent);border:none;border-radius:8px;font-size:13px;font-weight:700;color:#0d0e10;cursor:pointer">Lukk</button>
+  </div>`;
+  document.body.appendChild(d);
+}
+
+// ── Merker på tegningen ────────────────────────────────────────────────────
+// Egen funksjon kalt fra `render()`, ikke en hale inne i `drawRooms()` — 030 lærte at en hale
+// der aldri tegnes, fordi drawRooms har to tidlige `return`.
+function drawForslagMerker() {
+  if (!_forslagAktiv()) return;
+  for (const [roomId, v] of _forslagState.valg) {
+    const r = S.rooms.find(x => x.id === roomId);
+    if (!r || !r.points || r.points.length < 3 || !_roomOnActiveFloor(r)) continue;
+    const harForslag = !v.ok && (v.productId || v.targetWm2 || v.direction || (v.comment || '').trim());
+    if (!v.ok && !harForslag) continue;
+    let cx = 0, cy = 0;
+    for (const p of r.points) { cx += p.x; cy += p.y; }
+    const c = w2s(cx / r.points.length, cy / r.points.length);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(c.x, c.y - 26, 13, 0, Math.PI * 2);
+    ctx.fillStyle = v.ok ? '#22c55e' : '#f0b232';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#0d0e10';
+    ctx.font = 'bold 15px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(v.ok ? '✓' : '!', c.x, c.y - 25);
+    ctx.restore();
+  }
+}
+
 function _presentRenderDetail() {
   const el = document.getElementById('present-detail');
   if (!el) return;
@@ -6790,7 +7293,28 @@ function _presentRenderDetail() {
   if (!room) { el.style.display = 'none'; el.innerHTML = ''; return; }
   el.innerHTML = _presentRoomDetailHtml(room);
   const bar = document.getElementById('present-bar');
-  el.style.top = ((bar ? bar.offsetHeight : 56) + 12) + 'px';
+  if (_forslagAktiv()) {
+    // Kortet er nå noe kunden JOBBER i, så det trenger et kryss — hover lukker det ikke lenger.
+    const _kr = _kundeErSmal() ? 44 : 30;   // 44 px er minste trygge trykkflate på telefon
+    el.insertAdjacentHTML('afterbegin',
+      '<button onclick="S.ui.presentRoomId=null;_presentRenderDetail();render()" aria-label="Lukk"'
+      + ' style="position:absolute;top:8px;right:9px;width:' + _kr + 'px;height:' + _kr + 'px;cursor:pointer;'
+      + 'border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);'
+      + 'font-size:15px;line-height:1;z-index:2">✕</button>');
+    if (_kundeErSmal()) {
+      // Bunnark, samme mønster som 032/033. ⚠ MÅLT: bunnlinja er 74 px høy, ikke de 66 jeg
+      // først gjettet — kortet la seg da oppå «Send forslag». Høyden leses av, ikke antas.
+      const bh = (document.getElementById('_fors-bunn') || {}).offsetHeight || 74;
+      el.style.cssText += ';left:0;right:0;width:auto;max-width:none;top:auto;bottom:' + bh + 'px;'
+        + 'max-height:calc(100vh - ' + (bh + 120) + 'px);overflow:auto;border-radius:14px 14px 0 0';
+    } else {
+      el.style.top = ((bar ? bar.offsetHeight : 56) + 12) + 'px';
+      el.style.maxHeight = 'calc(100vh - ' + ((bar ? bar.offsetHeight : 56) + 92) + 'px)';
+      el.style.overflow = 'auto';
+    }
+  } else {
+    el.style.top = ((bar ? bar.offsetHeight : 56) + 12) + 'px';
+  }
   el.style.display = 'block';
 }
 // ── Steg 3: subtil gulvtekstur per gulvtype (under leggemønsteret) ─────────
@@ -9266,7 +9790,56 @@ function _copyManuelt(url) {
 
 // Dialogen etter «Del lenke». Erstatter den stille kopieringen: Kenneth så aldri hva som havnet
 // på tavla, og kunne ikke endre lenketeksten.
-function _presentShareModal(url) {
+// 043: forslagslenka gjenbrukes. Uten gjenbruk ville hver «Del lenke» laget en ny rad i
+// `kundelenker`, og 044s panel ville ikke vite hvilken av dem som gjelder.
+async function _presentForslagToken() {
+  if (!_db || !_supabaseProjectId) return null;
+  try {
+    const { data } = await _db.from('kundelenker')
+      .select('token, expires_at, created_at')
+      .eq('project_id', _supabaseProjectId).eq('mode', 'forslag').eq('status', 'open')
+      .order('created_at', { ascending: false }).limit(5);
+    const naa = Date.now();
+    const brukbar = (data || []).find(r => !r.expires_at || new Date(r.expires_at).getTime() > naa);
+    if (brukbar) return brukbar.token;
+  } catch (e) { /* ny lenke under */ }
+  const token = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
+  if (!token) return null;
+  try {
+    const { error } = await _db.from('kundelenker').insert({
+      token, project_id: _supabaseProjectId, org_id: _userOrg ? _userOrg.id : null,
+      mode: 'forslag', asked_walls: [], note: null, status: 'open',
+      // En presentasjon lever lenger enn en målforespørsel; 90 dager mot 30.
+      expires_at: new Date(Date.now() + 90 * 86400000).toISOString(),
+      created_by: _currentUser ? _currentUser.id : null,
+      notify_email: _currentUser ? _currentUser.email : null,
+    });
+    if (error) {
+      // 23514 = CHECK-constrainten på `mode` mangler 'forslag' → migrasjonen er ikke kjørt.
+      console.warn('Kunne ikke lage forslagslenke:', error.message);
+      return null;
+    }
+  } catch (e) { return null; }
+  return token;
+}
+
+// Hvilken URL gjelder nå? Avkryssingen bestemmer, og begge kopierknappene leser den — slik
+// slipper vi å bygge om dialogen for hvert klikk.
+let _delUrler = { ren: '', forslag: '' };
+function _delUrl() {
+  const av = document.getElementById('_del-forslag');
+  return (av && av.checked && _delUrler.forslag) ? _delUrler.forslag : _delUrler.ren;
+}
+function _delOppdater() {
+  const u = _delUrl();
+  const felt = document.getElementById('_del-adresse');
+  if (felt) felt.value = u;
+  const aa = document.getElementById('_del-apne');
+  if (aa) aa.href = u;
+}
+
+function _presentShareModal(url, forslagToken) {
+  _delUrler = { ren: url, forslag: forslagToken ? (url + '&forslag=' + forslagToken) : '' };
   document.getElementById('_del-ov')?.remove();
   const ov = document.createElement('div');
   ov.id = '_del-ov';
@@ -9284,21 +9857,26 @@ function _presentShareModal(url) {
       <input id="_del-label" value="PRESENTASJON" aria-label="Lenketekst"
         style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);
                color:#4ea3ff;text-decoration:underline;font-size:13px;font-weight:600">
-      <button onclick="_copyLinkRich(document.getElementById('_del-label').value, ${_jsStr(url)})"
+      <button onclick="_copyLinkRich(document.getElementById('_del-label').value, _delUrl())"
         style="padding:8px 15px;background:var(--accent);border:none;border-radius:7px;font-size:12.5px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
     </div>
     <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Du kan skrive noe annet, f.eks. «Se løsningen her» — teksten følger med lenken.</div>
 
+    ${forslagToken ? `<label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;font-size:12.5px;cursor:pointer">
+      <input type="checkbox" id="_del-forslag" checked onchange="_delOppdater()" style="margin-top:2px">
+      <span><b>Kunden kan foreslå endringer</b><br><span style="color:var(--dim);font-size:11.5px">Kunden kan trykke på et rom og si «OK» eller foreslå annet produkt, effekt eller retning. Ingenting endres før du godkjenner.</span></span>
+    </label>` : `<div style="font-size:11.5px;color:#f59e0b;margin-bottom:14px">Kunne ikke lage forslagslenke — er <code>supabase-migration-kundeforslag.sql</code> kjørt? Lenken under er en vanlig presentasjon.</div>`}
+
     <div style="font-size:12px;font-weight:600;margin-bottom:5px">Adressen</div>
     <div style="display:flex;gap:7px;align-items:center">
-      <input readonly value="${esc(url)}" onclick="this.select()"
+      <input id="_del-adresse" readonly value="${esc(_delUrler.forslag || url)}" onclick="this.select()"
         style="flex:1;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--dim);font-size:11.5px">
-      <button onclick="_copyLinkPlain(${_jsStr(url)})"
+      <button onclick="_copyLinkPlain(_delUrl())"
         style="padding:7px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer">Kopier adresse</button>
     </div>
 
     <div style="display:flex;justify-content:flex-end;gap:9px;margin-top:18px">
-      <a href="${esc(url)}" target="_blank" rel="noopener"
+      <a id="_del-apne" href="${esc(_delUrler.forslag || url)}" target="_blank" rel="noopener"
         style="padding:8px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text);text-decoration:none">Åpne</a>
       <button onclick="document.getElementById('_del-ov').remove()"
         style="padding:8px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Lukk</button>
@@ -9333,8 +9911,9 @@ async function _presentShareLink() {
   // gir arqely.com eller localhost, som kunden ikke kan bruke.
   const url = _PUBLIC_BASE_URL + '/?present=' + token;
   // 042: dialog i stedet for stille kopiering. Kenneth skal se hva som havner på tavla, og
-  // kunne endre lenketeksten før han limer den inn.
-  _presentShareModal(url);
+  // kunne endre lenketeksten før han limer den inn. 043: + forslagslenke.
+  const forslagToken = await _presentForslagToken();
+  _presentShareModal(url, forslagToken);
 }
 // Boot-sti: åpne et prosjekt read-only via offentlig token (uten innlogging).
 async function _presentLoadByToken(token) {
@@ -17845,6 +18424,176 @@ function _bestFoilOption(results) {
 // (0,0), x mot øst, nord = MINKENDE y (verdens-Y øker nedover). Bommer denne, havner alt som
 // snappes mot kartet i 006 på feil sted — og feilen ville vært vanskelig å se på skjermen fordi
 // bildet uansett ligger riktig.
+// ═══ 043 · REGRESJON: KUNDEFORSLAG ════════════════════════════════════════════════════════
+// Låser funnene fra STEG 0, som alle var overraskelser:
+//  - `getProductFamily` på en 17T-kabel gir 44 produkter som BLANDER 17T og 10T.
+//  - FlexFoil varierer bare i bredde, EcoMat i både W/m² og lengde.
+//  - Romkortet var hover-drevet og viste artikkelnummer til alle med en offentlig lenke.
+function _kundeforslagRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'skal IKKE finnes', got });
+
+  if (!Array.isArray(HEATING_PRODUCTS) || !HEATING_PRODUCTS.length) {
+    check('A: produktkatalogen er lastet', true, false, 'HEATING_PRODUCTS tom — kjør _loadProducts() først');
+    const ok0 = results.every(r => r.ok);
+    console[ok0 ? 'log' : 'error']('_kundeforslagRegressionTest: ' + (ok0 ? 'BESTÅTT' : 'FEILET'), results);
+    return { ok: ok0, results };
+  }
+
+  // Lagre og gjenopprett alt vi rører. Testen skal ikke etterlate et prosjekt.
+  const lagret = {
+    rooms: S.rooms, floors: S.floors, cables: S.cables, strips: S.strips, mats: S.mats,
+    plates: S.plates, hindrings: S.hindrings, zones: S.zones, stairs: S.stairs,
+    aktivEtasje: S.ui.activeFloorId, aktivPart: S.ui.activePartId,
+    kundeMode: S.ui.kundeMode, presentPublic: S.ui.presentPublic, presentRoomId: S.ui.presentRoomId,
+    forslag: _forslagState,
+  };
+  try {
+    const rom = (id, navn, b, h, x) => ({
+      id, name: navn, floorId: 1, partId: 1, shape: 'polygon', wallThicknessCm: 0,
+      points: [{ x: x || 0, y: 0 }, { x: (x || 0) + b, y: 0 }, { x: (x || 0) + b, y: h }, { x: x || 0, y: h }],
+      walls: [], dims: [], annotOffsets: {}, area: b * h, dimSnap: true, uncertainWalls: [],
+    });
+    S.floors = [{ id: 1, name: 'Plan', building: null, order: 0, collapsed: false, partId: 1 }];
+    S.ui.activeFloorId = 1; S.ui.activePartId = 1;
+    S.rooms = [rom(1, 'Stue', 500, 320), rom(2, 'Bad', 300, 240, 560)];
+    for (const r of S.rooms) r.walls = compWalls(r.points);
+    S.cables = []; S.strips = []; S.mats = []; S.plates = []; S.hindrings = []; S.zones = []; S.stairs = [];
+
+    const finn = n => HEATING_PRODUCTS.find(p => p.name === n);
+    const kab = finn('InFloor 17T 800W 47m');
+    const matte = finn('EcoMat 60T 0.5×4m');
+    const folie = finn('FlexFoil B=50cm');
+    check('A: testproduktene finnes i katalogen', true, !!(kab && matte && folie),
+      [kab && 'kabel', matte && 'matte', folie && 'folie'].filter(Boolean).join(','));
+    if (!kab || !matte || !folie) throw new Error('produkter mangler');
+
+    // ── B: kabel ──
+    S.cables = [{ id: 1, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
+    const alt = _forslagAlternativer(S.rooms[0]);
+    check('B: kabelrom gir en alternativliste', 'kabel', alt && alt.type === 'kabel', alt && alt.type);
+    check('B: lista er sortert på effekt (det er pilerekkefølgen)', true,
+      alt.liste.every((x, i, a) => i === 0 || a[i - 1].W <= x.W), 'usortert');
+    // ⚠ Uten innsnevringen ville lista hatt 44 produkter og blandet inn InFloor 10T.
+    checkIkke('B: ingen 10T-kabler i en 17T-liste (ikke bytte kabeltype)',
+      alt.liste.some(x => /\b10T\b/.test(x.navn)), alt.liste.filter(x => /\b10T\b/.test(x.navn)).map(x => x.navn));
+    check('B: lista er hele 17T-serien', 25, alt.liste.length, alt.liste.length);
+    check('B: dagens produkt er funnet i lista', true,
+      alt.naaIdx >= 0 && alt.liste[alt.naaIdx].productId === kab.id, alt.naaIdx);
+    check('B: ugyldige kandidater er med, men merket', true,
+      alt.liste.some(x => !x.valid) && alt.liste.filter(x => !x.valid).every(x => !!x.advarsel),
+      alt.liste.filter(x => !x.valid).length + ' ugyldige');
+    // Flateeffekt og W/m² er samme størrelse for kabel: W/m ÷ CC = productW / nettoM².
+    check('B: flateeffekt og W/m² er samme tall for kabel (vises derfor én gang)', true,
+      alt.liste.every(x => Math.abs(x.flateeffekt - x.wm2) <= 1), 'avviker');
+
+    // ── C: pilene ──
+    _forslagState = { token: 't', status: 'open', note: '', orgName: 'Cenika AS', valg: new Map(), navn: '', kommentar: '', sendt: false };
+    S.ui.kundeMode = 'forslag';
+    const naaW = alt.liste[alt.naaIdx].W;
+    _forslagPil(1, 1);
+    const opp = _forslagValg(1);
+    check('C: ▲ gir neste GYLDIGE kandidat over', true,
+      !!opp && alt.liste.find(x => x.productId === opp.productId).W > naaW,
+      opp && alt.liste.find(x => x.productId === opp.productId).navn);
+    _forslagPil(1, -1); _forslagPil(1, -1);
+    const ned = _forslagValg(1);
+    check('C: ▼▼ ender under utgangspunktet', true,
+      !!ned && alt.liste.find(x => x.productId === ned.productId).W < naaW,
+      ned && alt.liste.find(x => x.productId === ned.productId).navn);
+    // Pilene skal aldri lande på en ugyldig kandidat.
+    let ugyldigTruffet = false;
+    _forslagState.valg.clear();
+    for (let i = 0; i < 40; i++) { _forslagPil(1, -1); const v = _forslagValg(1); if (!v) break;
+      const k = alt.liste.find(x => x.productId === v.productId); if (k && !k.valid) ugyldigTruffet = true; }
+    checkIkke('C: pilene lander aldri på en ugyldig kandidat', ugyldigTruffet, 'traff ugyldig');
+
+    // ── D: ønsket flateeffekt ──
+    const serie = _forslagKabelSerie(getProductFamily(kab.id), kab);
+    const r80 = selectCableByPower(1, serie, 80);
+    check('D: ønsket 80 W/m² gir ett alternativ under og ett over', true,
+      !!(r80 && r80.below[0] && r80.above[0]),
+      r80 && [r80.below[0] && Math.round(r80.below[0].wm2), r80.above[0] && Math.round(r80.above[0].wm2)].join('/'));
+    check('D: «under» ligger under målet og «over» ligger over', true,
+      r80.below[0].wm2 <= 80 && r80.above[0].wm2 > 80,
+      Math.round(r80.below[0].wm2) + ' / ' + Math.round(r80.above[0].wm2));
+    check('D: begge er gyldige kandidater', true, r80.below[0].valid && r80.above[0].valid, 'ugyldig foreslått');
+
+    // ── E: matte og folie ──
+    S.cables = []; S.mats = [{ id: 1, roomId: 2, productId: matte.id }];
+    const am = _forslagAlternativer(S.rooms[1]);
+    check('E: matte piler over W/m²-variantene, ikke over lengdene', 3,
+      am && am.type === 'flate' && am.liste.length === 3, am && am.liste.length);
+    check('E: variantene er 60/100/150 W/m², stigende', '60,100,150',
+      am.liste.map(x => x.wm2).join(',') === '60,100,150', am.liste.map(x => x.wm2).join(','));
+    checkIkke('E: mattenavnet inneholder ikke den ene lengden motoren valgte',
+      am.liste.some(x => /0[.,]5\s*[×x]/.test(x.navn)), am.liste.map(x => x.navn));
+    S.mats = []; S.strips = [{ id: 1, roomId: 2, productId: folie.id }];
+    const af = _forslagAlternativer(S.rooms[1]);
+    check('E: FlexFoil har bare én W/m² → ingen piler', 1, af && af.liste.length === 1, af && af.liste.length);
+    checkIkke('E: folie tilbyr ikke bredder som valg', af.liste.some(x => /B=/.test(x.navn)), af.liste.map(x => x.navn));
+    S.strips = [];
+    check('E: rom uten produkt gir ingen alternativer', null, _forslagAlternativer(S.rooms[1]) === null, 'fikk liste');
+
+    // ── F: svaret ──
+    S.cables = [{ id: 1, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
+    _forslagState.valg.clear();
+    _forslagState.valg.set(1, { ok: false, productId: kab.id, targetWm2: 80, direction: 'v', comment: 'Varmere ved vinduet' });
+    _forslagState.valg.set(2, { ok: true, productId: null, targetWm2: null, direction: null, comment: '' });
+    const t = _forslagTelling();
+    check('F: telleren skiller OK fra forslag', '1/1', t.ok === 1 && t.forslag === 1, t.ok + '/' + t.forslag);
+    const pl = _forslagPayload();
+    check('F: svaret har en rad per rom', 2, pl.rooms.length === 2, pl.rooms.length);
+    const r1 = pl.rooms.find(r => r.roomId === 1), r2 = pl.rooms.find(r => r.roomId === 2);
+    check('F: forslagsraden bærer produkt, ønsket effekt, retning og kommentar', true,
+      r1.ok === false && r1.productId === kab.id && r1.targetWm2 === 80 && r1.direction === 'v' && !!r1.comment,
+      JSON.stringify(r1));
+    checkIkke('F: OK-raden har ingen endringsfelt', ('productId' in r2) || ('direction' in r2), JSON.stringify(r2));
+    check('F: romnavnet følger med så 044 kan vise det uten prosjektet', 'Stue', r1.roomName === 'Stue', r1.roomName);
+    // Et rom uten valg skal ikke bli en mening.
+    _forslagState.valg.set(3, { ok: false, productId: null, targetWm2: null, direction: null, comment: '   ' });
+    check('F: tomt valg teller verken som OK eller forslag', '1/1',
+      _forslagTelling().ok === 1 && _forslagTelling().forslag === 1,
+      _forslagTelling().ok + '/' + _forslagTelling().forslag);
+
+    // ── G: det kunden IKKE skal se, og hvordan rommet velges ──
+    const kilde = _kildeUtenKommentarer(_presentRoomDetailHtml);
+    check('G: artikkelnummer er gatet på presentPublic (spec regel 2)', true,
+      /article_no && !\(S\.ui && S\.ui\.presentPublic\)/.test(kilde), 'ugatet');
+    checkIkke('G: kortet viser ikke pris', /pris|price|kr\b/i.test(kilde), 'prisfelt funnet');
+    check('G: hover bytter ikke rom i forslagsmodus (kortet er interaktivt)', true,
+      /if \(_forslagAktiv\(\)\) return;/.test(_kildeUtenKommentarer(_presentHover)), 'hover overstyrer valget');
+    check('G: merkene tegnes fra render(), ikke som hale i drawRooms', true,
+      /drawForslagMerker\(\)/.test(_kildeUtenKommentarer(render))
+      && !/drawForslagMerker/.test(_kildeUtenKommentarer(drawRooms)), 'feil sted');
+    check('G: kunden skriver aldri i prosjektet — bare kundelenke_answer', true,
+      /kundelenke_answer/.test(_kildeUtenKommentarer(_forslagSend))
+      && !/romtegner_projects/.test(_kildeUtenKommentarer(_forslagSend)), 'skriver i prosjektet');
+    check('G: navn er påkrevd før innsending', true,
+      /if \(!navn\)/.test(_kildeUtenKommentarer(_forslagSend)), 'anonymt forslag mulig');
+    check('G: ingenting tegnes om hos kunden (spec regel 5)', true,
+      !/autoFillCable|autoAddStrips|autoFillMat/.test(
+        _kildeUtenKommentarer(_forslagSettValg) + _kildeUtenKommentarer(_forslagPil)
+        + _kildeUtenKommentarer(_forslagKortHtml) + _kildeUtenKommentarer(_forslagSend)),
+      'kaller en utleggsmotor');
+  } catch (e) {
+    check('Z: testen kjørte uten å kaste', true, false, e.message);
+  } finally {
+    S.rooms = lagret.rooms; S.floors = lagret.floors; S.cables = lagret.cables; S.strips = lagret.strips;
+    S.mats = lagret.mats; S.plates = lagret.plates; S.hindrings = lagret.hindrings;
+    S.zones = lagret.zones; S.stairs = lagret.stairs;
+    S.ui.activeFloorId = lagret.aktivEtasje; S.ui.activePartId = lagret.aktivPart;
+    S.ui.kundeMode = lagret.kundeMode; S.ui.presentPublic = lagret.presentPublic;
+    S.ui.presentRoomId = lagret.presentRoomId;
+    _forslagState = lagret.forslag;
+  }
+
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error']('_kundeforslagRegressionTest: ' + (allOk ? 'BESTÅTT' : 'FEILET'), results);
+  return { ok: allOk, results };
+}
+
 function _geoRegressionTest() {
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, expected, got, ok: !!cond });
@@ -38924,8 +39673,10 @@ async function _kundelenkeRegressionTest() {
         (brukt.match(/_copyLinkRich\(/g) || []).length >= 3, (brukt.match(/_copyLinkRich\(/g) || []).length);
       check('P: ren-URL-kopiering finnes fortsatt begge steder', true,
         (brukt.match(/_copyLinkPlain\(/g) || []).length >= 3, (brukt.match(/_copyLinkPlain\(/g) || []).length);
+      // 043 utvidet kallet med forslagstokenet, og denne sjekken fanget det. Den skal handle
+      // om ATFERDEN — dialog i stedet for stille kopiering — ikke om argumentlista.
       check('P: _presentShareLink kopierer ikke lenger stille', true,
-        /_presentShareModal\(url\)/.test(_kildeUtenKommentarer(_presentShareLink))
+        /_presentShareModal\(/.test(_kildeUtenKommentarer(_presentShareLink))
         && !/clipboard\.writeText/.test(_kildeUtenKommentarer(_presentShareLink)),
         'kopierer fortsatt stille');
       // URL-en limes inn i et onclick="…". JSON-serialisering gir doble anførselstegn og
@@ -64558,7 +65309,14 @@ async function initSupabase() {
     _db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     // Offentlig read-only presentasjon via ?present=<token> (ingen innlogging).
     const _presTok = new URLSearchParams(location.search).get('present');
-    if (_presTok) { const ok = await _presentLoadByToken(_presTok); if (ok) return; }
+    if (_presTok) {
+      const ok = await _presentLoadByToken(_presTok);
+      // 043: `&forslag=<token>` legger forslagslaget OPPÅ presentasjonen. Prosjektet er
+      // allerede hentet via get_present_project — lenka brukes bare til status.
+      const _forsTok = new URLSearchParams(location.search).get('forslag');
+      if (ok && _forsTok) await _forslagStart(_forsTok);
+      if (ok) return;
+    }
     // 027: kundelenke (?kunde=<token>) — egen gren, samme mønster. `?present=` er urørt.
     const _kundeTok = new URLSearchParams(location.search).get('kunde');
     if (_kundeTok) { const ok = await _kundeLoadByToken(_kundeTok); if (ok) return; }
