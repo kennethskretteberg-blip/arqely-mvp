@@ -4,6 +4,63 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesidens musemarkør identisk med hovedmodulen — 2026-10-08
+
+Prompt 036. Kenneth: «Normalt en pil. Kryss når den føres over en vegg. Hånd over et hjørne.
+Pil begge veier i retningen et objekt kan flyttes når den føres over gizmoene.»
+
+**STEG 0.1 — hovedmodulens hale, ordrett:**
+
+```js
+if (_hovWallHit?.wallId) canvas.style.cursor=WALL_CURSOR;    // vegg
+else if (_hovWallHit?.roomId) canvas.style.cursor='default'; // romflate
+else canvas.style.cursor='default';
+```
+
+`WALL_CURSOR` er en SVG-data-URL med et hvitt kryss og svart kontur. `grabbing` settes av
+mousedown når panoreringen starter, ikke i kaskaden.
+
+**STEG 0.2 — kundesiden før endringen:** tomt lerret `grab`, over vegg `pointer`, romflate
+`grab`. Tre avvik, nøyaktig som prompten beskrev.
+
+**Endret:** hvilestillingen fra `'grab'` til `'default'`, og veggtreffet fra `'pointer'` til
+`WALL_CURSOR` — samme konstant som hovedmodulen, ikke en kopi. `grabbing` måtte ikke flyttes;
+den settes allerede riktig av present-grenens mousedown. Men pan-*slipp* satte `'grab'` for
+begge moduser, så der skilles det nå: ren presentasjon er pan-bare og beholder hånd, mens
+kundesiden er en editor og går tilbake til pil. Samme i `_kundeGizmoSlipp`/`_kundeHjorneSlipp`
+og ved innlasting, så markøren er pil fra første frame og ikke først etter at musa er flyttet.
+
+**Målt etter endringen, kundesiden mot innlogget på samme rom — identiske i alle fem
+sammenlignbare tilfellene:**
+
+| Over | Begge |
+|---|---|
+| Tomt lerret | pil |
+| Vegg | kryss + glød |
+| Romflate | pil |
+| Hjørne | hånd |
+| Mens man panorerer | knyttet hånd, pil etterpå |
+
+Gizmoene (som ikke finnes i hovedmodulen på samme måte): vegg-pil `ns/ew-resize` etter veggens
+retning, hjørne-X `ew-resize`, hjørne-Y `ns-resize`, hengelås hånd.
+
+**⚠ To måleartefakter og én ekte feil underveis:**
+- **Lerretet var 0×0** ved første måling (headless-fella), så «alt gir grab» var ugyldig.
+  Skjermbilde først tvinger layout.
+- **Panelet gikk fra bunnark til sidepanel** mellom oppsett og probe, så lerretet krympet fra
+  1280 til 950 og alle `w2s`-koordinatene pekte feil. Målingen må skje etter at layouten har
+  satt seg.
+- **Ekte feil:** merkemodusens markør lå inne i kundemodus-vakten, men merkemodus kjører for
+  *innlogget* bruker — så den kjørte aldri, og hovedmodulens kaskade ga kryss der det skulle
+  være hånd. Flyttet øverst i mousemove.
+
+**Regresjon:** `_kundelenkeRegressionTest` måtte fjerne SEG SELV fra høystakken — dens egne
+regex-strenger inneholder mønstrene den leter etter (`_cur = 'grab'`, `const WALL_CURSOR = `),
+så den talte 3 der svaret er 0. Samme felle som i `_edgeMailRegressionTest`. 15 batterier
+grønt: **416 sjekker**.
+
+---
+
 ## «Be kunde om mål»: knappen først, så alle mål eller utvalgte vegger — ingen balanse-advarsel for innlogget — «Tegn selv» parkert — 2026-10-07
 
 Prompt 034. Kenneth: «Jeg trenger ikke advarsel om at rommet ikke går opp — det forstår jeg selv …
