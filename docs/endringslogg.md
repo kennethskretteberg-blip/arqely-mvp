@@ -4,6 +4,133 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Veggforslaget: duplikater, fragmenter, arkflate og INNVENDIG areal — 2026-10-08
+
+Prompt 047d. Forslaget kom fra meg selv i 047c, og **begge hypotesene i det var målt feil.**
+
+### STEG 0 — mitt eget premiss falt
+
+**«`PAIR_MIN_OVERLAP = 0.60` er for strengt når en vegg er delt av døråpninger.»** 3363 par
+avvises *bare* av overlapp-testen på din tegning — men medianen er **0.000** og **maks 0.590**.
+Terskel 0,5 gir 7 nye par, 0,1 gir 40. Terskelen er ikke flaskehalsen. Grunnen hypotesen var
+feil: nevneren i `_overlap_fraction` er den **korteste** av de to, så en kort innervegg mot en
+lang ytterlinje gir overlapp 1,0 — nettopp døråpningstilfellet jeg trodde feilet.
+
+**«Den ytre rammen droppes ikke.»** Riktig, men ikke av den grunnen jeg oppgav.
+`_drop_outer_frame` krever at flaten inneholder ALLE de andre, og ark-flaten inneholder **0 av
+17** — `polygonize` lager en **plan oppdeling**, så naboflater ligger utenfor hverandre, ikke
+inni.
+
+**Seks tilnærminger ble målt før noe ble skrevet.** Ingen lukket rommene ved å skru på en
+terskel: overlapp (+7 par), `MIN_STROKE_PT` ned til 0 (87 polygoner, men **2 av 34** med riktig
+areal), kjeding alene, dedup alene, grovere `close_gaps` (5 m «dører»), og et raster-**flomfyll**
+fra romlabelene (**8 av 34** — lekker gjennom døråpningene).
+
+### Det målingene faktisk fant — fire defekter
+
+**1. 114 av 368 vegger var duplikater.** Rundt ett enkelt rom lå tre nesten identiske
+senterlinjer (t = 12,8 / 13,4 / 12,8 cm). `_merge_collinear` fanger dem ikke — den krever at
+**endene** sammenfaller, mens duplikater overlapper i hele lengden. Ny `dedupe_overlapping`,
+med median tykkelse (13,4 var avviket, ikke fasiten).
+
+**2. Vegger sendt som fragmenter er usynlige for hele motoren.** 7851 av 11 174 segmenter er
+kortere enn 25 cm, og `MIN_WALL_LEN_CM` kaster hver enkelt. Toppveggen over ett av rommene
+finnes **ikke** som en lang strek — bare som biter. Etter kjeding er den 293 cm. Ny
+`chain_collinear`, og den må kjøre **før** kandidatvalget; `_merge_collinear` kjører på vegger
+og kommer for sent.
+
+**3. Ark-flaten ble «rom 1» på 2149 m²** mot 442 m² for summen av alle oppgitte arealer. Ny
+`_er_arkflate`: spenner over mer enn 85 % av både bredde og høyde. Målt: 96,6 % × 93,3 %, mot
+det største virkelige rommet på 47,9 m² ≈ 195 pt.
+
+**4. Rommene var SENTERLINJE-areal, ikke innvendig** — defekten med størst konsekvens i hele
+serien. `polygonize` lukker senterlinjer, så polygonet går vegg-midt til vegg-midt, mens
+grunnregelen i CLAUDE.md er at `room.points` er den **innvendige** grensen og `room.area` det
+brukbare gulvarealet. **Hvert rom plantegning-flyten lagde var systematisk ~1,2× for stort — og
+varmen dimensjoneres på arealet.** Ny `_til_innvendig`, som krymper inn halve tykkelsen av
+veggene som danner *dette* rommets grense (median, ikke snitt — snittet trekkes opp av tykke
+ytterveggbiter, og en global median under-krymper de tykke rommene). Brukt i **både**
+`/import/plan` og `/plan/rooms` — sistnevnte er ruta appen faktisk lager rom med.
+
+### Målt resultat på den ekte tegningen
+
+| | 047c | 047d |
+|---|---|---|
+| vegger | 253 | **168** (97 var duplikater) |
+| røde rester | 134 | 177 |
+| **lukkede rom** | **0** | **4** — Kontor/møterom, WC gjest, EL, WC |
+| arealsjekk OK | — | **3 av 4** |
+| dekning | 53,4 % | 48,3 % |
+
+Rester og dekning går «feil vei» med vilje: kjedingen finner flere **ekte** vegg-kandidater, og
+de som ikke parer seg blir røde prikker i stedet for å være usynlige.
+
+På fixturen treffer innkrympingen håndregnet fasit til centimeteren: ytre 500×400 cm med 20 cm
+vegger gir 460×360 = **16,56 m²** (senterlinje: 18,24).
+
+### To feller
+
+**`segment_widths` er en TOM LISTE for DWG, ikke `None`** — altså «ingen informasjon», som
+`centerlines` leser som «slipp gjennom». Første utgave av kjedingen bygget en ny liste med 0.0
+per kjede, altså «informasjon om at streken er 0 tykk», og da forsvant alle 6 veggene på
+DXF-fixturen. Fravær må forbli fravær.
+
+**Fixturens oppgitte arealer var satt nær senterlinje-arealet**, så tre arealtester *bestod* ved
+å låse en konvensjon som strider mot appens grunnregel. Fixturen oppgir nå innvendige arealer,
+slik en arkitekt skriver dem.
+
+### Ikke gjort, med vilje
+
+20 navnløse flater (tittelfeltet) står igjen. En regel «en flate uten romlabel er ikke et rom»
+ville fjernet dem alle — men også «Ikke navngitt», som Kenneth avklarte eksplisitt skal finnes.
+Og 30 av 34 rom lukker seg fortsatt ikke; det finnes ingen terskel som fikser det.
+
+**Regresjon:** lumelo 107 tester, `ruff` + `mypy` rene. arqely 17 batterier / 618 sjekker.
+
+---
+
+## Plantegning: DWG gjennom samme flyt, med $INSUNITS — 2026-10-08
+
+Prompt 050. DWG/DXF får det samme tredje valget som PDF, og går gjennom hele vegg-sjekken.
+
+### STEG 0 — prompten antok at DWG var som PDF
+
+**`parse_dwg` gir INGEN fylte flater.** CAD-vegger er doble linjer, så hele `rect`-veien fra 047
+er ubrukt for DWG og `double`-tersklene bærer alt. **Og `parse_dwg` manglet `page_size_pt` og
+`origin_pt`** — kontrakten fra 046 er sidenormalisert, og en tegning har ingen «side».
+
+### Tre feller, alle målt
+
+**1. Utstrekningen må regnes av SAMME strek som bakgrunnen.** `dwg_background` beskjærer til
+`MAX_BACKGROUND_SEGMENTS` og regnet utstrekningen av den **beskårne** mengden. Normaliseres
+veggene mot hele tegningen, driver de bort fra underlaget på akkurat de tegningene som er store
+nok til å bli beskåret. Nå delt kilde: `background_segments` + `background_extent`.
+
+**2. Origo er ikke (0,0).** SVG-en bruker `svg_x = x − x0`, `svg_y = h − (y − y0)`. Fixturen
+starter i (5000, 3000) med vilje — uten origo-subtraksjon havner u,v langt utenfor 0..1.
+`origin_pt` bæres nå fra motoren via `S.planMeta` til `/plan/rooms`.
+
+**3. Label-vinduet stod i PDF-PUNKTER og brakk på DWG.** En DXF i millimeter har 200 mm mellom
+linjene, ikke 8,4 pt — så nummer og navn falt utenfor vinduet og rommene kom tilbake
+**navnløse**, selv om grupperingen «fant» labels. Vinduet er nå i virkelige meter:
+`0.8 m / meters_per_unit` gir 22,7 pt for PDF 1:100 og 800 mm for DXF i mm.
+
+### $INSUNITS er en fordel DWG har over PDF
+
+`method: 'insunits'`, `confidence: 1.0` — eksakt, og slår både tittelfelt og arealkryss. Derfor
+står «Anbefalt» på plan-veien også for DWG.
+
+### Målt på den syntetiske DXF-en
+
+6 senterlinjer av 13 segmenter; **2 rom** (101 Stue 19,49 mot 18,5 ⚠, 102 Bad 18,86 mot 18,5 ✓);
+dekning 96,8 % med 1 rest (møbelet); kalibrering `insunits` 0,001 m/enhet, tillit 1,0; alle u,v
+innenfor 0..1.
+
+020s feilskille består: **415** = ingen konverterer finnes, **400** = en fantes men klarte ikke
+fila. `/import/pdf`, `/import/dwg` og `/import/dwg/background` er uendret og låst med tester.
+
+---
+
 ## Rom fra planveggene: gjennomgang, romtype, «Ikke navngitt» — 2026-10-08
 
 Prompt 049. Rommene fra vegg-sjekken inn i gjennomgangsskjermen, med navn og areal fra
