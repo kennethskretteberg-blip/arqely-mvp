@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Prosjektlista: «Venter på mål» (oransje) og «Mål mottatt» (grønn), bredere liste — 2026-10-08
+
+Prompt 038. Kenneth ville se forskjell på en kundelenke som er **sendt** og en som er **besvart**,
+og at søppelbøtta vises helt.
+
+**⚠ STEG 0.1 — tallene.** Tabellen trengte **1146 px**, lista ga **1100 px**: **46 px manglet**, og
+sletteknappen lå **38 px utenfor** kanten. Etter at merkene kom til vokste behovet til
+**1222 px** (min-content), så bredden ble satt til **1280 px** (1280 − 48 px padding = 1232).
+**1240 px holdt ikke** — det ga 1192 px innhold og 30 px overflow; målt, ikke gjettet.
+
+**`--dash-max-w` ble brukt, ikke en egen variabel.** Første forsøk var en egen `--pl-max-w` på
+tabell-wrapperen — den gjorde ingenting, fordi både `.dash` og `.dash-section` kapper på
+`var(--dash-max-w)` lenger opp. Variabelen settes nå på `#project-list-screen`, så den gjelder
+bare lista; resten av appen er urørt.
+
+**Funn underveis: sticky-knappen virket ikke.** `.pl-td-actions{position:sticky;right:0}` hører
+til `.pl-table-wrap`, men wrapperen ble aldri scrolleren: fanepanelene er flex-barn av `.dash` og
+krympet ikke under tabellens min-content. Ved 1000 px scrollet **hele dashbordet** sidelengs, og
+søppelbøtta havnet på x=1087 i et 1000 px vindu. `.dash > div[id^="dash-tab-content-"]
+{width:100%;min-width:0}` flytter scrollingen inn i tabellen — da fungerer sticky, og dashbordet
+står stille. Overskriftscella fikk samme sticky, ellers sklir «Oppdatert» inn under knappene.
+
+**Luft målt, ikke anslått.** `padding-right:16px` ble ignorert: `.pl-td` er definert senere i
+arket og vant med lik spesifisitet — faktisk luft ble 8 px. `.pl-table .pl-td-actions
+{padding-right:24px}` gir de målte **24 px** ved både 1280 og 1000 px.
+
+**Én spørring, to statuser.** `_fetchKundeAnswered` → `_fetchKundeStatus`: henter `open` og
+`answered` i samme kall. En **utløpt `open` teller ikke som «venter»** — kunden kan ikke svare på
+en død lenke. Har et prosjekt flere lenker vinner `answered`, ellers nyeste `created_at`.
+Sidebaren bruker nå samme fargelogikk (`#22c55e` grønn / `#f0b232` oransje).
+
+Merket overlever et langt prosjektnavn: `.pl-proj-line` gjør navnet krympbart (`flex:0 1 auto`)
+og merket fast (`flex:0 0 auto`) — målt at navnet kuttes og merket står helt.
+
+Regresjon: **443 sjekker grønne i 15 batterier**. De fire nye N-sjekkene ble negativt
+kontrollert — hver blir rød når sin regel fjernes.
+
+---
+
 ## Kundesvar: status hentes ved prosjektåpning, panelet åpner seg selv — 2026-10-08
 
 Prompt 037. Kenneth: «Går jeg rett inn på prosjektet som har merknaden, får jeg ikke opp
