@@ -16,7 +16,7 @@ Spec: [`spec-kundelenke.md`](spec-kundelenke.md) · Valg og avklaringer: [`promp
 | Kundesiden: sidepanel, veggvalg, piltaster og gizmo | 032 | `3540512` | ✅ i `main` |
 | E-postene skriver norsk med æøå + «<Org> Varmeplan» | 031 | `b16c4c5`, `5f8758b` | ✅ i `main` |
 | Kundesiden: hjørner, markør som i Varmeplan, fast tabell | 033 | `d640505` | ✅ i `main` |
-| Vegglengde: riktig ende flytter seg, brukervalgt fast ende | 035 | `9408319` | ⬜ upushet |
+| Vegglengde: riktig ende flytter seg, brukervalgt fast ende | 035 | `9408319` | ✅ i `main` |
 
 **032 erstattet en regel fra 027.** Der sto det at «geometrien tegnes ikke om på kundesiden».
 Nå følger tegningen tallene mens kunden retter — men spec regel 2 står uendret: alt skjer lokalt
