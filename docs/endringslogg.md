@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Prosjektlista: hvit stripe langs høyre kant borte — 2026-10-08
+
+Kenneth etter 038: «ta bort hvit bakgrunn og gjør det likt som resten.»
+
+038 ga den sticky handlingskolonnen `background:var(--surface)`. Målt: **alle andre celler i
+tabellen er gjennomsiktige** (`rgba(0,0,0,0)`) helt opp til `#project-list-screen`, som er
+`var(--bg)` = `rgb(240,244,248)`. `--surface` er hvit i lys modus — derav stripa.
+
+Cellen *må* være ugjennomsiktig, for den ligger sticky over innhold som scrolles under den. Den
+maler nå `var(--bg)`, altså nøyaktig det som ligger bak tabellen. Målt likt i begge temaer
+(lys `rgb(240,244,248)`, mørk `rgb(13,14,16)`), og den dekker fortsatt innholdet når tabellen
+scrolles. Hover legges på som samme sjikt raden selv bruker
+(`rgba(34,211,238,.04)` over `var(--bg)`), så det ikke oppstår en skjøt midt i raden.
+
+To nye N-sjekker, begge negativt kontrollert. Regresjon: **462 sjekker grønne i 15 batterier**.
+
+---
+
 ## Kundesiden: «Instruksjonsvideo»-knapp med kapitler — 2026-10-08
 
 Prompt 039. Kenneth: «Jeg ønsker å ta opp skjermen min og vise hvordan kunden endrer målene …
