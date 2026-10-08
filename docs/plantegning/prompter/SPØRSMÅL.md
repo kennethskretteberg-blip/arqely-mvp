@@ -29,11 +29,30 @@ Kenneth svarer til slutt.
 
 ## 047
 
--
+- **Tersklene ble målt mot den ekte tegningen i 048, og de holder ikke.** Kenneth la ved
+  `Forprosjekt golvplan 23.09.26.pdf` (ligger i `lumelo-backend/local/`, gitignorert).
+  Planens histogram var feil: tegningen har **6** fylte rektangler (2/16/32 cm), ikke
+  «28 à 20 cm, 16 à 10 cm, 28 à 5 cm». Veggene er **doble linjer** — 252 av 372 senterlinjer.
+- **Dekningen er ubrukelig som den er definert: 13,2 % på den ekte fila.** 6795 av 10489
+  rester er kortere enn 10 cm (skravur, tekstkonturer). `total_length` måler «hvor mye av
+  tegningen er vegg», som på en A2-arkitekttegning er ~13 % av natur. Den gule advarselen i
+  046 ville fyrt alltid. **Fiks:** tell bare vegg-kandidater.
+- **`single`-veien bør være AV som standard.** 116 uparede linjer ble «vegger» med tykkelse 0,
+  de fleste 50 cm — målsettingsmerker og symboler.
+- Begge hører hjemme i et 047b, eller i 050 der STEG 0.3 allerede spør om nettopp dette.
+  Si fra hvilket du vil ha.
 
 ## 048
 
--
+- **Alt i 048 er verifisert mot den ekte tegningen** og virker: 34/34 rom-labels med nummer,
+  navn og areal; målestokk «1 : 100» lest fra tittelfeltet.
+- **Tillit 0,5 på den ekte fila**, fordi areal-kryss-sjekken gir 0,00152 m/pt mot tittelens
+  0,0353 — 23 gangers avvik. Det er **ikke** en feil i 048: arealene hviler på at polygonene
+  er riktige, og de er søppel fordi veggene er det (se 047). Tittelen vinner, som den skal.
+- **Linjeavstanden kan ikke brukes som terskel** — fixturen hadde 6 pt, virkeligheten 8,4.
+  Grupperingen går på rekkefølge i stedet. Verdt å vite hvis du ser en tegning med annen
+  skriftstørrelse.
+- Si fra om `m2` (uten superskrift) skal godtas — jeg har latt det stå, men bare `m²` er målt.
 
 ## 049
 

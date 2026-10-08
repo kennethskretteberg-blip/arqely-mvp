@@ -34,8 +34,13 @@ være `'insunits'` med `confidence=1.0` — tittelfelt og arealer trengs ikke.
    auto-tolkningen. Med vegg-sjekken (046) er lag-valget mindre kritisk — men et plantegnings-lag
    med møbler gir mer støy. Mål hvor mange senterlinjer man får med og uten lag-filter.
 3. **Løse streker blåser opp rammen** (021: bygget 10,1 × 13,9 m mot utstrekning 20,1 × 24,3 m).
-   Påvirker det `coverage`-prosenten? Mål — hvis målsettingsstrek teller i `total_length`, blir
-   dekningen kunstig lav og den gule advarselen fyrer uten grunn.
+   Påvirker det `coverage`-prosenten? **BESVART for PDF i 048 — og svaret er ja, kraftig.**
+   Målt på Kenneths ekte A2-tegning: dekning **13,2 %**, fordi 6795 av 10489 rester er kortere
+   enn 10 cm (skravur, tekstkonturer, symboler). `total_length` måler «hvor mye av tegningen er
+   vegg», ikke om motoren traff. I tillegg ble **116 uparede linjer** til `single`-vegger med
+   tykkelse 0 — målsettingsmerker, de fleste 50 cm. Begge må rettes her eller i et 047b:
+   `coverage` teller bare vegg-kandidater, og `single`-veien er AV som standard. Mål det samme
+   på DXF før du velger tallene.
 
 ## Gjør
 
