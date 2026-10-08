@@ -4,6 +4,52 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Del presentasjon/kundelenke: ferdig hyperlenketekst med Kopier — 2026-10-08
+
+Prompt 042 (serien Kundeforslag). Kenneth: «Jeg vil ha en fast tekst med lenken som jeg kan
+kopiere — PRESENTASJON med kopierknapp bak — og lime inn i e-posten.»
+
+**041 finnes ikke som egen prompt, men er oppfylt i substans.** Serien oppgir 041 som krav.
+Verifisert: `supabase-migration-presentation.sql` har både `present_token` og
+`get_present_project`, og hvert symbol 042/043 navngir ligger på *nøyaktig* det linjenummeret
+promptene oppgir for `2147753` (9204, 9231, 6751, 6736, 22925, 26827, 22391, 5754). Promptene er
+altså skrevet mot denne HEAD-en, og presentasjonslenka var der fra før. Ingenting mangler.
+
+**Ny `_copyLinkRich(label, url)`** legger `text/html` (en `<a>` med teksten) og `text/plain`
+(ren URL) på tavla samtidig, så Outlook/Gmail får en klikkbar lenke mens Notater får adressen.
+`_copyLinkPlain` beholder ren-URL-kopieringen. Brukt begge steder: «Del presentasjon» og
+kundelenke-modalen.
+
+**«Del lenke» åpner nå en dialog** i stedet for å kopiere stille — Kenneth så aldri hva som havnet
+på tavla, og kunne ikke endre teksten. Lenketeksten står i et felt som *er* forhåndsvisningen
+(blå, understreket), så det du ser er det som kopieres. Kundelenke-modalen fikk samme rad over
+adressen; URL-radens knapp heter «Kopier adresse», ikke «Kopier», så to knapper ved siden av
+hverandre ikke har samme navn og ulik virkning.
+
+### To feil funnet ved måling, ikke ved lesing
+
+**1. Klikket gjorde ingenting, helt stille.** En JSON-serialisert URL limt rett inn i et
+`onclick="…"` gir DOBLE anførselstegn, og HTML-parseren avslutter attributtet der. Ingen
+feilmelding, ingen toast. Ny `_jsStr()` escaper dem til `&quot;`. Dette rammet fire knapper.
+
+**2. Fallback-kjeden var brutt.** `clipboard-write` er `denied` i Claudes nettleserrute (målt), så
+begge skrivemåtene feilet — og da falt koden ned på `window.prompt`, som **selv kaster** der
+prompt ikke finnes. Brukeren fikk en uhåndtert promise og ingenting. Den gamle kundelenke-knappen
+hadde ikke engang en `.catch`. Siste utvei er nå `_copyManuelt()`: merker adressen i feltet og
+sier «trykk Ctrl/Cmd+C». Kaster aldri.
+
+**Ikke testet her:** selve innlimingen i Gmail/Outlook. Nettleserruta nekter
+`clipboard-write`, så nyttelasten er verifisert mot en stubbet utklippstavle (riktig `text/html`
+og `text/plain`), men den ekte limingen må Kenneth gjøre.
+
+**Fallgruve notert:** `node --check` fanger **ikke** `await` i en ikke-async funksjon — i sloppy
+mode parses det som et kall til noe som heter `await`. `_kundelenkeRegressionTest` er nå `async`
+og må kalles med `await`.
+
+Regresjon: **476 sjekker grønne i 15 batterier** (14 nye i seksjon P), tre negative kontroller.
+
+---
+
 ## Prosjektlista: hvit stripe langs høyre kant borte — 2026-10-08
 
 Kenneth etter 038: «ta bort hvit bakgrunn og gjør det likt som resten.»
