@@ -4,6 +4,73 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundeforslag hos Cenika: Godkjenn/Avslå per rom → nytt utlegg — 2026-10-08
+
+Prompt 044. Kenneth: «Vi får melding om at kunden ønsker endring, vi trykker godkjenn forslag,
+og det endrer seg med layout og alt.»
+
+### STEG 0
+
+**0.1 Rydde-funksjonen er `_clearRoomProductCollections(roomId, keys)`.** Den tar en nøkkel-liste,
+lar sonenes egne utlegg stå, rydder UI-valg og invaliderer cachene. Hindringer og soner ligger
+ikke i `ROOM_PRODUCT_KEYS` og røres aldri. Gjenoppretting: `_restoreRoomProductSnapshot`, samme
+som produktbytte-økta bruker.
+
+**0.2 Retningen er ÉN delt global for alle tre typene:** `S.varmefolie.direction` + `dirExplicit`.
+Kabel leser den (:12400), matte leser den (:13040), folie leser den (:5773). Ingen egne innganger.
+`autoFillMatSerpentine` leser i tillegg `S.ui.selectedRoomId` — og `alert()`-er uten.
+
+**0.3 `_fetchKundeStatus` hentet uten `mode`,** så et forslag-svar ville fått «✓ Mål mottatt».
+**Og verre, funnet underveis:** `_kundeRefreshStatus` tok *første* levende lenke uansett modus.
+Siden 043 lager en forslagslenke som lever i 90 dager, ville den ofte vært den nyeste — og
+dermed skygget for et besvart mål-svar, som er det 028/037-panelet lever av. Modusene har nå
+hver sin cache, og innen hver modus vinner et besvart svar over en åpen lenke.
+
+### Bygget
+
+Panelet «Kundeforslag» åpner seg selv via 037-mekanismen (mål først — de endrer geometrien et
+forslag gjelder *i*). Per rom: Nå / Kunden foreslår / kommentar / [Godkjenn] [Avslå], pluss
+«Godkjenn alle» og «Send svar til kunden». «Nå»-tallene regnes med samme `selectCableByPower`-
+kandidat kunden så, ikke nye tall.
+
+`_forslagGodkjennRom` **kaller** motorene, endrer dem ikke: setter retning via den delte globalen
+(og tilbake etterpå), rydder scopet til produkttypen, kjører `autoFillCable` /
+`autoFillMatSerpentine` / `autoAddStrips`. «Godkjenn alle» er ETT angre-steg. Feiler motoren
+settes rommet tilbake og raden får ⚠.
+
+Merker: forslag er **blått** «💬 Forslag fra kunde», godkjenning **grønn** «✓ Godkjent av kunde»,
+mål uendret — og et prosjekt med begge viser begge, aldri blandet. Målt på fem tilfeller.
+
+E-post: `forslag_answered` (anonymt, som `answered` — samme tre lag) og `forslag_svar` (utgående,
+krever innlogging som `invite`, mottaker er alltid `invite_sent_to`, presentasjonstokenet hentes
+server-side).
+
+Migrasjon: mode-constraint + `approve_all_at`/`approve_all_name` (satt server-side av
+`kundelenke_answer`, så kunden ikke kan datere sin egen godkjenning) + `applied_at`/
+`applied_result` — 027/028 satte status til `applied` men lagret aldri HVA som ble gjort.
+
+### To funn der min egen påstand var feil
+
+**1. «Godkjenningen kan legge ut noe ulovlig» — delvis feil.** Jeg skrev vakten med 3400W/200m i
+et 16 m² rom som bevis (CC 8 cm). Målt etterpå: InFloor 17T har `minSp` **5 cm**, så det er
+lovlig etter produktreglene — 213 W/m² er urimelig, men ikke ulovlig. Vakten er fortsatt riktig
+(den avviser alt pilene avviser, f.eks. 500W/29m med CC 55 cm > maxHard 50), men kommentaren som
+påsto noe annet er rettet.
+
+**2. En live-test besto av feil grunn.** `_forslagMatteProdukt` leste `mat_length_m`/`length_m` —
+feltet heter **`mat_length_mm`**. Begge var `undefined` for alle matter, så
+`undefined === undefined` ble sant og den plukket første produkt i katalogrekkefølgen. Live-testen
+«bekreftet» EcoMat 60T 0.5×10m → 150T 0.5×10m fordi katalogen tilfeldigvis hadde den først.
+Regresjonstesten avslørte at den egentlig ga 0.5×2m.
+
+De fire 038-merkesjekkene feilet også — riktig av dem: 044 endret datakontrakten i
+`_cachedKundeSvar` fra én rad per prosjekt til `{ maal, forslag }`. Oppdatert, og fire nye
+sjekker lagt til for de nye merkene.
+
+Regresjon: `_kundeforslagRegressionTest` 33 → 52 sjekker. **532 sjekker grønne i 16 batterier.**
+
+---
+
 ## Kundeforslag: forslagskort i presentasjonen — 2026-10-08
 
 Prompt 043. Kunden ser presentasjonen som før, trykker på et rom og kan si «OK som det er» eller

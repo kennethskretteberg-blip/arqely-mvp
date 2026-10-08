@@ -8269,9 +8269,16 @@ async function _kundeRefreshStatus() {
   if (!_supabaseProjectId || !_db) { _kundeLinkCache = null; return; }
   try {
     const { data } = await _db.from('kundelenker').select('*')
-      .eq('project_id', _supabaseProjectId).order('created_at', { ascending: false }).limit(5);
-    _kundeLinkCache = (data || []).find(k => k.status === 'open' || k.status === 'answered') || null;
-  } catch (e) { _kundeLinkCache = null; }
+      .eq('project_id', _supabaseProjectId).order('created_at', { ascending: false }).limit(20);
+    const lev = (data || []).filter(k => k.status === 'open' || k.status === 'answered');
+    // ⚠ 044 (MÅLT): før tok denne linja FØRSTE levende lenke uansett `mode`. Siden 043 lager en
+    // forslagslenke som lever i 90 dager, ville den ofte vært den nyeste — og dermed skygget
+    // for et besvart MÅL-svar, som er det 028/037-panelet lever av. Modusene holdes nå adskilt,
+    // og innen hver modus vinner et besvart svar over en åpen lenke (samme regel som 038).
+    const velg = liste => liste.find(k => k.status === 'answered') || liste[0] || null;
+    _kundeLinkCache   = velg(lev.filter(k => k.mode !== 'forslag'));
+    _forslagLinkCache = velg(lev.filter(k => k.mode === 'forslag'));
+  } catch (e) { _kundeLinkCache = null; _forslagLinkCache = null; }
   if (typeof renderSidebar === 'function') renderSidebar();
 }
 async function _kundeRevokeLink(id) {
@@ -18572,6 +18579,82 @@ function _kundeforslagRegressionTest() {
       && !/romtegner_projects/.test(_kildeUtenKommentarer(_forslagSend)), 'skriver i prosjektet');
     check('G: navn er påkrevd før innsending', true,
       /if \(!navn\)/.test(_kildeUtenKommentarer(_forslagSend)), 'anonymt forslag mulig');
+    // ── H (044) — godkjenning hos Cenika ──
+    S.cables = [{ id: 1, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
+    S.mats = []; S.strips = [];
+    check('H: romtypen leses av det som faktisk ligger der', 'kabel', _forslagRomType(1) === 'kabel', _forslagRomType(1));
+    S.cables = []; S.mats = [{ id: 1, roomId: 1, productId: matte.id }];
+    check('H: matte gjenkjennes', 'matte', _forslagRomType(1) === 'matte', _forslagRomType(1));
+    S.mats = []; S.strips = [{ id: 1, roomId: 1, productId: folie.id }];
+    check('H: folie gjenkjennes', 'folie', _forslagRomType(1) === 'folie', _forslagRomType(1));
+    S.strips = [];
+    check('H: tomt rom har ingen type å bytte', null, _forslagRomType(1) === null, _forslagRomType(1));
+
+    // Matte: kunden foreslår en W/m²-VARIANT, ikke en lengde. Godkjenningen må finne samme
+    // lengde i den nye varianten — målt: EcoMat 60T 0.5x10m → EcoMat 150T 0.5x10m.
+    const m60 = HEATING_PRODUCTS.find(p => p.name === 'EcoMat 60T 0.5×10m');
+    const m150 = HEATING_PRODUCTS.find(p => p.name === 'EcoMat 150T 0.5×10m');
+    if (m60 && m150) {
+      S.mats = [{ id: 1, roomId: 1, productId: m60.id }];
+      const valgt = _forslagMatteProdukt(1, { targetWm2: 150 });
+      check('H: 150 W/m² velger samme lengde i den nye varianten', m150.name,
+        valgt === m150.id, (HEATING_PRODUCTS.find(p => p.id === valgt) || {}).name);
+      S.mats = [];
+    }
+
+    // Vakten: et forslag som er blitt ugyldig skal avvises UTEN å røre rommet.
+    S.cables = [{ id: 1, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
+    const ugyldig = HEATING_PRODUCTS.find(p => p.name === 'InFloor 17T 500W 29m');
+    if (ugyldig) {
+      const kand = _forslagKandidatGyldig(1, ugyldig.id);
+      check('H: 500W/29m er ugyldig i et 16 m² rom (CC over maxHard)', false,
+        kand && kand.valid === false, kand && (kand.cc + ' cm / ' + kand.advarsel));
+      const res = _forslagGodkjennRom({ roomId: 1, productId: ugyldig.id });
+      check('H: godkjenning avviser det, med årsak', false, res.ok === false && /Ikke lov/.test(res.feil), res.feil);
+      check('H: og rommet står urørt', kab.id, S.cables[0] && S.cables[0].productId === kab.id,
+        S.cables[0] && S.cables[0].productId);
+    }
+    // ⚠ Vakten sier bare hva PRODUKTET tillater: 3400W/200m gir CC 8 cm og 213 W/m² i samme
+    // rom, og er LOVLIG (minSp 5 cm). Urimelig effekt er en annen sak enn ulovlig avstand.
+    const stor = HEATING_PRODUCTS.find(p => p.name === 'InFloor 17T 3400W 200m');
+    if (stor) {
+      const k2 = _forslagKandidatGyldig(1, stor.id);
+      check('H: vakten er en PRODUKT-regel, ikke en rimelighetsvurdering', true,
+        k2 && k2.valid === true && k2.wm2 > 200, k2 && (k2.cc + ' cm / ' + k2.wm2 + ' W/m²'));
+    }
+
+    // Koden skal kalle motorene, ikke endre dem (prompt: «Skal IKKE: Endre auto-motorene selv»).
+    const kG = _kildeUtenKommentarer(_forslagGodkjennRom);
+    check('H: retningen settes via den DELTE globalen og settes tilbake etterpå', true,
+      /S\.varmefolie\.direction = rad\.direction/.test(kG)
+      && /S\.varmefolie\.direction = førD/.test(kG), 'retning lekker ut');
+    check('H: valgt rom settes tilbake (autoFillMatSerpentine leser S.ui.selectedRoomId)', true,
+      /S\.ui\.selectedRoomId = roomId/.test(kG) && /S\.ui\.selectedRoomId = førRom/.test(kG), 'romvalg lekker');
+    check('H: ryddingen er scopet til produkttypen, ikke hele rommet', true,
+      /_clearRoomProductCollections\(roomId, \['cables'\]\)/.test(kG)
+      && /_clearRoomProductCollections\(roomId, \['mats', 'matPaths'\]\)/.test(kG), 'rydder for bredt');
+    checkIkke('H: hindringer og soner røres aldri',
+      /S\.hindrings|S\.zones/.test(kG), 'rører hindringer/soner');
+    check('H: «Godkjenn alle» tar ETT angre-steg', true,
+      /pushUndo\(\);/.test(_kildeUtenKommentarer(_forslagGodkjennAlle))
+      && /skipPushUndo: true/.test(_kildeUtenKommentarer(_forslagGodkjennAlle)), 'ett steg per rom');
+    check('H: feiler motoren settes rommet tilbake', true,
+      /_restoreRoomProductSnapshot\(roomId, førProdukter\)/.test(kG), 'rommet kan bli stående tomt');
+
+    // Modusene må holdes fra hverandre — en åpen forslagslenke levde i 90 dager og ville ellers
+    // skygget for et besvart mål-svar.
+    const kR = _kildeUtenKommentarer(_kundeRefreshStatus);
+    check('H: mål og forslag har hver sin cache', true,
+      /_kundeLinkCache   = velg\(lev\.filter\(k => k\.mode !== 'forslag'\)\)/.test(kR)
+      && /_forslagLinkCache = velg\(lev\.filter\(k => k\.mode === 'forslag'\)\)/.test(kR), 'blandet');
+    check('H: prosjektlista skiller modusene', true,
+      /r\.mode === 'forslag' \? 'forslag' : 'maal'/.test(_kildeUtenKommentarer(_fetchKundeStatus)), 'én rad per prosjekt');
+    check('H: forslagsmerket er blått, godkjenning grønn', true,
+      /chip\('#4fa2b8', '💬 Forslag fra kunde'/.test(_kildeUtenKommentarer(_plKundeBadge))
+      && /chip\('#22c55e', '✓ Godkjent av kunde'/.test(_kildeUtenKommentarer(_plKundeBadge)), 'feil farge');
+    check('H: _restoreProject nullstiller forslagscachen', true,
+      /_forslagLinkCache = null/.test(_kildeUtenKommentarer(_restoreProject)), 'forrige prosjekts forslag henger igjen');
+
     check('G: ingenting tegnes om hos kunden (spec regel 5)', true,
       !/autoFillCable|autoAddStrips|autoFillMat/.test(
         _kildeUtenKommentarer(_forslagSettValg) + _kildeUtenKommentarer(_forslagPil)
@@ -39447,7 +39530,7 @@ async function _kundelenkeRegressionTest() {
           annotOffsets: {}, area: compArea(a), uncertainWalls: [] }];
         _supabaseProjectId = 'p1'; _kundeRevState = null;
 
-        _kundeLinkCache = null; _kundeReviewShownFor = null;
+        _kundeLinkCache = null; _forslagLinkCache = null;
         _kundeMaybeOpenReview();
         checkIkke('M: ingen lenke → ingen panel', !!document.getElementById('kunde-rev-ov'), 'panel åpnet');
 
@@ -39489,17 +39572,33 @@ async function _kundelenkeRegressionTest() {
       const na = new Date().toISOString();
       const om = new Date(Date.now() + 20 * 864e5).toISOString();
       try {
+        // 044 endret formen: Map-en holder nå { maal, forslag } per prosjekt, fordi ett
+        // prosjekt kan ha begge samtidig. Disse fire sjekkene FEILET på den endringen — det
+        // var riktig av dem, datakontrakten er en del av det de låser.
         _cachedKundeSvar = new Map([
-          ['a', { project_id: 'a', status: 'answered', answered_at: na, answered_by_name: 'Ola', created_at: na }],
-          ['o', { project_id: 'o', status: 'open', created_at: na, expires_at: om, invite_sent_to: 'k@f.no' }],
+          ['a', { maal: { project_id: 'a', mode: 'maal', status: 'answered', answered_at: na, answered_by_name: 'Ola', created_at: na } }],
+          ['o', { maal: { project_id: 'o', mode: 'maal', status: 'open', created_at: na, expires_at: om, invite_sent_to: 'k@f.no' } }],
+          ['f', { forslag: { project_id: 'f', mode: 'forslag', status: 'answered', answered_at: na, answered_by_name: 'Ola', created_at: na } }],
+          ['g', { forslag: { project_id: 'g', mode: 'forslag', status: 'answered', answered_at: na, answered_by_name: 'Per', created_at: na, approve_all_at: na, approve_all_name: 'Per Huseier' } }],
+          ['b', { maal: { project_id: 'b', mode: 'maal', status: 'open', created_at: na, expires_at: om },
+                  forslag: { project_id: 'b', mode: 'forslag', status: 'answered', answered_at: na, answered_by_name: 'Ola', created_at: na } }],
         ]);
         const a = _plKundeBadge('a'), o = _plKundeBadge('o');
+        const f = _plKundeBadge('f'), g = _plKundeBadge('g'), b = _plKundeBadge('b');
         check('N: mottatt er GRØNN', '#22c55e', /#22c55e/.test(a) && /Mål mottatt/.test(a), a.slice(0, 80));
         check('N: venter er ORANSJE', '#f0b232', /#f0b232/.test(o) && /Venter på mål/.test(o), o.slice(0, 80));
         check('N: ingen lenke gir intet merke', '', _plKundeBadge('finnes-ikke') === '', _plKundeBadge('x'));
         check('N: venter-merket nevner mottaker og utløp', true,
           /k@f\.no/.test(o) && /utløper/.test(o), o.slice(0, 170));
         check('N: mottatt-merket nevner hvem', true, /Ola/.test(a), a.slice(0, 170));
+        // 044: forslag er BLÅTT, godkjenning grønn, og de to sporene kan stå side om side.
+        check('N: forslag er BLÅTT og sier «Forslag fra kunde»', '#4fa2b8',
+          /#4fa2b8/.test(f) && /Forslag fra kunde/.test(f), f.slice(0, 90));
+        check('N: godkjent av kunde er GRØNN', '#22c55e',
+          /#22c55e/.test(g) && /Godkjent av kunde/.test(g), g.slice(0, 90));
+        checkIkke('N: et forslag-svar sier ALDRI «Mål mottatt»', /Mål mottatt/.test(f), f.slice(0, 90));
+        check('N: begge sporene vises samtidig når prosjektet har begge', true,
+          /Venter på mål/.test(b) && /Forslag fra kunde/.test(b), b.slice(0, 200));
       } finally { _cachedKundeSvar = lagret; }
     })();
 
@@ -53677,6 +53776,29 @@ function _renderSbProjInfo() {
       svarEl.style.display = '';
     } else svarEl.style.display = 'none';
   }
+  _renderSbForslagRad();
+}
+
+// 044: forslag er en EGEN rad, ikke en omskriving av mål-raden — et prosjekt kan ha begge.
+function _renderSbForslagRad() {
+  const vert = document.getElementById('spi-kundesvar');
+  if (!vert || !vert.parentElement) return;
+  document.getElementById('spi-forslag')?.remove();
+  const f = (typeof _forslagLinkCache !== 'undefined') ? _forslagLinkCache : null;
+  if (!f || f.status !== 'answered') return;
+  const nar = f.answered_at ? new Date(f.answered_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' }) : '';
+  const hvem = f.answered_by_name ? ', ' + esc(f.answered_by_name) : '';
+  const d = document.createElement('div');
+  d.className = 'spi-row';
+  d.id = 'spi-forslag';
+  d.onclick = e => { e.stopPropagation(); openKundeForslagPanel(); };
+  d.innerHTML = f.approve_all_at
+    ? '<span style="color:#22c55e;font-weight:600">✓ Godkjent av kunde</span>'
+      + ' <span style="color:var(--dim)">' + esc(f.approve_all_name || f.answered_by_name || '') + ' ' + nar + '</span>'
+      + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Se forslaget</span>'
+    : '<span style="color:#4fa2b8;font-weight:600">💬 Forslag fra kunde' + (nar ? ' (' + nar + hvem + ')' : hvem) + '</span>'
+      + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Gå gjennom</span>';
+  vert.parentElement.insertBefore(d, vert.nextSibling);
 }
 // DEL F: infoblokkens ENESTE inngang til å bytte kunde — samme _quickSetCustomer-velger som
 // prosjektlista alltid har brukt (ikke den gamle fritekst-inputen i _wfKundeModal, fjernet).
@@ -54672,6 +54794,9 @@ function _restoreProject(data) {
   // gjennom (fil, versjon, gjenoppretting, konvertering, sky, presentasjon), så det er her
   // nullstillingen hører hjemme — ikke spredt på elleve steder som setter _supabaseProjectId.
   _kundeLinkCache = null;
+  // 044: forslagslenka har sin egen cache og sitt eget panel — samme nullstilling her, ellers
+  // ville forrige prosjekts forslag kunne vises mot dette prosjektets rom.
+  _forslagLinkCache = null; _forslagRevState = null; _forslagRevFeil = new Map();
   _kundeReviewShownFor = null;
   _bgRestoreGen++;   // any background image still loading from a previously-opened project is now stale
   _matFree = null; _matFreeLastClick = null;   // avbryt evt. påbegynt frihånds-matte fra forrige prosjekt
@@ -65388,20 +65513,25 @@ async function _fetchKundeStatus() {
   if (!_db) return new Map();
   try {
     const { data, error } = await _db.from('kundelenker')
-      .select('project_id, status, answered_at, answered_by_name, expires_at, invite_sent_to, created_at')
+      .select('project_id, mode, status, answered_at, answered_by_name, expires_at, invite_sent_to, created_at, approve_all_at, approve_all_name')
       .in('status', ['open', 'answered']);
     if (error || !data) return new Map();
     const naa = Date.now();
     const m = new Map();
+    // 044: ET prosjekt kan ha BEGGE deler samtidig — en målforespørsel og en forslagslenke.
+    // Før holdt Map-en én rad per prosjekt, så et forslag-svar ville vist «✓ Mål mottatt».
+    // Nå holdes modusene fra hverandre, og lista kan vise begge merkene.
     for (const r of data) {
       // En utløpt `open` er en død lenke — kunden kan ikke svare på den, så den «venter» ikke.
       if (r.status === 'open' && r.expires_at && new Date(r.expires_at).getTime() < naa) continue;
-      const prev = m.get(r.project_id);
-      if (!prev) { m.set(r.project_id, r); continue; }
+      const spor = r.mode === 'forslag' ? 'forslag' : 'maal';
+      const b = m.get(r.project_id) || {};
+      const prev = b[spor];
+      if (!prev) { b[spor] = r; m.set(r.project_id, b); continue; }
       // `answered` vinner over `open`; ellers nyeste `created_at`.
       if (prev.status === 'answered' && r.status !== 'answered') continue;
-      if (r.status === 'answered' && prev.status !== 'answered') { m.set(r.project_id, r); continue; }
-      if (String(r.created_at || '') > String(prev.created_at || '')) m.set(r.project_id, r);
+      if (r.status === 'answered' && prev.status !== 'answered') { b[spor] = r; m.set(r.project_id, b); continue; }
+      if (String(r.created_at || '') > String(prev.created_at || '')) { b[spor] = r; m.set(r.project_id, b); }
     }
     return m;
   } catch (e) { return new Map(); }
@@ -66577,22 +66707,40 @@ function _filterProjectsList(projects, f = {}) {
 // Merk at fargene er BYTTET mot før: «Svar fra kunde» var oransje, nå er mottatt grønn og
 // oransje er reservert for det som fortsatt venter på noen.
 function _plKundeBadge(pid) {
-  const r = _cachedKundeSvar && _cachedKundeSvar.get(pid);
-  if (!r) return '';
+  const b = _cachedKundeSvar && _cachedKundeSvar.get(pid);
+  if (!b) return '';
   const d = iso => { try { return new Date(iso).toLocaleDateString('nb-NO', {day:'numeric',month:'short'}); } catch (e) { return ''; } };
   const chip = (farge, tekst, tittel) =>
     ' <span title="' + tittel + '" style="display:inline-block;white-space:nowrap;vertical-align:middle;'
     + 'background:' + farge + '22;color:' + farge + ';border:1px solid ' + farge + '55;'
     + 'border-radius:10px;padding:1px 7px;font-size:10px;font-weight:600">' + tekst + '</span>';
-  if (r.status === 'answered') {
-    const hvem = r.answered_by_name ? ', ' + esc(r.answered_by_name) : '';
-    return chip('#22c55e', '✓ Mål mottatt',
-      esc('Mål mottatt ' + d(r.answered_at) + hvem + ' — åpne prosjektet og gå gjennom'));
+  let ut = '';
+  const r = b.maal;
+  if (r) {
+    if (r.status === 'answered') {
+      const hvem = r.answered_by_name ? ', ' + esc(r.answered_by_name) : '';
+      ut += chip('#22c55e', '✓ Mål mottatt',
+        esc('Mål mottatt ' + d(r.answered_at) + hvem + ' — åpne prosjektet og gå gjennom'));
+    } else {
+      const til = r.invite_sent_to ? ' til ' + r.invite_sent_to : '';
+      const utl = r.expires_at ? ' — utløper ' + d(r.expires_at) : '';
+      ut += chip('#f0b232', '⏳ Venter på mål', esc('Kundelenke sendt ' + d(r.created_at) + til + utl));
+    }
   }
-  const til = r.invite_sent_to ? ' til ' + r.invite_sent_to : '';
-  const utl = r.expires_at ? ' — utløper ' + d(r.expires_at) : '';
-  return chip('#f0b232', '⏳ Venter på mål',
-    esc('Kundelenke sendt ' + d(r.created_at) + til + utl));
+  // 044: forslag får BLÅ, så det aldri forveksles med mål-merkene. En godkjenning av hele
+  // prosjektet er grønn — den er et svar, ikke en oppgave.
+  const f = b.forslag;
+  if (f && f.status === 'answered') {
+    if (f.approve_all_at) {
+      ut += chip('#22c55e', '✓ Godkjent av kunde',
+        esc('Godkjent av ' + (f.approve_all_name || f.answered_by_name || 'kunden') + ' ' + d(f.approve_all_at)));
+    } else {
+      const hvem = f.answered_by_name ? ' fra ' + esc(f.answered_by_name) : '';
+      ut += chip('#4fa2b8', '💬 Forslag fra kunde',
+        esc('Forslag' + hvem + ' ' + d(f.answered_at) + ' — åpne prosjektet og gå gjennom'));
+    }
+  }
+  return ut;
 }
 
 async function _renderProjectList() {
@@ -67204,10 +67352,328 @@ async function _openCloudProject(id) {
 // raden «✉ Svar fra kunde — Gå gjennom» står igjen i sidebaren som veien tilbake.
 let _kundeReviewShownFor = null;
 function _kundeMaybeOpenReview() {
-  if (!_kundeLinkCache || _kundeLinkCache.status !== 'answered') return;
   if (!_supabaseProjectId || _kundeReviewShownFor === _supabaseProjectId) return;
+  const maal = _kundeLinkCache && _kundeLinkCache.status === 'answered';
+  const fors = _forslagLinkCache && _forslagLinkCache.status === 'answered';
+  if (!maal && !fors) return;
   _kundeReviewShownFor = _supabaseProjectId;
-  openKundeReviewPanel();
+  // Mål først: de endrer geometrien, og et forslag gjelder utlegget i den geometrien.
+  if (maal) openKundeReviewPanel();
+  else openKundeForslagPanel();
+}
+
+// ═══ 044 · KUNDEFORSLAG HOS CENIKA ════════════════════════════════════════════════════════
+// Kenneth får panelet, godkjenner per rom, og utlegget endrer seg. Motorene er URØRT — de
+// bare kalles (prompt: «Skal IKKE: Endre auto-motorene selv»).
+//
+// ⚠ STEG 0 målte tre ting:
+//  1. `_clearRoomProductCollections(roomId, keys)` er rydde-funksjonen. Den tar en nøkkel-liste,
+//     lar sonenes egne utlegg stå, rydder UI-valg og invaliderer cachene. Hindringer og soner
+//     ligger ikke i ROOM_PRODUCT_KEYS og røres aldri.
+//  2. Retningen er ÉN delt global for alle tre typene: `S.varmefolie.direction` (+ `dirExplicit`).
+//     Kabel leser den, matte leser den, folie leser den. Ingen egne innganger.
+//     `autoFillMatSerpentine` leser i tillegg `S.ui.selectedRoomId` — og `alert()`-er uten.
+//  3. `_kundeRefreshStatus` plukket FØRSTE open/answered blant de 5 nyeste, uansett mode. Med
+//     en åpen forslagslenke (90 dager) ville den kunne skygge for et besvart mål-svar. Forslag
+//     har derfor sin egen cache; 028/037-veien er uendret.
+
+let _forslagLinkCache = null;     // lenka med mode='forslag'
+let _forslagRevFeil = new Map();  // roomId → feilmelding fra siste godkjenningsforsøk
+let _forslagRevState = null;      // { linkId, behandlet: Map(roomId → {status:'godkjent'|'avslaatt', grunn}) }
+
+function _forslagSvarRader() {
+  const k = _forslagLinkCache;
+  if (!k || !k.answer || !Array.isArray(k.answer.rooms)) return [];
+  return k.answer.rooms.map(rad => ({
+    ...rad,
+    room: S.rooms.find(r => r.id === rad.roomId) || null,
+  }));
+}
+
+// Hvilken produkttype ligger i rommet i dag? Bestemmer hvilken motor som skal kjøre.
+function _forslagRomType(roomId) {
+  if ((S.cables || []).some(c => c.roomId === roomId)) return 'kabel';
+  if ((S.mats || []).some(m => m.roomId === roomId)) return 'matte';
+  if ((S.strips || []).some(x => x.roomId === roomId)) return 'folie';
+  return null;
+}
+
+// Godkjenn ETT rom. Returnerer { ok, feil }. Kaller aldri pushUndo selv når
+// opts.skipPushUndo er satt — «Godkjenn alle» skal være ETT angre-steg.
+function _forslagGodkjennRom(rad, opts) {
+  opts = opts || {};
+  const roomId = rad.roomId;
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return { ok: false, feil: 'Rommet finnes ikke lenger' };
+  const type = _forslagRomType(roomId);
+  if (!type) return { ok: false, feil: 'Rommet har ikke noe utlegg å bytte' };
+  // 043 hindrer KUNDEN fra å velge en ugyldig kandidat (pilene hopper over dem), men
+  // godkjenningen tok `rad.productId` på tro. Et forslag kan bli ugyldig MELLOM innsending og
+  // godkjenning — kunden ber om 500W/29m i et rom som siden er delt eller krympet, og CC faller
+  // utenfor produktets grenser. Vakten leser samme kandidat kunden så.
+  //
+  // ⚠ Den sier bare hva PRODUKTET tillater. Målt: InFloor 17T har minSp 5 / maxHard 50 cm, så
+  // 3400W/200m i et 16 m² rom (CC 8 cm, 213 W/m²) er LOVLIG etter produktreglene selv om det er
+  // tredobbelt av hva et oppholdsrom skal ha. Urimelig effekt er en annen diskusjon enn ulovlig
+  // avstand; ⚠-en for «over anbefalt» vises i panelet uansett.
+  //
+  // Kjøres FØR pushUndo — et avvist forslag skal ikke etterlate et tomt angre-steg.
+  if (type === 'kabel' && rad.productId) {
+    const g = _forslagKandidatGyldig(roomId, rad.productId);
+    if (g && !g.valid) return { ok: false, feil: 'Ikke lov i dette rommet: ' + (g.advarsel || 'ugyldig c/c-avstand') };
+  }
+  if (!opts.skipPushUndo) pushUndo();
+
+  // Retning og valgt rom settes rundt kjøringen og settes TILBAKE etterpå — dette er globale
+  // brukerpreferanser, ikke noe en godkjenning skal etterlate endret.
+  const førD = S.varmefolie.direction, førE = S.varmefolie.dirExplicit;
+  const førRom = S.ui.selectedRoomId;
+  const førProdukter = _snapshotRoomProducts ? _snapshotRoomProducts(roomId) : null;
+  let ok = false, feil = '';
+  try {
+    if (rad.direction === 'h' || rad.direction === 'v') {
+      S.varmefolie.direction = rad.direction;
+      S.varmefolie.dirExplicit = true;
+    }
+    S.ui.selectedRoomId = roomId;
+
+    if (type === 'kabel') {
+      const pid = rad.productId || (S.cables.find(c => c.roomId === roomId) || {}).productId;
+      _clearRoomProductCollections(roomId, ['cables']);
+      const c = autoFillCable(roomId, pid);
+      if (c) { S.cables.push(c); S.ui.selectedCableId = c.id; ok = true; }
+      else feil = 'Kabelen fikk ikke plass i rommet';
+    } else if (type === 'matte') {
+      const pid = _forslagMatteProdukt(roomId, rad);
+      _clearRoomProductCollections(roomId, ['mats', 'matPaths']);
+      const m = autoFillMatSerpentine(pid, { skipPushUndo: true });
+      ok = !!(m || (S.mats || []).some(x => x.roomId === roomId));
+      if (!ok) feil = 'Matten fikk ikke plass i rommet';
+    } else {
+      const pid = rad.productId || (S.strips.find(x => x.roomId === roomId) || {}).productId;
+      _clearRoomProductCollections(roomId, ['strips', 'foilFree']);
+      autoAddStrips(roomId, pid);
+      ok = (S.strips || []).some(x => x.roomId === roomId);
+      if (!ok) feil = 'Folien fikk ikke plass i rommet';
+    }
+  } catch (e) {
+    ok = false; feil = e.message || 'Motoren feilet';
+  } finally {
+    S.varmefolie.direction = førD; S.varmefolie.dirExplicit = førE;
+    S.ui.selectedRoomId = førRom;
+  }
+  // Feiler motoren skal rommet stå NØYAKTIG som før, ikke tomt. Samme gjenopprettings-
+  // funksjon som produktbytte-økta bruker (`_restoreRoomProductSnapshot`) — ikke en ny vei.
+  if (!ok && førProdukter) {
+    try { _restoreRoomProductSnapshot(roomId, førProdukter); } catch (e) { /* bedre tomt enn krasj */ }
+  }
+  if (ok) { _invalidateCableCache(); _invalidateStripCache(); _invalidateMatCache(); }
+  return { ok, feil };
+}
+
+// Er kabelen gyldig i dette rommet NÅ? Leser kandidaten fra samme alternativliste kunden så,
+// så godkjenningen aldri legger ut noe pilene ville nektet.
+function _forslagKandidatGyldig(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const alt = _forslagAlternativer(room);
+  if (!alt || alt.type !== 'kabel') return null;
+  return alt.liste.find(x => x.productId === productId) || null;
+}
+
+// Kunden foreslår en W/m²-VARIANT for matte (60/100/150), ikke en lengde — lengden er motorens
+// valg. Finn varianten i familien og la motoren ta resten.
+function _forslagMatteProdukt(roomId, rad) {
+  const naa = (S.mats || []).find(m => m.roomId === roomId);
+  const naaProd = naa && HEATING_PRODUCTS.find(p => p.id === naa.productId);
+  if (!rad.productId && rad.targetWm2 == null) return naa && naa.productId;
+  const ønsket = rad.targetWm2 != null ? rad.targetWm2
+    : (HEATING_PRODUCTS.find(p => p.id === rad.productId) || {}).watt_per_m2;
+  if (!ønsket || !naaProd) return rad.productId || (naa && naa.productId);
+  const familie = getProductFamily(naaProd.id).filter(p => p.watt_per_m2 === ønsket);
+  if (!familie.length) return rad.productId || naa.productId;
+  // Samme lengde som ligger der i dag hvis den finnes i den nye varianten — ellers lengste.
+  // ⚠ Feltet heter `mat_length_mm`. Første versjon leste `mat_length_m`/`length_m`, som er
+  // `undefined` for ALLE matter — da ble `undefined === undefined` sant og den plukket første
+  // produkt i katalogrekkefølgen. En live-test «bekreftet» 0.5×10m fordi katalogen tilfeldigvis
+  // hadde den først; regresjonstesten avslørte at den egentlig ga 0.5×2m.
+  const lengde = p => p.mat_length_mm;
+  const lik = (lengde(naaProd) != null) ? familie.find(p => lengde(p) === lengde(naaProd)) : null;
+  const lengst = familie.slice().sort((a, b) => (lengde(a) || 0) - (lengde(b) || 0)).pop();
+  return (lik || lengst || familie[0]).id;
+}
+
+// ── Panelet ────────────────────────────────────────────────────────────────
+function openKundeForslagPanel() {
+  const k = _forslagLinkCache;
+  if (!k || k.status !== 'answered') { _showToast && _showToast('Ingen forslag fra kunde', 'info'); return; }
+  const rader = _forslagSvarRader();
+  if (!rader.length) { _showToast && _showToast('Forslaget gjelder rom som ikke finnes lenger', 'warn'); return; }
+  if (!_forslagRevState || _forslagRevState.linkId !== k.id) _forslagRevState = { linkId: k.id, behandlet: new Map() };
+  _forslagRevRender();
+}
+
+function _forslagProduktNavn(id) {
+  const p = HEATING_PRODUCTS.find(x => x.id === id);
+  return p ? p.name : null;
+}
+// «Nå»-tallene regnes med samme kandidat kunden så (043) — ikke nye tall.
+function _forslagRadTall(rad) {
+  const room = rad.room;
+  if (!room) return { naa: '—', ny: '—' };
+  const alt = _forslagAlternativer(room);
+  const fmt = k => !k ? '—' : (alt.type === 'kabel'
+    ? `${esc(k.navn)} · ${k.flateeffekt} W/m² · CC ${k.cc} cm`
+    : `${esc(k.navn)} · ${k.wm2} W/m²`);
+  const naa = alt && alt.naaIdx >= 0 ? alt.liste[alt.naaIdx] : null;
+  const ny = alt && rad.productId ? alt.liste.find(x => x.productId === rad.productId) : null;
+  const retn = rad.direction === 'h' ? ' · vannrett' : rad.direction === 'v' ? ' · loddrett' : '';
+  return {
+    naa: fmt(naa),
+    ny: (ny ? fmt(ny) : (rad.productId ? esc(_forslagProduktNavn(rad.productId) || '—') : (rad.targetWm2 != null ? rad.targetWm2 + ' W/m² ønsket' : 'bare retning')))
+        + retn,
+  };
+}
+
+function _forslagRevRender() {
+  const k = _forslagLinkCache;
+  const rader = _forslagSvarRader();
+  document.getElementById('fors-rev-ov')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'fors-rev-ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+
+  const hvem = k.answered_by_name ? esc(k.answered_by_name) : 'kunden';
+  const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'long' }) : '';
+  const godkjentAlt = k.approve_all_at || (k.answer && k.answer.approveAll);
+
+  let rows = '';
+  for (const rad of rader) {
+    const b = _forslagRevState.behandlet.get(rad.roomId);
+    const navn = esc((rad.room && rad.room.name) || rad.roomName || 'Rom');
+    if (!rad.room) {
+      rows += `<tr><td style="padding:9px 8px;color:var(--dim)" colspan="4">${navn} — finnes ikke i prosjektet lenger</td></tr>`;
+      continue;
+    }
+    if (rad.ok) {
+      rows += `<tr><td style="padding:9px 8px"><b>${navn}</b></td>
+        <td style="padding:9px 8px;color:#22c55e" colspan="2">✓ OK som det er</td>
+        <td style="padding:9px 8px;color:var(--dim);font-size:11.5px">ingen handling</td></tr>`;
+      continue;
+    }
+    const t = _forslagRadTall(rad);
+    const handling = b
+      ? (b.status === 'godkjent'
+          ? `<span style="color:#22c55e;font-weight:600">✓ Godkjent</span>`
+          : `<span style="color:var(--dim)">Avslått${b.grunn ? ' — ' + esc(b.grunn) : ''}</span>`)
+      : `<div style="display:flex;gap:6px;justify-content:flex-end">
+           <button onclick="_forslagGodkjennKlikk(${rad.roomId})" style="padding:6px 11px;background:var(--accent);border:none;border-radius:7px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Godkjenn</button>
+           <button onclick="_forslagAvslaaKlikk(${rad.roomId})" style="padding:6px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer">Avslå</button>
+         </div>`;
+    rows += `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:9px 8px;vertical-align:top"><b>${navn}</b>${_forslagRevFeil.has(rad.roomId) ? '<br><span style="color:#f59e0b;font-size:11.5px">⚠ ' + esc(_forslagRevFeil.get(rad.roomId)) + '</span>' : ''}</td>
+      <td style="padding:9px 8px;vertical-align:top;color:var(--dim);font-size:12px">${t.naa}</td>
+      <td style="padding:9px 8px;vertical-align:top;font-size:12px"><b>${t.ny}</b>${rad.comment ? '<br><span style="color:var(--dim);font-size:11.5px">«' + esc(rad.comment) + '»</span>' : ''}</td>
+      <td style="padding:9px 8px;vertical-align:top;text-align:right">${handling}</td></tr>`;
+  }
+
+  const uavklart = rader.filter(r => r.room && !r.ok && !_forslagRevState.behandlet.has(r.roomId)).length;
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(880px,96vw);max-height:88vh;overflow:auto;padding:22px;color:var(--text)">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:4px">
+      <div><div style="font-size:17px;font-weight:700">Kundeforslag</div>
+        <div style="font-size:12px;color:var(--dim)">Fra ${hvem}${nar ? ' · ' + nar : ''}</div></div>
+      <button onclick="document.getElementById('fors-rev-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
+    </div>
+    ${godkjentAlt ? `<div style="margin:10px 0;padding:9px 12px;border:1px solid #22c55e55;background:#22c55e18;border-radius:9px;font-size:12.5px;color:#22c55e">
+      ✓ ${esc(k.approve_all_name || (k.answer.approveAll && k.answer.approveAll.name) || hvem)} har godkjent hele prosjektet</div>` : ''}
+    ${k.answer && k.answer.comment ? `<div style="margin:10px 0;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);background:var(--surface2);border-radius:8px;font-size:12.5px;white-space:pre-wrap">${esc(String(k.answer.comment).slice(0, 2000))}</div>` : ''}
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px">
+      <thead><tr style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)">
+        <th style="text-align:left;padding:6px 8px">Rom</th>
+        <th style="text-align:left;padding:6px 8px">Nå</th>
+        <th style="text-align:left;padding:6px 8px">Kunden foreslår</th>
+        <th style="text-align:right;padding:6px 8px"></th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:9px;margin-top:18px;flex-wrap:wrap">
+      <button onclick="_forslagGodkjennAlle()" ${uavklart ? '' : 'disabled'}
+        style="padding:9px 15px;border-radius:8px;font-size:13px;font-weight:600;cursor:${uavklart ? 'pointer' : 'default'};
+               border:1px solid var(--border);background:var(--surface2);color:${uavklart ? 'var(--text)' : 'var(--dim)'}">Godkjenn alle (${uavklart})</button>
+      <div style="display:flex;gap:9px">
+        <button onclick="document.getElementById('fors-rev-ov').remove()" style="padding:9px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Lukk</button>
+        <button onclick="_forslagSendSvar()" ${uavklart ? 'disabled' : ''}
+          style="padding:9px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:${uavklart ? 'default' : 'pointer'};border:none;
+                 background:${uavklart ? 'var(--surface2)' : 'var(--accent)'};color:${uavklart ? 'var(--dim)' : '#0d0e10'}">Send svar til kunden</button>
+      </div>
+    </div>
+    ${uavklart ? `<div style="font-size:11.5px;color:var(--dim);margin-top:7px;text-align:right">${uavklart} rom er ikke behandlet ennå.</div>` : ''}
+  </div>`;
+  document.body.appendChild(ov);
+}
+
+function _forslagGodkjennKlikk(roomId) {
+  const rad = _forslagSvarRader().find(r => r.roomId === roomId);
+  if (!rad) return;
+  const res = _forslagGodkjennRom(rad);
+  if (res.ok) {
+    _forslagRevFeil.delete(roomId);
+    _forslagRevState.behandlet.set(roomId, { status: 'godkjent' });
+    _showToast && _showToast('«' + ((rad.room && rad.room.name) || 'Rommet') + '» er lagt ut på nytt — Ctrl+Z angrer', 'ok');
+  } else {
+    // Feilet motoren står raden UBEHANDLET med en ⚠, så Kenneth kan prøve igjen eller avslå —
+    // rommet er allerede satt tilbake slik det var av `_forslagGodkjennRom`.
+    _forslagRevFeil.set(roomId, res.feil);
+    _showToast && _showToast('Kunne ikke godkjenne: ' + res.feil, 'warn');
+  }
+  renderSidebar(); render();
+  _forslagRevRender();
+}
+
+function _forslagAvslaaKlikk(roomId) {
+  const grunn = window.prompt('Kort begrunnelse til kunden:', 'Beholder dagens — gir jevnere varme');
+  if (grunn === null) return;
+  _forslagRevState.behandlet.set(roomId, { status: 'avslaatt', grunn: String(grunn).slice(0, 300) });
+  _forslagRevRender();
+}
+
+// ETT angre-steg for hele runden (prompt: «Godkjenn alle → samme per rom i rekkefølge, ett pushUndo totalt»).
+function _forslagGodkjennAlle() {
+  const rader = _forslagSvarRader().filter(r => r.room && !r.ok && !_forslagRevState.behandlet.has(r.roomId));
+  if (!rader.length) return;
+  pushUndo();
+  let ok = 0, feilet = 0;
+  for (const rad of rader) {
+    const res = _forslagGodkjennRom(rad, { skipPushUndo: true });
+    if (res.ok) { _forslagRevState.behandlet.set(rad.roomId, { status: 'godkjent' }); ok++; }
+    else { _forslagRevFeil.set(rad.roomId, res.feil); feilet++; }
+  }
+  renderSidebar(); render();
+  _forslagRevRender();
+  _showToast && _showToast(ok + ' rom lagt ut på nytt' + (feilet ? ', ' + feilet + ' feilet' : '') + ' — Ctrl+Z angrer alt', feilet ? 'warn' : 'ok');
+}
+
+async function _forslagSendSvar() {
+  const k = _forslagLinkCache;
+  if (!k) return;
+  const svar = [];
+  for (const rad of _forslagSvarRader()) {
+    if (!rad.room || rad.ok) continue;
+    const b = _forslagRevState.behandlet.get(rad.roomId);
+    svar.push({ roomId: rad.roomId, roomName: (rad.room.name || 'Rom'),
+      status: b ? b.status : 'ubehandlet', grunn: (b && b.grunn) || undefined });
+  }
+  try {
+    await _db.from('kundelenker')
+      .update({ status: 'applied', applied_at: new Date().toISOString(), applied_result: svar })
+      .eq('id', k.id);
+  } catch (e) {
+    _showToast && _showToast('Kunne ikke lagre behandlingen: ' + e.message, 'warn');
+    return;
+  }
+  try { await _db.functions.invoke('kundelenke-mail', { body: { token: k.token, kind: 'forslag_svar' } }); }
+  catch (e) { /* 029: svaret er lagret uansett */ }
+  document.getElementById('fors-rev-ov')?.remove();
+  _showToast && _showToast('Svaret er sendt til kunden og forslaget er lukket', 'ok');
+  await _kundeRefreshStatus();
 }
 
 let _pendingDeleteId = null;

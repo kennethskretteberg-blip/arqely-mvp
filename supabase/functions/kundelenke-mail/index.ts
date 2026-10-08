@@ -137,7 +137,10 @@ Deno.serve(async (req) => {
 
   try {
     const { kind, token, to, message } = await req.json();
-    if (kind !== "invite" && kind !== "answered") return json({ error: "ugyldig kind" }, 400);
+    // 044: to nye. `forslag_answered` er anonymt som `answered` (kunden trykker Send og
+    // nettleseren kaller hit) - `forslag_svar` er UTGAENDE og krever innlogging som `invite`.
+    const _gyldigeKind = ["invite", "answered", "forslag_answered", "forslag_svar"];
+    if (!_gyldigeKind.includes(kind)) return json({ error: "ugyldig kind" }, 400);
     if (!token || typeof token !== "string") return json({ error: "token kreves" }, 400);
 
     const db = createClient(
@@ -151,7 +154,8 @@ Deno.serve(async (req) => {
     // gitt token finnes, til en kaller som ikke hadde noe der aa gjore. Autentiser foerst,
     // gjor arbeid etterpa: billigere, og ingenting lekker.
     let bruker: { id: string } | null = null;
-    if (kind === "invite") {
+    const _kreverInnlogging = (kind === "invite" || kind === "forslag_svar");
+    if (_kreverInnlogging) {
       const auth = req.headers.get("Authorization") || "";
       const jwt = auth.startsWith("Bearer ") ? auth.slice(7) : "";
       if (!jwt) return json({ error: "innlogging kreves" }, 401);
@@ -223,7 +227,47 @@ Deno.serve(async (req) => {
       return json({ ok: true, sent_to: rcpt });
     }
 
-    // ──────────────────────── answered ────────────────────────
+    // ──────────────────────── 044: forslag_svar ────────────────────────
+    // Kenneth har behandlet forslaget og sender resultatet til kunden. Krever innlogget bruker
+    // i lenkens org, som 'invite' — dette er en utgaende melding, ikke et anonymt varsel.
+    if (kind === "forslag_svar") {
+      // Lag 1 (ekte bruker) er gjort over, FOR oppslaget - samme rekkefolge som 'invite'.
+      if (!link.org_id) return json({ error: "lenken mangler organisasjon" }, 403);
+      const { data: medlemF } = await db.from("organization_members")
+        .select("user_id").eq("org_id", link.org_id).eq("user_id", bruker!.id).maybeSingle();
+      if (!medlemF) return json({ error: "ikke medlem av organisasjonen" }, 403);
+      // Mottakeren er ALLTID adressen lenken selv ble sendt til (029) - aldri noe fra kallet.
+      if (!link.invite_sent_to) return json({ ok: true, skipped: "ingen kundeadresse" });
+
+      const res: any[] = Array.isArray(link.applied_result) ? link.applied_result : [];
+      const rader = res.map((r: any) => {
+        const g = r.status === "godkjent";
+        return `<tr><td style="padding:7px 9px;border-top:1px solid #e2e8f0">${esc(String(r.roomName || "Rom"))}</td>
+          <td style="padding:7px 9px;border-top:1px solid #e2e8f0;color:${g ? "#16a34a" : "#6b7280"};font-weight:600">${g ? "Godkjent" : "Beholder dagens"}</td>
+          <td style="padding:7px 9px;border-top:1px solid #e2e8f0;color:#4b5563;font-size:13px">${esc(String(r.grunn || ""))}</td></tr>`;
+      }).join("");
+      // Presentasjonslenken hentes server-side fra prosjektet, aldri fra kallet.
+      const { data: pres } = await db.from("romtegner_projects")
+        .select("present_token").eq("id", link.project_id).maybeSingle();
+      const presentToken = pres?.present_token || "";
+      const seUrl = `${PUBLIC_BASE_URL}/?present=${encodeURIComponent(String(presentToken))}`;
+
+      await sendEmail({
+        to: [link.invite_sent_to],
+        fromName: _avsenderNavn(orgName),
+        replyTo: link.notify_email || undefined,
+        subject: `Svar på forslaget ditt til ${projectName}`,
+        html: shell(`
+          <div style="font-size:17px;font-weight:600;margin-bottom:10px">Vi har sett på forslaget ditt</div>
+          <p style="font-size:14px;line-height:1.55;margin:0 0 4px">Takk for innspillene til <b>${esc(projectName)}</b>. Slik ble det:</p>
+          ${rader ? `<table style="width:100%;border-collapse:collapse;font-size:14px;margin:14px 0">${rader}</table>`
+                  : `<p style="font-size:14px;color:#4b5563">Vi beholder løsningen slik den var.</p>`}
+          ${presentToken ? button(seUrl, "Se den oppdaterte løsningen") : ""}`),
+      });
+      return json({ ok: true, sent_to: link.invite_sent_to });
+    }
+
+    // ──────────────────────── answered / forslag_answered ────────────────────────
     // Anonymt kall. Tre lag som til sammen gjor den ubrukelig som e-postkanon.
     if (link.status !== "answered") return json({ error: "lenken har ikke et nytt svar" }, 403);
     if (!link.answered_at || Date.now() - new Date(link.answered_at).getTime() > NOTIFY_WINDOW_MS) {
@@ -235,6 +279,36 @@ Deno.serve(async (req) => {
     if (!link.notify_email) return json({ ok: true, skipped: "ingen mottaker" });
 
     const svar = link.answer || {};
+
+    // 044: forslag har en annen form (rooms[] i stedet for walls[]) og en annen setning.
+    // Resten - vinduet, rate-grensen og at mottakeren ALLTID er lenkens notify_email - er
+    // nøyaktig de samme tre lagene som 029 la inn.
+    if (kind === "forslag_answered" || link.mode === "forslag") {
+      const rom: any[] = Array.isArray(svar.rooms) ? svar.rooms : [];
+      const nOk = rom.filter((r: any) => r && r.ok).length;
+      const nEndring = rom.length - nOk;
+      const hvemF = link.answered_by_name || "Kunden";
+      const godkjentAlt = svar.approveAll && svar.approveAll.name;
+      const apneF = `${PUBLIC_BASE_URL}/?project=${link.project_id}&kundesvar=${link.id}`;
+      await sendEmail({
+        to: [link.notify_email],
+        fromName: _avsenderNavn(orgName),
+        subject: `${hvemF} har sendt forslag til ${projectName}`,
+        html: shell(`
+          <div style="font-size:17px;font-weight:600;margin-bottom:10px">Forslag fra kunde</div>
+          <p style="font-size:14px;line-height:1.55;margin:0 0 4px"><b>${esc(hvemF)}</b> har gått gjennom
+            <b>${esc(projectName)}</b>: <b>${nOk} rom OK</b> og <b>${nEndring} ${nEndring === 1 ? "endring" : "endringer"}</b>.</p>
+          ${godkjentAlt ? `<p style="font-size:14px;color:#16a34a;font-weight:600;margin:10px 0 0">✓ ${esc(String(godkjentAlt))} har godkjent hele prosjektet.</p>` : ""}
+          ${svar.comment ? `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:3px solid #0891b2;border-radius:8px;padding:12px 14px;margin:16px 0;font-size:13px;white-space:pre-wrap">${esc(String(svar.comment).slice(0, 2000))}</div>` : ""}
+          <p style="font-size:13px;color:#4b5563">Utlegget er ikke endret — forslaget ligger og venter til du godkjenner det.</p>
+          ${button(apneF, "Åpne i Varmeplan")}`),
+      });
+      await db.from("kundelenker")
+        .update({ last_notified_at: new Date().toISOString() })
+        .eq("id", link.id);
+      return json({ ok: true, sent_to: link.notify_email });
+    }
+
     const antallVegger = Array.isArray(svar.walls) ? svar.walls.length : 0;
     const antallRom = Array.isArray(svar.walls)
       ? new Set(svar.walls.map((w: any) => w.roomId)).size : 0;

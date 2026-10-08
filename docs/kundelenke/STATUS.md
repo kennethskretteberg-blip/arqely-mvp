@@ -214,6 +214,82 @@ Kenneth merker usikre vegger  ──►  «Be kunde om mål»  ──►  Mål e
                              (lenken blir ugyldig)
 ```
 
+## Kundeforslag (042–044) — ferdig 08.10.2026
+
+Kunden ser presentasjonen, trykker på et rom og sier «OK som det er» eller foreslår annet
+produkt / ønsket flateeffekt / retning. Kenneth godkjenner per rom, og utlegget endrer seg.
+
+| Prompt | Hva | Commit |
+|---|---|---|
+| 042 | «PRESENTASJON» / «FYLL INN MÅL» som ferdig hyperlenke med Kopier (formatert + ren URL) | `6420667` |
+| 043 | Forslagskort i presentasjonen: produkt-piling, ønsket flateeffekt, retning, OK per rom, Send | `1e9bcac` |
+| 044 | Panel med Godkjenn/Avslå per rom → auto-utlegg, e-post begge veier, «Godkjent av kunde» | denne |
+
+**041 finnes ikke som nummerert prompt** — serien oppgir det som krav, men presentasjonslenka
+(`?present=`, `present_token`, `get_present_project`, `_presentLoadByToken`) var der fra før, i
+`supabase-migration-presentation.sql`. Hvert symbol 042/043 navngir ligger på nøyaktig det
+linjenummeret promptene oppgir for `2147753`, så de er skrevet mot denne koden. Ingenting manglet.
+
+### Hvordan det henger sammen
+
+Lenka er `?present=<present_token>&forslag=<token>`. Prosjektet hentes som før via
+`get_present_project`; `kundelenke_get` brukes **bare** til lenkestatus. Forslagslenka viser
+derfor ikke ett felt mer enn en vanlig presentasjonslenke. Den gjenbrukes per prosjekt (90 dager)
+— uten gjenbruk ville hver deling laget en ny rad, og 044 ikke visst hvilken som gjelder.
+
+Svaret lagres med `kundelenke_answer` (formagnostisk fra 027), og kunden skriver aldri i
+prosjektet. `mode='forslag'` krevde én skjemaendring: CHECK-constrainten sto `in ('maal','tegn')`.
+
+### Pilefunksjonen — familiene oppfører seg ulikt
+
+| Familie | Antall | Varierer i | Piling |
+|---|---|---|---|
+| InFloor 17T (kabel) | 25 | lengde ved fast 17 W/m → effekt | over effekt |
+| EcoMat (matte) | 57 | 60/100/150 W/m² **og** lengde | over W/m² (3 valg) |
+| FlexFoil (folie) | 8 | kun bredde, alle 60 W/m² | ingen piler |
+
+`getProductFamily('InFloor 17T 800W 47m')` gir **44** produkter som **blander 17T og 10T**
+(kategori 2 har begge, så felles navneprefiks blir «InFloor»). Kundens pileliste snevres inn på
+`watt_per_m` — kabeltypen ER watt_per_m. `getProductFamily` er urørt.
+
+### Fire ting som ble funnet, ikke bestilt
+
+1. **Romkortet viste `Artikkelnr` til alle med en offentlig lenke.** Spec regel 2 forbyr det.
+   Nå gatet på `presentPublic`; innlogget presentasjon beholder det.
+2. **Kortet var hover-drevet** — det forsvant når musa forlot rommet. I forslagsmodus velges
+   rommet med klikk, og kortet har fått et ✕.
+3. **`_kundeRefreshStatus` tok første levende lenke uansett `mode`.** En åpen forslagslenke
+   (90 dager) kunne dermed skygge for et besvart mål-svar, som 028/037-panelet lever av.
+   Modusene har nå hver sin cache, og prosjektlista kan vise begge merkene samtidig.
+4. **Godkjenningen tok `rad.productId` på tro.** Et forslag kan bli ugyldig mellom innsending og
+   godkjenning. Vakten leser samme kandidat kunden så — men bare produktreglene: målt at
+   3400W/200m i 16 m² (CC 8 cm, 213 W/m²) er *lovlig*, siden minSp er 5 cm.
+
+### Godkjenningen
+
+`_forslagGodkjennRom` kaller motorene, endrer dem ikke. Retningen settes via den **delte**
+globalen `S.varmefolie.direction` (+ `dirExplicit`) — den ene inngangen for kabel, matte og folie
+— og settes tilbake etterpå; `S.ui.selectedRoomId` likedan, fordi `autoFillMatSerpentine` leser
+den. Ryddingen er scopet til produkttypen (`_clearRoomProductCollections(roomId, ['cables'])`),
+så hindringer og soner står. «Godkjenn alle» er ETT angre-steg. Feiler motoren settes rommet
+tilbake med `_restoreRoomProductSnapshot` og raden får ⚠.
+
+### Til Kenneth
+
+Tre ting å kjøre, i denne rekkefølgen:
+
+1. **Supabase SQL Editor:** `supabase-migration-kundeforslag.sql` (mode-constraint,
+   approve_all_*, applied_*). Uten den feiler «Del lenke» med 23514 og forslagsavkryssingen
+   vises ikke.
+2. **Terminal:** `supabase functions deploy kundelenke-mail` — to nye `kind`
+   (`forslag_answered`, `forslag_svar`). 039s `KUNDE_VIDEO_ID` følger med samme deploy.
+3. Test i Outlook og Gmail at «PRESENTASJON» blir en klikkbar lenke — Claudes nettleserrute
+   nekter `clipboard-write`, så den biten er ikke testet av meg.
+
+Fire spørsmål venter i `prompter/kundeforslag/SPØRSMÅL.md`, viktigst: skal kunden kunne foreslå
+en annen kabeltype (17T ↔ 10T), og skal «Godkjenn hele prosjektet» være formelt eller bare et
+signal.
+
 ## Ikke i v1 (fra spec)
 
 - Åpen «tegn selv»-side uten prosjekt, f.eks. fra cenika.no. Krever misbruksvern.

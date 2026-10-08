@@ -54,4 +54,16 @@ Kenneth svarer til slutt.
 
 ## 044
 
--
+- **«Godkjenn hele prosjektet» — formelt eller signal?** Fortsatt ubesvart (står også øverst).
+  044 lagrer navn + dato (server-side `now()`, ikke klientens tid) og viser «✓ Godkjent av kunde»
+  i lista og sidebaren. Ingen låsing, ingen PDF-stempel.
+- **Gyldighetsvakten ved godkjenning sjekker bare PRODUKTREGLER.** Målt: InFloor 17T har
+  minSp 5 cm / maxHard 50 cm, så 3400W/200m i et 16 m² rom (CC 8 cm, **213 W/m²**) er lovlig og
+  blir godkjent. Skal den også stoppe urimelig flateeffekt mot romtypens grense? Egen sak hvis ja.
+- **Avslå bruker `window.prompt`** for begrunnelsen. Det er raskt, men stygt og kan være blokkert.
+  Si fra hvis du vil ha et ordentlig felt i raden i stedet.
+- **Forslagslenka gjenbrukes per prosjekt.** Sender du presentasjonen til to ulike kunder, havner
+  begges forslag på samme lenke, og siste svar gjelder. Si fra hvis to kunder skal kunne mene hver
+  sin ting på samme prosjekt.
+- **Matte-godkjenning beholder samme lengde i den nye W/m²-varianten** (EcoMat 60T 0.5×10m →
+  150T 0.5×10m), ellers lengste. Si fra hvis motoren heller skal få velge lengden helt fritt.
