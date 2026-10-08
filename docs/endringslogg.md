@@ -4,6 +4,77 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Rom fra planveggene: gjennomgang, romtype, «Ikke navngitt» — 2026-10-08
+
+Prompt 049. Rommene fra vegg-sjekken inn i gjennomgangsskjermen, med navn og areal fra
+tegningen.
+
+### STEG 0 — to funn som halverte oppgaven, og ett som utvidet den
+
+**0.1/0.2 Gjennomgangsskjermen og romtype-gjettingen finnes allerede.** `_reviewRenderList`
+har redigerbart navn, redigerbart areal, advarsler med severity, slett, varmetype-velger,
+bulk-rad og live-sum. Og `_pdfGuessRoomType` gjetter romtype fra navn. 049 er altså en ny
+KILDE til skjermen, ikke en ny flate — målt mot de 16 romnavnene på Kenneths tegning traff
+**11 av 16** allerede.
+
+**0.4 `createRoom` kaller `pushUndo()` selv: 34 rom ga 34 angre-steg.** Målt. Kenneth måtte
+trykket Ctrl+Z 34 ganger for å angre én import. Nå ett, med `_undoSuppress` (samme vern 030
+brukte).
+
+**Og hullet i min egen 046-prompt:** `/import/plan` tar en FIL og returnerer rom fra motorens
+EGNE vegger. Etter at brukeren har rettet veggene er de rommene foreldet — og det er nettopp
+det tilfellet som betyr noe, siden den ekte tegningen gir 0 rom før retting. Løst med et nytt
+`POST /plan/rooms` i lumelo som lukker de redigerte veggene. Alternativet var en polygonizer i
+JavaScript; den ville duplisert `detect_rooms` og brutt «rom-modellen er sømmen».
+
+### Tre feil funnet ved å kjøre flyten, ikke ved å lese den
+
+**1. `_reviewCommit` droppet rom uten varme helt.** Filteret var `r.heat`, så et «Lager», «BK»
+eller «EL» ville aldri blitt et rom i prosjektet. Spec regel 4 sier det motsatte: de skal
+navngis og merkes uten varme, så lista stemmer med tegningen. Fra planen tas nå alle rom med
+geometri.
+
+**2. «Legg til N rom»-knappen var grå.** `_reviewUpdateCount` teller `r.heat`, så en plantegning
+der ingen rom hadde varme ga «Legg til 0 rom» og en deaktivert knapp — altså en lovlig
+innlegging blokkert av telleren. Knappen viser nå «Legg til 3 rom i prosjektering (0 med
+varme)».
+
+**3. `_calcRoughFill(room, rr.calcType || 'foil')` ga folie til rom som uttrykkelig ikke skal
+varmes.** `'none' || 'foil'` er `'foil'`.
+
+### Romtypene — målt, ikke antatt
+
+Av de 16 navnene falt fem til `other`: EL, Fellesareal, Lager, Garderobe, Boder beboere.
+**⚠ Det finnes ingen «ingen varme»-romtype i `ROOM_TYPES`** — spec-en snakker om det som en
+romtype, men appen modellerer det som `other` + `calcType:'none'`, og `other` er allerede uten
+varme. Lager, bod og EL havnet derfor riktig ved å ikke matche noe; de står nå eksplisitt, så
+en framtidig «Bodareal» ikke faller tilfeldig inn i en annen regel.
+
+**Én ekte feilklassifisering ble funnet:** `BK` (bøttekott) ga `laundry`, som FÅR varme
+foreslått. Rettet — `vaskesluse`/`vaskerom` beholder laundry.
+
+### «Ikke navngitt»
+
+Egen sammenleggbar gruppe nederst i romlista, i **begge** indoor-veiene
+(`_renderIndoorPartContent` og `_renderFlatSidebar`; snø er utelatt med vilje). Standard lukket
+når noe er navngitt, åpen når alt er unavngitt. Målt: å åpne eller lukke den flytter de
+navngitte radene **0 px**. Etasje-badgen får «22 navngitt · 12 ikke navngitt» som tittel.
+
+**«Anbefalt»-merket er flyttet** til «Finn vegger og rom automatisk» for PDF, nå som flyten
+faktisk lager rom. Den gamle veien står igjen merket «Eldre vei».
+
+### Målt ende til ende mot Kenneths ekte tegning
+
+Via appens eget klientlag mot en lokal motor: 253 vegger, 34 labels, dekning 53,4 %,
+kalibrering 1:100, på 198 ms. «Lag rom» gir 0 rom der — og da sier flyten ærlig fra
+(«Veggene lukker ingen rom ennå — se de røde prikkene») i stedet for å åpne en tom
+gjennomgangsskjerm.
+
+Regresjon: `_planRegressionTest` 28 → 47 sjekker. **614 sjekker grønne i 17 batterier.**
+046-sjekken «Lag rom krever minst én vegg» fanget selv at funksjonen ble `async`.
+
+---
+
 ## Vegg-sjekk: motorens vegger oppå tegningen før de blir rom — 2026-10-08
 
 Prompt 046, første i plantegning-serien. Kenneth: «La appen finne veggene, men la meg se og

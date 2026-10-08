@@ -1862,6 +1862,10 @@ body.kunde-maal #minimap-widget{display:none !important}
     <button class="rv-btn" onclick="_reviewBulk('all')">Merk alle</button>
     <button class="rv-btn" onclick="_reviewBulk('none')">Fjern alle</button>
     <button class="rv-btn" onclick="_reviewBulk('suggest')">Forslag (våtrom + fellesareal)</button>
+    <!-- 049: på en tegning med 34 rom er rom-for-rom en straff. Vises bare når rommene kom
+         fra en plantegning — ellers finnes det ingen navn fra tegningen å bekrefte. -->
+    <button class="rv-btn" id="rv-bekreft-alle" style="display:none"
+      onclick="_reviewBekreftAlle()" title="Godta navnene tegningen oppgir">✓ Bekreft alle med navn</button>
     <button class="rv-btn" onclick="_reviewOpenModTypeDefaults()" title="Sett standard varmetype per romtype">⚙ Standarder</button>
     <span class="rv-count" id="rv-count">0 av 0 rom valgt</span>
   </div>
@@ -5786,6 +5790,7 @@ function _planApplyResponse(res, floorId) {
     thickness_cm: w.thickness_cm || 0, source: w.source || 'single',
   }));
   S.planMeta[fid] = {
+    page_size_pt: res.page_size_pt || null,   // 049: /plan/rooms trenger den tilbake
     coverage: res.coverage || null,
     leftovers: (res.leftovers || []).map(r => ({ a: uv(r.a), b: uv(r.b) })),
     calibration: res.calibration || null,
@@ -5829,6 +5834,11 @@ function _planDevFixture(floorId) {
 // underlaget faktisk er på plass. Venter på bildet, for `_planBg()` krever `img` og `widthCm`.
 async function _planStartFraFil(file) {
   _startMethod = null; _emptyStateDismissed = true;
+  // 049: motoren kalles PARALLELT med at underlaget legges inn — den bruker 2–10 s, og
+  // underlaget har sin egen venting (PDF-render, sidevelger). Ingen grunn til å gjøre dem
+  // etter hverandre.
+  _planEngineLoad = _engineFetchPlan(file, { close_gaps_cm: 121 })
+    .catch(e => { _planEngineFeil = e.message; return null; });
   _loadFileAsBackground(file);
   // ⚠ `_loadFileAsBackground` er asynkron på flere nivåer (PDF-render, DWG→SVG, sidevelger som
   // VENTER på brukeren). Derfor pollet, ikke et fast timeout: modusen åpner i det øyeblikket
@@ -5836,11 +5846,31 @@ async function _planStartFraFil(file) {
   const start = Date.now();
   while (Date.now() - start < 60000) {
     await new Promise(r => setTimeout(r, 200));
-    if (_planBg()) { _planEnter(); return true; }
+    if (_planBg()) break;
   }
-  _showToast && _showToast('Fikk ikke lagt inn plantegningen — prøv «Jeg tegner selv»', 'warn');
-  return false;
+  if (!_planBg()) {
+    _showToast && _showToast('Fikk ikke lagt inn plantegningen — prøv «Jeg tegner selv»', 'warn');
+    return false;
+  }
+  _planEnter();
+  // Motorens svar kan komme etter at underlaget er på plass. Vegg-sjekken åpner uansett —
+  // da ser brukeren tegningen med en gang og får veggene når de er klare.
+  const res = await _planEngineLoad;
+  _planEngineLoad = null;
+  if (!res) {
+    _showToast && _showToast('Motoren fant ikke veggene: ' + (_planEngineFeil || 'ukjent feil')
+      + ' — du kan tegne dem selv her.', 'warn');
+    _planEngineFeil = null;
+    _planRenderBar();
+    return true;
+  }
+  const n = _planApplyResponse(res, _planFloorId());
+  _planRenderBar();
+  render();
+  _showToast && _showToast(n + ' vegger funnet — se at de ligger riktig før du lager rom', 'ok');
+  return true;
 }
+let _planEngineLoad = null, _planEngineFeil = null;
 
 // ── Treff og interaksjon ──────────────────────────────────────────────────
 // Toleransen er en PARAMETER, ikke en ny konstant — samme mønster `nearMoveArrow` og
@@ -6030,15 +6060,113 @@ function _planSettVerktoy(v) {
   render();
 }
 
-// 046 lager INGEN rom — det er 049. Her valideres bare at det finnes vegger, og kontrakten
-// som skal videre logges, så 049 og 047 kan måles mot samme form.
-function _planLagRom() {
-  const n = _planList().length;
-  if (!n) { _showToast && _showToast('Ingen vegger å lage rom av', 'warn'); return null; }
-  const ut = { floorId: _planFloorId(), walls: _planList().map(w => ({ ...w })), meta: _planMeta() };
-  console.log('[046] «Lag rom» — dette sendes videre til 049/motoren:', ut);
-  _showToast && _showToast(n + ' vegger klare. Rom lages i 049.', 'ok');
-  return ut;
+// 049: lukk veggene til rom og send dem inn i gjennomgangsskjermen.
+// ⚠ Veggene kan være RETTET av brukeren, så motorens opprinnelige `rooms` kan ikke brukes —
+// de lukkes på nytt via `/plan/rooms`. Det er hele poenget med vegg-sjekken.
+async function _planLagRom() {
+  const liste = _planList();
+  if (!liste.length) { _showToast && _showToast('Ingen vegger å lage rom av', 'warn'); return null; }
+  const meta = _planMeta() || {};
+  const kal = meta.calibration || {};
+  const side = meta.page_size_pt || null;
+  if (!side) {
+    _showToast && _showToast('Mangler sidestørrelse fra motoren — last tegningen på nytt', 'warn');
+    return null;
+  }
+  const btn = document.querySelector('#_plan-bar [onclick*="_planLagRom"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Lager rom …'; }
+  let svar = null;
+  try {
+    svar = await _engineFetchPlanRooms({
+      walls: liste.map(w => ({ a: [w.a.u, w.a.v], b: [w.b.u, w.b.v], thickness_cm: w.thickness_cm || 0 })),
+      labels: (meta.labels || []).map(l => ({
+        at: Array.isArray(l.at) ? l.at : [l.at.u, l.at.v],
+        number: l.number || null, name: l.name || null,
+        stated_area_m2: (l.stated_area_m2 != null) ? l.stated_area_m2 : null,
+      })),
+      page_size_pt: side,
+      meters_per_point: kal.meters_per_point || null,
+      close_gaps_cm: 121,
+    });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Lag rom'; }
+    _showToast && _showToast('Kunne ikke lage rom: ' + e.message, 'warn');
+    return null;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Lag rom'; }
+  const rom = (svar && svar.rooms) || [];
+  if (!rom.length) {
+    // ⚠ MÅLT på Kenneths ekte tegning: motoren lukker 0 rom der. Da er en ærlig beskjed med
+    // en vei videre bedre enn en tom gjennomgangsskjerm.
+    _showToast && _showToast('Veggene lukker ingen rom ennå. Se de røde prikkene og tegn de '
+      + 'manglende veggene, så prøv igjen.', 'warn');
+    return null;
+  }
+  _planTilGjennomgang(rom, kal);
+  return rom;
+}
+
+// Planens rom → `_reviewState`, altså SAMME struktur `/import/pdf` fyller. ⚠ STEG 0-funnet:
+// gjennomgangsskjermen har ALLEREDE navn, areal, advarsler, varmetype, bulk og live-sum.
+// Dette er en ny KILDE til den, ikke en ny flate.
+function _planTilGjennomgang(rom, kal) {
+  const mpp = (kal && kal.meters_per_point) || null;
+  const bg = _planBg();
+  const rooms = rom.map((r, i) => {
+    const navn = [r.number, r.name].filter(Boolean).join(' ') || null;
+    const type = _pdfGuessRoomType(r.name || '');
+    const suggest = _reviewIsSuggested(type);
+    // Polygonet er i (u,v); gjennomgangsskjermen regner i meter. Underlagets egen skala
+    // brukes, så planen og rommene ligger i flukt (046s normaliserings-regel).
+    const poly = (r.polygon || []).map(p => {
+      const u = Array.isArray(p) ? p[0] : p.u, v = Array.isArray(p) ? p[1] : p.v;
+      return bg ? [(bg.originX + u * bg.widthCm) / 100, (bg.originY + v * bg.heightCm) / 100]
+                : [u, v];
+    });
+    const rr = {
+      id: 'plan-' + (i + 1),
+      name: navn || ('Rom ' + (i + 1)),
+      areaM2: (r.area_m2 != null) ? r.area_m2 : Math.round(_pdfPolyAreaM2(poly) * 100) / 100,
+      type, heat: suggest, calcType: suggest ? _roomTypeModType(type) : 'none',
+      poly, obstacles: [], review: [],
+      _named: !!navn,
+      _planNumber: r.number || null,
+      _statedAreaM2: (r.stated_area_m2 != null) ? r.stated_area_m2 : null,
+      _areaOk: r.area_ok,
+    };
+    // Arealsjekken bruker den EKSISTERENDE review-mekanismen, så den vises i `rv-flag` uten
+    // ny UI.
+    if (rr._statedAreaM2 != null && r.area_ok === false) {
+      rr.review.push({ severity: 'warn',
+        message: 'Tegningen sier ' + rr._statedAreaM2 + ' m², rommet ble ' + rr.areaM2 + ' m²' });
+    }
+    if (!navn) rr.review.push({ severity: 'warn', message: 'Sjekk navn' });
+    return rr;
+  });
+  // Tegningens rekkefølge: romnummer først, resten etter.
+  rooms.sort((a, b) => {
+    const na = parseInt(a._planNumber, 10), nb = parseInt(b._planNumber, 10);
+    if (isFinite(na) && isFinite(nb)) return na - nb;
+    if (isFinite(na)) return -1;
+    if (isFinite(nb)) return 1;
+    return 0;
+  });
+  _planExit();
+  _pdfImportTarget = 'draw';
+  _reviewState = {
+    rooms, target: 'draw',
+    projectName: (S.project && S.project.name) || '',
+    calibrated: !!mpp, mpp,
+    floorBuild: 'concrete', hoverId: null, globalReview: [],
+    _fromPlan: true,
+  };
+  document.getElementById('project-list-screen').style.display = 'none';
+  const app = document.getElementById('app'); if (app) app.style.display = 'none';
+  const ms = document.getElementById('module-screen'); if (ms) ms.style.display = 'none';
+  document.getElementById('import-review-screen').style.display = 'flex';
+  const pn = document.getElementById('rv-projname');
+  if (pn) pn.value = (S.project && (S.project.name || '').trim()) ? S.project.name : '';
+  _reviewRender();
 }
 
 
@@ -19202,7 +19330,10 @@ function _kundeforslagRegressionTest() {
 //       bytte). Vegger i verdens-cm ville drevet bort fra tegningen. Derfor sidenormaliserte.
 //  0.3  `floatingDims`/`groups` forsvant stille fra lagring én gang. Rundturen låses her.
 //       Og under bygging: `pushUndo` manglet `planWalls` — Ctrl+Z var en stille no-op.
-function _planRegressionTest() {
+// 049: async — `_planLagRom` ble asynkron da den begynte å kalle motoren. ⚠ 046-sjekken
+// under fanget det selv: den sammenlignet det returnerte Promiset med `null` og feilet.
+// Kall batteriet med `await`.
+async function _planRegressionTest() {
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
   const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'skal IKKE finnes', got });
@@ -19313,13 +19444,89 @@ function _planRegressionTest() {
     check('F: _rasterChoose(\'plan\') går til vegg-sjekken', true,
       /if \(mode === 'plan'\) \{ _planStartFraFil\(file\); return; \}/.test(u(_rasterChoose)), 'feil ruting');
 
+    // ── H (049) — rom fra planveggene ──
+    // ⚠ STEG 0-funn som styrte hele prompten: gjennomgangsskjermen FINNES. `_reviewRenderList`
+    // har navn, areal, advarsler med severity, slett, varmetype, bulk og live-sum. 049 er en
+    // ny KILDE til den, ikke en ny flate.
+    check('H: romtype gjettes av den EKSISTERENDE funksjonen', true,
+      typeof _pdfGuessRoomType === 'function'
+      && /_pdfGuessRoomType\(r\.name \|\| ''\)/.test(u(_planTilGjennomgang)), 'egen gjetter');
+    checkIkke('H: ingen ny rom-kort-flate bygget',
+      /_planRomKort|plan-room-card/.test(skript), 'duplisert UI');
+    check('H: arealsjekken bruker review-mekanismen, ikke ny UI', true,
+      /severity: 'warn'[\s\S]{0,120}?Tegningen sier/.test(u(_planTilGjennomgang)), 'egen visning');
+
+    // Romtypene, MÅLT mot de 16 navnene på Kenneths ekte tegning (11 traff fra før).
+    (() => {
+      const fasit = {
+        'Sov': 'bedroom', 'Bad': 'bathroom', 'Kjk./stue': 'living', 'Entre': 'hallway',
+        'WC': 'bathroom', 'WC gjest': 'bathroom', 'Korridor': 'hallway',
+        'Felles inngang': 'hallway', 'Kontor/møterom': 'office', 'Vaskesluse': 'laundry',
+        'Fellesareal': 'living', 'Garderobe': 'hallway',
+        // ⚠ Disse SKAL være 'other': appen har ingen «ingen varme»-romtype, og `other` er
+        // den eneste som ikke får varme foreslått (`_reviewIsSuggested`).
+        'EL': 'other', 'BK': 'other', 'Lager': 'other', 'Boder beboere': 'other',
+      };
+      const feil = Object.entries(fasit).filter(([n, t]) => _pdfGuessRoomType(n) !== t)
+        .map(([n, t]) => n + ' ga ' + _pdfGuessRoomType(n) + ', ventet ' + t);
+      check('H: alle 16 romnavn fra den ekte tegningen klassifiseres riktig', 0, feil.length === 0, feil);
+      // ⚠ DEN ENE ekte feilklassifiseringen som ble funnet: BK (bøttekott) ga `laundry`,
+      // som FÅR varme foreslått. Et bøttekott skal ikke varmes.
+      checkIkke('H: BK får ikke varme foreslått', _reviewIsSuggested(_pdfGuessRoomType('BK')), 'BK varmes');
+      check('H: Vaskesluse beholder laundry (og varme)', true,
+        _pdfGuessRoomType('Vaskesluse') === 'laundry' && _reviewIsSuggested('laundry'), 'mistet vaskerom');
+    })();
+
+    // Innlegging: ALLE rom fra planen, ett angre-steg, ingen varme i rom uten varme.
+    check('H: commit tar alle rom fra planen, ikke bare de med varme', true,
+      /const fraPlan = !!_reviewState\._fromPlan;/.test(u(_reviewCommit))
+      && /\(fraPlan \|\| r\.heat\)/.test(u(_reviewCommit)), 'rom uten varme droppes');
+    check('H: telleren viser det samme som commit tar', true,
+      /const fraPlan = !!_reviewState\._fromPlan;/.test(u(_reviewUpdateCount))
+      && /b\.disabled = antall===0/.test(u(_reviewUpdateCount)), 'knappen kan bli grå');
+    check('H: 34 rom gir ETT angre-steg', true,
+      /pushUndo\(\);\s*\n\s*_undoSuppress\+\+;/.test(u(_drawCreateRoomsFromReview))
+      && /_undoSuppress--/.test(u(_drawCreateRoomsFromReview)), 'ett steg per rom');
+    check('H: rom med calcType none får ikke folie', true,
+      /if \(rr\.calcType !== 'none'\) _calcRoughFill/.test(u(_drawCreateRoomsFromReview)), 'varmes likevel');
+
+    // «Ikke navngitt»-gruppa: begge indoor-veiene, og 033-regelen.
+    check('H: gruppa finnes i BEGGE indoor-veiene', 2,
+      (skript.match(/_ikkeNavngittGruppeHtml\(fl\.id,/g) || []).length === 2,
+      (skript.match(/_ikkeNavngittGruppeHtml\(fl\.id,/g) || []).length);
+    check('H: standard lukket når noe er navngitt, åpen når alt er unavngitt', true,
+      /return !S\.rooms\.some\(r => r\.floorId === floorId && r\._planNamed !== false\);/.test(u(_ikkeNavngittApen)),
+      'feil standard');
+    check('H: «Ikke navngitt» betyr IKKE «uten varme»', true,
+      /_planNamed/.test(u(_drawCreateRoomsFromReview))
+      && !/calcType|heat/.test(u(_ikkeNavngittApen)), 'blander to ting');
+    check('H: etasje-badgen deler navngitt og ikke navngitt', true,
+      typeof _floorBadgeTitle === 'function'
+      && _floorBadgeTitle([{ _planNamed: false }, {}, {}]) === '2 navngitt · 1 ikke navngitt',
+      typeof _floorBadgeTitle === 'function' ? _floorBadgeTitle([{ _planNamed: false }, {}, {}]) : 'mangler');
+
+    // «Bekreft alle» og motor-veien.
+    check('H: «Bekreft alle med navn» finnes og vises bare for planen', true,
+      typeof _reviewBekreftAlle === 'function'
+      && /_reviewState && _reviewState\._fromPlan\) \? '' : 'none'/.test(u(_reviewRender)), 'alltid synlig');
+    check('H: redigerte vegger lukkes av motoren, ikke i klienten', true,
+      /_engineFetchPlanRooms\(/.test(u(_planLagRom))
+      && !/polygonize|_jsPolygonize/.test(skript), 'polygonizer i JS');
+    check('H: «Lag rom» sier fra når veggene ikke lukker noe', true,
+      /Veggene lukker ingen rom ennå/.test(u(_planLagRom)), 'tom skjerm i stedet');
+    check('H: «Anbefalt» er flyttet til plan-veien for PDF', true,
+      /_rasterChoose\('plan'\)[\s\S]{0,400}?background:var\(--accent\);border-radius:5px;padding:2px 7px">Anbefalt/.test(skript),
+      'står fortsatt på auto');
+
     // ── G: 046 lager INGEN rom ──
     checkIkke('G: ingen createRoom i vegg-sjekken',
       /createRoom\(/.test(u(_planLagRom) + u(_planApplyResponse) + u(_planMouseDown) + u(_planEnter)),
       'lager rom');
     S.ui.drawMode = 'plan-review';
     S.planWalls[1] = [];
-    check('G: «Lag rom» krever minst én vegg', null, _planLagRom() === null, 'godtok tomt');
+    check('G: «Lag rom» krever minst én vegg', null, (await _planLagRom()) === null, 'godtok tomt');
+    checkIkke('G: og kaller ikke motoren for et tomt veggsett',
+      /_engineFetchPlanRooms[\s\S]{0,200}?liste\.length/.test(u(_planLagRom)), 'kaller uansett');
   } catch (e) {
     check('Z: testen kjørte uten å kaste', true, false, e.message);
   } finally {
@@ -43842,7 +44049,7 @@ function _renderIndoorPartContent(part) {
         ondrop="_floorRowDrop(event,${fl.id})">
         <span class="floor-toggle">${fl.collapsed?'▶':'▼'}</span>
         <span class="floor-name-txt" title="${esc(fl.name)}">${esc(fl.name)}</span>
-        <span class="floor-badge">${frooms.length}</span>
+        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>
         <button class="floor-bg-btn" onclick="event.stopPropagation();renameFloorClick(${fl.id},this.closest('.floor-hdr').querySelector('.floor-name-txt'))" title="Gi nytt navn" style="background:transparent"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
         <button class="floor-bg-btn" onclick="setActiveBgFloor(${fl.id});openBgImportPanel();event.stopPropagation()" title="Bakgrunnsbilde for ${esc(fl.name)}">${S.bgs[fl.id]&&S.bgs[fl.id].img?'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>':'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>'}</button>
         <button class="sb-add-sm" onclick="showAddRoomModal(${fl.id});event.stopPropagation()" title="Legg til rom">+</button>
@@ -43850,7 +44057,8 @@ function _renderIndoorPartContent(part) {
     if (!fl.collapsed) {
       h += `<div class="floor-rooms">
         ${_floorBgItemsHtml(fl.id)}
-        ${frooms.map(r=>roomItemHtml(r,true)).join('')}
+        ${frooms.filter(r=>r._planNamed!==false).map(r=>roomItemHtml(r,true)).join('')}
+        ${_ikkeNavngittGruppeHtml(fl.id, frooms.filter(r=>r._planNamed===false))}
       </div>`;
     }
     h += '</div>';
@@ -43865,6 +44073,45 @@ function _renderIndoorPartContent(part) {
 // _renderStairPartContent OG _renderFlatSidebar (samme markup, kun padding-left ulikt) — ingen
 // felles stairItemHtml fantes, i motsetning til roomItemHtml som rom-radene deler. Samler dem her
 // slik at rename (dobbeltklikk + blyantknapp, samme mønster som roomItemHtml) kun trengs ett sted.
+// 049: gruppa «Ikke navngitt (N)» i romlista. «Ikke navngitt» betyr at MOTOREN ikke fant
+// navnet — ikke at rommet ikke skal varmes (spec regel 4); et «Lager» er navngitt og uten
+// varme, og hører hjemme i hovedlista.
+//
+// ⚠ Begge indoor-veiene har den (`_renderIndoorPartContent` OG `_renderFlatSidebar`). Snø-
+// veien er utelatt med vilje: snøsoner kommer ikke fra en plantegning.
+//
+// Standard LUKKET når det finnes minst ett navngitt rom. Er ALT unavngitt står den åpen —
+// å skjule alt hjelper ingen. Tilstanden ligger i S.ui, så en lukket gruppe blir værende det.
+// «Etasje 1 · 22 rom · 12 ikke navngitt» — tallet i badgen er alle rom; tittelen deler dem.
+function _floorBadgeTitle(frooms) {
+  const uten = frooms.filter(r => r._planNamed === false).length;
+  if (!uten) return frooms.length + (frooms.length === 1 ? ' rom' : ' rom');
+  return (frooms.length - uten) + ' navngitt · ' + uten + ' ikke navngitt';
+}
+
+function _ikkeNavngittGruppeHtml(floorId, rom) {
+  if (!rom.length) return '';
+  const apen = _ikkeNavngittApen(floorId);
+  return `<div class="floor-grp" data-unnamed-floor="${floorId}" style="margin-top:2px">
+    <div class="floor-hdr" style="padding-left:18px;cursor:pointer" onclick="_toggleIkkeNavngitt(${floorId})">
+      <span class="floor-toggle">${apen ? '▼' : '▶'}</span>
+      <span class="floor-name-txt" style="color:var(--dim)" title="Rom motoren ikke fant navn på — klikk for å gi dem navn">Ikke navngitt</span>
+      <span class="floor-badge">${rom.length}</span>
+    </div>
+    ${apen ? `<div class="floor-rooms">${rom.map(r => roomItemHtml(r, true)).join('')}</div>` : ''}
+  </div>`;
+}
+function _ikkeNavngittApen(floorId) {
+  if (!S.ui._unnamedOpen) S.ui._unnamedOpen = {};
+  if (S.ui._unnamedOpen[floorId] != null) return !!S.ui._unnamedOpen[floorId];
+  return !S.rooms.some(r => r.floorId === floorId && r._planNamed !== false);
+}
+function _toggleIkkeNavngitt(floorId) {
+  if (!S.ui._unnamedOpen) S.ui._unnamedOpen = {};
+  S.ui._unnamedOpen[floorId] = !_ikkeNavngittApen(floorId);
+  renderSidebar();
+}
+
 function stairItemHtml(st, paddingLeft) {
   const isSel = st.id === S.ui.selectedStairId;
   let segSummary = '';
@@ -43971,14 +44218,15 @@ function _renderFlatSidebar() {
         ondrop="_floorRowDrop(event,${fl.id})">
         <span class="floor-toggle">${fl.collapsed?'▶':'▼'}</span>
         <span class="floor-name-txt" title="${esc(fl.name)}">${esc(fl.name)}</span>
-        <span class="floor-badge">${frooms.length}</span>
+        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>
         <button class="floor-bg-btn" onclick="event.stopPropagation();renameFloorClick(${fl.id},this.closest('.floor-hdr').querySelector('.floor-name-txt'))" title="Gi nytt navn" style="background:transparent"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
         <button class="floor-bg-btn" onclick="setActiveBgFloor(${fl.id});openBgImportPanel();event.stopPropagation()" title="Bakgrunnsbilde for ${esc(fl.name)}">${S.bgs[fl.id]&&S.bgs[fl.id].img?'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>':'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>'}</button>
         <button class="sb-add-sm" onclick="showAddRoomModal(${fl.id});event.stopPropagation()" title="Legg til rom">+</button>
       </div>`;
     if (!fl.collapsed) {
       h += `<div class="floor-rooms">
-        ${frooms.map(r=>roomItemHtml(r,true)).join('')}
+        ${frooms.filter(r=>r._planNamed!==false).map(r=>roomItemHtml(r,true)).join('')}
+        ${_ikkeNavngittGruppeHtml(fl.id, frooms.filter(r=>r._planNamed===false))}
       </div>`;
     }
     h += '</div>';
@@ -54115,6 +54363,47 @@ function _engineHandleImportError(err, retryFn){
 // Kaster en vanlig Error med et lesbart budskap (som originalen) — disse tre stedene har ALDRI
 // vist tilkoblings-dialogen, kun en toast/inline-melding, og beholder den oppførselen uendret;
 // de får bare STEG 1-3 (adresseoppløsning + kaldstart-toleranse) transparent under panseret.
+async function _engineFetchPlan(file, params){
+  params = params || {};
+  const res = await _resolveEngineUrl();
+  const qs = new URLSearchParams();
+  (params.layers||[]).forEach(l=>qs.append('layers', l));
+  if(params.meters_per_point!=null) qs.append('meters_per_point', String(params.meters_per_point));
+  if(params.close_gaps_cm!=null) qs.append('close_gaps_cm', String(params.close_gaps_cm));
+  if(params.allow_single) qs.append('allow_single', 'true');
+  const url = res.url + '/import/plan?' + qs.toString();
+  const fd = new FormData(); fd.append('file', file);
+  let r;
+  try {
+    r = await _engineFetchWithRetry(url, {method:'POST', body:fd}, _engineShowColdStartToast);
+  } catch(err){
+    const c = _engineClassifyError(err, url);
+    throw new Error('Fikk ikke kontakt med tolkemotoren på ' + _engineHost(url)
+      + (c.maybeCors ? ' (kan skyldes CORS — se motorens cors_origins)' : ''));
+  }
+  if(!r.ok){ throw new Error('Motoren svarte ' + r.status + ': ' + (await r.text()).slice(0,200)); }
+  return r.json();
+}
+
+// 049: lukk de (muligens RETTEDE) veggene til rom. ⚠ `/import/plan` returnerer rom fra
+// motorens EGNE vegger — etter at brukeren har rettet dem i vegg-sjekken er de foreldet, og
+// det er nettopp det tilfellet som betyr noe. Alternativet var en polygonizer i JavaScript;
+// den ville duplisert motorens `detect_rooms`.
+async function _engineFetchPlanRooms(body){
+  const res = await _resolveEngineUrl();
+  const url = res.url + '/plan/rooms';
+  let r;
+  try {
+    r = await _engineFetchWithRetry(url,
+      {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)},
+      _engineShowColdStartToast);
+  } catch(err){
+    throw new Error('Fikk ikke kontakt med tolkemotoren på ' + _engineHost(url));
+  }
+  if(!r.ok){ throw new Error('Motoren svarte ' + r.status + ': ' + (await r.text()).slice(0,200)); }
+  return r.json();
+}
+
 async function _engineFetchImport(file, params){
   const res = await _resolveEngineUrl();
   const qs = new URLSearchParams();
@@ -54501,14 +54790,15 @@ function _rasterMethodChoice(file){
       <div style="font-size:12px;color:var(--dim);margin-top:3px">Du velger vegg-lag, og appen forsøker å tolke dem. Virker sjelden på CAD-tegninger der veggene er doble streker — da får du ingen eller rare rom.</div>
     </button>` : `
     <button style="${card}" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="_rasterChoose('auto')">
-      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('check',15)} La appen finne rommene <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#0d0e10;background:var(--accent);border-radius:5px;padding:2px 7px">Anbefalt</span></div>
+      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('check',15)} La appen finne rommene <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:2px 7px">Eldre vei</span></div>
       <div style="font-size:12px;color:var(--dim);margin-top:3px">Appen tolker tegningen og foreslår rommene — du bekrefter og justerer.</div>
     </button>
-    <!-- 046: tredje vei. «Anbefalt»-merket står FORTSATT på «La appen finne rommene» — det
-         flyttes hit i 049, når flyten virker ende til ende. Å flytte det nå ville anbefalt noe
-         som ennå ikke lager rom. -->
+    <!-- 049: «Anbefalt» er flyttet hit nå som flyten faktisk lager rom. ⚠ MÅLT 08.10.2026 at
+         merket sto på «La appen finne rommene» for PDF — den svakeste veien: den tolker
+         råstrekene og gir vegg-flater som rom (020: «590 rom»). Den gamle veien beholdes som
+         valg, men er ikke lenger det anbefalte. -->
     <button style="${card}" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="_rasterChoose('plan')">
-      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('map',15)} Finn vegger og rom automatisk <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:2px 7px">Ny</span></div>
+      <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px">${IC('map',15)} Finn vegger og rom automatisk <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#0d0e10;background:var(--accent);border-radius:5px;padding:2px 7px">Anbefalt</span></div>
       <div style="font-size:12px;color:var(--dim);margin-top:3px">Appen finner veggene og viser dem oppå tegningen. Du ser at de ligger riktig, retter det som trengs, og lager rommene selv.</div>
     </button>
     <button style="${card};margin-bottom:0" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'" onclick="_rasterChoose('manual')">
@@ -54964,14 +55254,27 @@ function _pdfPolyAreaM2(poly){ // poly i meter, [[x,y],…]
   return Math.abs(a) / 2;
 }
 
+// 049: utvidet, MÅLT mot de 16 romnavnene på Kenneths ekte tegning. 11 av 16 traff allerede.
+// De fem som falt til «other» var EL, Fellesareal, Lager, Garderobe og Boder beboere.
+//
+// ⚠ Det finnes INGEN «ingen varme»-romtype i `ROOM_TYPES` — spec-en snakker om det som en
+// romtype, men appen modellerer det som romtype `other` + `calcType:'none'`, og `other` er
+// allerede uten varme (`_reviewIsSuggested` foreslår bare bad/vaskerom/gang). Lager, bod og
+// EL havner derfor riktig ved å IKKE matche noe. De står likevel eksplisitt nedenfor, så en
+// framtidig «Bodareal» ikke faller tilfeldig inn i en annen regel.
+//
+// ⚠ ÉN ekte feilklassifisering ble funnet: `BK` (bøttekott) ga `laundry`, som FÅR varme
+// foreslått. Et bøttekott skal ikke varmes. `vaskesluse`/`vaskerom` beholder laundry.
 function _pdfGuessRoomType(name){
   const n = (name||'').toLowerCase();
+  // Uten varme først — ellers spiser «vask»-regelen under opp «bk».
+  if(/^bk$|\bbk\b|b.ttekott|^bod|\bboder?\b|lager|^el$|\bel\.?rom\b|^ikt$|teknisk|^tekn\b|sprinkler|renovasjon/.test(n)) return 'other';
   if(/bad|wc|dusj|v.trom|toalett/.test(n)) return 'bathroom';
-  if(/kj.kken/.test(n)) return 'kitchen';
-  if(/stue|opphold/.test(n)) return 'living';
+  if(/kj.kken|kjk/.test(n) && !/stue/.test(n)) return 'kitchen';
+  if(/stue|opphold|fellesareal/.test(n)) return 'living';
   if(/sov/.test(n)) return 'bedroom';
-  if(/vask|^bk|\bbk\b/.test(n)) return 'laundry';
-  if(/gang|entr|korridor|hall/.test(n)) return 'hallway';
+  if(/vask/.test(n)) return 'laundry';
+  if(/gang|entr|korridor|hall|inngang|garderobe/.test(n)) return 'hallway';
   if(/kontor|m.te/.test(n)) return 'office';
   return 'other';
 }
@@ -55070,7 +55373,10 @@ function _pdfOpenReview(result){
   _reviewRender();
 }
 
-function _reviewRender(){ _reviewRenderPlan(); _reviewRenderList(); _reviewUpdateCount(); _reviewUpdateSum(); _reviewApplyHover(); }
+function _reviewRender(){
+  const _bk=document.getElementById('rv-bekreft-alle');
+  if(_bk) _bk.style.display = (_reviewState && _reviewState._fromPlan) ? '' : 'none';
+  _reviewRenderPlan(); _reviewRenderList(); _reviewUpdateCount(); _reviewUpdateSum(); _reviewApplyHover(); }
 
 function _reviewRenderPlan(){
   const el=document.getElementById('rv-plan'); if(!el||!_reviewState) return;
@@ -55133,7 +55439,19 @@ function _reviewUpdateCount(){
   if(!_reviewState) return;
   const sel=_reviewState.rooms.filter(r=>r.heat).length, tot=_reviewState.rooms.length;
   const c=document.getElementById('rv-count'); if(c) c.textContent=`${sel} av ${tot} rom valgt`;
-  const b=document.getElementById('rv-commit'); if(b){ b.textContent=`Legg til ${sel} rom i prosjektering`; b.disabled=sel===0; }
+  // ⚠ 049-funn MÅLT i UI-et: knappen var grå («Legg til 0 rom») for en plantegning der ingen
+  // rom hadde varme — f.eks. et plan med bare Lager/BK/EL, eller før brukeren har valgt
+  // varmetype. `_reviewCommit` tar ALLE rom med geometri fra planen (spec regel 4), så
+  // telleren må vise det samme, ellers blokkerer knappen en lovlig innlegging.
+  const fraPlan = !!_reviewState._fromPlan;
+  const antall = fraPlan ? _reviewState.rooms.filter(r=>r.poly && r.poly.length>=3).length : sel;
+  const b=document.getElementById('rv-commit');
+  if(b){
+    b.textContent = fraPlan
+      ? `Legg til ${antall} rom i prosjektering` + (sel < antall ? ` (${sel} med varme)` : '')
+      : `Legg til ${sel} rom i prosjektering`;
+    b.disabled = antall===0;
+  }
 }
 // STEG 5: live-sum nederst — rom med varme · sum m² · grov effekt (W). Verdien i kalkylen.
 function _reviewUpdateSum(){
@@ -55170,6 +55488,20 @@ function _reviewApplyHover(){
   document.querySelectorAll('#import-review-screen [data-rid]').forEach(el=>{
     el.classList.toggle('rv-hl', !!id && el.getAttribute('data-rid')===id);
   });
+}
+
+// 049: godta tegningens navn for alle rom som HAR et. Rom uten navn står igjen som
+// «Sjekk navn» og havner i «Ikke navngitt» etter innlegging.
+function _reviewBekreftAlle(){
+  if(!_reviewState) return;
+  let n=0;
+  for(const r of _reviewState.rooms){
+    if(!r._named) continue;
+    r.review = (r.review||[]).filter(x=>x.message!=='Sjekk navn');
+    r._bekreftet = true; n++;
+  }
+  _reviewRender();
+  if(typeof _showToast==='function') _showToast(n+' rom bekreftet med navn fra tegningen','ok');
 }
 
 function _reviewBulk(mode){
@@ -55246,7 +55578,12 @@ function _reviewClose(){ const t=_reviewState&&_reviewState.target; _reviewState
 function _reviewCommit(){
   if(!_reviewState) return;
   const target=_reviewState.target||'list';
-  const chosen=_reviewState.rooms.filter(r=>r.heat && (target==='draw' ? (r.poly&&r.poly.length>=3) : r.areaM2>0));
+  // ⚠ 049-funn: filteret `r.heat` droppet rom UTEN varme HELT. Fra plantegningen er det feil
+  // — et «Lager» eller «BK» skal være med i prosjektet, navngitt og uten varme, så lista
+  // stemmer med tegningen (spec regel 4). Varmeflagget styrer bare om et produkt foreslås.
+  const fraPlan = !!_reviewState._fromPlan;
+  const chosen=_reviewState.rooms.filter(r=>(fraPlan || r.heat)
+    && (target==='draw' ? (r.poly&&r.poly.length>=3) : r.areaM2>0));
   if(!chosen.length){ if(typeof _showToast==='function') _showToast(target==='draw'?'Velg minst ett rom med geometri':'Velg minst ett rom med areal','warn'); return; }
   // Prosjektnavn fra gjennomgangen → sett på prosjektet, så man slipper å finne det i lista etterpå.
   const pn=(document.getElementById('rv-projname')?.value||'').trim();
@@ -55269,12 +55606,22 @@ function _drawCreateRoomsFromReview(rooms){
   const floorId = (_pdfImportDrawFloorId!=null) ? _pdfImportDrawFloorId
     : (S.ui.activeFloorId ?? (S.floors[0] && S.floors[0].id) ?? null);
   let n=0;
+  // ⚠ MÅLT i STEG 0.4: `createRoom` kaller `pushUndo()` selv, så 34 rom ga 34 angre-steg —
+  // Kenneth måtte trykket Ctrl+Z 34 ganger for å angre én import. Samme vern som 030 brukte.
+  pushUndo();
+  _undoSuppress++;
+  try {
   for(const rr of rooms){
     if(!rr.poly || rr.poly.length<3) continue; // manuelt tillagte uten geometri kan ikke tegnes
     const pts = rr.poly.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
     const room = createRoom(pts, 'polygon', rr.name||('Rom '+(n+1)), floorId, /*keepPosition*/true);
     if(room){
       if(rr.type){ room.roomType=rr.type; if(typeof _roomTypeDefaults==='function') room.targetWm2=_roomTypeDefaults(rr.type).targetWm2; }
+      // 049: rom uten navn fra tegningen samles i en egen gruppe i romlista. Flagget settes
+      // her fordi det er her rommet faktisk blir til.
+      if (rr._named === false) room._planNamed = false;
+      if (rr._planNumber) room._planNumber = rr._planNumber;
+      if (rr._statedAreaM2 != null) room.statedAreaM2 = rr._statedAreaM2;
       // Faste hindringer fra import → ekte S.hindrings i samme verdenskoordinater som rommet
       // (createRoom med keepPosition=true bevarer koordinatene). Slettes/flyttes på lerretet.
       for(const ob of (rr.obstacles||[])){
@@ -55289,10 +55636,13 @@ function _drawCreateRoomsFromReview(rooms){
           clearance:'wall' });
       }
       // STEG 4: grov auto-utfylling per valgt varmetype (kalkyle-nivå, flagges for re-kjøring).
-      _calcRoughFill(room, rr.calcType || 'foil');
+      // ⚠ 049: `|| 'foil'` ville gitt folie til et rom som uttrykkelig IKKE skal varmes
+      // (Lager, BK, EL). Fra plantegningen kommer slike rom med `calcType:'none'`.
+      if (rr.calcType !== 'none') _calcRoughFill(room, rr.calcType || 'foil');
       n++;
     }
   }
+  } finally { _undoSuppress--; }
   if(n){ if(typeof fitAll==='function') fitAll(); if(typeof render==='function') render(); if(typeof _scheduleAutoSave==='function') _scheduleAutoSave(); }
   return n;
 }
