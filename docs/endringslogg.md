@@ -4,6 +4,59 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Presentasjonslenken virket ikke: RPC-en returnerer en liste — 2026-10-08
+
+Prompt 041. Kenneth: «Presentasjonsfunksjonen genererer en lenke, men den virker ikke. Jeg
+kommer rett inn på dashbordet og ikke på prosjektet.»
+
+### STEG 0
+
+**0.2 — bevist uten å trenge et gyldig token.** Målt mot den deployede RPC-en:
+
+```
+get_present_project('finnes-ikke')  →  []      (en LISTE)
+kundelenke_get('finnes-ikke')       →  null    (en skalar)
+```
+
+`supabase-migration-presentation.sql:27` definerer funksjonen som
+`returns table (id uuid, name text, data jsonb)`, og en `returns table` kommer tilbake fra
+supabase-js som `[{id, name, data}]`. `_presentLoadByToken` leste `data.data` rett på lista →
+`undefined` → «fant ikke prosjekt» for et **helt gyldig token**. Innlogget: dashbordet. Kunde:
+innloggingsskjermen. Hypotesen i prompten stemte.
+
+**0.3 — fem rpc-kall.** `kundelenke_get` ×2 (`returns jsonb`) og `kundelenke_answer` ×2
+(`returns boolean`) er skalarer og leses riktig. Bare `get_present_project` er en liste. 027 ble
+skrevet riktig; det er samme felle som ble unngått der.
+
+**Migrasjonen var kjørt** — RPC-en finnes og svarer, den returnerer bare feil form.
+
+### Rettet
+
+`const rad = Array.isArray(data) ? data[0] : data;` — tåler begge former, så
+`supabase-migration-presentation-v2.sql` (`returns jsonb`, som `kundelenke_get`) kan kjøres når
+som helst eller la være. Målt at begge former gir `true`, og at ukjent token og manglende RPC
+fortsatt gir `false`.
+
+**Dette rammet også 043s forslagslenke** — `?present=X&forslag=Y` går gjennom samme funksjon.
+Målt at hele kjeden nå virker: presentasjon lastes, `kundeMode` blir `forslag`, bunnlinja kommer.
+
+### Punkt 3 avdekket en andre stille feil
+
+`_presentShareLink` la `update({present_token})` i en `try/catch` — men **supabase-js returnerer
+`{error}` og kaster ikke**, så `catch` fanget aldri noe. En mislykket lagring ga ingen toast:
+tokenet ble satt i `S.project`, dialogen åpnet seg, og lenken pekte på et token databasen aldri
+fikk. Feilen leses nå av returverdien, tokenet ryddes bort, og toasten vises — verifisert med en
+stubbet `{error}` (ingen dialog, toast «Kunne ikke lagre delelenke: column "present_token" does
+not exist»). Lenken går til `varmeplan.no` som før (027 regel 8), bekreftet.
+
+Regresjon: 12 nye sjekker i seksjon R, derav fire på atferd (begge RPC-former, ukjent token,
+manglende RPC). **567 sjekker grønne i 16 batterier**, to negative kontroller. En av sjekkene
+mine var først en tautologi med feil premiss — `_kundeLoadByToken` inneholder `Array.isArray`,
+men for `asked_walls`, ikke for RPC-formen. Skrevet om til å telle rpc-kallene og hvor
+array-vakten står.
+
+---
+
 ## Kundesiden: fri hjørnedrag, én hengelås, ryddigere veggliste — 2026-10-08
 
 Prompt 045.

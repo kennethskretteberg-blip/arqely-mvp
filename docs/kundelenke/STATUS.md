@@ -225,10 +225,15 @@ produkt / ønsket flateeffekt / retning. Kenneth godkjenner per rom, og utlegget
 | 043 | Forslagskort i presentasjonen: produkt-piling, ønsket flateeffekt, retning, OK per rom, Send | `1e9bcac` |
 | 044 | Panel med Godkjenn/Avslå per rom → auto-utlegg, e-post begge veier, «Godkjent av kunde» | denne |
 
-**041 finnes ikke som nummerert prompt** — serien oppgir det som krav, men presentasjonslenka
-(`?present=`, `present_token`, `get_present_project`, `_presentLoadByToken`) var der fra før, i
-`supabase-migration-presentation.sql`. Hvert symbol 042/043 navngir ligger på nøyaktig det
-linjenummeret promptene oppgir for `2147753`, så de er skrevet mot denne koden. Ingenting manglet.
+**041 kom etterpå, og var en FEILRETTING — ikke infrastruktur.** Infrastrukturen var på plass
+(`?present=`, `present_token`, `get_present_project`), men lenken virket ikke:
+`get_present_project` er `returns table`, som supabase-js leverer som en LISTE, mens
+`_presentLoadByToken` leste `data.data` rett på den. Et gyldig token ga «fant ikke prosjekt» →
+dashbordet for innloggede, innloggingsskjerm for kunder. **Det rammet også forslagslenka**, som
+går gjennom samme funksjon. Rettet 08.10.2026 (`Array.isArray(data) ? data[0] : data`), og
+`supabase-migration-presentation-v2.sql` gjør funksjonen lik `kundelenke_get` for den som vil
+rydde. Lærdommen: at infrastrukturen FINNES er ikke det samme som at den VIRKER — jeg slo fast
+det første og antok det andre.
 
 ### Hvordan det henger sammen
 

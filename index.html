@@ -10035,12 +10035,18 @@ async function _presentShareLink() {
       ? crypto.randomUUID()
       : (Math.random().toString(36).slice(2) + Date.now().toString(36));
     S.project.present_token = token;
+    // ⚠ 041: supabase-js RETURNERER `{error}` og kaster ikke. `catch` fanget derfor aldri en
+    // mislykket lagring — tokenet ble satt i `S.project`, dialogen åpnet seg, og lenken pekte
+    // på et token databasen aldri fikk. Helt stille. Feilen leses nå av returverdien.
     try {
-      await _db.from('romtegner_projects').update({ present_token: token }).eq('id', _supabaseProjectId);
+      const { error: _lagreFeil } = await _db.from('romtegner_projects')
+        .update({ present_token: token }).eq('id', _supabaseProjectId);
+      if (_lagreFeil) throw new Error(_lagreFeil.message || 'ukjent feil');
       _projectDirty = true;   // sørg for at token også havner i lagret data-JSON
     } catch (e) {
+      S.project.present_token = null;   // ikke la et ulagret token ligge igjen og se gyldig ut
       console.warn('Kunne ikke lagre delingstoken (kjørte du migrasjonen?):', e.message);
-      _showToast && _showToast('Kunne ikke lagre delelenke. Se konsoll / kjør migrasjonen.');
+      _showToast && _showToast('Kunne ikke lagre delelenke: ' + e.message, 'warn');
       return;
     }
   }
@@ -10058,10 +10064,20 @@ async function _presentLoadByToken(token) {
     // Sikker offentlig henting via SECURITY DEFINER-funksjon (anon kan ikke
     // liste alle delte prosjekter — kun slå opp eksakt token). Se migrasjonen.
     const { data, error } = await _db.rpc('get_present_project', { p_token: token });
-    if (error || !data || !data.data) { console.warn('Presentasjon: fant ikke prosjekt for token.', error && error.message); return false; }
+    // ⚠ 041 (MÅLT 08.10.2026): `get_present_project` er definert som
+    // `returns table (id uuid, name text, data jsonb)`, og en `returns table` kommer tilbake fra
+    // supabase-js som en LISTE — `[{id, name, data}]`. Koden leste `data.data` rett på lista,
+    // som er `undefined`, så funksjonen returnerte `false` for et HELT GYLDIG token. Kenneth
+    // havnet på dashbordet (innlogget) og kunden ville fått innloggingsskjermen.
+    // Målt mot deployet RPC: ukjent token gir `[]`, mens `kundelenke_get` (returns jsonb) gir
+    // `null` — altså bevis på formen uten å måtte ha et gyldig token.
+    // Lesingen tåler nå begge former, så `supabase-migration-presentation-v2.sql` (returns jsonb)
+    // kan kjøres når som helst, eller la være.
+    const rad = Array.isArray(data) ? data[0] : data;
+    if (error || !rad || !rad.data) { console.warn('Presentasjon: fant ikke prosjekt for token.', error && error.message); return false; }
     try { if (typeof _loadProducts === 'function') await _loadProducts(); } catch (e) { /* produktnavn er valgfritt */ }
-    _restoreProject(data.data);
-    _supabaseProjectId = data.id;
+    _restoreProject(rad.data);
+    _supabaseProjectId = rad.id;
     ['auth-screen','project-list-screen','module-screen'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     document.getElementById('app').style.display = 'flex';
     _presentEnter(true);   // offentlig visning: skjul Del/Avslutt-knapper
@@ -39887,6 +39903,65 @@ async function _kundelenkeRegressionTest() {
       // Videoen skal ikke ligge i repoet.
       checkIkke('O: ingen videofil bygget inn i konfigurasjonen',
         /\.mp4|\.mov|\.webm/.test(JSON.stringify(KUNDE_VIDEO)), JSON.stringify(KUNDE_VIDEO));
+    })();
+
+    // ─── R (041) — presentasjonslenken leste RPC-ens form feil ───
+    // ⚠ MÅLT mot den deployede RPC-en 08.10.2026:
+    //     get_present_project('finnes-ikke')  →  []      (en LISTE)
+    //     kundelenke_get('finnes-ikke')       →  null    (en skalar)
+    // `returns table` kommer tilbake fra supabase-js som `[{id, name, data}]`. Koden leste
+    // `data.data` rett på lista → `undefined` → «fant ikke prosjekt» for et GYLDIG token.
+    // Kenneth havnet på dashbordet; en kunde ville fått innloggingsskjermen. Det rammet også
+    // 043s forslagslenke, som går gjennom samme funksjon.
+    await (async () => {
+      const kLoad = _kildeUtenKommentarer(_presentLoadByToken);
+      check('R: lesingen tåler både liste og skalar', true,
+        /const rad = Array\.isArray\(data\) \? data\[0\] : data;/.test(kLoad), 'leser fortsatt data.data');
+      check('R: prosjekt og id tas fra raden, ikke fra lista', true,
+        /_restoreProject\(rad\.data\)/.test(kLoad) && /_supabaseProjectId = rad\.id/.test(kLoad), 'feil kilde');
+
+      // Oppførsel, ikke bare kilde: begge former skal gi true, og ugyldig skal gi false.
+      const prosjekt = { _version: 3, project: { name: 'R-test', parts: [{ id: 1, name: 'Plan', moduleType: 'indoor' }] },
+        floors: [{ id: 1, name: 'Plan', building: null, order: 0, collapsed: false, partId: 1 }],
+        rooms: [], strips: [], cables: [], mats: [], plates: [], hindrings: [], zones: [], stairs: [], counters: {}, bgs: {} };
+      const lagretDb = _db, lagretId = _supabaseProjectId;
+      try {
+        _db = { rpc: async () => ({ data: [{ id: 'liste', name: 'R', data: prosjekt }], error: null }) };
+        check('R: liste-form (dagens RPC) laster presentasjonen', true,
+          (await _presentLoadByToken('t')) === true && _supabaseProjectId === 'liste', _supabaseProjectId);
+        _db = { rpc: async () => ({ data: { id: 'jsonb', name: 'R', data: prosjekt }, error: null }) };
+        check('R: jsonb-form (etter migrasjon v2) laster også', true,
+          (await _presentLoadByToken('t')) === true && _supabaseProjectId === 'jsonb', _supabaseProjectId);
+        _db = { rpc: async () => ({ data: [], error: null }) };
+        check('R: ukjent token gir false (tom liste)', false, (await _presentLoadByToken('x')) === false, 'true');
+        _db = { rpc: async () => ({ data: null, error: { message: 'does not exist' } }) };
+        check('R: manglende RPC gir false, ikke et krasj', false, (await _presentLoadByToken('x')) === false, 'true');
+      } finally { _db = lagretDb; _supabaseProjectId = lagretId; }
+
+      // Den andre stille feilen: supabase-js RETURNERER {error} og kaster ikke, så `catch`
+      // fanget aldri en mislykket lagring — lenken pekte på et token databasen aldri fikk.
+      const kShare = _kildeUtenKommentarer(_presentShareLink);
+      check('R: lagringsfeil leses av returverdien, ikke av catch alene', true,
+        /const \{ error: _lagreFeil \}/.test(kShare) && /if \(_lagreFeil\) throw/.test(kShare), 'fortsatt stille');
+      check('R: et ulagret token blir ikke liggende igjen', true,
+        /S\.project\.present_token = null;/.test(kShare), 'token blir stående');
+      check('R: lenken går til varmeplan.no (027 regel 8)', true,
+        /_PUBLIC_BASE_URL \+ '\/\?present=' \+ token/.test(kShare), 'feil domene');
+
+      // STEG 0.3 listet fem rpc-kall: `kundelenke_get` ×2 (returns jsonb) og `kundelenke_answer`
+      // ×2 (returns boolean) er SKALARER og leses riktig; bare `get_present_project` er en
+      // liste. Påstanden her er at array-vakten står på det ene kallet som trenger den, og
+      // ikke har spredt seg til de fire som ikke skal ha den.
+      const _rpcKall = _skriptJ.match(/_db\.rpc\('[a-z_]+'/g) || [];
+      check('R: fortsatt fem rpc-kall, og bare ett er get_present_project', '4 + 1',
+        _rpcKall.filter(k => /kundelenke_/.test(k)).length === 4
+        && _rpcKall.filter(k => /get_present_project/.test(k)).length === 1,
+        _rpcKall.join(' '));
+      check('R: array-vakten står KUN i presentasjonsveien', 1,
+        (_skriptJ.match(/Array\.isArray\(data\) \? data\[0\] : data/g) || []).length === 1,
+        (_skriptJ.match(/Array\.isArray\(data\) \? data\[0\] : data/g) || []).length);
+      checkIkke('R: kundelenke-svaret pakkes ikke ut som en liste',
+        /kundelenke_get[\s\S]{0,160}?data\[0\]/.test(_skriptJ), 'kundelenke rørt');
     })();
 
     // ─── Q (045) — fri hjørnedrag, én hengelås, ryddigere liste ───
