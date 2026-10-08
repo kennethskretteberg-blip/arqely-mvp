@@ -57,6 +57,24 @@ Kenneth svarer til slutt.
 - **Dekningsgrensen i 046 er 90 %.** På en ekte tegning er 53 % kanskje normalen. Si fra om
   grensen skal ned, eller om teksten heller skal si «N vegger mangler» enn en prosent.
 
+## 047c
+
+- **Mekanismen jeg beskrev i 047b var feil.** `unary_union` noder allerede alle kryss. Den
+  ekte årsaken: stammen *treffer ikke* — senterlinja stopper ved ytterveggens flate, så gapet
+  er nøyaktig halve kryssveggens tykkelse (målt median 6,4 cm = halve 12,8). Toleransen er
+  derfor utledet, ikke et rundt tall.
+- **Sveisingen virker:** 1 → 2 rom på minimaltilfellet, 8 → 18 på den ekte tegningen.
+- **Men den korrigerer også 047b.** Jeg skrev at «en uparet linje er ikke bevis på en vegg».
+  Uten `single` lukkes **ingenting** på din tegning — de 116 uparede linjene bærer en tredel
+  av lukkegeometrien. `allow_single` er nå en parameter (av som standard).
+- **Den ekte tegningen gir fortsatt ikke brukbare rom.** To ting gjenstår, i prioritert
+  rekkefølge: (1) dobbel-paringen finner ikke alle vegger — `PAIR_MIN_OVERLAP = 0.60` er
+  trolig for strengt når en vegg er delt av døråpninger, og paringen er grådig (første treff
+  vinner); (2) ytre ramme droppes ikke — et polygon på 2151 m² overlever.
+- **Spørsmål:** vil du at jeg fortsetter på veggdeteksjonen (047d), eller at jeg går til 049
+  og lar vegg-sjekken være måten du retter opp de siste veggene manuelt? Flyten er bygget for
+  nettopp det — 253 vegger med 134 røde prikker er kanskje nok til å jobbe med.
+
 ## 048
 
 - **Alt i 048 er verifisert mot den ekte tegningen** og virker: 34/34 rom-labels med nummer,
