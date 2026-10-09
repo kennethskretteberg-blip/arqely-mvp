@@ -4,6 +4,115 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Labels i PDF med fast papirstørrelse + «Prosjektert av» fra innlogget bruker — 2026-10-09
+
+Prompt 051. Fredrik syns labelene på utskrift er små, og «Prosjektert av» blir ofte tomt.
+
+### STEG 0.1 — målt, og det er verre enn meldingen tilsier
+
+`LABEL_FONT_CM = 5.0` er en konstant **verdens**-størrelse: 5 cm på gulvet. Men hvert rom
+skaleres for å fylle siden, så 5 cm blir ulikt mange millimeter på papiret:
+
+| rom | mm per cm | teksthøyde |
+|---|---|---|
+| Lager 400 m² (25 × 16 m) | 0,0643 | **0,32 mm** (0,9 pt) |
+| Stue 60 m² (7,75 × 7,75 m) | 0,1293 | **0,65 mm** (1,8 pt) |
+| Lager 60 m² (10 × 6 m) | 0,1385 | **0,69 mm** (2,0 pt) |
+| Bad 8 m² (3,2 × 2,5 m) | 0,2527 | 1,26 mm (3,6 pt) |
+| WC 2 m² (1,4 × 1,4 m) | 0,3159 | 1,58 mm (4,5 pt) |
+
+Et rom på 60 m² får altså 0,7 mm tekst. Selv badet, som er «best», får 1,3.
+
+### STEG 0.2 — seks bruksteder, ikke elleve, og ingen egne konstanter
+
+Prompten sa 11 steder. Målt er det **6** kodesteder (resten er kommentarer og selve
+definisjonen), og kabel/matte har **ingen** egne konstanter — alle leser `LABEL_FONT_CM`:
+`_drawMatPathObj` (frihånds-matte), `drawStrips` (folie), `_drawFoilFreeLabel` (fri folie),
+`_drawCableLabelOnly`, `drawCables`, `drawMats`. Alle seks går nå via `_labelFontCm()`.
+
+### STEG 0.3 — og her tok prompten feil om hvor skalaen bor
+
+Prompten sa at rommets PDF-skala finnes der `S.ui._pdfMode` settes. **Det gjør den ikke.**
+`_renderRoomToImage` får `targetWidthMm`, men PDF-ruta kan plassere bildet **smalere**
+etterpå: når `imgW × aspect` overstiger høydebudsjettet, blir bredden `imgH / aspect`.
+Målt på et kvadratisk rom: **139 mm, ikke 180**. Regnet labelene med 180 ville de blitt 23 %
+for små på nettopp de rommene som er høyere enn brede.
+
+Løsningen: aspektet er bare geometri, så det kan regnes **før** rendringen. Ny
+`_pdfRoomAspect(room)` er den delte kilden til både padding (`PDF_ROOM_PAD_CM`) og aspekt, og
+kalleren regner ut den plasserte bredden og sender *den* som `targetWidthMm`.
+
+### Regelen er snudd: fast størrelse på PAPIRET
+
+`_labelFontCm()` gir `LABEL_FONT_CM` på skjerm (uendret for alle), og i PDF
+`2,2 mm × preferanse / mmPerCm`, klemt til 4–40 cm på gulvet. Målt resultat — samme
+millimeter uansett romstørrelse:
+
+| | Liten 0,8 | Normal 1,0 | Stor 1,25 | Ekstra stor 1,5 |
+|---|---|---|---|---|
+| alle rom | 1,76 mm | **2,20 mm** | 2,75 mm | 3,30 mm |
+
+Gulvstørrelsen varierer i stedet: 7 cm i et WC på 2 m², 15,9 cm i et lager på 60 m², 34,2 cm
+i et på 400 m².
+
+**Klemmingen er en sikring, ikke normaltilfellet — også målt.** Med 150 cm luft rundt rommet
+treffes 4 cm-gulvet **aldri** (det minste målte er 5,6 cm for et WC på 2 m² ved Liten; det
+ville krevd et rom under 27 cm bredt). 40 cm-taket treffes først ved et rom over ~30 m langt:
+en hall på 30 × 8 m får 2,18 mm i stedet for 2,20, og et lager på 400 m² får 2,57 i stedet for
+2,75 ved Stor. Prompten ventet at et WC på 2 m² skulle klemmes til 4 cm — det skjer ikke.
+
+### Preferansen
+
+`profiles.prefs.pdfLabelScale` (023-mønsteret), chip-rad i profil-dialogens
+«Prosjekteringsvalg». Fire valg, slik tittelen i prompten sa — brødteksten listet bare tre.
+Eksportdialogen viser «Labelstørrelse: Normal» med lenke til profilen, **ikke** et valg per
+utskrift. Lagres aldri i prosjektet, så to brukere kan skrive ut samme prosjekt med ulik
+labelstørrelse.
+
+### Test 2 — overlapp i tette rom, målt og rapportert
+
+8 m² bad med 6 folier, labelboksene transformert til bildekoordinater:
+
+| preferanse | fontstørrelse | overlappende par |
+|---|---|---|
+| Normal | 23 px | **0** |
+| Stor | 29 px | 1 |
+| Ekstra stor | 34 px | 6 (fem av dem bare 4 px dypt) |
+
+Ved Normal er det rent. Velger Fredrik Stor eller Ekstra stor, begynner labelene å kollidere i
+et så tett rom — det er avveiningen han selv tar, og Normal er allerede 3,2× dagens.
+
+### «Prosjektert av»
+
+- `_myDisplayName()` er én kilde (profilnavn → e-postens del før `@`), brukt av alle tre veiene.
+- **Opprettelse:** feltet forhåndsfylles, og er det tømt ved lagring settes det likevel. Gjelder
+  også hurtig prosjektering (`_quickStartModule`), som ikke satte det i det hele tatt.
+- **Eksisterende prosjekter:** fylles **ikke** ved åpning — det kan være Fredriks prosjekt som
+  Kenneth åpner. I stedet «Sett meg»-knapp i Kunde & prosjektinfo (vises bare når feltet er
+  tomt) og en gul linje med «Bruk <navn>» i eksportdialogen.
+- `responsible_user_id` lagres i prosjekt-JSON når navnet er brukerens eget, og nullstilles hvis
+  navnet redigeres bort. Ingen migrasjon.
+- Filnavn-initialene bruker nå **den som prosjekterte** via den eksisterende
+  `_plResponsibleInitials` — samme oppløsning som prosjektlista. Målt: FH for eget navn, KN for
+  «Kari Nordmann», FH når feltet er tomt (som før). **Spørsmål til Kenneth:** er det ønsket?
+
+### Funnet underveis, ikke rettet
+
+**Målkjede-tallene («40 cm», «49 cm») er en annen fontvei og er fortsatt små: målt 0,85 mm.**
+De bruker `max(7, 9 × zoom)` px, ikke `LABEL_FONT_CM`, så 051 rører dem ikke. Fredrik vil
+trolig se dem neste. Ikke endret, fordi målsettingsteksten må få plass mellom målestrekene og
+det er en annen avveining.
+
+Og en målefelle i min egen test: `_currentProfile` er modul-scope, så
+`window._currentProfile = …` endret ingenting — første testkjøring viste 2,20 mm for alle fire
+preferansene og så ut som en bug i koden. Den var i testen.
+
+**Regresjon:** 17 batterier, **636 sjekker** (fra 618), alle grønne. `_prefsRegressionTest`
+utvidet med F (labelstørrelse) og G («Prosjektert av»), og de sju kilde-påstandene er
+negativkontrollert ved å mutere kilden og se at de da feiler.
+
+---
+
 ## Veggforslaget: duplikater, fragmenter, arkflate og INNVENDIG areal — 2026-10-08
 
 Prompt 047d. Forslaget kom fra meg selv i 047c, og **begge hypotesene i det var målt feil.**
