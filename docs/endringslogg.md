@@ -4,6 +4,111 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Plantegning: målestokk fra motoren, rom på lerretet, lesbar vegg-sjekk — 2026-10-10
+
+Prompt 052. Kenneth: «Så fort jeg setter målestokk, kommer det dårlige resultatet: bare rom i
+farger, uten plantegningen og ikke standard canvas.»
+
+### STEG 0 — alle fire punkter reprodusert
+
+**0.1** På Okkenhaugvegen-tegningen svarte motoren `method:'title'`,
+`meters_per_point:0.0352778`, **`confidence:0.9`** — *samtidig* som `bg._needsCalibration`
+var `true` og «Sett målestokk»-overlayet lå oppå vegg-sjekken. Boksen var altså en sperre for
+noe appen allerede visste. (047d løftet tilliten fra 0,5 til 0,9: innvendig areal gjorde at
+arealkryss-sjekken endelig stemmer med tittelfeltet.)
+
+**0.2** `confirmFixedScale` satte `drawMode = null` → `_planAktiv()` false → vegg-sjekken
+borte. **Verre enn prompten antok:** `#_plan-bar` ble *stående igjen* i DOM-en, så brukeren så
+verktøylinja til en modus han ikke lenger var i.
+
+**0.3** «Lag rom» → `#import-review-screen` som `flex`, fullskjerm, 0 rom i `S.rooms`.
+
+**0.4** Det er **ikke** `_dropTargetChoice`, men PDF-grenen av `_rasterMethodChoice`: samme
+funksjon har to grener, og vektor-grenen hadde allerede riktig rekkefølge mens PDF-grenen
+hadde «La appen finne rommene (Eldre vei)» øverst.
+
+### Målestokken kommer fra motoren
+
+`_planKalibrerUnderlag` setter `bg.widthCm/heightCm` fra `page_size_pt × meters_per_point`.
+Målt: 0 → **5940 × 4200 cm** (A2 i 1:100). `originX/originY` røres ikke — veggene er i (u,v)
+av underlaget (046), så tegningen og veggene flytter seg i flukt. Det er hele grunnen til at
+046 valgte normaliserte koordinater.
+
+- **Tillit ≥ 0,8:** overlayet vises ikke, og verktøylinja får brikka
+  «Målestokk 1:100 · fra tittelfeltet · Endre».
+- **Tillit < 0,8:** overlayet står, men «Fast målestokk» er forhåndsfylt med motorens gjetning
+  og en gul linje sier «Motoren er usikker på målestokken (gjetter 1:100) — bekreft eller mål
+  opp». Brikka sier «usikker · Bekreft».
+- **Rekkefølge-fella** fra prompten er håndtert og verifisert: motoren svarer *etter* at
+  underlaget er lagt inn, og overlayet lukkes i det svaret kommer.
+- Brikka leste først bare motorens tall, så den sto på «1:100 fra tittelfeltet» også etter at
+  brukeren hadde overstyrt til 1:50. Nå vinner brukerens eget valg: «satt av deg» / «målt opp».
+
+### Kalibrering forlater ikke lenger vegg-sjekken
+
+Felles `_planEtterKalibrering()` i alle tre veiene (fast målestokk, to-punkts, Avbryt), **før**
+`drawMode = null`. Målt etter 1:50: `drawMode` fortsatt `plan-review`, verktøylinja står,
+u,v uendret — veggene flytter seg ikke i forhold til underlaget.
+
+### Rommene legges på lerretet
+
+`_planRomTilLerret` erstatter `_planTilGjennomgang`, som er **fjernet**. Rom-opprettelsen
+gjenbrukes helt — `_drawCreateRoomsFromReview` eier allerede ett-undo-steget, `_planNamed`,
+`_planNumber` og `statedAreaM2`. Målt på Okkenhaugvegen gjennom den ekte inngangen:
+
+| rom | romtype | areal | tegningen sier | |
+|---|---|---|---|---|
+| 115 Kontor/møterom | office | 7,36 m² | 6,9 | ⚠ |
+| 117 WC gjest | bathroom | 2,55 m² | 2,5 | ✓ |
+| 120 WC | bathroom | 1,47 m² | 1,4 | ✓ |
+| 122 EL | other | 2,51 m² | 2,4 | ✓ |
+
+**Ett** Ctrl+Z fjerner alle fire. ✓/⚠ vises både ved romnavnet på lerretet og i romlistas
+eksisterende badge-rad. Rom-kort ved klikk (navn, romtype, «Ingen varme», areal mot tegningen,
+Bekreft / Hopp over / Slett; Enter bekrefter, Tab går videre, Esc lukker). «Bekreft alle med
+navn fra tegningen» i en egen linje over lerretet, som forsvinner når alt er bekreftet.
+
+**049s «Ikke navngitt»-gruppe kunne gjenbrukes uendret** — den nøkler allerede på
+`_planNamed === false`. Verifisert med et navnløst rom: gruppa «Ikke navngitt (1)» dukket opp,
+det navngitte rommet ble i hovedlista.
+
+### To feil funnet ved å kjøre, ikke ved å lese
+
+**1. `calcType` finnes ikke på et ekte rom.** Feltet bor bare på review-raden
+(`_reviewApplyType`). Uten et eget flagg ville «122 EL» sett nøyaktig ut som et rom ingen har
+kommet i gang med. Nå `room._planNoHeat` + egen status «Ingen varme (fra tegningen)».
+
+**2. `_reviewIsSuggested` betyr «foreslå utfylling», ikke «skal ikke varmes».** Første versjon
+gjorde «115 Kontor/møterom» til et rom uten varme. Et kontor skal varmes — det er bare ikke
+appen som foreslår produktet. «Uten varme» leses nå av NAVNET (`UTEN_VARME_RE`, delt med
+`_pdfGuessRoomType` så mønsteret ikke finnes i to utgaver).
+
+Og én i min egen kode: dimmingen hentet underlaget via `_planBg()`, som krever `widthCm > 0` —
+og den er 0 helt til målestokken kommer, altså nettopp i vinduet vegg-sjekken åpner i.
+Underlaget ble derfor ikke dimmet i det hele tatt.
+
+### Lesbarhet og dialog
+
+Underlaget dimmes til 45 % mens vegg-sjekken står på (originalen lagres på bakgrunnen selv, så
+to påfølgende `_planEnter` ikke kan lagre 0,45 som «originalen»), og senterlinjene får en mørk
+kant så de leses både mot hvitt papir og mot en svart vegg. Begge grener av valgdialogen har nå
+samme rekkefølge: anbefalt øverst, eldre vei nederst og grå.
+
+### Ikke verifisert
+
+**Den ekte A2-PDF-en rendres ikke ferdig i testpanelet** — `page.render()` på 3367 × 2381 px
+brukte over 80 s og fullførte ikke. Hele app-logikken er derfor målt med motorens *ekte* svar
+og en PDF med samme sideforhold, og den ekte inngangen (`_rasterChoose('plan')` →
+`_planStartFraFil`) er kjørt ende-til-ende på den. PDF.js' egen rendring av den store siden er
+det eneste leddet jeg ikke har sett fullføre her.
+
+**Regresjon:** 17 batterier, **652 sjekker** (fra 636), alle grønne. `_planRegressionTest`
+utvidet med blokk J. 049s sjekk «ingen ny rom-kort-flate bygget» er **opphevet** og erstattet:
+den ville bestått fordi jeg døpte funksjonen `_planAapneKort`, ikke `_planRomKort` — altså
+bestått av feil grunn. Kortet ER bygget, og det er bestilt.
+
+---
+
 ## Labels i PDF med fast papirstørrelse + «Prosjektert av» fra innlogget bruker — 2026-10-09
 
 Prompt 051. Fredrik syns labelene på utskrift er små, og «Prosjektert av» blir ofte tomt.
