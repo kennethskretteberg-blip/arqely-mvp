@@ -517,6 +517,8 @@ body.light-theme .room-name-prompt{background:rgba(255,255,255,0.97);border-colo
 
 /* Room item — compact single-line */
 .room-item{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;border-left:2px solid transparent;transition:all .12s}
+/* 053: rom med ubehandlet kundeønske. Blå, aldri forvekslet med mål-merkene (grønn/oransje). */
+.room-item.kundeonske{border-left:3px solid #4fa2b8}
 .room-item:hover{background:var(--surface2)}
 .room-item.sel{border-left:3px solid var(--accent);background:rgba(34,211,238,.11)}
 .room-item.sel .room-nm{color:var(--accent)}
@@ -9158,7 +9160,13 @@ async function _kundeRefreshStatus() {
     const velg = liste => liste.find(k => k.status === 'answered') || liste[0] || null;
     _kundeLinkCache   = velg(lev.filter(k => k.mode !== 'forslag'));
     _forslagLinkCache = velg(lev.filter(k => k.mode === 'forslag'));
-  } catch (e) { _kundeLinkCache = null; _forslagLinkCache = null; }
+    // 053: et FERDIGBEHANDLET forslag er ikke lenger en oppgave (det forsvinner fra
+    // `_fetchKundeStatus`, som bare henter open/answered), men Kenneth skal fortsatt kunne
+    // slå det opp. Egen cache, så den aldri kan forveksles med en ubehandlet.
+    _forslagSisteCache = (data || [])
+      .filter(k => k.mode === 'forslag' && k.status === 'applied')
+      .sort((a, b) => String(b.applied_at || '') > String(a.applied_at || '') ? 1 : -1)[0] || null;
+  } catch (e) { _kundeLinkCache = null; _forslagLinkCache = null; _forslagSisteCache = null; }
   if (typeof renderSidebar === 'function') renderSidebar();
 }
 async function _kundeRevokeLink(id) {
@@ -19658,6 +19666,54 @@ function _kundeforslagRegressionTest() {
         _kildeUtenKommentarer(_forslagSettValg) + _kildeUtenKommentarer(_forslagPil)
         + _kildeUtenKommentarer(_forslagKortHtml) + _kildeUtenKommentarer(_forslagSend)),
       'kaller en utleggsmotor');
+
+    // ── I (053) — beslutningene lagres, vinduet er ikke lenger en modal ──
+    // ⚠ MÅLT (STEG 0.1): Godkjenn skrev BARE til en Map i minnet. Etter en ny innlasting var
+    // beslutningen borte, `status` fortsatt 'answered', og panelet åpnet med rommet som
+    // ubehandlet — selv om utlegget alt var byttet. (Dobbelt utlegg ble det ikke:
+    // `_clearRoomProductCollections` rydder først. Målt: 1 kabel etter to godkjenninger.)
+    const uI = _kildeUtenKommentarer;
+    check('I: Godkjenn skriver beslutningen til databasen med én gang', true,
+      /_forslagLagreBeslutning\(roomId, \{ status: 'godkjent' \}\)/.test(uI(_forslagGodkjennKlikk))
+      && /applied_result/.test(uI(_forslagLagreBeslutning)), 'bare i minnet');
+    check('I: behandlet seedes fra applied_result, ikke som tom Map', true,
+      /_forslagAppliedResult\(\)/.test(uI(openKundeForslagPanel))
+      && !/behandlet: new Map\(\) \}/.test(uI(openKundeForslagPanel)), 'starter tom');
+    check('I: ferdig-regelen setter applied UTEN å sende e-post', true,
+      /status = 'applied'/.test(uI(_forslagLagreBeslutning))
+      && !/kundelenke-mail|functions\.invoke/.test(uI(_forslagLagreBeslutning)), 'sender e-post');
+    check('I: _kundeMaybeOpenReview ser på UBEHANDLEDE, ikke bare status', true,
+      /_forslagUbehandlede\(\)\.length > 0/.test(uI(_kundeMaybeOpenReview)), 'åpner alltid');
+    check('I: radklikk velger rommet OG zoomer til det', true,
+      /S\.ui\.selectedRoomId = roomId/.test(uI(_forslagVelgRad))
+      && /fitRoom\(roomId\)/.test(uI(_forslagVelgRad)), 'ingen zoom');
+    checkIkke('I: Avslå bruker ikke lenger window.prompt',
+      /window\.prompt/.test(uI(_forslagAvslaaKlikk)) || /window\.prompt/.test(uI(_forslagAvslaaLagre)),
+      'systemdialog');
+    checkIkke('I: vinduet er ikke en modal med bakdropp',
+      /inset:0;background:rgba\(0,0,0/.test(uI(_forslagRevRender)), 'dekker lerretet');
+    check('I: Angre bruker den EKSISTERENDE gjenopprettingen', true,
+      /_restoreRoomProductSnapshot\(roomId, snap\)/.test(uI(_forslagAngreRom))
+      && /_snapshotRoomProducts\(roomId\)/.test(uI(_forslagGodkjennKlikk)), 'ny vei');
+    check('I: Angre tar status tilbake til answered', true,
+      /felt\.status = 'answered'/.test(uI(_forslagLagreBeslutning)), 'blir stående applied');
+    check('I: romlista merker rom med ubehandlet ønske', true,
+      /kundeonske/.test(uI(roomItemHtml)) && typeof _forslagRomOnske === 'function', 'ingen merke');
+    check('I: ruta i romlista kaller SAMME funksjoner som vinduet', true,
+      /_forslagGodkjennKlikk\(\$\{room\.id\}\)/.test(uI(_forslagOnskeBoksHtml)), 'egen kopi');
+    // Ferdig-regelen i tall: ok-rader og rom som er borte teller som behandlet.
+    {
+      const lagretCache = _forslagLinkCache, lagretRom = S.rooms;
+      try {
+        S.rooms = [{ id: 1, name: 'A' }, { id: 2, name: 'B' }];
+        _forslagLinkCache = { id: 'x', status: 'answered', applied_result: [{ roomId: 1, status: 'godkjent' }],
+          answer: { rooms: [{ roomId: 1, ok: false }, { roomId: 2, ok: true }, { roomId: 99, ok: false }] } };
+        check('I: ok-rader og forsvunne rom teller som behandlet', 0,
+          _forslagUbehandlede().length === 0, _forslagUbehandlede().length);
+        _forslagLinkCache.applied_result = [];
+        check('I: en ubehandlet rad telles', 1, _forslagUbehandlede().length === 1, _forslagUbehandlede().length);
+      } finally { _forslagLinkCache = lagretCache; S.rooms = lagretRom; }
+    }
   } catch (e) {
     check('Z: testen kjørte uten å kaste', true, false, e.message);
   } finally {
@@ -44697,7 +44753,7 @@ function _renderIndoorPartContent(part) {
         ondrop="_floorRowDrop(event,${fl.id})">
         <span class="floor-toggle">${fl.collapsed?'▶':'▼'}</span>
         <span class="floor-name-txt" title="${esc(fl.name)}">${esc(fl.name)}</span>
-        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>
+        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>${_forslagEtasjeMerke(fl.id)}
         <button class="floor-bg-btn" onclick="event.stopPropagation();renameFloorClick(${fl.id},this.closest('.floor-hdr').querySelector('.floor-name-txt'))" title="Gi nytt navn" style="background:transparent"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
         <button class="floor-bg-btn" onclick="setActiveBgFloor(${fl.id});openBgImportPanel();event.stopPropagation()" title="Bakgrunnsbilde for ${esc(fl.name)}">${S.bgs[fl.id]&&S.bgs[fl.id].img?'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>':'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>'}</button>
         <button class="sb-add-sm" onclick="showAddRoomModal(${fl.id});event.stopPropagation()" title="Legg til rom">+</button>
@@ -44731,6 +44787,13 @@ function _renderIndoorPartContent(part) {
 // Standard LUKKET når det finnes minst ett navngitt rom. Er ALT unavngitt står den åpen —
 // å skjule alt hjelper ingen. Tilstanden ligger i S.ui, så en lukket gruppe blir værende det.
 // «Etasje 1 · 22 rom · 12 ikke navngitt» — tallet i badgen er alle rom; tittelen deler dem.
+// 053: «💬 3 kundeønsker» i etasje-toppen når noen venter på behandling.
+function _forslagEtasjeMerke(floorId) {
+  const n = (typeof _forslagOnskerPaaEtasje === 'function') ? _forslagOnskerPaaEtasje(floorId) : 0;
+  if (!n) return '';
+  return ` <span style="color:#4fa2b8;font-size:10.5px;font-weight:600" title="Rom med ubehandlet kundeønske">💬 ${n} kundeønske${n === 1 ? '' : 'r'}</span>`;
+}
+
 function _floorBadgeTitle(frooms) {
   const uten = frooms.filter(r => r._planNamed === false).length;
   if (!uten) return frooms.length + (frooms.length === 1 ? ' rom' : ' rom');
@@ -44866,7 +44929,7 @@ function _renderFlatSidebar() {
         ondrop="_floorRowDrop(event,${fl.id})">
         <span class="floor-toggle">${fl.collapsed?'▶':'▼'}</span>
         <span class="floor-name-txt" title="${esc(fl.name)}">${esc(fl.name)}</span>
-        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>
+        <span class="floor-badge" title="${_floorBadgeTitle(frooms)}">${frooms.length}</span>${_forslagEtasjeMerke(fl.id)}
         <button class="floor-bg-btn" onclick="event.stopPropagation();renameFloorClick(${fl.id},this.closest('.floor-hdr').querySelector('.floor-name-txt'))" title="Gi nytt navn" style="background:transparent"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
         <button class="floor-bg-btn" onclick="setActiveBgFloor(${fl.id});openBgImportPanel();event.stopPropagation()" title="Bakgrunnsbilde for ${esc(fl.name)}">${S.bgs[fl.id]&&S.bgs[fl.id].img?'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>':'<svg class="ic ic-map" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M9 4 3 6.5v14L9 18l6 2.5 6-2.5v-14L15 6.5z"/><path d="M9 4v14M15 6.5v14"/></svg>'}</button>
         <button class="sb-add-sm" onclick="showAddRoomModal(${fl.id});event.stopPropagation()" title="Legg til rom">+</button>
@@ -44962,6 +45025,59 @@ function _roomMaalBadge(room) {
 }
 
 // ─── COMPACT ROOM ITEM (sidebar tree) ──────────────────────
+// ── 053: kundeønske i romlista ────────────────────────────────────────────────────────────
+// Spec regel 12: vinduet er en SNARVEI, ikke eneste vei. Kenneth skal kunne krysse det vekk og
+// jobbe fra romlista. Begge veier kaller de SAMME funksjonene — ingen kopi av logikken.
+function _forslagRomOnske(roomId) {
+  if (typeof _forslagLinkCache === 'undefined' || !_forslagLinkCache) return null;
+  if (_forslagLinkCache.status !== 'answered') return null;
+  return _forslagUbehandlede().find(r => r.roomId === roomId) || null;
+}
+
+function _forslagOnskerPaaEtasje(floorId) {
+  if (typeof _forslagLinkCache === 'undefined' || !_forslagLinkCache) return 0;
+  if (_forslagLinkCache.status !== 'answered') return 0;
+  return _forslagUbehandlede().filter(r => r.room && r.room.floorId === floorId).length;
+}
+
+// Ruta under romnavnet når rommet er valgt. Samme innhold som raden i vinduet.
+function _forslagOnskeBoksHtml(room) {
+  const rad = _forslagRomOnske(room.id);
+  if (!rad || room.id !== S.ui.selectedRoomId) return '';
+  const t = _forslagRadTall(rad);
+  const igjen = _forslagUbehandlede().length;
+  return `<div style="margin:2px 12px 8px;padding:9px 10px;border:1px solid #4fa2b8;border-left:3px solid #4fa2b8;
+      border-radius:9px;background:rgba(79,162,184,.09)">
+    <div style="font-size:11px;font-weight:700;color:#4fa2b8;margin-bottom:4px">💬 Kundeønske</div>
+    <div style="font-size:11px;color:var(--dim)">Nå: ${t.naa}</div>
+    <div style="font-size:11px;color:var(--text);margin-top:1px">Kunden foreslår: <b>${t.ny}</b></div>
+    ${rad.comment ? `<div style="font-size:11px;color:var(--dim);font-style:italic;margin-top:3px">«${esc(rad.comment)}»</div>` : ''}
+    <div style="display:flex;gap:5px;margin-top:7px;flex-wrap:wrap">
+      <button onclick="event.stopPropagation();_forslagGodkjennKlikk(${room.id})"
+        style="padding:5px 10px;border:none;border-radius:6px;background:var(--accent);color:#0d0e10;
+               font-size:11.5px;font-weight:600;cursor:pointer">Godkjenn</button>
+      <button onclick="event.stopPropagation();_forslagAvslaaFraListe(${room.id})"
+        style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);
+               color:var(--text);font-size:11.5px;cursor:pointer">Avslå</button>
+      <button onclick="event.stopPropagation();_forslagAapneAlle(${room.id})"
+        style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;
+               color:var(--accent);font-size:11.5px;cursor:pointer">Åpne alle (${igjen})</button>
+    </div></div>`;
+}
+
+// Avslå fra romlista åpner vinduet på det rommet — begrunnelsesfeltet bor der, og å bygge et
+// nummer to i sidepanelet ville vært den kopien spec-en advarer mot.
+function _forslagAvslaaFraListe(roomId) {
+  openKundeForslagPanel();
+  _forslagVelgRad(roomId);
+  _forslagAvslaaKlikk(roomId);
+}
+
+function _forslagAapneAlle(roomId) {
+  openKundeForslagPanel();
+  if (roomId != null) _forslagVelgRad(roomId);
+}
+
 function roomItemHtml(room, indented) {
   const sel = room.id === S.ui.selectedRoomId;
   const area = room.area ? (room.area/10000).toFixed(1) : '—';
@@ -44973,13 +45089,15 @@ function roomItemHtml(room, indented) {
   const hasCables = _cablesForRoom(room.id).length > 0;
   const cableDimOn = room.cableDimSnap;
 
-  return `<div class="room-item${sel?' sel':''}${indented?' indented':''}" data-room-id="${room.id}" data-room-name="${esc(room.name).toLowerCase()}"
+  const onske = (typeof _forslagRomOnske === 'function') ? _forslagRomOnske(room.id) : null;
+  return `<div class="room-item${sel?' sel':''}${indented?' indented':''}${onske?' kundeonske':''}" data-room-id="${room.id}" data-room-name="${esc(room.name).toLowerCase()}"
     onclick="selRoom(${room.id})"
     ondblclick="startRename(${room.id},this)"
     oncontextmenu="roomCtxMenu(event,${room.id})">
     <span class="room-type-ico">${ico}</span>
     <div class="room-info">
-      <span class="room-nm" title="${esc(room.name)}">${esc(room.name)}</span>
+      <span class="room-nm" title="${esc(room.name)}">${esc(room.name)}</span>${onske
+        ? `<span style="color:#4fa2b8;margin-left:3px" title="Kunden foreslår ${esc(_forslagRadTall(onske).ny)} — klikk for å se">💬</span>` : ''}
       <span class="room-area">${area} m²${_roomMaalBadge(room)}</span>
     </div>
     <span style="display:flex;gap:2px;align-items:center;margin-left:auto;flex-shrink:0">
@@ -44990,7 +45108,7 @@ function roomItemHtml(room, indented) {
       <button onclick="event.stopPropagation();_toggleCableDimSnap(${room.id})" title="Målsett kabel" style="width:20px;height:20px;border:none;border-radius:3px;background:${cableDimOn?'var(--accent)':'transparent'};color:${cableDimOn?'#0d0e10':'var(--dim)'};cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center"><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg></button>` : ''}
     </span>
     <span class="room-status" style="color:${st.color}" title="${st.title}">${st.dot}</span>
-  </div>${_soneRowsHtml(room)}`;
+  </div>${_forslagOnskeBoksHtml(room)}${_soneRowsHtml(room)}`;
 }
 
 // 008 del 2: sonene listes som egne, innrykkede rader under rommet — «behandles som to separate
@@ -55649,6 +55767,21 @@ function _renderSbForslagRad() {
   if (!vert || !vert.parentElement) return;
   document.getElementById('spi-forslag')?.remove();
   const f = (typeof _forslagLinkCache !== 'undefined') ? _forslagLinkCache : null;
+  // 053: et FERDIGBEHANDLET forslag er ikke lenger en oppgave, men skal kunne slås opp.
+  // ⚠ Dette var raden Kenneth meldte: «Det står fortsatt en tekst oppe til venstre … om at
+  // forslag fra kunde må gås gjennom» — fordi `status` aldri ble `applied`.
+  if ((!f || f.status !== 'answered') && _forslagSisteCache) {
+    const sn = _forslagSisteCache.applied_at
+      ? new Date(_forslagSisteCache.applied_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' }) : '';
+    const d2 = document.createElement('div');
+    d2.className = 'spi-row'; d2.id = 'spi-forslag';
+    d2.onclick = e => { e.stopPropagation(); openKundeForslagPanel(true); };
+    d2.innerHTML = '<span style="color:#22c55e;font-weight:600">✓ Forslag behandlet</span>'
+      + (sn ? ' <span style="color:var(--dim)">' + sn + '</span>' : '')
+      + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Se forslaget</span>';
+    vert.parentElement.insertBefore(d2, vert.nextSibling);
+    return;
+  }
   if (!f || f.status !== 'answered') return;
   const nar = f.answered_at ? new Date(f.answered_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' }) : '';
   const hvem = f.answered_by_name ? ', ' + esc(f.answered_by_name) : '';
@@ -69401,7 +69534,10 @@ let _kundeReviewShownFor = null;
 function _kundeMaybeOpenReview() {
   if (!_supabaseProjectId || _kundeReviewShownFor === _supabaseProjectId) return;
   const maal = _kundeLinkCache && _kundeLinkCache.status === 'answered';
-  const fors = _forslagLinkCache && _forslagLinkCache.status === 'answered';
+  // 053: ⚠ sto `status === 'answered'`, så panelet åpnet igjen selv når alt var behandlet.
+  // Nå avgjør de faktiske ubehandlede radene — samme kilde som merket i romlista.
+  const fors = _forslagLinkCache && _forslagLinkCache.status === 'answered'
+    && _forslagUbehandlede().length > 0;
   if (!maal && !fors) return;
   _kundeReviewShownFor = _supabaseProjectId;
   // Mål først: de endrer geometrien, og et forslag gjelder utlegget i den geometrien.
@@ -69427,9 +69563,114 @@ function _kundeMaybeOpenReview() {
 let _forslagLinkCache = null;     // lenka med mode='forslag'
 let _forslagRevFeil = new Map();  // roomId → feilmelding fra siste godkjenningsforsøk
 let _forslagRevState = null;      // { linkId, behandlet: Map(roomId → {status:'godkjent'|'avslaatt', grunn}) }
+let _forslagSisteCache = null;    // 053: nyeste FERDIGBEHANDLEDE forslag (status='applied')
+let _forslagAngre = new Map();    // 053: roomId → snapshot tatt FØR godkjenningen
+
+// ── 053: beslutningene lagres i databasen, med én gang ───────────────────────────────────
+//
+// ⚠ MÅLT (STEG 0.1): Godkjenn skrev bare til `_forslagRevState.behandlet` — en Map i minnet.
+// Etter en ny innlasting var beslutningen borte, `status` fortsatt 'answered' og panelet åpnet
+// med rommet som ubehandlet, SELV OM utlegget alt var byttet. Eneste vei til 'applied' gikk
+// gjennom «Send svar til kunden», en knapp Kenneth ikke vil trykke.
+//
+// `applied_result` er jsonb fra 044 og brukes nå som den fortløpende protokollen, ikke bare
+// som et sluttoppgjør. Merge per roomId — siste beslutning vinner.
+function _forslagAppliedResult() {
+  const k = _forslagLinkCache;
+  return (k && Array.isArray(k.applied_result)) ? k.applied_result : [];
+}
+
+// Hva ligger FAKTISK i rommet nå? Leses etter at motoren har kjørt, så «Ble: …» er målt og
+// ikke en gjentakelse av hva kunden ba om.
+function _forslagRomResultat(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return null;
+  const st = (typeof _computeRoomStats === 'function') ? _computeRoomStats(room) : null;
+  const kabel = (S.cables || []).find(c => c.roomId === roomId);
+  const matte = (S.mats || []).find(m => m.roomId === roomId);
+  const folie = (S.strips || []).find(x => x.roomId === roomId);
+  const pid = (kabel || matte || folie || {}).productId;
+  const prod = pid != null ? HEATING_PRODUCTS.find(p => p.id === pid) : null;
+  const kabler = (S.cables || []).filter(c => c.roomId === roomId);
+  return {
+    productId: pid != null ? pid : null,
+    navn: prod ? prod.name : null,
+    cableCount: kabler.length || undefined,
+    W: st ? Math.round(st.totalW) : null,
+    wm2: (st && st.nettoM2 > 0) ? Math.round(st.totalW / st.nettoM2) : null,
+    cc: kabel && kabel.spacing_cm ? Math.round(kabel.spacing_cm * 10) / 10 : null,
+  };
+}
+
+// Egen toast med en knapp. `_showToast` tar bare (melding, type) og brukes 100+ steder — å
+// utvide signaturen der for ett tilfelle ville vært å endre alle.
+function _forslagFerdigToast() {
+  document.getElementById('_fors-ferdig-toast')?.remove();
+  const d = document.createElement('div');
+  d.id = '_fors-ferdig-toast';
+  d.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#22c55e;'
+    + 'color:#fff;padding:10px 14px;border-radius:9px;font-size:13px;font-weight:600;z-index:9999;'
+    + 'display:flex;align-items:center;gap:11px;max-width:92vw;box-shadow:0 6px 22px rgba(0,0,0,.3)';
+  d.innerHTML = `<span>Forslaget er ferdig behandlet. Vil du sende svar til kunden?</span>
+    <button onclick="document.getElementById('_fors-ferdig-toast').remove();_forslagSendSvar()"
+      style="padding:5px 12px;border:none;border-radius:7px;background:#fff;color:#128a3e;font-size:12.5px;font-weight:700;cursor:pointer">Send svar</button>
+    <button onclick="document.getElementById('_fors-ferdig-toast').remove()"
+      style="background:none;border:none;color:#fff;font-size:17px;cursor:pointer;line-height:1;opacity:.8">×</button>`;
+  document.body.appendChild(d);
+  setTimeout(() => d.remove(), 12000);
+}
+
+async function _forslagLagreBeslutning(roomId, beslutning) {
+  const k = _forslagLinkCache;
+  if (!k) return;
+  const rad = _forslagSvarRader().find(r => r.roomId === roomId);
+  const navn = (rad && rad.room && rad.room.name) || (rad && rad.roomName) || 'Rom';
+  const liste = _forslagAppliedResult().filter(x => x.roomId !== roomId);
+  if (beslutning) {
+    liste.push({
+      roomId, roomName: navn, status: beslutning.status,
+      grunn: beslutning.grunn || undefined,
+      at: new Date().toISOString(),
+      by: (_currentProfile && _currentProfile.full_name) || (_currentUser && _currentUser.email) || null,
+      resultat: beslutning.status === 'godkjent' ? _forslagRomResultat(roomId) : undefined,
+    });
+  }
+  k.applied_result = liste;
+  // Ferdig-regelen: rader med `ok: true`, og rader der rommet ikke finnes lenger, teller som
+  // behandlet. Ingen e-post sendes av dette (spec regel 13).
+  const ferdig = _forslagUbehandlede().length === 0;
+  const felt = { applied_result: liste };
+  if (ferdig && k.status !== 'applied') {
+    felt.status = 'applied';
+    felt.applied_at = new Date().toISOString();
+    k.status = 'applied'; k.applied_at = felt.applied_at;
+  } else if (!ferdig && k.status === 'applied') {
+    // Angre på det siste rommet skal ta forslaget tilbake til «under arbeid».
+    felt.status = 'answered';
+    felt.applied_at = null;
+    k.status = 'answered'; k.applied_at = null;
+  }
+  try {
+    if (_db) await _db.from('kundelenker').update(felt).eq('id', k.id);
+  } catch (e) {
+    _showToast && _showToast('Kunne ikke lagre beslutningen: ' + e.message, 'warn');
+  }
+  if (felt.status === 'applied') {
+    _forslagSisteCache = k;
+    _forslagFerdigToast();
+  }
+  if (typeof renderSidebar === 'function') renderSidebar();
+}
+
+// Rader som venter på en beslutning. Brukt av ferdig-regelen, av merket i romlista og av
+// `_kundeMaybeOpenReview` — ÉN definisjon, så de tre aldri kan være uenige.
+function _forslagUbehandlede() {
+  const behandlet = new Set(_forslagAppliedResult().map(x => x.roomId));
+  return _forslagSvarRader().filter(r => r.room && !r.ok && !behandlet.has(r.roomId));
+}
 
 function _forslagSvarRader() {
-  const k = _forslagLinkCache;
+  const k = _forslagLinkCache || _forslagSisteCache;   // 053: også lesbart etter `applied`
   if (!k || !k.answer || !Array.isArray(k.answer.rooms)) return [];
   return k.answer.rooms.map(rad => ({
     ...rad,
@@ -69550,12 +69791,21 @@ function _forslagMatteProdukt(roomId, rad) {
 }
 
 // ── Panelet ────────────────────────────────────────────────────────────────
-function openKundeForslagPanel() {
+function openKundeForslagPanel(lesFerdig) {
+  // 053: et ferdigbehandlet forslag kan åpnes LESENDE fra prosjektinfo («Se forslaget»).
+  if (lesFerdig && _forslagSisteCache) _forslagLinkCache = _forslagSisteCache;
   const k = _forslagLinkCache;
-  if (!k || k.status !== 'answered') { _showToast && _showToast('Ingen forslag fra kunde', 'info'); return; }
+  if (!k || (k.status !== 'answered' && k.status !== 'applied')) { _showToast && _showToast('Ingen forslag fra kunde', 'info'); return; }
   const rader = _forslagSvarRader();
   if (!rader.length) { _showToast && _showToast('Forslaget gjelder rom som ikke finnes lenger', 'warn'); return; }
-  if (!_forslagRevState || _forslagRevState.linkId !== k.id) _forslagRevState = { linkId: k.id, behandlet: new Map() };
+  // 053: ⚠ `behandlet` startet som en TOM Map ved hver åpning — derfor kom panelet tilbake med
+  // alle rom «ubehandlet» etter en ny innlasting, selv om utlegget alt var byttet. Seedes nå
+  // fra `applied_result`, som er den varige protokollen.
+  if (!_forslagRevState || _forslagRevState.linkId !== k.id) {
+    const m = new Map();
+    for (const x of _forslagAppliedResult()) m.set(x.roomId, { status: x.status, grunn: x.grunn, resultat: x.resultat });
+    _forslagRevState = { linkId: k.id, behandlet: m };
+  }
   _forslagRevRender();
 }
 
@@ -69581,89 +69831,260 @@ function _forslagRadTall(rad) {
   };
 }
 
+// ── 053: vinduet ──────────────────────────────────────────────────────────────────────────
+//
+// ⚠ MÅLT (STEG 0): dette var `position:fixed; inset:0` med `rgba(0,0,0,.6)` bakdropp — en modal
+// som dekket lerretet, og klikk utenfor lukket den. Kenneth: «Det føles litt utrygt å bare
+// endre løsningen med en knapp uten å se hva som skjer.» Nå et vindu ved siden av tegningen.
+const FORSLAG_VINDU_B = 440;
+let _forslagVinduMin = false;      // minimert til brikke
+let _forslagValgtRom = null;       // raden som har fokus i vinduet
+
+function _forslagVinduPos() {
+  try {
+    const p = JSON.parse(sessionStorage.getItem('_forsVinduPos') || 'null');
+    if (p && isFinite(p.x) && isFinite(p.y)) return p;
+  } catch (e) { /* tom eller korrupt — bruk standard */ }
+  return null;
+}
+function _forslagVinduLagrePos(x, y) {
+  try { sessionStorage.setItem('_forsVinduPos', JSON.stringify({ x, y })); } catch (e) { /* privat modus */ }
+}
+
 function _forslagRevRender() {
-  const k = _forslagLinkCache;
+  // ⚠ MÅLT: `_kundeRefreshStatus` plukker bare open/answered, så `_forslagLinkCache` blir NULL
+  // i det forslaget blir `applied` — og en re-render etter «Send svar» krasjet på
+  // `k.answered_by_name`. Vinduet må tåle at lenka ikke lenger er en levende oppgave.
+  const k = _forslagLinkCache || _forslagSisteCache;
+  if (!k) { document.getElementById('fors-rev-ov')?.remove(); document.getElementById('_fors-brikke')?.remove(); return; }
   const rader = _forslagSvarRader();
   document.getElementById('fors-rev-ov')?.remove();
-  const ov = document.createElement('div');
-  ov.id = 'fors-rev-ov';
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px';
-  ov.onclick = e => { if (e.target === ov) ov.remove(); };
+  document.getElementById('_fors-brikke')?.remove();
+
+  const ubeh = _forslagUbehandlede().length;
+  if (_forslagVinduMin) {
+    const b = document.createElement('div');
+    b.id = '_fors-brikke';
+    b.onclick = () => { _forslagVinduMin = false; _forslagRevRender(); };
+    b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2100;cursor:pointer;'
+      + 'background:var(--surface);border:1px solid #4fa2b8;border-radius:11px;padding:9px 14px;'
+      + 'font-size:12.5px;font-weight:600;color:#4fa2b8;box-shadow:0 6px 22px rgba(0,0,0,.32)';
+    b.textContent = '💬 Kundeforslag' + (ubeh ? ' · ' + ubeh + ' igjen' : ' · ferdig');
+    document.body.appendChild(b);
+    return;
+  }
 
   const hvem = k.answered_by_name ? esc(k.answered_by_name) : 'kunden';
   const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'long' }) : '';
   const godkjentAlt = k.approve_all_at || (k.answer && k.answer.approveAll);
+  const ferdig = k.status === 'applied';
+
+  // Valgt rad: den brukeren sist klikket, ellers første ubehandlede.
+  const aktuelle = rader.filter(r => r.room && !r.ok);
+  if (!aktuelle.some(r => r.roomId === _forslagValgtRom)) {
+    const f = aktuelle.find(r => !_forslagRevState.behandlet.has(r.roomId)) || aktuelle[0];
+    _forslagValgtRom = f ? f.roomId : null;
+  }
 
   let rows = '';
   for (const rad of rader) {
-    const b = _forslagRevState.behandlet.get(rad.roomId);
     const navn = esc((rad.room && rad.room.name) || rad.roomName || 'Rom');
     if (!rad.room) {
-      rows += `<tr><td style="padding:9px 8px;color:var(--dim)" colspan="4">${navn} — finnes ikke i prosjektet lenger</td></tr>`;
+      rows += `<div style="padding:9px 11px;color:var(--dim);font-size:12px;border-top:1px solid var(--border)">${navn} — finnes ikke i prosjektet lenger</div>`;
       continue;
     }
     if (rad.ok) {
-      rows += `<tr><td style="padding:9px 8px"><b>${navn}</b></td>
-        <td style="padding:9px 8px;color:#22c55e" colspan="2">✓ OK som det er</td>
-        <td style="padding:9px 8px;color:var(--dim);font-size:11.5px">ingen handling</td></tr>`;
+      rows += `<div style="padding:9px 11px;border-top:1px solid var(--border);font-size:12.5px">
+        <b>${navn}</b> <span style="color:#22c55e">✓ OK som det er</span></div>`;
       continue;
     }
+    const b = _forslagRevState.behandlet.get(rad.roomId);
+    const valgt = _forslagValgtRom === rad.roomId;
     const t = _forslagRadTall(rad);
-    const handling = b
-      ? (b.status === 'godkjent'
-          ? `<span style="color:#22c55e;font-weight:600">✓ Godkjent</span>`
-          : `<span style="color:var(--dim)">Avslått${b.grunn ? ' — ' + esc(b.grunn) : ''}</span>`)
-      : `<div style="display:flex;gap:6px;justify-content:flex-end">
-           <button onclick="_forslagGodkjennKlikk(${rad.roomId})" style="padding:6px 11px;background:var(--accent);border:none;border-radius:7px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Godkjenn</button>
-           <button onclick="_forslagAvslaaKlikk(${rad.roomId})" style="padding:6px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer">Avslå</button>
-         </div>`;
-    rows += `<tr style="border-top:1px solid var(--border)">
-      <td style="padding:9px 8px;vertical-align:top"><b>${navn}</b>${_forslagRevFeil.has(rad.roomId) ? '<br><span style="color:#f59e0b;font-size:11.5px">⚠ ' + esc(_forslagRevFeil.get(rad.roomId)) + '</span>' : ''}</td>
-      <td style="padding:9px 8px;vertical-align:top;color:var(--dim);font-size:12px">${t.naa}</td>
-      <td style="padding:9px 8px;vertical-align:top;font-size:12px"><b>${t.ny}</b>${rad.comment ? '<br><span style="color:var(--dim);font-size:11.5px">«' + esc(rad.comment) + '»</span>' : ''}</td>
-      <td style="padding:9px 8px;vertical-align:top;text-align:right">${handling}</td></tr>`;
+    const merke = b
+      ? (b.status === 'godkjent' ? '<span style="color:#22c55e;font-weight:600;font-size:11.5px">✓ Godkjent</span>'
+         : '<span style="color:var(--dim);font-size:11.5px">Avslått</span>')
+      : '<span style="color:#4fa2b8;font-size:11.5px">venter</span>';
+    const resultat = (b && b.status === 'godkjent') ? (b.resultat || null) : null;
+    rows += `<div onclick="_forslagVelgRad(${rad.roomId})" style="padding:9px 11px;cursor:pointer;
+        border-top:1px solid var(--border);border-left:3px solid ${valgt ? PLAN_FARGE : 'transparent'};
+        background:${valgt ? 'rgba(255,167,38,.07)' : 'transparent'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <b style="font-size:13px">${navn}</b>${merke}</div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:3px">Nå: ${t.naa}</div>
+      <div style="font-size:11.5px;color:var(--text);margin-top:1px">Kunden foreslår: <b>${t.ny}</b></div>
+      ${rad.comment ? `<div style="font-size:11.5px;color:var(--dim);font-style:italic;margin-top:3px">«${esc(rad.comment)}»</div>` : ''}
+      ${resultat ? `<div style="font-size:11.5px;color:#22c55e;margin-top:3px">Ble: ${esc(resultat.navn || '—')}${resultat.wm2 != null ? ' · ' + resultat.wm2 + ' W/m²' : ''}${resultat.cc != null ? ' · CC ' + resultat.cc : ''}</div>` : ''}
+      ${_forslagRevFeil.has(rad.roomId) ? `<div style="font-size:11.5px;color:#f59e0b;margin-top:3px">⚠ ${esc(_forslagRevFeil.get(rad.roomId))}</div>` : ''}
+      ${valgt ? _forslagRadHandlinger(rad, b) : ''}
+    </div>`;
   }
 
-  const uavklart = rader.filter(r => r.room && !r.ok && !_forslagRevState.behandlet.has(r.roomId)).length;
-  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--surface,#16171c);border:1px solid var(--border);border-radius:16px;width:min(880px,96vw);max-height:88vh;overflow:auto;padding:22px;color:var(--text)">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:4px">
-      <div><div style="font-size:17px;font-weight:700">Kundeforslag</div>
-        <div style="font-size:12px;color:var(--dim)">Fra ${hvem}${nar ? ' · ' + nar : ''}</div></div>
-      <button onclick="document.getElementById('fors-rev-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
-    </div>
-    ${godkjentAlt ? `<div style="margin:10px 0;padding:9px 12px;border:1px solid #22c55e55;background:#22c55e18;border-radius:9px;font-size:12.5px;color:#22c55e">
-      ✓ ${esc(k.approve_all_name || (k.answer.approveAll && k.answer.approveAll.name) || hvem)} har godkjent hele prosjektet</div>` : ''}
-    ${k.answer && k.answer.comment ? `<div style="margin:10px 0;padding:9px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);background:var(--surface2);border-radius:8px;font-size:12.5px;white-space:pre-wrap">${esc(String(k.answer.comment).slice(0, 2000))}</div>` : ''}
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px">
-      <thead><tr style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)">
-        <th style="text-align:left;padding:6px 8px">Rom</th>
-        <th style="text-align:left;padding:6px 8px">Nå</th>
-        <th style="text-align:left;padding:6px 8px">Kunden foreslår</th>
-        <th style="text-align:right;padding:6px 8px"></th></tr></thead>
-      <tbody>${rows}</tbody></table>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:9px;margin-top:18px;flex-wrap:wrap">
-      <button onclick="_forslagGodkjennAlle()" ${uavklart ? '' : 'disabled'}
-        style="padding:9px 15px;border-radius:8px;font-size:13px;font-weight:600;cursor:${uavklart ? 'pointer' : 'default'};
-               border:1px solid var(--border);background:var(--surface2);color:${uavklart ? 'var(--text)' : 'var(--dim)'}">Godkjenn alle (${uavklart})</button>
-      <div style="display:flex;gap:9px">
-        <button onclick="document.getElementById('fors-rev-ov').remove()" style="padding:9px 15px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer">Lukk</button>
-        <button onclick="_forslagSendSvar()" ${uavklart ? 'disabled' : ''}
-          style="padding:9px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:${uavklart ? 'default' : 'pointer'};border:none;
-                 background:${uavklart ? 'var(--surface2)' : 'var(--accent)'};color:${uavklart ? 'var(--dim)' : '#0d0e10'}">Send svar til kunden</button>
+  const pos = _forslagVinduPos();
+  const ov = document.createElement('div');
+  ov.id = 'fors-rev-ov';
+  ov.style.cssText = `position:fixed;z-index:2100;width:${FORSLAG_VINDU_B}px;max-width:94vw;`
+    + 'max-height:70vh;display:flex;flex-direction:column;background:var(--surface,#16171c);'
+    + 'border:1px solid var(--border);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45);'
+    + 'color:var(--text);overflow:hidden;'
+    + (pos ? `left:${pos.x}px;top:${pos.y}px;` : `right:16px;top:70px;`);
+
+  ov.innerHTML = `
+    <div id="_fors-tittel" style="display:flex;align-items:center;gap:8px;padding:11px 13px;
+        border-bottom:1px solid var(--border);cursor:move;user-select:none;background:var(--surface2)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:700">Kundeforslag${ferdig ? ' · ferdig' : ''}</div>
+        <div style="font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Fra ${hvem}${nar ? ' · ' + nar : ''}</div>
       </div>
+      <button onclick="event.stopPropagation();_forslagVinduMin=true;_forslagRevRender()" title="Minimer"
+        style="background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;line-height:1">▾</button>
+      <button onclick="event.stopPropagation();_forslagLukkVindu()" title="Lukk"
+        style="background:none;border:none;color:var(--muted);font-size:19px;cursor:pointer;line-height:1">&times;</button>
     </div>
-    ${uavklart ? `<div style="font-size:11.5px;color:var(--dim);margin-top:7px;text-align:right">${uavklart} rom er ikke behandlet ennå.</div>` : ''}
-  </div>`;
+    <div style="overflow:auto;flex:1">
+      ${godkjentAlt ? `<div style="margin:10px 11px;padding:8px 10px;border:1px solid #22c55e55;background:#22c55e18;border-radius:8px;font-size:12px;color:#22c55e">
+        ✓ ${esc(k.approve_all_name || (k.answer.approveAll && k.answer.approveAll.name) || hvem)} har godkjent hele prosjektet</div>` : ''}
+      ${k.answer && k.answer.comment ? `<div style="margin:10px 11px;padding:8px 10px;border:1px solid var(--border);border-left:3px solid var(--accent);background:var(--surface2);border-radius:8px;font-size:12px;white-space:pre-wrap">${esc(String(k.answer.comment).slice(0, 2000))}</div>` : ''}
+      ${rows}
+    </div>
+    <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button onclick="_forslagGodkjennAlle()" ${ubeh ? '' : 'disabled'}
+        style="flex:1;min-width:120px;padding:8px 12px;border-radius:8px;font-size:12.5px;font-weight:600;
+               cursor:${ubeh ? 'pointer' : 'default'};border:1px solid var(--border);
+               background:var(--surface2);color:${ubeh ? 'var(--text)' : 'var(--dim)'}">Godkjenn alle (${ubeh})</button>
+      <button onclick="_forslagSendSvar()"
+        style="padding:8px 12px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+               border:1px solid var(--border);background:var(--surface2);color:var(--text)"
+        title="Valgfritt — forslaget er ferdig behandlet uansett">${k.svar_sendt_at
+          ? 'Svar sendt ' + new Date(k.svar_sendt_at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
+          : 'Send svar til kunden (valgfritt)'}</button>
+    </div>`;
   document.body.appendChild(ov);
+  _forslagVinduDrag(ov);
+  _forslagRegistrerTaster();
+}
+
+// Knappene for den valgte raden. Ligger I raden, så de alltid står ved rommet de gjelder.
+function _forslagRadHandlinger(rad, b) {
+  if (_forslagAvslaaFor === rad.roomId) {
+    return `<div onclick="event.stopPropagation()" style="margin-top:8px">
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
+        ${FORSLAG_AVSLAG_GRUNNER.map(g => `<button onclick="document.getElementById('_fors-grunn').value=${_jsStr(g)}"
+          style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);
+                 color:var(--dim);font-size:11px;cursor:pointer">${esc(g)}</button>`).join('')}
+      </div>
+      <input id="_fors-grunn" class="modal-inp" placeholder="Kort begrunnelse til kunden (valgfritt)"
+        style="width:100%;font-size:12px" onkeydown="if(event.key==='Enter'){event.preventDefault();_forslagAvslaaLagre(${rad.roomId});}">
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button onclick="_forslagAvslaaLagre(${rad.roomId})" style="padding:6px 11px;border:none;border-radius:7px;
+          background:var(--accent);color:#0d0e10;font-size:12px;font-weight:600;cursor:pointer">Lagre avslag</button>
+        <button onclick="_forslagAvslaaAvbryt()" style="padding:6px 11px;border:1px solid var(--border);border-radius:7px;
+          background:var(--surface2);color:var(--text);font-size:12px;cursor:pointer">Avbryt</button>
+      </div></div>`;
+  }
+  const knapp = (fn, tekst, primær) =>
+    `<button onclick="event.stopPropagation();${fn}" style="padding:6px 11px;border-radius:7px;font-size:12px;
+      font-weight:${primær ? '600' : '400'};cursor:pointer;border:${primær ? 'none' : '1px solid var(--border)'};
+      background:${primær ? 'var(--accent)' : 'var(--surface2)'};color:${primær ? '#0d0e10' : 'var(--text)'}">${tekst}</button>`;
+  return `<div onclick="event.stopPropagation()" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+    ${b ? knapp(`_forslagAngreRom(${rad.roomId})`, 'Angre')
+        : knapp(`_forslagGodkjennKlikk(${rad.roomId})`, 'Godkjenn', true) + knapp(`_forslagAvslaaKlikk(${rad.roomId})`, 'Avslå')}
+    ${knapp('_forslagNesteRad()', 'Neste →')}</div>`;
+}
+
+// Klikk på en rad velger rommet OG zoomer til det — det er hele poenget med vinduet.
+function _forslagVelgRad(roomId) {
+  _forslagValgtRom = roomId;
+  _forslagAvslaaFor = null;
+  S.ui.selectedRoomId = roomId;
+  if (typeof fitRoom === 'function') fitRoom(roomId);
+  renderSidebar(); render();
+  _forslagRevRender();
+}
+
+function _forslagNesteRad() {
+  const liste = _forslagSvarRader().filter(r => r.room && !r.ok);
+  if (!liste.length) return;
+  const i = liste.findIndex(r => r.roomId === _forslagValgtRom);
+  const neste = liste[(i + 1) % liste.length];
+  _forslagVelgRad(neste.roomId);
+}
+
+function _forslagForrigeRad() {
+  const liste = _forslagSvarRader().filter(r => r.room && !r.ok);
+  if (!liste.length) return;
+  const i = liste.findIndex(r => r.roomId === _forslagValgtRom);
+  _forslagVelgRad(liste[(i - 1 + liste.length) % liste.length].roomId);
+}
+
+// Lukk lar merkene i romlista stå — de er veien tilbake (spec regel 12).
+function _forslagLukkVindu() {
+  document.getElementById('fors-rev-ov')?.remove();
+  document.getElementById('_fors-brikke')?.remove();
+  _forslagVinduMin = false;
+  renderSidebar();
+}
+
+// Piltaster bytter rom, Enter godkjenner, Esc lukker. ⚠ Registreres ÉN gang (ikke per
+// render) — ellers ville hver `_forslagRevRender` lagt på enda en lytter, og Enter ville
+// godkjent N ganger.
+let _forslagTastRegistrert = false;
+function _forslagRegistrerTaster() {
+  if (_forslagTastRegistrert) return;
+  _forslagTastRegistrert = true;
+  window.addEventListener('keydown', e => {
+    if (!document.getElementById('fors-rev-ov')) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+      if (e.key === 'Escape') { _forslagAvslaaAvbryt(); e.stopPropagation(); }
+      return;
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); _forslagNesteRad(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _forslagForrigeRad(); }
+    else if (e.key === 'Enter' && _forslagValgtRom != null
+             && !_forslagRevState.behandlet.has(_forslagValgtRom)) {
+      e.preventDefault(); _forslagGodkjennKlikk(_forslagValgtRom);
+    } else if (e.key === 'Escape') { e.preventDefault(); _forslagLukkVindu(); }
+  });
+}
+
+// Drag i tittellinja. Klemmes til viewport, så vinduet aldri kan dras ut av syne.
+function _forslagVinduDrag(ov) {
+  const h = ov.querySelector('#_fors-tittel');
+  if (!h) return;
+  h.addEventListener('pointerdown', e => {
+    if (e.target.tagName === 'BUTTON') return;
+    const r = ov.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const flytt = ev => {
+      const x = Math.max(4, Math.min(window.innerWidth - r.width - 4, ev.clientX - dx));
+      const y = Math.max(4, Math.min(window.innerHeight - 60, ev.clientY - dy));
+      ov.style.left = x + 'px'; ov.style.top = y + 'px'; ov.style.right = 'auto';
+      _forslagVinduLagrePos(x, y);
+    };
+    const slipp = () => { window.removeEventListener('pointermove', flytt); window.removeEventListener('pointerup', slipp); };
+    window.addEventListener('pointermove', flytt);
+    window.addEventListener('pointerup', slipp);
+    e.preventDefault();
+  });
 }
 
 function _forslagGodkjennKlikk(roomId) {
   const rad = _forslagSvarRader().find(r => r.roomId === roomId);
   if (!rad) return;
+  // 053: snapshot FØR motoren, så «Angre» kan legge rommet tilbake. Samme funksjonspar
+  // `_forslagGodkjennRom` alt bruker på feil-veien (STEG 0.4) — ikke en ny gjenopprettingsvei.
+  // `_cloneRoomProductItem` tar `{...item}`, så `multiCableGroup`/`multiCableIndex` følger med;
+  // soner og hindringer ligger ikke i ROOM_PRODUCT_KEYS og røres aldri.
+  const foer = _snapshotRoomProducts ? _snapshotRoomProducts(roomId) : null;
   const res = _forslagGodkjennRom(rad);
   if (res.ok) {
     _forslagRevFeil.delete(roomId);
-    _forslagRevState.behandlet.set(roomId, { status: 'godkjent' });
+    if (foer) _forslagAngre.set(roomId, foer);
+    // ⚠ `resultat` må settes HER også, ikke bare når `behandlet` seedes fra databasen — ellers
+    // mangler «Ble: …»-linja helt til siden lastes på nytt, altså akkurat når den trengs minst.
+    _forslagRevState.behandlet.set(roomId, { status: 'godkjent', resultat: _forslagRomResultat(roomId) });
+    _forslagLagreBeslutning(roomId, { status: 'godkjent' });
     _showToast && _showToast('«' + ((rad.room && rad.room.name) || 'Rommet') + '» er lagt ut på nytt — Ctrl+Z angrer', 'ok');
   } else {
     // Feilet motoren står raden UBEHANDLET med en ⚠, så Kenneth kan prøve igjen eller avslå —
@@ -69675,11 +70096,49 @@ function _forslagGodkjennKlikk(roomId) {
   _forslagRevRender();
 }
 
+// 053: Avslå åpner et felt I RADEN. ⚠ MÅLT (STEG 0): dette var `window.prompt`, som er en
+// systemdialog uten hurtigvalg — og som ikke finnes i alle kjøremiljøer.
+const FORSLAG_AVSLAG_GRUNNER = [
+  'Beholder dagens — gir jevnere varme',
+  'For høy effekt for rommet',
+  'Produktet passer ikke her',
+];
+let _forslagAvslaaFor = null;     // roomId feltet står åpent for
+
 function _forslagAvslaaKlikk(roomId) {
-  const grunn = window.prompt('Kort begrunnelse til kunden:', 'Beholder dagens — gir jevnere varme');
-  if (grunn === null) return;
-  _forslagRevState.behandlet.set(roomId, { status: 'avslaatt', grunn: String(grunn).slice(0, 300) });
+  _forslagAvslaaFor = roomId;
+  S.ui.selectedRoomId = roomId;
   _forslagRevRender();
+  setTimeout(() => { const el = document.getElementById('_fors-grunn'); if (el) { el.focus(); el.select(); } }, 20);
+}
+
+function _forslagAvslaaLagre(roomId) {
+  const el = document.getElementById('_fors-grunn');
+  const grunn = String((el && el.value) || '').trim().slice(0, 300);
+  _forslagAvslaaFor = null;
+  _forslagRevState.behandlet.set(roomId, { status: 'avslaatt', grunn });
+  _forslagLagreBeslutning(roomId, { status: 'avslaatt', grunn });
+  renderSidebar();
+  _forslagRevRender();
+}
+
+function _forslagAvslaaAvbryt() { _forslagAvslaaFor = null; _forslagRevRender(); }
+
+// 053: Angre ett rom — utlegget tilbake slik det var, og beslutningen bort (også i databasen,
+// og `status` tilbake til 'answered' hvis forslaget var ferdigstilt).
+function _forslagAngreRom(roomId) {
+  const snap = _forslagAngre.get(roomId);
+  if (snap) {
+    pushUndo();
+    try { _restoreRoomProductSnapshot(roomId, snap); } catch (e) { /* bedre enn å krasje */ }
+    _forslagAngre.delete(roomId);
+  }
+  _forslagRevState.behandlet.delete(roomId);
+  _forslagRevFeil.delete(roomId);
+  _forslagLagreBeslutning(roomId, null);
+  renderSidebar(); render();
+  _forslagRevRender();
+  _showToast && _showToast('Angret — rommet er tilbake slik det var', 'ok');
 }
 
 // ETT angre-steg for hele runden (prompt: «Godkjenn alle → samme per rom i rekkefølge, ett pushUndo totalt»).
@@ -69689,9 +70148,14 @@ function _forslagGodkjennAlle() {
   pushUndo();
   let ok = 0, feilet = 0;
   for (const rad of rader) {
+    const foer = _snapshotRoomProducts ? _snapshotRoomProducts(rad.roomId) : null;
     const res = _forslagGodkjennRom(rad, { skipPushUndo: true });
-    if (res.ok) { _forslagRevState.behandlet.set(rad.roomId, { status: 'godkjent' }); ok++; }
-    else { _forslagRevFeil.set(rad.roomId, res.feil); feilet++; }
+    if (res.ok) {
+      if (foer) _forslagAngre.set(rad.roomId, foer);
+      _forslagRevState.behandlet.set(rad.roomId, { status: 'godkjent', resultat: _forslagRomResultat(rad.roomId) });
+      _forslagLagreBeslutning(rad.roomId, { status: 'godkjent' });   // 053
+      ok++;
+    } else { _forslagRevFeil.set(rad.roomId, res.feil); feilet++; }
   }
   renderSidebar(); render();
   _forslagRevRender();
@@ -69701,26 +70165,40 @@ function _forslagGodkjennAlle() {
 async function _forslagSendSvar() {
   const k = _forslagLinkCache;
   if (!k) return;
+  // 053: bygges av `applied_result` — den varige protokollen — ikke av Map-en i minnet.
+  // Knappen kan trykkes fra en toast uten at panelet noen gang ble åpnet, og da er
+  // `_forslagRevState` null.
+  const lagret = new Map(_forslagAppliedResult().map(x => [x.roomId, x]));
   const svar = [];
   for (const rad of _forslagSvarRader()) {
     if (!rad.room || rad.ok) continue;
-    const b = _forslagRevState.behandlet.get(rad.roomId);
+    const b = lagret.get(rad.roomId);
     svar.push({ roomId: rad.roomId, roomName: (rad.room.name || 'Rom'),
-      status: b ? b.status : 'ubehandlet', grunn: (b && b.grunn) || undefined });
+      status: b ? b.status : 'ubehandlet', grunn: (b && b.grunn) || undefined,
+      resultat: (b && b.resultat) || undefined });
   }
+  // 053: ⚠ denne var ENESTE vei til `applied`. Nå settes den av ferdig-regelen i
+  // `_forslagLagreBeslutning`, og sendingen er en egen, valgfri handling (spec regel 13).
+  // `applied_result` skrives her også, så en sending alltid speiler det som faktisk er lagret.
+  const naa = new Date().toISOString();
   try {
     await _db.from('kundelenker')
-      .update({ status: 'applied', applied_at: new Date().toISOString(), applied_result: svar })
+      .update({ status: 'applied', applied_at: k.applied_at || naa, applied_result: svar, svar_sendt_at: naa })
       .eq('id', k.id);
+    k.status = 'applied'; k.applied_at = k.applied_at || naa;
+    k.applied_result = svar; k.svar_sendt_at = naa;
   } catch (e) {
     _showToast && _showToast('Kunne ikke lagre behandlingen: ' + e.message, 'warn');
     return;
   }
   try { await _db.functions.invoke('kundelenke-mail', { body: { token: k.token, kind: 'forslag_svar' } }); }
   catch (e) { /* 029: svaret er lagret uansett */ }
-  document.getElementById('fors-rev-ov')?.remove();
-  _showToast && _showToast('Svaret er sendt til kunden og forslaget er lukket', 'ok');
+  _showToast && _showToast('Svaret er sendt til kunden', 'ok');
   await _kundeRefreshStatus();
+  // Etter sending er lenka `applied` → `_forslagLinkCache` er null. `_forslagSisteCache` bærer
+  // den videre, så vinduet kan vise «Svar sendt …» i stedet for å forsvinne.
+  if (!_forslagLinkCache && (!_forslagSisteCache || _forslagSisteCache.id !== k.id)) _forslagSisteCache = k;
+  if (document.getElementById('fors-rev-ov')) _forslagRevRender();
 }
 
 let _pendingDeleteId = null;

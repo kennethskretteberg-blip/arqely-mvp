@@ -4,6 +4,72 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundeforslag: beslutningene lagres per rom, flyttbart vindu, kundeønske i romlista — 2026-10-10
+
+Prompt 053. Kenneth: «Jeg trykker godkjenn og lukk — ikke «send svar til kunde». Det står
+fortsatt en tekst oppe til venstre om at forslag fra kunde må gås gjennom.»
+
+### STEG 0 — målt, og årsaken er én linje
+
+044 lagret **aldri hva Kenneth bestemte**, bare hva kunden sendte. `_forslagRevState.behandlet`
+er en Map i minnet; `_kundeReviewShownFor` likeså. Eneste vei til `status='applied'` gikk
+gjennom «Send svar til kunden».
+
+Målt i appen: Godkjenn → produktet byttet, `behandlet: 1`, ett angre-steg. «Last på nytt» →
+`behandlet: 0`, panelet viser Godkjenn-knappen igjen, **men utlegget er fortsatt byttet**,
+`status` fortsatt `answered`, `applied_result` fortsatt `null`.
+
+**Parentesen i prompten besvart:** en ny Godkjenn gir **1 kabel, ikke 2** —
+`_clearRoomProductCollections` rydder før motoren. Dobbelt utlegg var aldri risikoen.
+
+Panelet var `position:fixed; inset:0` med `rgba(0,0,0,.6)` bakdropp — altså en modal som dekket
+lerretet, og klikk utenfor lukket den. Avslå var `window.prompt`.
+
+### Beslutningene lagres i databasen, med én gang
+
+`applied_result` (jsonb, fra 044) brukes nå som løpende protokoll, ikke sluttoppgjør: hver
+Godkjenn/Avslå merges inn per `roomId`, med `by`, `at` og — for godkjente — `resultat` **målt
+av rommet etterpå** (`_computeRoomStats`), ikke gjentatt fra forslaget.
+
+Når alle rader som ikke er `ok` har en beslutning, settes `status='applied'` **automatisk og
+uten e-post**. Rader med `ok: true` og rom som ikke finnes lenger teller som behandlet.
+«Send svar til kunden (valgfritt)» er en egen knapp som i tillegg setter ny kolonne
+`svar_sendt_at` — skilt fra `applied_at` med vilje, fordi «ferdig» og «kunden er varslet» er
+to ting.
+
+`behandlet` seedes nå fra `applied_result`, og `_kundeMaybeOpenReview` ser på **ubehandlede
+rader** i stedet for bare `status`. Merket i prosjektlista forsvinner av seg selv
+(`_fetchKundeStatus` henter bare open/answered), og prosjektinfo viser i stedet
+«✓ Forslag behandlet 10. okt · Se forslaget».
+
+### Vinduet
+
+Ikke lenger en modal: 440 px bredt, høyre side, dras i tittellinja (posisjonen huskes i
+`sessionStorage`), minimeres til en brikke «💬 Kundeforslag · 3 igjen», og **klikk på lerretet
+lukker det ikke**. Én rad per rom med «Nå:», «Kunden foreslår:», kommentaren i kursiv og — etter
+godkjenning — «Ble: …». Klikk på en rad velger rommet og zoomer til det, så utlegget skifter
+mens Kenneth ser på. ↑/↓ bytter rom, Enter godkjenner, Esc lukker. Avslå åpner et felt **i
+raden** med tre hurtigvalg. Hvert rom har **Angre**, som legger rommet tilbake og tar `status`
+tilbake til `answered`.
+
+### Kundeønske i romlista
+
+Rom med ubehandlet ønske får blå venstrekant og 💬 etter navnet; etasje-toppen viser
+«💬 N kundeønsker». Er rommet valgt, står ruta «Kundeønske» rett under raden med Godkjenn ·
+Avslå · Åpne alle — og den kaller **de samme funksjonene** som vinduet, ikke en kopi.
+
+### Én ekte feil funnet ved å kjøre
+
+Etter «Send svar» blir lenka `applied`, og `_kundeRefreshStatus` plukker bare open/answered →
+`_forslagLinkCache` ble **null**, og vinduets re-render krasjet på `k.answered_by_name`.
+`_forslagSisteCache` bærer lenka videre, så vinduet kan vise «Svar sendt 10. okt» i stedet for
+å forsvinne.
+
+**Regresjon:** 17 batterier, **665 sjekker** (fra 652), alle grønne. Ti nye kilde-påstander i
+`_kundeforslagRegressionTest`, alle negativkontrollert ved å mutere kilden.
+
+---
+
 ## Plantegning: målestokk fra motoren, rom på lerretet, lesbar vegg-sjekk — 2026-10-10
 
 Prompt 052. Kenneth: «Så fort jeg setter målestokk, kommer det dårlige resultatet: bare rom i
