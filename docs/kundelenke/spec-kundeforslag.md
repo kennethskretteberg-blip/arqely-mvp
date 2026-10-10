@@ -22,10 +22,14 @@
    kundenavn eller andre prosjekter.** (Kenneth 08.10: produktnavn er greit.)
 3. **Alternativene er de reelle produktene** i samme familie som ligger i rommet (kabel: samme
    familie, f.eks. InFloor 10T; folie/matte: samme familie, variantene i W/m² eller bredde).
+   **(054)** For kabel fortsetter lista forbi største enkeltkabel med `N × like` (N ≤ 3), og
+   hver rad bærer `cableCount`. En rad er identifisert av **(produkt, antall)** — 1 stk og
+   2 stk 1100 W er to ulike rader med ulik CC.
    Tallene regnes med Varmeplans egne funksjoner (`selectCableByPower`-kandidatene gir W, W/m², CC
    per produkt) — aldri en egen formel på kundesiden.
 4. **Ønsket flateeffekt** er en snarvei: kunden taster f.eks. 80 W/m² → kortet hopper til nærmeste
-   produkt under og over (`below`/`above` fra `selectCableByPower`), begge vist med sine tall.
+   produkt under og over, begge vist med sine tall. **(054)** Hentes fra **stigen** (regel 3),
+   ikke fra `selectCableByPower.below/above` — ellers ville «Finn» hatt et annet tak enn pilene.
 5. **Retning** (vannrett/loddrett) kan foreslås for kabel, matte og folie. Forhåndsvisning hos
    kunden er **ikke** et nytt utlegg (for tungt og for mye som kan gå galt uten innlogget bruker);
    kunden ser tallene og en pil for retning. Utlegget tegnes når Kenneth godkjenner.
@@ -74,5 +78,6 @@
 
 - Live omtegning av utlegget hos kunden.
 - Bytte produkt**familie** i et rom som alt har varme — det er en samtale, ikke et klikk.
-  (Tomme rom: se regel 15.)
+  (Tomme rom: **oppheves** av regel 15 — der velger kunden type → serie → variant fritt.)
+- Blandede kabler (1100 + 1300) som ett klikk. Bare N × like.
 - Pris.

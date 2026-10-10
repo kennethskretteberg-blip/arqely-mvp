@@ -50,7 +50,27 @@ Kenneth svarer til slutt.
 
 ## 054
 
--
+- **Taket er N ≤ 3**, som prompten foreslo. Med 3 er stigen i et 30 m² rom allerede 38 trinn.
+  Si fra om du vil ha flere — fasebalanse (3/6) er en annen diskusjon, og motoren kjenner den
+  alt; den hører etter min mening hjemme i ditt panel, ikke i kundens.
+- **⚠ Terskelen måtte være mot N−1, ikke mot N=1.** Med terskel mot største enkeltkabel
+  overlevde «3 stk 700 W = 2100 W» og ble det FØRSTE steget over 2000 W — tre kurser for 100 W
+  mer, i stedet for din «2 stk 1100 W = 2200 W». Med riktig terskel er sekvensen nøyaktig din:
+  2000 → 2200 → 2400 → 2600.
+- **«To kabler → to kurser/termostatutganger» står der** (grå linje under tallene), men bare
+  når N > 1. Si fra om det er for teknisk for en sluttkunde.
+- **Folie er holdt utenfor** i «Foreslå varme», som du sa — bare Kabel og Matte.
+- **Alle innendørs rom uten produkt** kan få forslag, unntatt snørom og fryserom. Jeg skiller
+  altså ikke mellom «bevisst uten varme» (bod) og «ikke prosjektert ennå» — 052s `_planNoHeat`
+  kunne brukt til det. Si fra om boder skal utelates.
+- **Målt om leverandørfilteret holder anonymt:** `_upcScopeProducts` gir nøyaktig det samme
+  innlogget og utlogget (44 kabler, 57 matter), inaktive er borte, og `_productVisibleToOrg`
+  er med. Kunden ser altså bare det du selv kan velge.
+- **Bøyeradius stanset ingen rader** i testrommet (32 mm krever 1,6 cm, smaleste CC var 5,0).
+  Den stopper først ved svært tette utlegg.
+- **⚠ `_famKeyOf` må kalles med `true` som andre argument.** Uten det splitter den navnet og
+  gir «InFloor 10T 1100W» som «serie» — altså én serie per produkt. Prompten antok «10T · 17T»,
+  og det stemmer, men bare med flagget.
 
 ## 055
 

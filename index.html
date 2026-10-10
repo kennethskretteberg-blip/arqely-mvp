@@ -7711,8 +7711,15 @@ function _forslagAlternativer(room) {
                           : (!c.ccValid ? (c.cc_cm < _ccLimits(c.product).minSp ? 'for tett' : 'for langt mellom')
                                         : 'for trang bøy'),
       }));
-    const naaIdx = liste.findIndex(x => x.productId === prod.id);
-    return { type: 'kabel', liste, naaIdx, prod, res };
+    // 054: stigen fortsetter med N × like kabler over største GYLDIGE enkeltkabel.
+    const storsteGyldigW = liste.filter(x => x.valid).reduce((m, x) => Math.max(m, x.W), 0);
+    liste.push(..._forslagFlerkabelRader(room, _forslagKabelSerie(familie, prod), storsteGyldigW));
+    liste.sort((a, b) => (a.W - b.W) || ((a.cableCount || 1) - (b.cableCount || 1)));
+    // `naaIdx` må treffe BÅDE produkt og antall kabler — ellers peker «som nå» på 1 stk når
+    // rommet har 2.
+    const naaN = (S.cables || []).filter(c => c.roomId === room.id).length || 1;
+    const naaIdx = liste.findIndex(x => x.productId === prod.id && (x.cableCount || 1) === naaN);
+    return { type: 'kabel', liste, naaIdx: naaIdx >= 0 ? naaIdx : liste.findIndex(x => x.productId === prod.id), prod, res };
   }
 
   // Matte/folie: kunden piler mellom W/m²-VARIANTENE, aldri mellom bredder eller lengder —
@@ -7751,6 +7758,67 @@ function _forslagAlternativer(room) {
 // Skillet trenger ingen navneparsing: kabeltypen ER `watt_per_m` (målt: 17 W/m → 25 produkter,
 // 10 W/m → 19). Varmeplans eget forslagspanel får fortsatt hele familien — `getProductFamily`
 // er urørt; det er bare kundens pileliste som er snevret inn.
+// ── 054: stigen fortsetter forbi største kabel ───────────────────────────────────────────
+//
+// Kenneth: «InFloor 10T, maks 2000 W: neste steg 2 stk 1100 W = 2200 W, neste 2 stk 1200 W.»
+//
+// ⚠ MÅLT 10.10.2026 (STEG 0.1) i et 30 m² rom: største gyldige enkeltkabel er 10T 2000W/200m
+// med CC 15,0 cm og 67 W/m². To stk 1100W/110m gir CC 13,6 cm — innenfor [5, 50] — og
+// 73 W/m². Bøyeradius 32 mm krever 1,6 cm, det er 6,8 cm. Stigen kan altså fortsette.
+//
+// Formelen er HENTET, ikke ny: `roomAreas` for arealet, `_ccLimits` for grensene, og samme
+// bøyeradius-test som `selectCableByPower`. N=1-radene kommer fortsatt fra `selectCableByPower`
+// selv (prompt: «Skal IKKE endre selectCableByPower»).
+const FORSLAG_MAX_KABLER = 3;
+
+function _forslagFlerkabelRader(room, serie, storsteGyldigW) {
+  const areas = (typeof roomAreas === 'function') ? roomAreas(room) : null;
+  const nettoM2 = areas ? areas.net / 10000 : 0;
+  if (nettoM2 <= 0) return [];
+  const ut = [];
+  // ⚠ Terskelen gjelder N−1, ikke N=1. Mot N=1 ville «3 stk 700 W = 2100 W» overlevd og blitt
+  // det FØRSTE steget over 2000 W — tre kurser for 100 W mer, i stedet for Kenneths
+  // «2 stk 1100 W = 2200 W». Målt: den forsvinner med riktig terskel.
+  let forrigeMaksW = storsteGyldigW;
+  for (let N = 2; N <= FORSLAG_MAX_KABLER; N++) {
+    let maksDenneN = forrigeMaksW;
+    for (const prod of serie) {
+      if (!prod.cable_length_m || !prod.watt_per_m) continue;
+      const enkeltW = prod.watt_per_m * prod.cable_length_m;
+      if (enkeltW <= 0) continue;
+      const totalW = N * enkeltW;
+      // Stigen skal STIGE: 2 × 500 W hører ikke hjemme når 1000 W finnes som én kabel.
+      if (!(totalW > forrigeMaksW)) continue;
+      const cc = (nettoM2 / (N * prod.cable_length_m)) * 100;
+      const { minSp, maxWarn, maxHard } = _ccLimits(prod);
+      const minBend = (prod.min_bend_radius_mm || 0) / 10;
+      const ccValid = cc >= minSp && cc <= maxHard;
+      const bendOk = !(minBend > 0 && (cc / 2) < minBend);
+      ut.push({
+        productId: prod.id, cableCount: N,
+        navn: N + ' stk ' + prod.name,
+        W: Math.round(totalW), lengdeM: prod.cable_length_m,
+        wm2: Math.round(totalW / nettoM2),
+        flateeffekt: cc > 0 ? Math.round(prod.watt_per_m / (cc / 100)) : 0,
+        cc: Math.round(cc * 10) / 10,
+        valid: ccValid && bendOk,
+        overMax: ccValid && cc > maxWarn,
+        advarsel: !ccValid ? (cc < minSp ? 'for tett' : 'for langt mellom')
+                 : !bendOk ? 'for trang bøy' : (cc > maxWarn ? 'over anbefalt avstand' : ''),
+      });
+      if (ccValid && bendOk && totalW > maksDenneN) maksDenneN = totalW;
+    }
+    forrigeMaksW = maksDenneN;
+  }
+  // Én rad per effekt: ved lik total-W vinner FÆRREST kabler.
+  const beste = new Map();
+  for (const r of ut) {
+    const f = beste.get(r.W);
+    if (!f || r.cableCount < f.cableCount) beste.set(r.W, r);
+  }
+  return [...beste.values()].sort((a, b) => a.W - b.W);
+}
+
 function _forslagKabelSerie(familie, prod) {
   const wpm = prod.watt_per_m;
   const serie = familie.filter(p => p.watt_per_m === wpm && p.cable_length_m);
@@ -7808,7 +7876,8 @@ async function _forslagStart(token) {
 // ── Valg per rom ───────────────────────────────────────────────────────────
 function _forslagSettValg(roomId, endring) {
   if (!_forslagState) return;
-  const naa = _forslagState.valg.get(roomId) || { ok: false, productId: null, targetWm2: null, direction: null, comment: '' };
+  const naa = _forslagState.valg.get(roomId)
+    || { ok: false, productId: null, cableCount: null, nyType: null, targetWm2: null, direction: null, comment: '' };
   _forslagState.valg.set(roomId, Object.assign(naa, endring));
   _forslagRenderBunn();
   _presentRenderDetail();
@@ -7837,20 +7906,188 @@ function _forslagPil(roomId, retning) {
   const alt = _forslagAlternativer(room);
   if (!alt || alt.liste.length < 2) return;
   const v = _forslagValg(roomId);
-  let i = alt.liste.findIndex(x => v && v.productId === x.productId);
+  // 054: identiteten til en rad er (produkt, antall) — ikke produktet alene.
+  const vN = (v && v.cableCount) || 1;
+  let i = alt.liste.findIndex(x => v && v.productId === x.productId && (x.cableCount || 1) === vN);
   if (i < 0) i = alt.naaIdx >= 0 ? alt.naaIdx : 0;
   for (let steg = i + retning; steg >= 0 && steg < alt.liste.length; steg += retning) {
     if (alt.liste[steg].valid) {
       const k = alt.liste[steg];
-      _forslagSettValg(roomId, { ok: false, productId: k.productId, targetWm2: k.targetWm2 || null });
+      _forslagSettValg(roomId, { ok: false, productId: k.productId,
+        cableCount: k.cableCount || 1, targetWm2: k.targetWm2 || null });
       return;
     }
   }
 }
 
 // ── Kortet ─────────────────────────────────────────────────────────────────
+// ── 054: rom uten varme kan få et forslag ────────────────────────────────────────────────
+// Spec regel 15. «Ikke i v1»-punktet om familiebytte oppheves KUN for tomme rom — et rom som
+// alt har kabel bytter aldri kabeltype (043-regelen står).
+//
+// Snørom og fryserom holdes utenfor: snø er en annen modul med egne regler, og et fryserom har
+// kabel UNDER isolasjonen med reservekabel (025) — ingen av delene er et kundevalg.
+function _forslagKanForeslaaVarme(room) {
+  if (!room) return false;
+  if (room.moduleType === 'snow') return false;
+  if (room.roomType === 'fryserom') return false;
+  return !_presentRoomProduct(room);
+}
+
+// Seriene kunden kan velge mellom. Samme kilde som Kenneths eget produktvalg
+// (`_upcScopeProducts` + `_famKeyOf`), så kunden aldri ser noe Kenneth ikke kan velge.
+// ⚠ MÅLT (STEG 0.4): `_upcScopeProducts` virker ANONYMT — samme 44 kabler og 57 matter
+// innlogget og utlogget. Og `_famKeyOf` må kalles med `hasFamily = true`; uten andre argument
+// splitter den navnet og gir én «serie» per produkt («InFloor 10T 1100W»), ikke «InFloor 10T».
+function _forslagSerier(modType, room) {
+  const prods = (typeof _upcScopeProducts === 'function') ? _upcScopeProducts(modType) : [];
+  const grupper = new Map();
+  for (const p of prods) {
+    const key = _famKeyOf(p, true);
+    if (!grupper.has(key)) grupper.set(key, []);
+    grupper.get(key).push(p);
+  }
+  // Bare serier som har minst én GYLDIG rad i dette rommet.
+  const ut = [];
+  for (const [navn, liste] of grupper) {
+    const rader = _forslagNyeRader(room, modType, liste);
+    if (rader.some(r => r.valid)) ut.push({ navn, liste, rader });
+  }
+  return ut;
+}
+
+// Pilelista for et TOMT rom: stigen for kabel, W/m²-variantene for matte.
+function _forslagNyeRader(room, modType, serie) {
+  if (modType === 'cable') {
+    const kabler = serie.filter(p => p.cable_length_m && p.watt_per_m);
+    if (!kabler.length) return [];
+    const enkelt = (typeof selectCableByPower === 'function')
+      ? selectCableByPower(room.id, kabler, _roomTargetWm2 ? _roomTargetWm2(room.id) : 100) : null;
+    const liste = (enkelt && enkelt.candidates ? enkelt.candidates : []).map(c => ({
+      productId: c.product.id, cableCount: 1, navn: c.product.name,
+      W: Math.round(c.productW), lengdeM: c.product.cable_length_m,
+      wm2: Math.round(c.wm2),
+      flateeffekt: c.cc_cm > 0 ? Math.round(c.product.watt_per_m / (c.cc_cm / 100)) : 0,
+      cc: Math.round(c.cc_cm * 10) / 10, valid: !!c.valid, overMax: !!c.ccOverMax, advarsel: '',
+    })).sort((a, b) => a.W - b.W);
+    const maks = liste.filter(x => x.valid).reduce((m, x) => Math.max(m, x.W), 0);
+    liste.push(..._forslagFlerkabelRader(room, kabler, maks));
+    return liste.sort((a, b) => (a.W - b.W) || ((a.cableCount || 1) - (b.cableCount || 1)));
+  }
+  // Matte: én rad per W/m²-variant, som for et rom som alt har matte.
+  const perWm2 = new Map();
+  for (const f of serie) { const w = f.watt_per_m2; if (w && !perWm2.has(w)) perWm2.set(w, f); }
+  return [...perWm2.entries()].sort((a, b) => a[0] - b[0])
+    .map(([w, rep]) => ({ productId: rep.id, targetWm2: w, navn: rep.name, wm2: w, valid: true }));
+}
+
+// Tre trinn I KORTET: type → serie → variant. Tilstanden ligger i kundens eget valg
+// (`_forslagValg`), ikke i en egen modul-variabel — da overlever den en re-render.
+function _forslagTomtRomKort(room) {
+  const rid = room.id;
+  const v = _forslagValg(rid) || {};
+  const smal = _kundeErSmal();
+  const brikke = (tekst, fn, paa) =>
+    `<button onclick="${fn}" style="min-height:${smal ? 44 : 34}px;padding:0 13px;cursor:pointer;border-radius:8px;
+      font-size:12.5px;font-weight:600;border:1px solid ${paa ? 'var(--accent)' : 'var(--border)'};
+      background:${paa ? 'var(--accent)' : 'var(--surface2)'};color:${paa ? '#0d0e10' : 'var(--text)'}">${tekst}</button>`;
+
+  if (!v.foreslaaVarme && !v.ok && !v.nyType) {
+    return `<div style="margin-top:14px;padding-top:12px;border-top:2px solid var(--accent)">
+      <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:2px">Hva synes du?</div>
+      <div style="font-size:11.5px;color:var(--dim);line-height:1.45">Ingen varme er planlagt i dette rommet.</div>
+      <div style="display:flex;gap:7px;margin-top:11px">
+        ${brikke('✓ OK uten varme', `_forslagSettValg(${rid},{ok:true,productId:null,nyType:null,targetWm2:null})`, !!v.ok)}
+        ${brikke('Foreslå varme', `_forslagSettValg(${rid},{ok:false,foreslaaVarme:true})`, false)}
+      </div></div>`;
+  }
+  if (v.ok) {
+    return `<div style="margin-top:14px;padding-top:12px;border-top:2px solid var(--accent)">
+      <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px">Hva synes du?</div>
+      <div style="display:flex;gap:7px">
+        ${brikke('✓ OK uten varme', `_forslagSettValg(${rid},{ok:true})`, true)}
+        ${brikke('Foreslå varme', `_forslagSettValg(${rid},{ok:false,foreslaaVarme:true})`, false)}
+      </div></div>`;
+  }
+
+  // Trinn 1 — type
+  const typer = [['cable', 'Kabel'], ['mat', 'Matte']];
+  let h = `<div style="margin-top:14px;padding-top:12px;border-top:2px solid var(--accent)">
+    <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px">Foreslå varme</div>
+    <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:5px">Type</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${typer.map(([k, n]) =>
+      brikke(n, `_forslagSettValg(${rid},{nyType:'${k}',serie:null,productId:null,cableCount:null,targetWm2:null})`, v.nyType === k)).join('')}</div>`;
+
+  if (v.nyType) {
+    const serier = _forslagSerier(v.nyType, room);
+    h += `<div style="margin-top:11px">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:5px">Serie</div>
+      ${serier.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${serier.map(sr =>
+        brikke(esc(sr.navn), `_forslagSettValg(${rid},{serie:${_jsStr(sr.navn)},productId:null,cableCount:null,targetWm2:null})`, v.serie === sr.navn)).join('')}</div>`
+        : '<div style="font-size:11.5px;color:var(--dim)">Ingen serie passer i dette rommet.</div>'}</div>`;
+
+    const valgtSerie = serier.find(sr => sr.navn === v.serie);
+    if (valgtSerie) {
+      const rader = valgtSerie.rader.filter(r => r.valid);
+      // Start på raden nærmest rommets standard-flateeffekt — samme tall Kenneths eget panel bruker.
+      const maal = (typeof _roomTargetWm2 === 'function') ? _roomTargetWm2(rid) : 100;
+      let idx = v.productId
+        ? rader.findIndex(r => r.productId === v.productId && (r.cableCount || 1) === (v.cableCount || 1))
+        : -1;
+      if (idx < 0) {
+        idx = 0; let best = Infinity;
+        rader.forEach((r, i) => { const d = Math.abs((r.flateeffekt || r.wm2 || 0) - maal); if (d < best) { best = d; idx = i; } });
+      }
+      const k = rader[idx];
+      if (k) {
+        const tall = v.nyType === 'cable'
+          ? `${k.W} W · ${k.lengdeM} m<br><span style="color:var(--dim)">Flateeffekt ${k.flateeffekt} W/m² · CC ${k.cc} cm</span>`
+          : `${k.wm2} W/m²`;
+        const pil = (tegn, d, av) => `<button ${av ? 'disabled' : ''} onclick="_forslagNyPil(${rid},${d})"
+          style="width:${smal ? 46 : 34}px;height:${smal ? 46 : 34}px;flex:0 0 auto;cursor:${av ? 'default' : 'pointer'};
+          border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:${av ? 'var(--dim)' : 'var(--text)'};font-size:14px">${tegn}</button>`;
+        h += `<div style="margin-top:11px">
+          <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin-bottom:6px">Variant</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${pil('▼', -1, idx <= 0)}
+            <div style="flex:1;min-width:0;font-size:12.5px;line-height:1.45;text-align:center"><b>${esc(k.navn)}</b><br>${tall}</div>
+            ${pil('▲', 1, idx >= rader.length - 1)}
+          </div>
+          ${(k.cableCount || 1) > 1 ? '<div style="font-size:11px;color:var(--dim);margin-top:5px;text-align:center">To kabler → to kurser/termostatutganger</div>' : ''}
+        </div>`;
+        // Valget lagres først når kunden har sett det — ellers ville «Serie» alene sendt et forslag.
+        if (!v.productId) setTimeout(() => _forslagSettValg(rid, { productId: k.productId, cableCount: k.cableCount || 1, targetWm2: k.targetWm2 || null }), 0);
+      }
+    }
+  }
+  h += `<div style="margin-top:11px">
+      <textarea id="_fors-komm" rows="2" placeholder="Kommentar (valgfritt)" oninput="_forslagKomm(${rid}, this.value)"
+        style="width:100%;padding:8px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12.5px;font-family:inherit;resize:vertical">${esc(v.comment || '')}</textarea>
+    </div>
+    <div style="display:flex;gap:7px;margin-top:11px">
+      ${brikke('✓ OK uten varme', `_forslagSettValg(${rid},{ok:true,nyType:null,serie:null,productId:null,foreslaaVarme:false})`, false)}
+    </div></div>`;
+  return h;
+}
+
+// Pil i variant-trinnet for et tomt rom.
+function _forslagNyPil(roomId, retning) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const v = _forslagValg(roomId) || {};
+  const serier = _forslagSerier(v.nyType, room);
+  const sr = serier.find(x => x.navn === v.serie);
+  if (!sr) return;
+  const rader = sr.rader.filter(r => r.valid);
+  let i = rader.findIndex(r => r.productId === v.productId && (r.cableCount || 1) === (v.cableCount || 1));
+  if (i < 0) i = 0;
+  const n = Math.max(0, Math.min(rader.length - 1, i + retning));
+  const k = rader[n];
+  if (k) _forslagSettValg(roomId, { productId: k.productId, cableCount: k.cableCount || 1, targetWm2: k.targetWm2 || null });
+}
+
 function _forslagKortHtml(room) {
   if (!_forslagAktiv() || !room) return '';
+  if (_forslagKanForeslaaVarme(room)) return _forslagTomtRomKort(room);
   const alt = _forslagAlternativer(room);
   const v = _forslagValg(room.id) || {};
   const rid = room.id;
@@ -7862,7 +8099,10 @@ function _forslagKortHtml(room) {
 
   let valgtIdx = -1, valgt = null;
   if (alt) {
-    valgtIdx = v.productId ? alt.liste.findIndex(x => x.productId === v.productId) : alt.naaIdx;
+    const vN2 = v.cableCount || 1;   // 054
+    valgtIdx = v.productId
+      ? alt.liste.findIndex(x => x.productId === v.productId && (x.cableCount || 1) === vN2)
+      : alt.naaIdx;
     valgt = alt.liste[valgtIdx] || null;
   }
   const endret = !!(valgt && alt && valgtIdx !== alt.naaIdx);
@@ -7978,19 +8218,25 @@ function _forslagOnsket(roomId) {
   const room = S.rooms.find(r => r.id === roomId);
   const alt = _forslagAlternativer(room);
   if (!alt || alt.type !== 'kabel') return;
-  const prod = alt.prod;
-  const res = selectCableByPower(roomId, _forslagKabelSerie(getProductFamily(prod.id), prod), mål);
-  if (!res) { ut.textContent = 'Fant ingen alternativer.'; return; }
-  const rad = (c, merke) => c ? `<div style="display:flex;align-items:center;gap:7px;padding:5px 0">
-      <span style="flex:1;min-width:0"><b>${esc(c.product.name)}</b><br>
-        <span style="color:var(--dim);font-size:11.5px">${Math.round(c.wm2)} W/m² · CC ${c.cc_cm.toFixed(1)} cm</span></span>
+  // 054: ⚠ hentet fra STIGEN, ikke fra `selectCableByPower.below/above` — ellers ville
+  // «Finn» hatt et annet tak enn pilene, og 130 W/m² i et 30 m² rom ville svart «ingen
+  // alternativer» selv om 2 stk 1950 W finnes rett over.
+  const gyldige = alt.liste.filter(x => x.valid);
+  if (!gyldige.length) { ut.textContent = 'Fant ingen alternativer.'; return; }
+  let u = null, o = null;
+  for (const k of gyldige) {
+    if (k.flateeffekt <= mål) u = k;
+    if (k.flateeffekt >= mål && !o) o = k;
+  }
+  const rad = (k, merke) => k ? `<div style="display:flex;align-items:center;gap:7px;padding:5px 0">
+      <span style="flex:1;min-width:0"><b>${esc(k.navn)}</b><br>
+        <span style="color:var(--dim);font-size:11.5px">${k.flateeffekt} W/m² · CC ${k.cc} cm</span></span>
       <span style="font-size:10.5px;color:var(--dim);text-transform:uppercase">${merke}</span>
-      <button onclick="_forslagSettValg(${roomId},{ok:false,productId:${c.product.id},targetWm2:${mål}})"
+      <button onclick="_forslagSettValg(${roomId},{ok:false,productId:${k.productId},cableCount:${k.cableCount || 1},targetWm2:${mål}})"
         style="min-height:32px;padding:0 11px;cursor:pointer;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:12px;font-weight:600">Velg</button>
     </div>` : '';
-  const u = res.below[0], o = res.above[0];
   ut.innerHTML = (u || o)
-    ? rad(u, 'under') + rad(o, 'over')
+    ? rad(u, 'under') + (o && (!u || o !== u) ? rad(o, 'over') : '')
     : '<span style="color:var(--dim)">Ingen gyldige alternativer for dette tallet.</span>';
 }
 
@@ -8058,6 +8304,11 @@ function _forslagPayload() {
     const rad = { roomId, roomName: (r && r.name) || 'Rom', ok: !!v.ok };
     if (!v.ok) {
       if (v.productId) rad.productId = v.productId;
+      // 054: utelates når 1 — payloaden skal ikke bli større for det vanlige tilfellet.
+      if (v.cableCount > 1) rad.cableCount = v.cableCount;
+      // Datamodellen i spec-en sier 'kabel'|'matte'; UI-en bruker modType-navnene
+      // ('cable'|'mat') fordi `_upcScopeProducts` gjør det. Oversettes ett sted.
+      if (v.nyType) rad.nyType = (v.nyType === 'mat' ? 'matte' : 'kabel');
       if (v.targetWm2 != null) rad.targetWm2 = v.targetWm2;
       if (v.direction) rad.direction = v.direction;
       if ((v.comment || '').trim()) rad.comment = v.comment.trim();
@@ -19547,7 +19798,12 @@ function _kundeforslagRegressionTest() {
     check('E: FlexFoil har bare én W/m² → ingen piler', 1, af && af.liste.length === 1, af && af.liste.length);
     checkIkke('E: folie tilbyr ikke bredder som valg', af.liste.some(x => /B=/.test(x.navn)), af.liste.map(x => x.navn));
     S.strips = [];
-    check('E: rom uten produkt gir ingen alternativer', null, _forslagAlternativer(S.rooms[1]) === null, 'fikk liste');
+    // ⚠ 054 ENDRER denne. Før: et tomt rom ga ingen pileliste OG ingen kort. Nå gir det
+    // fortsatt ingen pileliste (det finnes ikke noe å pile mellom før kunden har valgt serie),
+    // men det får kortet «Foreslå varme» — spec regel 15.
+    check('E: rom uten produkt gir ingen pileliste', null, _forslagAlternativer(S.rooms[1]) === null, 'fikk liste');
+    check('E→054: ...men kan foreslå varme', true,
+      _forslagKanForeslaaVarme(S.rooms[1]) === true, _forslagKanForeslaaVarme(S.rooms[1]));
 
     // ── F: svaret ──
     S.cables = [{ id: 1, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
@@ -19666,6 +19922,74 @@ function _kundeforslagRegressionTest() {
         _kildeUtenKommentarer(_forslagSettValg) + _kildeUtenKommentarer(_forslagPil)
         + _kildeUtenKommentarer(_forslagKortHtml) + _kildeUtenKommentarer(_forslagSend)),
       'kaller en utleggsmotor');
+
+    // ── J (054) — stigen forbi største kabel, og rom uten varme ──
+    {
+      const romSaved = S.rooms, kabSaved = S.cables;
+      try {
+        // 30 m² rom, InFloor 10T. ⚠ MÅLT (STEG 0.1): største gyldige enkeltkabel er 2000 W
+        // (CC 15,0); 2 × 1100 W gir CC 13,6 og 73 W/m² — innenfor [5, 50] og bøyeradius 32 mm.
+        S.rooms = [{ id: 7001, name: 'J', floorId: null, partId: null, shape: 'polygon',
+          wallThicknessCm: 0, points: [{x:0,y:0},{x:600,y:0},{x:600,y:500},{x:0,y:500}],
+          walls: [], dims: [], area: 300000, roomType: 'living' }];
+        const t10 = HEATING_PRODUCTS.filter(p => p.product_family === 'InFloor 10T' && p.cable_length_m);
+        const p13 = t10.find(p => Math.round(p.watt_per_m * p.cable_length_m) === 1300);
+        check('J: InFloor 10T finnes i katalogen', true, !!(t10.length && p13), t10.length);
+        if (p13) {
+          S.cables = [{ id: 1, roomId: 7001, productId: p13.id, runs: [], direction: 'v' }];
+          const alt = _forslagAlternativer(S.rooms[0]);
+          const enkeltMaks = alt.liste.filter(x => x.valid && (x.cableCount || 1) === 1)
+            .reduce((m, x) => Math.max(m, x.W), 0);
+          check('J: største gyldige ENKELTkabel er 2000 W', 2000, enkeltMaks === 2000, enkeltMaks);
+          const over = alt.liste.filter(x => x.W > enkeltMaks);
+          check('J: stigen fortsetter over største enkeltkabel', true, over.length > 0, over.length);
+          check('J: første steg over er 2 stk 1100 W = 2200 W', '2 stk … 2200',
+            over[0] && over[0].cableCount === 2 && over[0].W === 2200,
+            over[0] && (over[0].navn + ' ' + over[0].W));
+          check('J: neste er 2 stk 1200 W = 2400 W', 2400,
+            over[1] && over[1].cableCount === 2 && over[1].W === 2400, over[1] && over[1].W);
+          check('J: stigen stiger monotont', true,
+            alt.liste.every((x, i, a) => i === 0 || a[i - 1].W <= x.W), 'usortert');
+          // ⚠ Terskelen gjelder N−1. Mot N=1 ville «3 stk 700 W = 2100 W» blitt første steg.
+          checkIkke('J: ingen flerkabel-rad under største enkeltkabel',
+            alt.liste.some(x => (x.cableCount || 1) > 1 && x.W <= enkeltMaks), 'stigen synker');
+          checkIkke('J: ingen 3-kabel-rad før 2-kabel-stigen er brukt opp',
+            over.length > 1 && over[0].cableCount === 3, '3 kabler før 2');
+          // CC-tallet skal komme fra samme formel som motoren, ikke fra en ny.
+          const r2200 = over[0];
+          check('J: 2 × 1100 W gir CC 13,6 cm', 13.6, r2200 && Math.abs(r2200.cc - 13.6) < 0.1, r2200 && r2200.cc);
+          check('J: flateeffekt for 2 × 1100 W er 73 W/m²', 73, r2200 && r2200.flateeffekt === 73, r2200 && r2200.flateeffekt);
+          // Payload: cableCount utelates når 1.
+          const u054 = _kildeUtenKommentarer;
+          check('J: cableCount utelates når 1', true,
+            /if \(v\.cableCount > 1\) rad\.cableCount = v\.cableCount;/.test(u054(_forslagPayload)), 'alltid med');
+          check('J: godkjenningen kaller autoFillMultiCable for N > 1', true,
+            /autoFillMultiCable\(roomId, pid, N\)/.test(u054(_forslagGodkjennRom)), 'bare én kabel');
+          check('J: gyldighetsvakten matcher BÅDE produkt og antall', true,
+            /x\.productId === productId && \(x\.cableCount \|\| 1\) === N/.test(u054(_forslagKandidatGyldig)),
+            'ser bort fra antall');
+          check('J: «Finn» henter fra stigen, ikke fra below/above', true,
+            /alt\.liste\.filter\(x => x\.valid\)/.test(u054(_forslagOnsket))
+            && !/res\.below\[0\]/.test(u054(_forslagOnsket)), 'eget tak');
+        }
+        // Tomt rom / snørom / fryserom
+        S.cables = [];
+        const tomt = { id: 7002, name: 'Tomt', floorId: null, partId: null, shape: 'polygon',
+          wallThicknessCm: 0, points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}],
+          walls: [], dims: [], area: 120000, roomType: 'living' };
+        S.rooms = [tomt];
+        check('J: tomt innendørs rom kan få forslag', true, _forslagKanForeslaaVarme(tomt) === true, false);
+        checkIkke('J: snørom kan ikke', _forslagKanForeslaaVarme({ ...tomt, moduleType: 'snow' }), 'snø tilbys');
+        checkIkke('J: fryserom kan ikke', _forslagKanForeslaaVarme({ ...tomt, roomType: 'fryserom' }), 'fryserom tilbys');
+        // ⚠ MÅLT (STEG 0.4): `_famKeyOf` MÅ kalles med `hasFamily = true` — uten andre argument
+        // splitter den navnet og gir «InFloor 10T 1100W» som «serie», altså én per produkt.
+        check('J: seriene grupperes på product_family, ikke på navnet', true,
+          /_famKeyOf\(p, true\)/.test(_kildeUtenKommentarer(_forslagSerier)), 'feil gruppering');
+        const serier = _forslagSerier('cable', tomt).map(x => x.navn);
+        check('J: kabelseriene er 10T og 17T', 2,
+          serier.includes('InFloor 10T') && serier.includes('InFloor 17T'), serier.join(','));
+      } finally { S.rooms = romSaved; S.cables = kabSaved; }
+    }
 
     // ── I (053) — beslutningene lagres, vinduet er ikke lenger en modal ──
     // ⚠ MÅLT (STEG 0.1): Godkjenn skrev BARE til en Map i minnet. Etter en ny innlasting var
@@ -69592,10 +69916,13 @@ function _forslagRomResultat(roomId) {
   const pid = (kabel || matte || folie || {}).productId;
   const prod = pid != null ? HEATING_PRODUCTS.find(p => p.id === pid) : null;
   const kabler = (S.cables || []).filter(c => c.roomId === roomId);
+  const N = kabler.length;
   return {
     productId: pid != null ? pid : null,
-    navn: prod ? prod.name : null,
-    cableCount: kabler.length || undefined,
+    // 054: «Ble: 2 stk InFloor 10T 1200W» — antallet hører med i navnet, ellers ser to kabler
+    // ut som én i både vinduet og i `applied_result`.
+    navn: prod ? (N > 1 ? N + ' stk ' + prod.name : prod.name) : null,
+    cableCount: N || undefined,
     W: st ? Math.round(st.totalW) : null,
     wm2: (st && st.nettoM2 > 0) ? Math.round(st.totalW / st.nettoM2) : null,
     cc: kabel && kabel.spacing_cm ? Math.round(kabel.spacing_cm * 10) / 10 : null,
@@ -69693,7 +70020,8 @@ function _forslagGodkjennRom(rad, opts) {
   const roomId = rad.roomId;
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return { ok: false, feil: 'Rommet finnes ikke lenger' };
-  const type = _forslagRomType(roomId);
+  // 054: et TOMT rom har ingen type å lese — kunden har da foreslått én (`nyType`).
+  const type = _forslagRomType(roomId) || (rad.nyType === 'matte' ? 'matte' : rad.nyType === 'kabel' ? 'kabel' : null);
   if (!type) return { ok: false, feil: 'Rommet har ikke noe utlegg å bytte' };
   // 043 hindrer KUNDEN fra å velge en ugyldig kandidat (pilene hopper over dem), men
   // godkjenningen tok `rad.productId` på tro. Et forslag kan bli ugyldig MELLOM innsending og
@@ -69707,7 +70035,7 @@ function _forslagGodkjennRom(rad, opts) {
   //
   // Kjøres FØR pushUndo — et avvist forslag skal ikke etterlate et tomt angre-steg.
   if (type === 'kabel' && rad.productId) {
-    const g = _forslagKandidatGyldig(roomId, rad.productId);
+    const g = _forslagKandidatGyldig(roomId, rad.productId, rad.cableCount);
     if (g && !g.valid) return { ok: false, feil: 'Ikke lov i dette rommet: ' + (g.advarsel || 'ugyldig c/c-avstand') };
   }
   if (!opts.skipPushUndo) pushUndo();
@@ -69727,10 +70055,20 @@ function _forslagGodkjennRom(rad, opts) {
 
     if (type === 'kabel') {
       const pid = rad.productId || (S.cables.find(c => c.roomId === roomId) || {}).productId;
+      // 054: N × like kabler. `autoFillMultiCable` finnes fra før og er URØRT — den kalles bare.
+      // ⚠ MÅLT (STEG 0.2): den trenger IKKE `S.ui.selectedRoomId` (det gjør `autoFillMatSerpentine`),
+      // og returnerer N kabler med felles `multiCableGroup`.
+      const N = Math.max(1, Math.min(FORSLAG_MAX_KABLER, rad.cableCount || 1));
       _clearRoomProductCollections(roomId, ['cables']);
-      const c = autoFillCable(roomId, pid);
-      if (c) { S.cables.push(c); S.ui.selectedCableId = c.id; ok = true; }
-      else feil = 'Kabelen fikk ikke plass i rommet';
+      if (N > 1) {
+        const cs = autoFillMultiCable(roomId, pid, N);
+        if (cs && cs.length) { cs.forEach(c => S.cables.push(c)); S.ui.selectedCableId = cs[0].id; ok = true; }
+        else feil = N + ' kabler fikk ikke plass i rommet';
+      } else {
+        const c = autoFillCable(roomId, pid);
+        if (c) { S.cables.push(c); S.ui.selectedCableId = c.id; ok = true; }
+        else feil = 'Kabelen fikk ikke plass i rommet';
+      }
     } else if (type === 'matte') {
       const pid = _forslagMatteProdukt(roomId, rad);
       _clearRoomProductCollections(roomId, ['mats', 'matPaths']);
@@ -69761,17 +70099,23 @@ function _forslagGodkjennRom(rad, opts) {
 
 // Er kabelen gyldig i dette rommet NÅ? Leser kandidaten fra samme alternativliste kunden så,
 // så godkjenningen aldri legger ut noe pilene ville nektet.
-function _forslagKandidatGyldig(roomId, productId) {
+function _forslagKandidatGyldig(roomId, productId, cableCount) {
   const room = S.rooms.find(r => r.id === roomId);
   const alt = _forslagAlternativer(room);
   if (!alt || alt.type !== 'kabel') return null;
-  return alt.liste.find(x => x.productId === productId) || null;
+  // 054: må matche BÅDE produkt og antall — 1 stk 1100 W og 2 stk 1100 W er to ulike rader med
+  // helt ulik CC, og bare den ene kan være gyldig i rommet.
+  const N = cableCount || 1;
+  return alt.liste.find(x => x.productId === productId && (x.cableCount || 1) === N) || null;
 }
 
 // Kunden foreslår en W/m²-VARIANT for matte (60/100/150), ikke en lengde — lengden er motorens
 // valg. Finn varianten i familien og la motoren ta resten.
 function _forslagMatteProdukt(roomId, rad) {
   const naa = (S.mats || []).find(m => m.roomId === roomId);
+  // 054: i et TOMT rom finnes ingen `naaProd` å lete i familien til — da er kundens valg
+  // allerede et konkret produkt, og skal brukes som det er.
+  if (!naa && rad && rad.productId) return rad.productId;
   const naaProd = naa && HEATING_PRODUCTS.find(p => p.id === naa.productId);
   if (!rad.productId && rad.targetWm2 == null) return naa && naa.productId;
   const ønsket = rad.targetWm2 != null ? rad.targetWm2
@@ -69817,12 +70161,22 @@ function _forslagProduktNavn(id) {
 function _forslagRadTall(rad) {
   const room = rad.room;
   if (!room) return { naa: '—', ny: '—' };
+  // 054: et tomt rom har ingen pileliste å slå opp i — produktet står i raden.
+  if (rad.nyType && !_presentRoomProduct(room)) {
+    const p = HEATING_PRODUCTS.find(x => x.id === rad.productId);
+    const N = rad.cableCount || 1;
+    const navn = p ? (N > 1 ? N + ' stk ' + p.name : p.name) : (rad.nyType === 'matte' ? 'matte' : 'kabel');
+    return { naa: 'ingen varme', ny: esc(navn) + ' (nytt)' };
+  }
   const alt = _forslagAlternativer(room);
   const fmt = k => !k ? '—' : (alt.type === 'kabel'
     ? `${esc(k.navn)} · ${k.flateeffekt} W/m² · CC ${k.cc} cm`
     : `${esc(k.navn)} · ${k.wm2} W/m²`);
   const naa = alt && alt.naaIdx >= 0 ? alt.liste[alt.naaIdx] : null;
-  const ny = alt && rad.productId ? alt.liste.find(x => x.productId === rad.productId) : null;
+  // 054: identiteten er (produkt, antall) — 1 stk og 2 stk 1100 W er to ulike rader.
+  const nyN = rad.cableCount || 1;
+  const ny = alt && rad.productId
+    ? alt.liste.find(x => x.productId === rad.productId && (x.cableCount || 1) === nyN) : null;
   const retn = rad.direction === 'h' ? ' · vannrett' : rad.direction === 'v' ? ' · loddrett' : '';
   return {
     naa: fmt(naa),

@@ -4,6 +4,63 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundesiden: stigen fortsetter med N × like kabler, og tomme rom kan få forslag — 2026-10-10
+
+Prompt 054. Kenneth: «InFloor 10T, maks 2000 W: neste steg 2 stk 1100 W = 2200 W.»
+
+### STEG 0 — målt i et 30 m² rom
+
+Største gyldige enkeltkabel er **InFloor 10T 2000W/200m**: CC 15,0 cm, 67 W/m². To stk
+1100W/110m gir **CC 13,6 cm** — innenfor [5, 50] — og **73 W/m²**. Bøyeradius 32 mm krever
+1,6 cm; det er 6,8 cm. Stigen kan altså fortsette.
+
+`autoFillMultiCable(roomId, pid, 2)` returnerer **2 kabler med felles `multiCableGroup`**, og
+trenger **ikke** `S.ui.selectedRoomId` — i motsetning til `autoFillMatSerpentine`, som 044 målte
+at gjør det.
+
+`_upcScopeProducts` virker **anonymt**: samme 44 kabler og 57 matter innlogget og utlogget,
+inaktive borte, `_productVisibleToOrg` med. ⚠ Men `_famKeyOf` må kalles med `hasFamily = true`
+— uten andre argument splitter den navnet og gir «InFloor 10T 1100W» som «serie», altså én per
+produkt i stedet for «InFloor 10T · InFloor 17T».
+
+### Stigen
+
+`_forslagFlerkabelRader` legger N × like (N ≤ 3) oppå `selectCableByPower`-radene. Formelen er
+hentet, ikke ny: `roomAreas` for arealet, `_ccLimits` for grensene, samme bøyeradius-test.
+
+**⚠ Terskelen måtte være mot N−1, ikke mot N=1.** Med terskel mot største enkeltkabel overlevde
+«3 stk 700 W = 2100 W» og ble første steg over 2000 W — tre kurser for 100 W mer. Med riktig
+terskel er sekvensen nøyaktig Kenneths: **2000 → 2 stk 1100 = 2200 → 2 stk 1200 = 2400 →
+2 stk 1300 = 2600**.
+
+En rad er nå identifisert av **(produkt, antall)** — pilene, «som nå», gyldighetsvakten og
+`_forslagRadTall` måtte alle lære det; 1 stk og 2 stk 1100 W har helt ulik CC.
+«Finn» (ønsket flateeffekt) henter fra stigen i stedet for `selectCableByPower.below/above`,
+ellers ville den hatt et annet tak enn pilene. Målt: 130 W/m² gir «under: 2 stk 1800 W
+(120 W/m²)» og «over: 2 stk 2000 W (133)».
+
+Godkjenningen kaller `autoFillMultiCable` når `cableCount > 1`. Målt: 2 kabler med felles
+gruppe, **ett** angre-steg, «Ble: 2 stk InFloor 10T 1200W … 79 W/m² · CC 12,5».
+
+### Rom uten varme
+
+`_forslagKanForeslaaVarme` — alle innendørs rom uten produkt, **unntatt snørom og fryserom**
+(snø er en annen modul; et fryserom har kabel under isolasjonen med reservekabel, 025).
+Kortet gir «✓ OK uten varme» eller «Foreslå varme» → tre trinn: **type** (Kabel/Matte, folie
+holdt utenfor) → **serie** (fra samme katalog Kenneth ser) → **variant** (pilekort, startet på
+raden nærmest rommets standard-flateeffekt). Bare serier med minst én gyldig rad i rommet vises.
+
+Godkjenningen leser `rad.nyType` når rommet er tomt, og `_forslagMatteProdukt` returnerer
+kundens produkt direkte i stedet for å lete i familien til en `naaProd` som ikke finnes.
+Målt: tomt rom → kabel lagt; tomt bad → matte lagt.
+
+049s regresjonssjekk E er **endret**: et tomt rom gir fortsatt ingen pileliste, men får nå
+kortet «Foreslå varme».
+
+**Regresjon:** 17 batterier, **685 sjekker** (fra 665), alle grønne.
+
+---
+
 ## Kundeforslag: beslutningene lagres per rom, flyttbart vindu, kundeønske i romlista — 2026-10-10
 
 Prompt 053. Kenneth: «Jeg trykker godkjenn og lukk — ikke «send svar til kunde». Det står
