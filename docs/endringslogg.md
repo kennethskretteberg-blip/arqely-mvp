@@ -4,6 +4,63 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Plantegning: rommene speilvendes ikke lenger — 2026-10-10
+
+Prompt 056. Kenneth: «De rommene som ble opprettet la seg helt feil sted, utenfor tegningen.»
+
+### Rotårsaken: to omregninger som er uenige om hvilken vei y går
+
+`_planRomRader` gir polygonet i verdens-cm delt på 100, med y **nedover** — samme retning som
+veggene tegnes (`_planUVtoW`: `y = originY + v·heightCm`). `_drawCreateRoomsFromReview` ble
+skrevet for den gamle `/import/pdf`-veien, der polygonene kommer i PDF-meter med y **oppover**,
+og speiler derfor: `y: -p[1]*100`.
+
+052 lot plantegning-veien gå gjennom den funksjonen. Resultatet var
+`y = −(originY + v·heightCm)` — speilvendt om x-aksen.
+
+**STEG 0.1, målt:** underlaget spenner y ∈ [−700, 0]. Forventet `points[0].y = −560`; faktisk
+**`+560`**. Romsenteret på **`+420`**, altså utenfor tegningen. Veggene går ikke gjennom denne
+funksjonen og lå derfor riktig hele tiden.
+
+**STEG 0.2:** `fitAll()` i `_drawCreateRoomsFromReview` er grunnen til at både tegningen og de
+feilplasserte rommene var synlige — den zoomet ut til 0,2 for å få med alt.
+
+### Hvorfor 052 ikke så det
+
+052s sjekker sammenlignet **arealer**, og arealet er identisk for et speilvendt polygon —
+11,2 m² begge veier. Og den ekte PDF-en rendret ikke ferdig i testpanelet, så ingen så rommene
+på lerretet. Den nye regresjonssjekken måler derfor **posisjon**: `points[0]` mot
+`_planUVtoW(bg, polygon[0])` ± 1 cm, og at romsenteret ligger innenfor underlagets rektangel.
+
+### Fiksen
+
+`_drawCreateRoomsFromReview(rooms, opts)` fikk `{ yDown, fitAll }`. Plantegning-veien kaller
+med `{ yDown: true, fitAll: false }`; den gamle veien er uendret (standard speiler, standard
+kjører `fitAll`). Visningen fra vegg-sjekken beholdes — brukeren står alt og ser på tegningen.
+
+**Målt etter:** `points[0]` treffer `_planUVtoW` med **0 cm avvik**, alle fire rom fra
+Okkenhaugvegen ligger innenfor underlaget, zoom uendret. Gammel vei gir fortsatt `y: −200` for
+et polygon på 2 m — uberørt.
+
+### Kontrollen som gjør sjekken verdt noe
+
+Den nye sjekken ble kjørt mot koden **før** endringen (ved å la `_drawCreateRoomsFromReview`
+ignorere `opts`): fem av åtte feilet, med nøyaktig Kenneths symptom — `200/560` mot `200/-560`,
+senter `400,420` utenfor `[-700..0]`, og zoom tilbake til 0,2.
+
+Og testriggen gikk i **049s gamle felle**: `img: {}` er ikke et gyldig bilde, så `_planExit()`
+→ `render()` → `drawBgImage` kastet, og hele J-blokken stoppet stille etter det punktet. De
+rene datasjekkene i samme blokk kaller aldri `render()` og overlevde derfor. Riggen bruker nå
+et ekte `<canvas>`.
+
+En 052-sjekk måtte også løsnes: mønsteret `_drawCreateRoomsFromReview\(rader\)` var for
+bokstavelig og feilet da kallet fikk et `opts` — selv om det den hevder (at den delte
+opprettelsen gjenbrukes) fortsatt var sant.
+
+**Regresjon:** 17 batterier, **709 sjekker** (fra 701), alle grønne.
+
+---
+
 ## Kundedialog-logg: hele historikken per prosjekt — 2026-10-10
 
 Prompt 055. Kenneth: «Jeg ønsker en knapp hvor jeg kan se logg av hele dialogen med meg og

@@ -6505,7 +6505,9 @@ function _planRomTilLerret(rom, kal) {
   const foer = new Set(S.rooms.map(r => r.id));
   _planExit();
   _pdfImportDrawFloorId = fid;
-  const n = _drawCreateRoomsFromReview(rader);
+  // 056: ⚠ `yDown` — `_planRomRader` gir y NEDOVER (som `_planUVtoW`), ikke PDF-meter med y
+  // oppover. Uten dette speiles rommene om x-aksen og havner utenfor tegningen.
+  const n = _drawCreateRoomsFromReview(rader, { yDown: true, fitAll: false });
   _pdfImportDrawFloorId = null;
   const nye = S.rooms.filter(r => !foer.has(r.id));
   nye.forEach((r, i) => { r._planIndex = i; r._planConfirmed = false; });
@@ -20478,8 +20480,11 @@ async function _planRegressionTest() {
         check('J: «Lag rom» går til lerretet, ikke review-skjermen', true,
           /_planRomTilLerret\(rom, kal\)/.test(u(_planLagRom))
           && !/_planTilGjennomgang/.test(u(_planLagRom)), 'går fortsatt til review');
+        // ⚠ 056: mønsteret var `…\(rader\)` — for bokstavelig. Påstanden er at den DELTE
+        // opprettelsen gjenbrukes, ikke at kallet har nøyaktig ett argument. 056 ga den et
+        // `opts`, og da feilet sjekken selv om det den hevder fortsatt var sant.
         check('J: rom-opprettelsen gjenbrukes, ikke kopieres', true,
-          /_drawCreateRoomsFromReview\(rader\)/.test(u(_planRomTilLerret)), 'egen løkke');
+          /_drawCreateRoomsFromReview\(rader[,)]/.test(u(_planRomTilLerret)), 'egen løkke');
 
         // «Uten varme» leses av NAVNET, ikke av romtypen. ⚠ MÅLT: `_reviewIsSuggested` gjorde
         // «115 Kontor/møterom» til et rom uten varme — den betyr «foreslå utfylling».
@@ -20490,6 +20495,79 @@ async function _planRegressionTest() {
           'kontor regnes som uoppvarmet');
         check('J: mønsteret deles med romtype-gjetteren', true,
           /UTEN_VARME_RE\.test\(n\)/.test(u(_pdfGuessRoomType)), 'to kopier');
+
+        // ⚠ 056 — POSISJON, ikke bare areal.
+        // Kenneth: «de rommene som ble opprettet la seg helt feil sted, utenfor tegningen.»
+        // `_drawCreateRoomsFromReview` ble skrevet for `/import/pdf`, der polygonene kommer i
+        // PDF-meter med y OPPOVER, og speilet derfor (`y: -p[1]*100`). Plantegningens
+        // polygoner har y NEDOVER (samme retning som `_planUVtoW`), så rommene ble speilvendt
+        // om x-aksen. MÅLT: forventet `points[0].y = −560`, faktisk `+560`.
+        //
+        // ⚠ 052s sjekker så det ikke fordi de bare sammenlignet AREAL — og arealet er identisk
+        // for et speilvendt polygon (11,2 m² begge veier). Derfor måler denne POSISJON.
+        {
+          const bgSaved2 = S.bgs[1], romSaved2 = S.rooms, modeSaved2 = S.ui.drawMode,
+                partSaved = _pdfImportDrawFloorId, visning = { ...S.view },
+                floSaved = S.floors, aktivSaved = S.ui.activeFloorId;
+          try {
+            // ⚠ ET EKTE bilde. `_planRomTilLerret` kaller `_planExit()` → `render()` →
+            // `drawBgImage`, og `img: {}` (som de rene datasjekkene over bruker) gir
+            // «drawImage: The provided value is not of type …» — samme felle som i 049s
+            // testrigg. Et tomt <canvas> er gyldig for `drawImage`.
+            const _ekteImg = document.createElement('canvas'); _ekteImg.width = 8; _ekteImg.height = 8;
+            S.bgs[1] = { img: _ekteImg, originX: 0, originY: -700, widthCm: 1000, heightCm: 700,
+                         opacity: 1, visible: true, _needsCalibration: false };
+            S.floors = [{ id: 1, name: 'P', building: null, order: 0, collapsed: false, partId: 1 }];
+            S.ui.activeFloorId = 1; S.rooms = [];
+            S.view = { zoom: 0.33, panX: 111, panY: 222 };
+            const bg2 = S.bgs[1];
+            const poly = [[0.2, 0.2], [0.6, 0.2], [0.6, 0.6], [0.2, 0.6]];
+            _planRomTilLerret([{ polygon: poly, name: 'Stue', number: '101',
+              stated_area_m2: 11.2, area_m2: 11.2, area_ok: true }], { meters_per_point: 0.0352778 });
+            const rom = S.rooms[0];
+            check('J→056: rommet ble opprettet', 1, S.rooms.length === 1, S.rooms.length);
+            if (rom) {
+              const vent = _planUVtoW(bg2, { u: poly[0][0], v: poly[0][1] });
+              check('J→056: points[0] er lik _planUVtoW, ikke speilvendt', '200/-560',
+                Math.abs(rom.points[0].x - vent.x) <= 1 && Math.abs(rom.points[0].y - vent.y) <= 1,
+                Math.round(rom.points[0].x) + '/' + Math.round(rom.points[0].y)
+                  + ' mot ' + Math.round(vent.x) + '/' + Math.round(vent.y));
+              const sx = rom.points.reduce((a, p) => a + p.x, 0) / rom.points.length;
+              const sy = rom.points.reduce((a, p) => a + p.y, 0) / rom.points.length;
+              check('J→056: romsenteret ligger INNENFOR underlaget', true,
+                sx >= bg2.originX && sx <= bg2.originX + bg2.widthCm
+                && sy >= bg2.originY && sy <= bg2.originY + bg2.heightCm,
+                Math.round(sx) + ',' + Math.round(sy) + ' i ['
+                  + bg2.originX + '..' + (bg2.originX + bg2.widthCm) + ', '
+                  + bg2.originY + '..' + (bg2.originY + bg2.heightCm) + ']');
+              // ⚠ Arealet er IKKE et vern — det er likt for et speilvendt polygon. Låses her
+              // bare for å vise at det ikke kan brukes som posisjonssjekk.
+              check('J→056: arealet alene skiller ikke speilvendt fra riktig', 11.2,
+                Math.abs(rom.area / 10000 - 11.2) < 0.1, +(rom.area / 10000).toFixed(2));
+            }
+            check('J→056: visningen fra vegg-sjekken beholdes (ingen fitAll)', '0.33/111/222',
+              S.view.zoom === 0.33 && S.view.panX === 111 && S.view.panY === 222,
+              S.view.zoom + '/' + S.view.panX + '/' + S.view.panY);
+            const u056 = _kildeUtenKommentarer;
+            check('J→056: plantegning-veien ber om yDown og dropper fitAll', true,
+              /_drawCreateRoomsFromReview\(rader, \{ yDown: true, fitAll: false \}\)/.test(u056(_planRomTilLerret)),
+              'kaller uten opts');
+            // Den gamle `/import/pdf`-veien skal være UENDRET: standard er fortsatt speiling.
+            check('J→056: gammel vei speiler fortsatt (standard yDown = false)', true,
+              /const _yTegn = opts\.yDown \? 1 : -1;/.test(u056(_drawCreateRoomsFromReview)),
+              'standard endret');
+            check('J→056: gammel vei kjører fortsatt fitAll', true,
+              /opts\.fitAll !== false && typeof fitAll/.test(u056(_drawCreateRoomsFromReview)),
+              'fitAll fjernet for alle');
+          } catch (e) {
+            check('J→056: posisjonssjekken kjørte uten å kaste', true, false, e.message);
+          } finally {
+            if (bgSaved2 === undefined) delete S.bgs[1]; else S.bgs[1] = bgSaved2;
+            S.rooms = romSaved2; S.ui.drawMode = modeSaved2;
+            _pdfImportDrawFloorId = partSaved; S.view = visning;
+            S.floors = floSaved; S.ui.activeFloorId = aktivSaved;
+          }
+        }
 
         // 049s gruppe gjenbrukes som den var — den nøkler på `_planNamed === false`.
         check('J: «Ikke navngitt» er 049s gruppe, uendret', true,
@@ -57127,7 +57205,22 @@ function _reviewCommit(){
 // Adapter: gjennomgang-rom (motor-polygon i meter, Y-opp) → ekte TEGNEDE rom med
 // geometri + vegger i tegnemodulen. Y flippes (motor Y-opp → app verdens-Y nedover),
 // m→cm. keepPosition=true bevarer rommenes innbyrdes plassering fra tegningen.
-function _drawCreateRoomsFromReview(rooms){
+// ⚠ 056 (Kenneth 10.10.2026, «rommene la seg helt feil sted, utenfor tegningen»): denne
+// funksjonen ble skrevet for den gamle `/import/pdf`-veien, der polygonene kommer i PDF-meter
+// med y OPPOVER — derfor `y: -p[1]*100`. 052 lot plantegning-veien gå gjennom den, men DENS
+// polygoner er allerede i verdens-cm/100 med y NEDOVER (samme retning som `_planUVtoW` tegner
+// veggene). Resultatet var `y = −(originY + v·heightCm)`: speilvendt om x-aksen.
+//
+// MÅLT: underlaget spenner y ∈ [−700, 0]; forventet `points[0].y = −560`, faktisk `+560`,
+// romsenteret på `+420`. ⚠ AREALET er identisk for et speilvendt polygon (11,2 m² begge veier)
+// — og 052 sjekket bare arealer. Derfor den nye POSISJONS-sjekken i regresjonen.
+//
+// `opts.yDown` sier at polygonene allerede har y nedover. `opts.fitAll === false` lar visningen
+// stå som den var (plantegning-veien kommer rett fra vegg-sjekken, der brukeren alt ser på
+// tegningen i riktig utsnitt).
+function _drawCreateRoomsFromReview(rooms, opts){
+  opts = opts || {};
+  const _yTegn = opts.yDown ? 1 : -1;
   const floorId = (_pdfImportDrawFloorId!=null) ? _pdfImportDrawFloorId
     : (S.ui.activeFloorId ?? (S.floors[0] && S.floors[0].id) ?? null);
   let n=0;
@@ -57138,7 +57231,7 @@ function _drawCreateRoomsFromReview(rooms){
   try {
   for(const rr of rooms){
     if(!rr.poly || rr.poly.length<3) continue; // manuelt tillagte uten geometri kan ikke tegnes
-    const pts = rr.poly.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
+    const pts = rr.poly.map(p => ({ x: p[0]*100, y: _yTegn*p[1]*100 }));
     const room = createRoom(pts, 'polygon', rr.name||('Rom '+(n+1)), floorId, /*keepPosition*/true);
     if(room){
       if(rr.type){ room.roomType=rr.type; if(typeof _roomTypeDefaults==='function') room.targetWm2=_roomTypeDefaults(rr.type).targetWm2; }
@@ -57153,7 +57246,7 @@ function _drawCreateRoomsFromReview(rooms){
       // Faste hindringer fra import → ekte S.hindrings i samme verdenskoordinater som rommet
       // (createRoom med keepPosition=true bevarer koordinatene). Slettes/flyttes på lerretet.
       for(const ob of (rr.obstacles||[])){
-        const hp = ob.map(p => ({ x: p[0]*100, y: -p[1]*100 }));
+        const hp = ob.map(p => ({ x: p[0]*100, y: _yTegn*p[1]*100 }));
         if(hp.length<3) continue;
         const hcx=hp.reduce((a,p)=>a+p.x,0)/hp.length, hcy=hp.reduce((a,p)=>a+p.y,0)/hp.length;
         if(typeof ptInPoly==='function' && !ptInPoly(hcx,hcy,room.points)) continue; // hindring utenfor rommet → hopp over
@@ -57176,7 +57269,11 @@ function _drawCreateRoomsFromReview(rooms){
     }
   }
   } finally { _undoSuppress--; }
-  if(n){ if(typeof fitAll==='function') fitAll(); if(typeof render==='function') render(); if(typeof _scheduleAutoSave==='function') _scheduleAutoSave(); }
+  if(n){
+    // 056: plantegning-veien beholder utsnittet fra vegg-sjekken — brukeren står alt og ser på
+    // tegningen, og en `fitAll` ville zoomet ut uten grunn.
+    if(opts.fitAll !== false && typeof fitAll==='function') fitAll();
+    if(typeof render==='function') render(); if(typeof _scheduleAutoSave==='function') _scheduleAutoSave(); }
   return n;
 }
 
