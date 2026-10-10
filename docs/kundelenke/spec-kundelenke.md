@@ -57,6 +57,14 @@ e-post, og innarbeider forslaget vegg for vegg / rom for rom i prosjektet.
 10. **Én lenke, én status:** `open → answered → applied` (eller `expired`/`revoked`). Kunden kan
     sende inn flere ganger til Kenneth har trykket «Bruk» (siste svar gjelder).
 
+11. **Hele dialogen per prosjekt er en logg** (055), avledet av `kundelenker` — én runde per
+    lenke, begge moduser. Alt som har egen kolonne (`created_at`, `invite_sent_at`,
+    `answered_at`, `answer`, `approve_all_at`, `applied_result`, `svar_sendt_at`, `applied_at`)
+    leses derfra; bare hendelser UTEN egen kolonne (`kopiert`, `trukket`, `paaminnelse`) lagres,
+    i `hendelser jsonb`, og alltid via RPC-en `kundelenke_logg` (append, så to vinduer ikke
+    overskriver hverandre). Loggen er **intern** — kunden ser den aldri, og ingen anonym vei
+    skriver til den.
+
 ## Datamodell (Supabase, additiv)
 
 ```

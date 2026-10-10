@@ -300,3 +300,56 @@ signal.
 - Åpen «tegn selv»-side uten prosjekt, f.eks. fra cenika.no. Krever misbruksvern.
 - Elektriker med egen Varmeplan-konto som deler prosjekt mellom organisasjoner.
 - Bilder/vedlegg fra kunden i svaret.
+
+---
+
+## Kundeforslag 2 (053–055) — kodeferdig 10.10.2026
+
+Bygget etter Kenneths live-test 10.10.2026. Presentasjonen og forslagskortet hos kunden var
+allerede bra; det som manglet var **behandlingen hos Cenika**, **stigen forbi største kabel**,
+**rom uten varme** og **historikken**.
+
+### 053 — beslutningene lagres per rom
+
+044 lagret aldri hva Kenneth bestemte, bare hva kunden sendte. Målt: etter en ny innlasting var
+beslutningen borte, status fortsatt `answered`, og panelet åpnet med rommet som ubehandlet —
+mens utlegget allerede var byttet. Eneste vei til `applied` gikk gjennom «Send svar til kunden».
+
+Nå: hver Godkjenn/Avslå merges inn i `applied_result` med én gang, med `by`, `at` og et
+`resultat` målt av rommet etterpå. Når alt er behandlet blir forslaget `applied` **uten
+e-post**. Vinduet er flyttbart og ikke-modalt — radklikk velger og zoomer til rommet, så
+utlegget skifter mens du ser på. Angre per rom. Rom med ubehandlet ønske er merket blått i
+romlista med en «Kundeønske»-rute som kaller de samme funksjonene som vinduet.
+
+### 054 — stigen og tomme rom
+
+Stigen fortsetter forbi største enkeltkabel med N × like (N ≤ 3). Målt i et 30 m² rom:
+2000 W → **2 stk 1100 W = 2200 W** → **2 stk 1200 W = 2400 W**, nøyaktig som Kenneth beskrev.
+⚠ Terskelen måtte være mot N−1; mot N=1 ble «3 stk 700 W = 2100 W» første steg.
+«Ønsket flateeffekt» bruker samme stige. Rom uten varme får «Foreslå varme»: type → serie →
+variant, snørom og fryserom utenfor.
+
+### 055 — loggen
+
+Hele dialogen per prosjekt, avledet av `kundelenker`. Én additiv kolonne (`hendelser`) og en
+append-RPC for det som ikke hadde egen kolonne. Flyttbart vindu, nyeste runde øverst,
+«Kopier som tekst» og «Skriv ut».
+
+### Til Kenneth — migrasjoner du må kjøre i Supabase
+
+| Fil | Hva |
+|---|---|
+| [`supabase-migration-kundeforslag-053.sql`](../../supabase-migration-kundeforslag-053.sql) | `svar_sendt_at` på `kundelenker` — skiller «ferdig behandlet» fra «kunden er varslet» |
+| [`supabase-migration-kundelenke-055.sql`](../../supabase-migration-kundelenke-055.sql) | `hendelser jsonb` + RPC-en `kundelenke_logg` |
+
+Begge er idempotente og ren ASCII. **054 trenger ingen migrasjon.**
+
+Uten 053-migrasjonen virker alt bortsett fra at «Svar sendt …» ikke kan dateres. Uten
+055-migrasjonen virker loggen fortsatt — den avleder det meste — men «kopiert» og «trukket»
+blir ikke registrert, og `kundelenke_logg`-kallet feiler stille (det er med vilje).
+
+### Ubesvart
+
+Sju spørsmål i [`prompter/kundeforslag-2/SPØRSMÅL.md`](prompter/kundeforslag-2/SPØRSMÅL.md) —
+blant annet om kunden skal få en automatisk e-post når forslaget er ferdigbehandlet, taket på
+antall like kabler, og om boder skal kunne få foreslått varme.

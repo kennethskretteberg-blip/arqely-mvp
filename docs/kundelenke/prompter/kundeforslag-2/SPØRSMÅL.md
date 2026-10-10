@@ -74,4 +74,19 @@ Kenneth svarer til slutt.
 
 ## 055
 
--
+- **STEG 0.1: mål-veien satte `status:'applied'` UTEN `applied_at`.** «Du innarbeidet målene»
+  kunne altså ikke dateres. Rettet — men **gamle mål-runder får ingen dato** på det punktet, og
+  loggen bruker da `answered_at` som nødløsning.
+- **`svar_sendt_at` ble IKKE flyttet inn i `hendelser`.** Den er en egen kolonne fra 053 og
+  leses direkte; å flytte den ville gjort 053 avhengig av 055s migrasjon uten å vinne noe.
+- **Dette kan ikke rekonstrueres for gamle runder:** når en lenke ble *kopiert* til e-post
+  (ingen rad fantes før 055), og når en lenke ble *trukket* (`status='revoked'` har aldri hatt
+  tidspunkt). Alt annet er fullstendig tilbake til 027.
+- **`kundelenke_logg` er et sjette RPC-kall.** 041s regresjonsvakt teller dem, og jeg hevet
+  tallet bevisst med begrunnelse i koden: funksjonen er `security invoker`, bare gitt til
+  `authenticated`, og kundens egne veier rører den ikke (låst i testen).
+- **Loggknappen står to steder:** egen rad «🕘 Kundedialog · Logg» i prosjektinfo (alltid, når
+  prosjektet er lagret i skya) og 🕘 i forslagsvinduets tittellinje. 053s rad «✓ Forslag
+  behandlet» peker nå på **Se logg** i stedet for «Se forslaget».
+- **Ikke gjort:** loggen som PDF-vedlegg. «Kopier som tekst» og «Skriv ut» dekker det du
+  beskrev; si fra om du vil ha den inn i rapporten også.

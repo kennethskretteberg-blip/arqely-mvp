@@ -9272,7 +9272,10 @@ async function _kundeCreateLink() {
     created_by: _currentUser ? _currentUser.id : null,
     notify_email: _currentUser ? _currentUser.email : null,
   };
-  const { error } = await _db.from('kundelenker').insert(row);
+  // 055: `.select('id')` for å kunne logge «kopiert» på raden. Feiler selecten (eldre
+  // PostgREST, manglende rettighet) går innleggingen like fullt gjennom — da logges bare ikke.
+  const { data: _nyRad, error } = await _db.from('kundelenker').insert(row).select('id').limit(1);
+  const lenkeId = (Array.isArray(_nyRad) && _nyRad[0] && _nyRad[0].id) || null;
   if (btn) { btn.disabled = false; btn.textContent = 'Lag lenke'; }
   if (error) {
     if (res) { res.style.display = 'block'; res.style.color = '#e5484d';
@@ -9289,7 +9292,7 @@ async function _kundeCreateLink() {
       <div style="display:flex;gap:7px;align-items:center;margin-bottom:7px">
         <input id="kunde-label" value="FYLL INN MÅL" aria-label="Lenketekst"
           style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:#4ea3ff;text-decoration:underline;font-size:13px;font-weight:600">
-        <button onclick="_copyLinkRich(document.getElementById('kunde-label').value, ${_jsStr(url)})" style="padding:8px 15px;background:var(--accent);border:none;border-radius:7px;font-size:12.5px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
+        <button onclick="_copyLinkRich(document.getElementById('kunde-label').value, ${_jsStr(url)}, ${_jsStr(lenkeId || '')})" style="padding:8px 15px;background:var(--accent);border:none;border-radius:7px;font-size:12.5px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
       </div>
       <div style="display:flex;gap:7px;align-items:center">
         <input readonly value="${esc(url)}" onclick="this.select()" style="flex:1;padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--dim);font-size:11.5px">
@@ -9420,9 +9423,247 @@ async function _kundeRefreshStatus() {
   } catch (e) { _kundeLinkCache = null; _forslagLinkCache = null; _forslagSisteCache = null; }
   if (typeof renderSidebar === 'function') renderSidebar();
 }
+// ── 055: kundedialog-loggen ──────────────────────────────────────────────────────────────
+//
+// ⚠ MÅLT 10.10.2026 (STEG 0.1): nesten hele dialogen ligger ALLEREDE i `kundelenker` —
+// `created_at`, `invite_sent_at`, `answered_at`, `answer`, `approve_all_at`, og fra 053
+// `applied_result[].at/by/resultat` og `svar_sendt_at`. Loggen AVLEDES derfor; den lagres ikke.
+// Det eneste som manglet var hendelser uten egen kolonne: «kopiert» og «trukket».
+//
+// ⚠ MÅLT: MÅL-veien (`_kundeBrukMaal`) satte bare `status: 'applied'` — UTEN tidspunkt. Da kan
+// «Du innarbeidet målene» ikke dateres. Rettet der; gamle runder får ingen dato (se rapporten).
+async function _kundeLogg(linkId, kind, data) {
+  if (!linkId || !_db) return;
+  const h = { kind, at: new Date().toISOString(),
+    by: (_currentProfile && _currentProfile.full_name) || (_currentUser && _currentUser.email) || null };
+  if (data) h.data = data;
+  try {
+    // RPC-en gjør `hendelser || $1` på serveren — to vinduer som logger samtidig skal ikke
+    // overskrive hverandre, slik en les-endre-skriv i klienten ville gjort.
+    await _db.rpc('kundelenke_logg', { p_id: linkId, p_hendelse: h });
+  } catch (e) { /* loggen er en bekvemmelighet; den skal aldri stoppe handlingen den beskriver */ }
+}
+
+// Henter ALLE lenker for prosjektet — også `applied`, `revoked` og `expired`, som
+// `_fetchKundeStatus` og `_kundeRefreshStatus` med vilje filtrerer bort. Loggen er historikk,
+// ikke en oppgaveliste.
+async function _kundeLoggHent(projectId) {
+  if (!_db || !projectId) return [];
+  try {
+    const { data } = await _db.from('kundelenker').select('*')
+      .eq('project_id', projectId).order('created_at', { ascending: true });
+    return (data || []).map((k, i) => _kundeLoggRunde(k, i + 1));
+  } catch (e) { return []; }
+}
+
+// Én lenke → én runde med hendelser. Ren funksjon: ingen nettverk, så den kan testes.
+function _kundeLoggRunde(k, nr) {
+  const h = [];
+  const erForslag = k.mode === 'forslag';
+  const tittel = erForslag ? 'Forslag' : 'Mål';
+  const legg = (at, retning, tekst, ekstra) => {
+    if (!at) return;
+    h.push(Object.assign({ at, retning, tekst }, ekstra || {}));
+  };
+
+  legg(k.created_at, 'ut', erForslag
+    ? 'Du laget en forslagslenke'
+    : 'Du ba om mål' + (Array.isArray(k.asked_walls) && k.asked_walls.length
+        ? ' for ' + k.asked_walls.length + (k.asked_walls.length === 1 ? ' vegg' : ' vegger') : ''));
+  for (const e of (Array.isArray(k.hendelser) ? k.hendelser : [])) {
+    if (e.kind === 'kopiert') legg(e.at, 'ut', 'Du kopierte «' + ((e.data && e.data.tekst) || 'lenken') + '» til e-post');
+    else if (e.kind === 'trukket') legg(e.at, 'ut', 'Du trakk lenken tilbake');
+    else if (e.kind === 'paaminnelse') legg(e.at, 'ut', 'Påminnelse sendt');
+    else legg(e.at, 'ut', e.kind);
+  }
+  if (k.invite_sent_at) legg(k.invite_sent_at, 'ut', 'Invitasjon sendt' + (k.invite_sent_to ? ' til ' + k.invite_sent_to : ''));
+
+  const hvem = k.answered_by_name || 'Kunden';
+  if (k.answered_at) {
+    const linjer = [];
+    const a = k.answer || {};
+    if (erForslag) {
+      for (const r of (a.rooms || [])) {
+        const navn = r.roomName || ((S.rooms.find(x => x.id === r.roomId) || {}).name) || 'Rom';
+        if (r.ok) { linjer.push({ roomId: r.roomId, tekst: navn + ': OK som det er' }); continue; }
+        const p = r.productId != null ? HEATING_PRODUCTS.find(x => x.id === r.productId) : null;
+        const N = r.cableCount || 1;
+        const hva = p ? (N > 1 ? N + ' stk ' + p.name : p.name)
+                  : (r.targetWm2 != null ? r.targetWm2 + ' W/m² ønsket' : 'retning');
+        linjer.push({ roomId: r.roomId,
+          tekst: navn + ': ' + hva + (r.nyType ? ' (nytt)' : '')
+            + (r.direction === 'h' ? ' · vannrett' : r.direction === 'v' ? ' · loddrett' : ''),
+          sitat: r.comment || null });
+      }
+    } else {
+      for (const w of (a.walls || [])) {
+        const navn = w.roomName || ((S.rooms.find(x => x.id === w.roomId) || {}).name) || 'Rom';
+        linjer.push({ roomId: w.roomId,
+          tekst: navn + ' vegg ' + ((w.wallIdx != null ? w.wallIdx + 1 : '?')) + ': '
+            + (w.fromCm != null ? Math.round(w.fromCm) + ' → ' : '') + Math.round(w.cm || 0) + ' cm' });
+      }
+      if (Array.isArray(a.points) && a.points.length) linjer.push({ tekst: a.points.length + ' hjørne(r) flyttet' });
+    }
+    legg(k.answered_at, 'inn', hvem + (erForslag ? ' sendte forslag' : ' sendte mål'),
+      { linjer, sitat: (a.comment || '').trim() || null });
+  }
+  if (k.approve_all_at) legg(k.approve_all_at, 'inn',
+    (k.approve_all_name || hvem) + ' godkjente hele prosjektet', { merke: 'ok' });
+
+  for (const r of (Array.isArray(k.applied_result) ? k.applied_result : [])) {
+    if (!r || !r.at) continue;
+    const navn = r.roomName || 'Rom';
+    if (r.status === 'godkjent') {
+      const res = r.resultat || {};
+      legg(r.at, 'ut', 'Du godkjente ' + navn
+        + (res.navn ? ' — ble ' + res.navn : '')
+        + (res.wm2 != null ? ' · ' + res.wm2 + ' W/m²' : '')
+        + (res.cc != null ? ' · CC ' + res.cc : ''), { roomId: r.roomId, merke: 'ok' });
+    } else {
+      legg(r.at, 'ut', 'Du avslo ' + navn, { roomId: r.roomId, merke: 'nei', sitat: r.grunn || null });
+    }
+  }
+  if (k.svar_sendt_at) legg(k.svar_sendt_at, 'ut', 'Du sendte svar til kunden');
+  if (!erForslag && k.status === 'applied') legg(k.applied_at || k.answered_at, 'ut', 'Du innarbeidet målene', { merke: 'ok' });
+  if (k.status === 'open' && k.expires_at && new Date(k.expires_at) < new Date())
+    legg(k.expires_at, 'ut', 'Lenken utløp');
+
+  h.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  return { id: k.id, nr, mode: k.mode, tittel, status: k.status, hendelser: h,
+    fra: h.length ? h[0].at : k.created_at, til: h.length ? h[h.length - 1].at : k.created_at };
+}
+
+// ── 055: logg-vinduet ────────────────────────────────────────────────────────────────────
+// Samme slag vindu som 053s (flyttbart, ikke-modalt) — gjenbruker `_forslagVinduDrag`, så det
+// ikke finnes to drag-implementasjoner.
+let _loggRunder = null;
+
+async function _kundeAapneLogg(apneRunde) {
+  const runder = await _kundeLoggHent(_supabaseProjectId);
+  _loggRunder = runder;
+  _kundeLoggRender(apneRunde);
+}
+
+function _kundeLoggLukk() { document.getElementById('_logg-ov')?.remove(); }
+
+function _kundeLoggRender(apneRunde) {
+  document.getElementById('_logg-ov')?.remove();
+  const runder = (_loggRunder || []).slice().reverse();   // nyeste runde øverst
+  const d = document.createElement('div');
+  d.id = '_logg-ov';
+  d.style.cssText = 'position:fixed;right:16px;top:70px;z-index:2101;width:480px;max-width:94vw;'
+    + 'max-height:74vh;display:flex;flex-direction:column;background:var(--surface,#16171c);'
+    + 'border:1px solid var(--border);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.45);'
+    + 'color:var(--text);overflow:hidden';
+
+  const dt = iso => { try {
+    return new Date(iso).toLocaleString('nb-NO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  } catch (e) { return ''; } };
+  const dag = iso => { try { return new Date(iso).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' }); } catch (e) { return ''; } };
+  const ikon = h => h.merke === 'ok' ? '✓' : h.merke === 'nei' ? '✕' : h.retning === 'inn' ? '←' : '→';
+  const farge = h => h.merke === 'ok' ? '#22c55e' : h.merke === 'nei' ? '#e5484d'
+    : h.retning === 'inn' ? '#4fa2b8' : 'var(--dim)';
+
+  let kropp = '';
+  if (!runder.length) {
+    kropp = `<div style="padding:22px 16px;font-size:12.5px;color:var(--dim);text-align:center">
+      Ingen kundedialog ennå — del en presentasjon eller be om mål.</div>`;
+  }
+  for (const r of runder) {
+    const apen = (apneRunde == null) || apneRunde === r.id || runder.length === 1;
+    kropp += `<div style="border-top:1px solid var(--border)">
+      <div onclick="_kundeLoggToggle('${r.id}')" style="padding:9px 13px;cursor:pointer;background:var(--surface2);
+          display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;font-weight:700">Runde ${r.nr} · ${r.tittel}</span>
+        <span style="font-size:11px;color:var(--dim)">${dag(r.fra)}${dag(r.til) !== dag(r.fra) ? '–' + dag(r.til) : ''}</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--dim)">${r.hendelser.length} hendelser</span>
+      </div>
+      ${apen ? r.hendelser.slice().reverse().map(h => `
+        <div style="padding:8px 13px;border-top:1px solid var(--border)">
+          <div style="display:flex;gap:8px;align-items:baseline">
+            <span style="color:${farge(h)};font-size:12px;width:14px;flex:0 0 auto">${ikon(h)}</span>
+            <span style="font-size:11px;color:var(--dim);white-space:nowrap">${dt(h.at)}</span>
+            <span style="font-size:12.5px;flex:1">${esc(h.tekst)}</span>
+          </div>
+          ${(h.linjer || []).map(l => `<div style="margin:3px 0 0 36px;font-size:11.5px">
+            ${l.roomId != null ? `<a href="#" onclick="event.preventDefault();_kundeLoggTilRom(${l.roomId})" style="color:var(--accent);text-decoration:none">${esc(l.tekst)}</a>` : esc(l.tekst)}
+            ${l.sitat ? `<div style="color:var(--dim);font-style:italic">«${esc(l.sitat)}»</div>` : ''}</div>`).join('')}
+          ${h.sitat ? `<div style="margin:4px 0 0 36px;font-size:11.5px;color:var(--dim);font-style:italic;white-space:pre-wrap">«${esc(String(h.sitat).slice(0, 2000))}»</div>` : ''}
+        </div>`).join('') : ''}
+    </div>`;
+  }
+
+  d.innerHTML = `
+    <div id="_fors-tittel" style="display:flex;align-items:center;gap:8px;padding:11px 13px;
+        border-bottom:1px solid var(--border);cursor:move;user-select:none;background:var(--surface2)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:700">🕘 Kundedialog</div>
+        <div style="font-size:11px;color:var(--dim)">${runder.length} runde${runder.length === 1 ? '' : 'r'} — bare synlig for dere</div>
+      </div>
+      <button onclick="_kundeLoggLukk()" style="background:none;border:none;color:var(--muted);font-size:19px;cursor:pointer;line-height:1">&times;</button>
+    </div>
+    <div style="overflow:auto;flex:1">${kropp}</div>
+    <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px">
+      <button onclick="_kundeLoggKopier()" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;
+        background:var(--surface2);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer">Kopier som tekst</button>
+      <button onclick="_kundeLoggSkrivUt()" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;
+        background:var(--surface2);color:var(--text);font-size:12.5px;cursor:pointer">Skriv ut</button>
+    </div>`;
+  document.body.appendChild(d);
+  _forslagVinduDrag(d);   // samme drag som 053 — ikke en kopi
+}
+
+let _loggApen = null;
+function _kundeLoggToggle(id) { _loggApen = (_loggApen === id) ? null : id; _kundeLoggRender(_loggApen); }
+
+function _kundeLoggTilRom(roomId) {
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r) { _showToast && _showToast('Rommet finnes ikke lenger', 'info'); return; }
+  S.ui.selectedRoomId = roomId;
+  if (typeof fitRoom === 'function') fitRoom(roomId);
+  renderSidebar(); render();
+}
+
+// Ren tekst, KRONOLOGISK (eldst først) — den skal limes inn i en e-post eller et Visma-notat,
+// og der leses historikk forfra.
+function _kundeLoggTekst() {
+  const linjer = [];
+  for (const r of (_loggRunder || [])) {
+    linjer.push('Runde ' + r.nr + ' · ' + r.tittel);
+    for (const h of r.hendelser) {
+      let d = ''; try { d = new Date(h.at).toLocaleString('nb-NO'); } catch (e) {}
+      linjer.push('  ' + d + '  ' + h.tekst);
+      for (const l of (h.linjer || [])) {
+        linjer.push('      - ' + l.tekst + (l.sitat ? '  «' + l.sitat + '»' : ''));
+      }
+      if (h.sitat) linjer.push('      «' + h.sitat + '»');
+    }
+    linjer.push('');
+  }
+  return linjer.join('\n').trim();
+}
+
+async function _kundeLoggKopier() {
+  const t = _kundeLoggTekst();
+  if (!t) { _showToast && _showToast('Ingenting å kopiere', 'info'); return; }
+  try { await navigator.clipboard.writeText(t); _showToast && _showToast('Loggen er kopiert', 'ok'); }
+  catch (e) { _copyManuelt ? _copyManuelt(t) : _showToast && _showToast('Kunne ikke kopiere', 'warn'); }
+}
+
+function _kundeLoggSkrivUt() {
+  const w = window.open('', '_blank');
+  if (!w) { _showToast && _showToast('Nettleseren blokkerte utskriftsvinduet', 'warn'); return; }
+  w.document.write('<meta charset="utf-8"><title>Kundedialog</title>'
+    + '<pre style="font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap;padding:24px">'
+    + esc(_kundeLoggTekst()) + '</pre>');
+  w.document.close();
+  w.print();
+}
+
 async function _kundeRevokeLink(id) {
   if (!id) return;
   await _db.from('kundelenker').update({ status: 'revoked' }).eq('id', id);
+  _kundeLogg(id, 'trukket');   // 055
   _showToast && _showToast('Kundelenken er trukket tilbake', 'ok');
   _kundeRefreshStatus();
 }
@@ -10928,7 +11169,8 @@ async function _kundeMarkApplied() {
   // feiler den (eller er man ikke pakoblet), er maalene likevel innarbeidet i tegningen, og da
   // skal ikke panelet bli staaende og paastaa at noe gjenstaar.
   if (_db) {
-    try { await _db.from('kundelenker').update({ status: 'applied' }).eq('id', k.id); }
+    // 055: ⚠ `applied_at` manglet her — målene ble innarbeidet uten at noe sa NÅR.
+    try { await _db.from('kundelenker').update({ status: 'applied', applied_at: new Date().toISOString() }).eq('id', k.id); }
     catch (e) { _showToast && _showToast('Målene er innarbeidet, men status kunne ikke lagres — prøv igjen senere', 'warn'); }
   }
   _kundeRevState = null;
@@ -10999,8 +11241,12 @@ function _linkLabelHtml(label, url) {
   // Ren <a> uten stil: e-postklienten styler lenken selv, slik mottakeren er vant til.
   return '<a href="' + esc(url) + '">' + esc(label) + '</a>';
 }
-async function _copyLinkRich(label, url) {
+async function _copyLinkRich(label, url, linkId) {
   const tekst = String(label || '').trim() || 'LENKE';
+  // 055: logges HER, i den ene delte kopieringsfunksjonen, ikke i hver av de tre knappene som
+  // kaller den. Uten `linkId` (en presentasjonslenke uten forslagsrad) finnes ingen rad å
+  // logge på, og da logges ingenting.
+  if (linkId) _kundeLogg(linkId, 'kopiert', { tekst });
   try {
     if (typeof ClipboardItem !== 'undefined' && navigator.clipboard && navigator.clipboard.write) {
       await navigator.clipboard.write([new ClipboardItem({
@@ -11040,16 +11286,21 @@ function _copyManuelt(url) {
 // på tavla, og kunne ikke endre lenketeksten.
 // 043: forslagslenka gjenbrukes. Uten gjenbruk ville hver «Del lenke» laget en ny rad i
 // `kundelenker`, og 044s panel ville ikke vite hvilken av dem som gjelder.
+// 055: lenkas `id` trengs for å logge «kopiert». Den stashes her i stedet for å endre
+// returverdien — funksjonen heter `…Token` og brukes som et token tre steder.
+let _delLenkeId = null;
+
 async function _presentForslagToken() {
+  _delLenkeId = null;
   if (!_db || !_supabaseProjectId) return null;
   try {
     const { data } = await _db.from('kundelenker')
-      .select('token, expires_at, created_at')
+      .select('id, token, expires_at, created_at')
       .eq('project_id', _supabaseProjectId).eq('mode', 'forslag').eq('status', 'open')
       .order('created_at', { ascending: false }).limit(5);
     const naa = Date.now();
     const brukbar = (data || []).find(r => !r.expires_at || new Date(r.expires_at).getTime() > naa);
-    if (brukbar) return brukbar.token;
+    if (brukbar) { _delLenkeId = brukbar.id; return brukbar.token; }
   } catch (e) { /* ny lenke under */ }
   const token = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
   if (!token) return null;
@@ -11105,7 +11356,7 @@ function _presentShareModal(url, forslagToken) {
       <input id="_del-label" value="PRESENTASJON" aria-label="Lenketekst"
         style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);
                color:#4ea3ff;text-decoration:underline;font-size:13px;font-weight:600">
-      <button onclick="_copyLinkRich(document.getElementById('_del-label').value, _delUrl())"
+      <button onclick="_copyLinkRich(document.getElementById('_del-label').value, _delUrl(), _delLenkeId)"
         style="padding:8px 15px;background:var(--accent);border:none;border-radius:7px;font-size:12.5px;font-weight:600;color:#0d0e10;cursor:pointer">Kopier</button>
     </div>
     <div style="font-size:11px;color:var(--dim);margin-bottom:14px">Du kan skrive noe annet, f.eks. «Se løsningen her» — teksten følger med lenken.</div>
@@ -41661,15 +41912,25 @@ async function _kundelenkeRegressionTest() {
       check('R: lenken går til varmeplan.no (027 regel 8)', true,
         /_PUBLIC_BASE_URL \+ '\/\?present=' \+ token/.test(kShare), 'feil domene');
 
-      // STEG 0.3 listet fem rpc-kall: `kundelenke_get` ×2 (returns jsonb) og `kundelenke_answer`
-      // ×2 (returns boolean) er SKALARER og leses riktig; bare `get_present_project` er en
-      // liste. Påstanden her er at array-vakten står på det ene kallet som trenger den, og
-      // ikke har spredt seg til de fire som ikke skal ha den.
+      // STEG 0.3 (041) listet fem rpc-kall: `kundelenke_get` ×2 (returns jsonb) og
+      // `kundelenke_answer` ×2 (returns boolean) er SKALARER og leses riktig; bare
+      // `get_present_project` er en liste. Påstanden her er at array-vakten står på det ene
+      // kallet som trenger den, og ikke har spredt seg til de fire som ikke skal ha den.
+      //
+      // ⚠ 055 la til `kundelenke_logg` — et SJETTE kall. Den utvider IKKE den anonyme flaten:
+      // funksjonen er `security invoker` og bare `granted` til `authenticated`, og kundens egne
+      // veier (`_forslagStart`, `_forslagSend`) rører den ikke (låst i L under). Tallet er
+      // derfor hevet bevisst, ikke fordi noe «bare ble flere».
       const _rpcKall = _skriptJ.match(/_db\.rpc\('[a-z_]+'/g) || [];
-      check('R: fortsatt fem rpc-kall, og bare ett er get_present_project', '4 + 1',
-        _rpcKall.filter(k => /kundelenke_/.test(k)).length === 4
+      check('R: seks rpc-kall, og bare ett er get_present_project', '5 + 1',
+        _rpcKall.filter(k => /kundelenke_/.test(k)).length === 5
         && _rpcKall.filter(k => /get_present_project/.test(k)).length === 1,
         _rpcKall.join(' '));
+      // At funksjonen er `security invoker` og bare gitt til `authenticated` står i
+      // migrasjonen, ikke i klienten — det kan denne testen ikke se. Det den KAN se, og som er
+      // den klientsidige halvdelen av påstanden, er at kundens veier ikke kaller den (blokk L).
+      check('R: det sjette kallet er loggen', true,
+        _rpcKall.some(k => /kundelenke_logg/.test(k)), _rpcKall.join(' '));
       check('R: array-vakten står KUN i presentasjonsveien', 1,
         (_skriptJ.match(/Array\.isArray\(data\) \? data\[0\] : data/g) || []).length === 1,
         (_skriptJ.match(/Array\.isArray\(data\) \? data\[0\] : data/g) || []).length);
@@ -41943,6 +42204,84 @@ async function _kundelenkeRegressionTest() {
       const planSkjev = _kundeApplyPlan(rom(trap), new Map([[0, 345], [2, 346]]));
       check('K: men ALDRI i et skjevt rom — der er veggene ikke koblet', 0,
         planSkjev.notes.length === 0, planSkjev.notes.map(nt => nt.kind));
+    })();
+
+    // ── L (055) — kundedialog-loggen ──
+    // ⚠ MÅLT (STEG 0.1): nesten hele dialogen lå ALLEREDE i `kundelenker`. Loggen avledes
+    // derfor; bare «kopiert» og «trukket» manglet et sted å bo. Og mål-veien satte
+    // `status:'applied'` UTEN `applied_at` — «Du innarbeidet målene» kunne ikke dateres.
+    (() => {
+      const uL = _kildeUtenKommentarer;
+      // Egen høystakk — `kilde`/`_skriptJ` lever i andre blokker i denne testen.
+      const _skriptL = uL([...document.scripts].filter(sc => !sc.src).map(sc => sc.textContent).join('\n'))
+        .replace(/async function _kundelenkeRegressionTest\(\)[\s\S]*?\n\}/, '');
+      const alt = {
+        id: 'x', mode: 'forslag', status: 'applied', created_at: '2026-10-09T08:00:00Z',
+        invite_sent_at: '2026-10-09T08:05:00Z', invite_sent_to: 'ola@firma.no',
+        answered_at: '2026-10-09T11:30:00Z', answered_by_name: 'Ola Nordmann',
+        approve_all_at: '2026-10-09T11:31:00Z', approve_all_name: 'Ola Nordmann',
+        answer: { rooms: [{ roomId: 1, roomName: 'Stue', ok: false, productId: 1, cableCount: 2, comment: 'Varmere' },
+                          { roomId: 2, roomName: 'Bad', ok: true }], comment: 'Takk!' },
+        applied_result: [{ roomId: 1, roomName: 'Stue', status: 'godkjent', at: '2026-10-10T07:00:00Z',
+                           resultat: { navn: '2 stk InFloor 17T 900W', wm2: 94, cc: 10.8 } },
+                         { roomId: 2, roomName: 'Bad', status: 'avslaatt', at: '2026-10-10T07:05:00Z', grunn: 'Beholder dagens' }],
+        svar_sendt_at: '2026-10-10T07:10:00Z',
+        hendelser: [{ kind: 'kopiert', at: '2026-10-09T08:01:00Z', data: { tekst: 'PRESENTASJON' } }],
+      };
+      const r = _kundeLoggRunde(alt, 2);
+      // created + kopiert + invite + answered + approve_all + godkjent + avslått + svar_sendt
+      check('L: alle feltene blir til hendelser', 8, r.hendelser.length === 8, r.hendelser.length);
+      check('L: kronologisk rekkefølge', true,
+        r.hendelser.every((h, i, a) => i === 0 || String(a[i - 1].at) <= String(h.at)), 'usortert');
+      check('L: kundens svar har én linje per rom', 2,
+        (r.hendelser.find(h => /sendte forslag/.test(h.tekst)) || {}).linjer?.length === 2,
+        (r.hendelser.find(h => /sendte forslag/.test(h.tekst)) || {}).linjer?.length);
+      check('L: godkjenningen viser hva det FAKTISK ble', true,
+        r.hendelser.some(h => /Du godkjente Stue — ble 2 stk InFloor 17T 900W · 94 W\/m² · CC 10.8/.test(h.tekst)),
+        r.hendelser.map(h => h.tekst).join(' | '));
+      check('L: avslaget bærer begrunnelsen', 'Beholder dagens',
+        (r.hendelser.find(h => /Du avslo Bad/.test(h.tekst)) || {}).sitat === 'Beholder dagens',
+        (r.hendelser.find(h => /Du avslo Bad/.test(h.tekst)) || {}).sitat);
+      // ⚠ Et slettet rom skal ikke gi en feil — navnet tas fra `roomName` i svaret.
+      const uten = _kundeLoggRunde({ ...alt, answer: { rooms: [{ roomId: 999, roomName: 'Slettet rom', ok: true }] },
+        applied_result: [], svar_sendt_at: null, hendelser: [] }, 1);
+      check('L: slettet rom vises med lagret navn', true,
+        uten.hendelser.some(h => (h.linjer || []).some(l => /Slettet rom/.test(l.tekst))),
+        JSON.stringify(uten.hendelser.map(h => h.linjer)));
+      // Mål-runden
+      const m = _kundeLoggRunde({ id: 'm', mode: 'maal', status: 'applied', created_at: '2026-10-02T09:00:00Z',
+        asked_walls: [{}, {}, {}], applied_at: '2026-10-03T16:00:00Z',
+        answered_at: '2026-10-03T14:20:00Z', answered_by_name: 'Ola',
+        answer: { walls: [{ roomId: 1, roomName: 'Stue', wallIdx: 1, fromCm: 320, cm: 345 }], comment: '' } }, 1);
+      check('L: mål-runden teller veggene det ble spurt om', true,
+        m.hendelser.some(h => /Du ba om mål for 3 vegger/.test(h.tekst)), m.hendelser[0] && m.hendelser[0].tekst);
+      check('L: «Du innarbeidet målene» dateres av applied_at', true,
+        m.hendelser.some(h => /innarbeidet målene/.test(h.tekst) && h.at === '2026-10-03T16:00:00Z'),
+        m.hendelser.map(h => h.tekst + '@' + h.at).join(' | '));
+      check('L: mål-veien setter nå applied_at', true,
+        /status: 'applied', applied_at: new Date\(\)\.toISOString\(\)/.test(_skriptL), 'mangler tidspunkt');
+      // Loggingen skal gå via RPC-en (append), ikke via en les-endre-skriv.
+      check('L: hendelser legges til med RPC, ikke med update', true,
+        /_db\.rpc\('kundelenke_logg'/.test(uL(_kundeLogg))
+        && !/\.update\(/.test(uL(_kundeLogg)), 'overskriver');
+      check('L: «kopiert» logges i den DELTE kopieringsfunksjonen', true,
+        /_kundeLogg\(linkId, 'kopiert'/.test(uL(_copyLinkRich)), 'logges per knapp');
+      check('L: «trukket» logges når lenken trekkes', true,
+        /_kundeLogg\(id, 'trukket'\)/.test(uL(_kundeRevokeLink)), 'ikke logget');
+      // Loggen henter ALLE statuser — den er historikk, ikke en oppgaveliste.
+      checkIkke('L: loggen filtrerer ikke bort applied/revoked',
+        /\.in\('status'/.test(uL(_kundeLoggHent)), 'filtrerer');
+      // Ren tekst er KRONOLOGISK (eldst først) — vinduet viser nyeste øverst.
+      const lagretRunder = _loggRunder;
+      try {
+        _loggRunder = [m, r];
+        const t = _kundeLoggTekst();
+        check('L: «Kopier som tekst» er kronologisk og har æøå', true,
+          t.indexOf('Runde 1') < t.indexOf('Runde 2') && /målene/.test(t), t.slice(0, 60));
+      } finally { _loggRunder = lagretRunder; }
+      // Ingen anonym vei skal røre `hendelser`.
+      checkIkke('L: kundens egen side logger ingenting',
+        /kundelenke_logg/.test(uL(_forslagStart) + uL(_forslagSend)), 'kunden logger');
     })();
   } finally {
     S.rooms = saved.rooms;
@@ -56083,9 +56422,28 @@ function _renderSbProjInfo() {
     } else svarEl.style.display = 'none';
   }
   _renderSbForslagRad();
+  // 055: ⚠ ikke inni `_renderSbForslagRad` — den returnerer tidlig når det ikke finnes noe
+  // forslag, og da ville loggknappen aldri dukket opp på et prosjekt med bare en mål-runde.
+  _renderSbLoggRad();
 }
 
 // 044: forslag er en EGEN rad, ikke en omskriving av mål-raden — et prosjekt kan ha begge.
+// 055: alltid tilgjengelig rad «🕘 Kundedialog · Logg» når prosjektet er lagret i skya.
+// Står under forslagsraden, så den ikke konkurrerer med oppgavene.
+function _renderSbLoggRad() {
+  const vert = document.getElementById('spi-kundesvar');
+  if (!vert || !vert.parentElement) return;
+  document.getElementById('spi-logg')?.remove();
+  if (!_supabaseProjectId) return;
+  const d = document.createElement('div');
+  d.className = 'spi-row'; d.id = 'spi-logg';
+  d.onclick = e => { e.stopPropagation(); _kundeAapneLogg(); };
+  d.innerHTML = '<span style="color:var(--dim)">🕘 Kundedialog</span>'
+    + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Logg</span>';
+  const etter = document.getElementById('spi-forslag') || vert;
+  etter.parentElement.insertBefore(d, etter.nextSibling);
+}
+
 function _renderSbForslagRad() {
   const vert = document.getElementById('spi-kundesvar');
   if (!vert || !vert.parentElement) return;
@@ -56100,9 +56458,11 @@ function _renderSbForslagRad() {
     const d2 = document.createElement('div');
     d2.className = 'spi-row'; d2.id = 'spi-forslag';
     d2.onclick = e => { e.stopPropagation(); openKundeForslagPanel(true); };
+    // 055: «Se forslaget» → «Se logg» (prompt §3).
+    d2.onclick = e => { e.stopPropagation(); _kundeAapneLogg(_forslagSisteCache && _forslagSisteCache.id); };
     d2.innerHTML = '<span style="color:#22c55e;font-weight:600">✓ Forslag behandlet</span>'
       + (sn ? ' <span style="color:var(--dim)">' + sn + '</span>' : '')
-      + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Se forslaget</span>';
+      + ' <span style="color:var(--accent);cursor:pointer;text-decoration:underline">Se logg</span>';
     vert.parentElement.insertBefore(d2, vert.nextSibling);
     return;
   }
@@ -70290,6 +70650,8 @@ function _forslagRevRender() {
         <div style="font-size:13.5px;font-weight:700">Kundeforslag${ferdig ? ' · ferdig' : ''}</div>
         <div style="font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Fra ${hvem}${nar ? ' · ' + nar : ''}</div>
       </div>
+      <button onclick="event.stopPropagation();_kundeAapneLogg(k.id)" title="Hele dialogen med kunden"
+        style="background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;line-height:1">🕘</button>
       <button onclick="event.stopPropagation();_forslagVinduMin=true;_forslagRevRender()" title="Minimer"
         style="background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;line-height:1">▾</button>
       <button onclick="event.stopPropagation();_forslagLukkVindu()" title="Lukk"

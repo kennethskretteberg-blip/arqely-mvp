@@ -4,6 +4,59 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kundedialog-logg: hele historikken per prosjekt — 2026-10-10
+
+Prompt 055. Kenneth: «Jeg ønsker en knapp hvor jeg kan se logg av hele dialogen med meg og
+kunden … går det flere runder, har vi full historikk.»
+
+### STEG 0 — loggen trengte nesten ingen ny lagring
+
+Målt: `kundelenker` har allerede `created_at`, `invite_sent_at`/`invite_sent_to`, `answered_at`,
+`answered_by_name`, `answer`, `approve_all_at`, og fra 053 `applied_result[].at/by/resultat` og
+`svar_sendt_at`. Loggen **avledes** derfor — den lagres ikke.
+
+To hull: (1) hendelser uten egen kolonne — at lenka ble *kopiert* til e-post og at den ble
+*trukket*; (2) **mål-veien satte `status:'applied'` uten `applied_at`**, så «Du innarbeidet
+målene» ikke kunne dateres. Begge rettet.
+
+### Datamodell
+
+Én additiv kolonne `hendelser jsonb` og RPC-en `kundelenke_logg(p_id, p_hendelse)` som gjør
+`hendelser || $1` **på serveren** — to vinduer som logger samtidig skal ikke overskrive
+hverandre, slik en les-endre-skriv i klienten ville gjort. `security invoker`, bare gitt til
+`authenticated`: RLS avgjør hvem som kan skrive, og anonyme veier rører den aldri.
+
+«Kopiert» logges i den **delte** `_copyLinkRich`, ikke i hver av de tre knappene som kaller den.
+
+### Tidslinjen
+
+`_kundeLoggRunde(lenke, nr)` er en ren funksjon — ingen nettverk, så den kan testes. Én lenke
+blir til én runde: lenke laget → kopiert → invitasjon sendt → kundens svar (med én klikkbar
+linje per rom og kommentaren i kursiv) → godkjent hele prosjektet → dine beslutninger med hva
+det **faktisk ble** → svar sendt → innarbeidet / trukket / utløpt.
+
+Vinduet er av samme slag som 053s (flyttbart, ikke-modalt) og gjenbruker `_forslagVinduDrag`, så
+det ikke finnes to drag-implementasjoner. Nyeste runde øverst, ikoner → ← ✓ ✕, klikk på et
+romnavn velger og zoomer til rommet. «Kopier som tekst» gir **kronologisk** ren tekst (historikk
+leses forfra, i motsetning til vinduet), og «Skriv ut» åpner en lesbar side.
+
+Knappen står to steder: egen rad «🕘 Kundedialog · Logg» i prosjektinfo, og 🕘 i
+forslagsvinduets tittellinje. 053s «✓ Forslag behandlet · Se forslaget» peker nå på **Se logg**.
+
+### Én vakt måtte heves bevisst
+
+041s regresjonssjekk teller RPC-kall for å hindre at den anonyme flaten vokser.
+`kundelenke_logg` er et sjette kall — tallet er hevet **med begrunnelse i koden**: funksjonen er
+innlogget-only, og at kundens veier ikke kaller den er låst i en egen sjekk.
+
+Og en av mine egne forventninger var feil: jeg skrev 7 hendelser der riktig svar er 8
+(created + kopiert + invitasjon + svar + godkjent-alt + godkjent + avslått + svar sendt).
+Testen var feil, ikke koden.
+
+**Regresjon:** 17 batterier, **701 sjekker** (fra 685), alle grønne.
+
+---
+
 ## Kundesiden: stigen fortsetter med N × like kabler, og tomme rom kan få forslag — 2026-10-10
 
 Prompt 054. Kenneth: «InFloor 10T, maks 2000 W: neste steg 2 stk 1100 W = 2200 W.»
