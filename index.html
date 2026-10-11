@@ -5753,11 +5753,14 @@ function drawPlanWalls() {
   const meta = _planMeta() || {};
   ctx.save();
   // 1) Halvtransparent bredde — viser om senterlinja dekker den svarte veggen under.
+  // 057: en ÅPNINGSVEGG dekker ingen vegg i tegningen — den er motorens gjetning om at det
+  // ligger en dør eller et vindu der. Derfor svakere flate og stiplet linje, så Kenneth ser
+  // forskjell på «dette fant jeg» og «dette gjettet jeg».
   for (const w of liste) {
     const a = w2s(..._planPt(bg, w.a)), b = w2s(..._planPt(bg, w.b));
     const tw = _planTykkelseW(w) * S.view.zoom * BASE_SCALE;
     if (tw >= 2) {
-      ctx.strokeStyle = 'rgba(255,167,38,.28)';
+      ctx.strokeStyle = w.source === 'opening' ? 'rgba(255,167,38,.17)' : 'rgba(255,167,38,.28)';
       ctx.lineWidth = tw; ctx.lineCap = 'butt';
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
@@ -5769,12 +5772,16 @@ function drawPlanWalls() {
   for (const w of liste) {
     const a = w2s(..._planPt(bg, w.a)), b = w2s(..._planPt(bg, w.b));
     const valgt = S.ui.planSelId === w.id;
+    const apning = w.source === 'opening';
+    const blink = apning && _planBlinkTil > Date.now();
+    ctx.setLineDash(apning ? [8, 6] : []);
     ctx.strokeStyle = 'rgba(90,61,0,.6)';
     ctx.lineWidth = (valgt ? 3 : 1.6) + 2;
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-    ctx.strokeStyle = PLAN_FARGE;
-    ctx.lineWidth = valgt ? 3 : 1.6;
+    ctx.strokeStyle = blink ? '#fff' : PLAN_FARGE;
+    ctx.lineWidth = (valgt ? 3 : 1.6) + (blink ? 1.5 : 0);
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.setLineDash([]);
     if (valgt) {
       ctx.fillStyle = PLAN_FARGE;
       for (const p of [a, b]) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill(); }
@@ -5985,6 +5992,7 @@ function _planApplyResponse(res, floorId) {
   S.planWalls[fid] = (res.walls || []).map((w, i) => ({
     id: i + 1, a: uv(w.a), b: uv(w.b),
     thickness_cm: w.thickness_cm || 0, source: w.source || 'single',
+    opening: w.opening || null,   // 057: 'door' | 'window' når source === 'opening'
   }));
   S.planMeta[fid] = {
     page_size_pt: res.page_size_pt || null,   // 049: /plan/rooms trenger den tilbake
@@ -5994,6 +6002,7 @@ function _planApplyResponse(res, floorId) {
     coverage: res.coverage || null,
     leftovers: (res.leftovers || []).map(r => ({ a: uv(r.a), b: uv(r.b) })),
     calibration: res.calibration || null,
+    openings: res.openings || null,   // 057
     rooms: res.rooms || [],
     labels: res.labels || [],
   };
@@ -6103,7 +6112,9 @@ async function _planStartFraFil(file) {
   // 049: motoren kalles PARALLELT med at underlaget legges inn — den bruker 2–10 s, og
   // underlaget har sin egen venting (PDF-render, sidevelger). Ingen grunn til å gjøre dem
   // etter hverandre.
-  _planEngineLoad = _engineFetchPlan(file, { close_gaps_cm: 121 })
+  // 057: 130 cm, samme tall som motorens `DOOR_MAX_CM`. ⚠ `close_gaps` betyr «smalere enn»
+  // (målt mellom 90 og 91 i 047), så 130 lukker dører til og med 129.
+  _planEngineLoad = _engineFetchPlan(file, { close_gaps_cm: 130 })
     .catch(e => { _planEngineFeil = e.message; return null; });
   _loadFileAsBackground(file);
   // ⚠ `_loadFileAsBackground` er asynkron på flere nivåer (PDF-render, DWG→SVG, sidevelger som
@@ -6300,6 +6311,27 @@ function _planExit() {
 
 // 052: målestokken som brikke i stedet for «Sett målestokk»-boksen. Tillit < 0,8 vises gult
 // med «bekreft» — brukeren skal se at appen gjetter, ikke bare at den har et tall.
+// 057: brikke som viser hvor mange åpninger motoren lukket. Klikk blinker dem, så Kenneth
+// ser hvilke vegger som er gjetninger — og kan slette den som er en ekte åpning.
+let _planBlinkTil = 0;
+function _planBlinkApninger() {
+  _planBlinkTil = Date.now() + 1500;
+  const slutt = _planBlinkTil;
+  const tikk = () => { render(); if (Date.now() < slutt) requestAnimationFrame(tikk); };
+  tikk();
+}
+
+function _planApningBrikke(meta) {
+  const o = meta && meta.openings;
+  if (!o) return '';
+  const n = (o.door || 0) + (o.window || 0);
+  if (!n) return '';
+  return `<button onclick="_planBlinkApninger()" title="Vegger motoren la over dører og vinduer så rommene lukker. Klikk for å se dem — slett den som er en ekte åpning."
+      style="min-height:28px;padding:0 10px;border:1px dashed ${PLAN_FARGE};border-radius:7px;
+             background:rgba(255,167,38,.1);color:var(--text);font-size:11.5px;cursor:pointer">
+    🚪 ${o.door || 0} dører${o.window ? ' · 🪟 ' + o.window + ' vinduer' : ''} lukket</button>`;
+}
+
 function _planMaalestokkBrikke(kal) {
   const bg = _planBg();
   // ⚠ MÅLT: brikka leste BARE motorens `calibration`, så den sto på «1:100 fra tittelfeltet»
@@ -6364,6 +6396,11 @@ function _planRenderBar() {
       <input type="checkbox" ${_planSnap ? 'checked' : ''} onchange="_planSnap=this.checked">Snap til tegning</label>
     <span style="width:1px;height:22px;background:var(--border)"></span>
     ${_planMaalestokkBrikke(meta.calibration)}
+    ${_planApningBrikke(meta)}
+    ${(() => { const v = _planList().find(w => w.id === S.ui.planSelId);
+      return (v && v.source === 'opening')
+        ? `<span style="font-size:11.5px;color:${PLAN_FARGE}">Lagt over ${v.opening === 'window' ? 'et vindu' : 'en dør'} — slett hvis det er en ekte åpning</span>`
+        : ''; })()}
     <span style="font-size:12px;color:${lav ? '#f0b232' : 'var(--dim)'}">
       Dekning: <b>${pct != null ? pct + ' %' : '–'}</b>${lav ? ' — noen vegger mangler, se røde markører' : ''}</span>
     <button onclick="_planExit()" style="min-height:34px;padding:0 13px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--muted);font-size:12.5px;cursor:pointer">Avbryt</button>
@@ -6415,7 +6452,7 @@ async function _planLagRom() {
       page_size_pt: side,
       origin_pt: meta.origin_pt || [0, 0],
       meters_per_point: kal.meters_per_point || null,
-      close_gaps_cm: 121,
+      close_gaps_cm: 130,   // 057
     });
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = 'Lag rom'; }
@@ -20495,6 +20532,65 @@ async function _planRegressionTest() {
           'kontor regnes som uoppvarmet');
         check('J: mønsteret deles med romtype-gjetteren', true,
           /UTEN_VARME_RE\.test\(n\)/.test(u(_pdfGuessRoomType)), 'to kopier');
+
+        // ── 057: åpningsvegger ──
+        // ⚠ MÅLT i lumelo (STEG 0.2): 199 frie veggender, 59 kollineære par og 149 som peker
+        // på en tverrvegg. Motoren lukker dem nå som EGNE vegger, så Kenneth ser gjetningen.
+        {
+          const bgA = S.bgs[1], wA = S.planWalls, mA = S.planMeta, flA = S.floors, akA = S.ui.activeFloorId;
+          try {
+            S.planWalls = {}; S.planMeta = {};
+            S.floors = [{ id: 1, name: 'P', building: null, order: 0, collapsed: false, partId: 1 }];
+            S.ui.activeFloorId = 1;
+            S.bgs = Object.assign({}, S.bgs, { 1: { img: {}, widthCm: 1000, heightCm: 700,
+              originX: 0, originY: -700, visible: true } });
+            _planApplyResponse({
+              walls: [
+                { a: [0.1, 0.2], b: [0.4, 0.2], thickness_cm: 12, source: 'double' },
+                { a: [0.4, 0.2], b: [0.5, 0.2], thickness_cm: 12, source: 'opening', opening: 'door' },
+                { a: [0.5, 0.2], b: [0.9, 0.2], thickness_cm: 12, source: 'opening', opening: 'window' },
+              ],
+              coverage: { pct: 95 }, leftovers: [],
+              calibration: { meters_per_point: 0.0352778, method: 'title', confidence: 0.9 },
+              openings: { door: 1, window: 1, corner: 0 },
+              page_size_pt: [1683.72, 1190.52],
+            }, 1);
+            const l = _planList(1);
+            check('J→057: source og opening bæres med fra motoren', 'door/window',
+              l[1].source === 'opening' && l[1].opening === 'door' && l[2].opening === 'window',
+              l.map(w => (w.opening || w.source)).join('/'));
+            check('J→057: en åpningsvegg er en VANLIG vegg i lista', 3, l.length === 3, l.length);
+            // Den slettes på nøyaktig samme vei som enhver annen vegg — `_planList()` er én
+            // liste, og sletteverktøyet spleiser ut treffet uten å se på `source`.
+            // ⚠ `_planList()` returnerer den LEVENDE lista — `l` og `liste` er samme array.
+            // Id-en må derfor leses FØR spleisingen; etter den peker `l[1]` på en annen vegg.
+            const slettetId = l[1].id;
+            const liste = _planList(1);
+            liste.splice(liste.findIndex(w => w.id === slettetId), 1);
+            check('J→057: åpningsveggen slettes som de andre', 2, _planList(1).length === 2, _planList(1).length);
+            check('J→057: ...og de andre står igjen', true,
+              _planList(1).every(w => w.id !== slettetId), 'feil vegg slettet');
+            checkIkke('J→057: sletteverktøyet særbehandler ikke åpninger',
+              /source === 'opening'/.test(_kildeUtenKommentarer(_planMouseDown)), 'egen vei');
+            const u057 = _kildeUtenKommentarer;
+            check('J→057: åpningsvegger tegnes stiplet', true,
+              /setLineDash\(apning \? \[8, 6\] : \[\]\)/.test(u057(drawPlanWalls)), 'ikke stiplet');
+            check('J→057: brikka teller dørene og vinduene', true,
+              /🚪 \$\{o\.door \|\| 0\} dører/.test(u057(_planApningBrikke)), 'ingen brikke');
+            check('J→057: appen ber om 130 cm, samme som motorens DOOR_MAX_CM', true,
+              /close_gaps_cm: 130/.test(skript) && !/close_gaps_cm: 121/.test(skript),
+              'fortsatt 121');
+            // `/plan/rooms` skal sende åpningsveggen som en helt vanlig vegg — den ER en vegg der.
+            check('J→057: /plan/rooms sender a, b og tykkelse — ingen særbehandling', true,
+              /thickness_cm: w\.thickness_cm \|\| 0/.test(u057(_planLagRom))
+              && !/source|opening/.test(u057(_planLagRom).split('labels:')[0]),
+              'særbehandler åpninger');
+          } finally {
+            if (bgA === undefined) delete S.bgs[1]; else S.bgs[1] = bgA;
+            S.planWalls = wA; S.planMeta = mA; S.floors = flA; S.ui.activeFloorId = akA;
+            S.ui.planSelId = null;
+          }
+        }
 
         // ⚠ 056 — POSISJON, ikke bare areal.
         // Kenneth: «de rommene som ble opprettet la seg helt feil sted, utenfor tegningen.»

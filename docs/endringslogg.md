@@ -4,6 +4,81 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Plantegning: vegger over dører og vinduer, så rommene lukker — 2026-10-10
+
+Prompt 057. Kenneth: «Det ble bare 4 rom opprettet. Jeg tror den største feilen er at vinduer
+og dører bryter veggene slik at det ikke blir opprettet rom.» Riktig diagnose.
+
+### STEG 0.2 — 199 frie veggender, målt
+
+| vei | antall | fordeling |
+|---|---|---|
+| kollineær ende-mot-ende | 59 par | klynger på **90–109 cm** og **130–159 cm**; 110–119 er tomt |
+| ende peker på en tverrvegg | 149 | 39 innen 130 cm, median 214 |
+| hjørne som ikke møtes | 9 | ≤ 25 cm, ~90° |
+
+**⚠ Første måling ga 0 par.** `_open_ends` returnerer `(punkt, utover-RETNING)`, ikke
+`(punkt, nabopunkt)` — måleskriptet mitt leste andre element som et punkt. En måling kan være
+like gal som en hypotese.
+
+**STEG 0.3:** tegningen har 10 535 symbolsegmenter å lete i. Av 14 gap i 131–400 cm fikk
+**11 vindusbevis**; de tre siste — alle 132 cm — hadde **73, 118 og 164** symbolpunkter i
+dørslagets ring.
+
+### Motoren
+
+`bridge_openings` legger åpningene som **egne vegger** (`source='opening'`,
+`opening='door'|'window'`): kollineær bro (dør ≤ 130 uten bevis, 130–400 bare med vindussymbol
+eller dørslag, aldri over 400), fri ende → tverrvegg innen 130, og hjørner som ikke møtes.
+Dekningen regnes **før** broene — en åpningsvegg dekker ingen råstrek.
+
+### To målinger som endret planen
+
+1. **Promptens tykkelses-sjekk (±2 cm) er feil.** Den avviste 22 av 59 kandidater, og alle var
+   ekte dører: 12,8 mot 24,6 cm er en dør mellom en inner- og en yttervegg. ⚠ Men målt ga det
+   bare **+1 bro og 0 rom** — regel (b) fanget dem opp likevel. Fjernet uansett, fordi filteret
+   ikke beskytter mot noe.
+2. **`DOOR_MAX_CM = 150` ville gitt 15 rom mot 13.** Beholdt **130**: Kenneths egen regel sier
+   at en ekte åpning bredere enn en dør skal stå. Dørslag-beviset lukker de brede gapene som
+   faktisk *er* dører — uten å gjette.
+
+### Appen
+
+Åpningsvegger tegnes **stiplet** med svakere flate, så Kenneth ser forskjell på «dette fant
+jeg» og «dette gjettet jeg». Brikke «🚪 55 dører · 🪟 3 vinduer lukket» i verktøylinja; klikk
+blinker dem i 1,5 s. Velger man en, sier linja «Lagt over en dør — slett hvis det er en ekte
+åpning». Den slettes på nøyaktig samme vei som enhver annen vegg. `close_gaps_cm` er hevet fra
+121 til 130, samme tall som motorens `DOOR_MAX_CM`.
+
+### Målt på Kenneths tegning
+
+| | før 057 | etter |
+|---|---|---|
+| lukkede rom | **4** | **13** |
+| frie veggender | 199 | 129 |
+| åpningsvegger | – | 55 dører + 3 vinduer |
+| dekning | 48,3 % | 48,3 % (uendret, som den skal) |
+
+Alle 13 fikk navn fra tegningen, 8 med arealsjekk ✓, og ett Ctrl+Z fjerner alle.
+
+### Hvor det stopper — ærlig
+
+13 av 34, ikke promptens mål på 25. De 19 som ikke lukker er de **store** rommene:
+Kjk./stue (22–29 m²), Fellesareal 31, Boder 48, Felles inngang 26/20, Korridor 19. De er ikke
+blokkert av åpninger, men av **manglende vegger** — 177 vegg-kandidater ble aldri vegg, og
+dekningen står på 48 %. Det er 047ds uferdige arbeid (dobbel-paringen), ikke 057s.
+
+### En felle i min egen test
+
+`_planList()` returnerer den **levende** lista. Testen holdt en referanse til den, spleiset ut
+en vegg, og sammenlignet så mot `l[1].id` — som da pekte på en annen vegg. Id-en leses nå før
+spleisingen.
+
+**Regresjon:** lumelo 112 tester, `ruff` + `mypy` rene. arqely 17 batterier, **718 sjekker**
+(fra 709), alle grønne.
+
+---
+
 ## Plantegning: rommene speilvendes ikke lenger — 2026-10-10
 
 Prompt 056. Kenneth: «De rommene som ble opprettet la seg helt feil sted, utenfor tegningen.»
