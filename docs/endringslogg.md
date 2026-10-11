@@ -61,9 +61,29 @@ blinker dem i 1,5 s. Velger man en, sier linja «Lagt over en dør — slett hvi
 
 Alle 13 fikk navn fra tegningen, 8 med arealsjekk ✓, og ett Ctrl+Z fjerner alle.
 
+### Kenneth hevet taket samme dag: 130 → 500 cm
+
+> «door max kan være mye mer, det kan plutselig komme garasjeporter på 500 cm også.»
+
+Målt på tegningen — rom lukket / romlabels truffet av 34:
+
+| 130 | 200 | 250 | 300 | 400 | **500** | 600 |
+|---|---|---|---|---|---|---|
+| 13 / 14 | 19 / 23 | 21 / 23 | 23 / 23 | 29 / 27 | **35 / 33** | 41 / 32 |
+
+600 gir flere rom enn det finnes labels, og færre treff — da splittes rom som hører sammen.
+**500 er toppen.** I appen: **36 rom** på lerretet, 26 med navn fra tegningen, ett angre-steg.
+
+Prisen er at en ekte åpning mellom kjøkken og stue nå også lukkes. Det er et bevisst bytte: en
+åpningsvegg er stiplet og slettes med ett klikk, mens et rom som ikke lukker krever at brukeren
+tegner veggen selv. **Å lukke for mye er billig; å lukke for lite er dyrt.**
+
+Og vindussymbolet avgjør nå navnet *først*, også under `DOOR_MAX` — ellers ble de 3 vinduene
+til «dører» i brikka så snart terskelen gikk over 130. Nå: 91 dører og 12 vinduer.
+
 ### Hvor det stopper — ærlig
 
-13 av 34, ikke promptens mål på 25. De 19 som ikke lukker er de **store** rommene:
+Med 130 var det 13 av 34. De 19 som ikke lukker er de **store** rommene:
 Kjk./stue (22–29 m²), Fellesareal 31, Boder 48, Felles inngang 26/20, Korridor 19. De er ikke
 blokkert av åpninger, men av **manglende vegger** — 177 vegg-kandidater ble aldri vegg, og
 dekningen står på 48 %. Det er 047ds uferdige arbeid (dobbel-paringen), ikke 057s.
