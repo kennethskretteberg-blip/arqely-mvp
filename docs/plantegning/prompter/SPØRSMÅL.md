@@ -147,3 +147,29 @@ Kenneth svarer til slutt.
 - **Fortsatt ubesvart:** 30 av 34 rom lukker seg ikke. Resten av veggene må rettes i
   vegg-sjekken. Jeg har ikke flere målte hypoteser — det neste steget er i så fall et
   flomfyll med døråpningene lukket først, som er en annen motor, ikke en terskel.
+
+## 057
+
+- **STEG 0.2, målt på 199 frie veggender:** 59 kollineære par (klynger på **90–109** og
+  **130–159 cm**, med 110–119 helt tomt), 149 ender som peker på en tverrvegg (39 innen 130),
+  og 9 hjørner som ikke møtes.
+- **⚠ Min første måling ga 0 kollineære par.** `_open_ends` returnerer
+  `(punkt, utover-RETNING)`, ikke `(punkt, nabopunkt)`. Måleskriptet var like galt som en
+  hypotese kan være — verdt å huske neste gang et STEG 0-tall ser rart ut.
+- **Promptens tykkelses-sjekk (±2 cm) er feil** og er fjernet: den avviste 22 av 59 kandidater,
+  alle ekte dører mellom en inner- og en yttervegg (12,8 mot 24,6 cm). Målt ga fjerningen
+  likevel bare +1 bro og 0 rom — regel (b) fanget dem opp.
+- **`DOOR_MAX_CM`: jeg beholdt 130, som prompten sa.** 150 ville gitt **15 rom i stedet for
+  13** — men din egen regel sier at en ekte åpning bredere enn en dør skal stå. I stedet
+  implementerte jeg **dørslag-beviset** (buen), som lukker de brede gapene som *faktisk* er
+  dører: tre gap på 132 cm med 73–164 symbolpunkter i ringen. **Si fra om du heller vil ha
+  150** — da er det 2 rom til, men noen passasjer lukkes som ikke burde.
+- **Målet på ≥ 25 rom ble ikke nådd. 13 av 34.** De 19 som mangler er de store rommene
+  (Kjk./stue 22–29 m², Fellesareal 31, Boder 48, Felles inngang 26/20, Korridor 19). De er
+  **ikke** blokkert av åpninger — de er blokkert av **manglende vegger**: 177 vegg-kandidater
+  ble aldri vegg, og dekningen står fortsatt på 48 %. Det er 047ds uferdige arbeid
+  (dobbel-paringen er grådig og `PAIR_MIN_OVERLAP` ble aldri etterprøvd mot ekte vegger delt av
+  åpninger). **Det er der neste innsats hører hjemme, ikke i flere åpningsregler.**
+- `corner`-regelen fyrer nå 0 ganger på din tegning (den fyrte 1 gang før dørslag-beviset kom
+  inn) — de 9 hjørnene fra STEG 0.4 blir tatt av regel (a) og (b) først. Regelen er beholdt
+  fordi den er billig og riktig når den trengs.
