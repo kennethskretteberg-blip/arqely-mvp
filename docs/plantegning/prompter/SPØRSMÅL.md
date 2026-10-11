@@ -173,3 +173,16 @@ Kenneth svarer til slutt.
 - `corner`-regelen fyrer nå 0 ganger på din tegning (den fyrte 1 gang før dørslag-beviset kom
   inn) — de 9 hjørnene fra STEG 0.4 blir tatt av regel (a) og (b) først. Regelen er beholdt
   fordi den er billig og riktig når den trengs.
+
+## 047e (fortsettelsen — de manglende veggene)
+
+- **Rotårsaken var ikke grådighet, men modellen.** 91 av 177 ubrukte kandidater hadde en gyldig
+  partner som allerede var brukt. Én ytre fasadelinje er partner til *flere* veggbiter.
+- **Jeg prøvde gjensidig-beste paring først, og den ga null effekt** (177 → 177). Verdt å huske:
+  «grådig algoritme» er en forklaring som høres riktig ut, men den var feil her.
+- **Alle 34 romlabels havner nå inni et rom.** 37 rom fra motoren, 42 i appen (noen flater uten
+  label blir egne rom — de havner i «Ikke navngitt», som du avklarte at de skal).
+- **103 rester står igjen.** De er i all hovedsak skravur og symboler som ligner vegger; de
+  vises som røde prikker. Dekningen er 58 %, som er ærlig for en A2-arkitekttegning.
+- Si fra om 42 rom er for mange — da kan vi kreve at et rom må inneholde en romlabel for å bli
+  opprettet. Jeg lot være, fordi det ville fjernet «Ikke navngitt»-gruppa du ba om i 049.

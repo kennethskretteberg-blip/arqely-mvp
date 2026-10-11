@@ -4,6 +4,68 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Plantegning: de manglende veggene — én linje kan pares med flere biter — 2026-10-11
+
+047d-fortsettelsen Kenneth ba om. Etter 057 sto 177 vegg-kandidater fortsatt ubrukt, dekningen
+på 48 %, og flere romlabels utenfor alle rom.
+
+### Rotårsaken, målt
+
+For hver av de 177: finnes det en annen kandidat som `_pair_centerline` faktisk godtar?
+**91 av 177 — over halvparten — hadde en fullt gyldig partner.** Den var bare allerede brukt.
+En 765 cm linje med partner på 25,8 cm tykkelse og overlapp 1,0 sto igjen som «rest».
+
+**«Hver linje kan bare pares én gang» er feil modell.** En arkitekt tegner ytterveggens ytre
+linje som ÉN sammenhengende strek langs hele fasaden, mens den indre er delt i biter av hver
+tverrvegg. Den ene ytre linja er den ekte partneren til *flere* veggbiter.
+
+### En løsning jeg prøvde og forkastet
+
+**Gjensidig-beste paring** (stabil matching): alle foreslår til sin beste partner, bare
+gjensidige par bindes. Den løser «grådighet» — hvem som velger først. Men det var ikke
+problemet. Målt: rester 177 → **177**, helt uendret. Problemet er ikke rekkefølgen, det er at
+antallet partnere er begrenset til én.
+
+### Løsningen
+
+Lag **alle** gyldige par — 875 senterlinjer med mange duplikater — og la `_merge_collinear` og
+`dedupe_overlapping` (som 047d allerede bygget) rydde dem ned til 166.
+
+### Prisen, fanget av en eksisterende test
+
+`test_moebel_paa_eget_lag_blir_ikke_vegg` feilet. Møbellinja i DXF-fixturen fikk en «partner» i
+veggen 50 cm unna — innenfor [4, 60] cm. Før endringen tapte møbelet fordi veggen alt var
+oppbrukt; nå var den ledig, og den tilfeldige nærheten ble til en vegg.
+
+Vakten er fysisk: **de to flatene av én vegg er hverandres nærmeste parallelle.** Møbelet
+ligger 50 cm fra veggen, men veggens egen andre flate ligger 12,8 cm unna — møbelet er ikke
+veggens nærmeste, og paret avvises fra veggens side. Fasade-tilfellet overlever, fordi alle
+bitene ligger i *samme* avstand fra den lange ytre linja.
+
+`PAIR_NEAREST_FACTOR` målt — rom / romlabels truffet av 34:
+
+| 1,5 | 2,0 | **2,5** | 3,0 | 4,0 | ingen vakt |
+|---|---|---|---|---|---|
+| 33 / 30 | 35 / 31 | **37 / 34** | 35 / 34 | 37 / 33 (møbel) | 42 / 32 (møbel) |
+
+### Resultat
+
+| | 047d | 057 | **047e** |
+|---|---|---|---|
+| lukkede rom | 0 | 13 | **37** (42 i appen) |
+| romlabels truffet | — | 14 av 34 | **34 av 34** |
+| rester | 177 | 177 | **103** |
+| dekning | 48,3 % | 48,3 % | **58,2 %** |
+
+I appen: **42 rom** på lerretet, 28 med navn fra tegningen, alle innenfor underlaget, ett
+angre-steg. Hver eneste romlabel på tegningen havner nå inni et rom.
+
+**Regresjon:** lumelo 115 tester (3 nye som låser rotårsaken), `ruff` + `mypy` rene. arqely
+718 sjekker. Den nye testen er kontrollert mot den gamle modellen: der gir den 2 rester i
+stedet for 0.
+
+---
+
 ## Plantegning: vegger over dører og vinduer, så rommene lukker — 2026-10-10
 
 Prompt 057. Kenneth: «Det ble bare 4 rom opprettet. Jeg tror den største feilen er at vinduer
