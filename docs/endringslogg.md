@@ -4,6 +4,95 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 061: Hurtig prosjektering — «Ulike kabler» på ett rom — 2026-10-12
+
+Kenneth: «Kan vi få en knapp for å velge ulike kabler på et rom? Trykk «Ulike kabler», så kommer
+det opp to linjer hvor man kan velge valgfrie kabler, og en pluss for å legge til en linje til
+hvis man skal ha enda flere. Må fortsatt se samme resultater: total effekt, flateeffekt, CC.»
+
+**Status: kodeferdig, UPUSHET.** Ingen migrasjon, ingen deploy — `room.listMix` er bare et felt
+på rommet og følger prosjekt-blobben. Spec: `docs/spec-utendors-produkter-hurtig-prosjektering.md`
+(ny seksjon «061 · «Ulike kabler» på ett rom»).
+
+### STEG 0 — målt, ikke antatt
+
+Syntetisk rom «Stue» 45 m² brutto / 1 m² hindring / 80 W/m², InFloor 10T 230 V (ekte katalog),
+1 × 1800 W + 1 × 1200 W pushet manuelt med lik `spacing_cm`.
+
+- **0.1 Resultatboksen summerer riktig uten en eneste endring.** `_computeRoomStats` ga
+  `cableLenM` 300 m (sum), `cableW` 3000 W (sum), `cableWm2` 68, `heatedM2` 44 (= netto, «kun
+  label»-antakelsen); `_roomRatedEffectW` 3000 W; W/m² brutto 67, flate 68, dekning 100 %.
+  **MEN `cableCcCm` tar den FØRSTE kabelens `spacing_cm` og ignorerer resten stille** — satte
+  jeg kabel 2 til 99 cm, sto CC-feltet fortsatt på 14,7 mens den lengdevektede flateeffekten
+  falt fra 68 til 45 W/m². Felles CC på alle kablene er derfor betingelsen for at tallene er
+  sanne, ikke en finesse. `_listRoomProductId` returnerte 56 — bare det første produktet.
+- **0.2 `_syncReserveCables` lager én reserve PER KABEL, ikke per produkt.** Målt: fire kabler
+  (56, 50, 56-reserve→1, 50-reserve→2), «4 stk (2 + 2 reserve)», effekt uendret 3000 W.
+  `_roomProductBreakdown` gir egne «Reservekabel»-rader per produkt. Riktig som den står.
+- **0.3 Materialliste og Romoversikt ga allerede to linjer.** `_collectMaterialItems` går per
+  kabel og `_aggregateMaterialItems` grupperer per produkt-id → CVA10087 ×1 + CVA10081 ×1, samme
+  i Visma-pasten; `_roomProductBreakdown` → 1800 W + 1200 W. **Ingen endring nødvendig noe sted.**
+  Det eneste som kollapset til første produkt var `_listFinalizedRowHtml` og «Bestilles».
+- **0.4 Produktlista kan gjenbrukes rad for rad.** `_listFamilyProducts('cable','InFloor 10T|230',
+  'indoor')` = 19 varianter. `_generateMixedCombos` ga 20 kombinasjoner, første ULIKE =
+  1700 + 1800 = 3500 W (behov 3520), CC 12,6 cm. `_autoFillMixedCables` **tåler tre kabler**
+  (180 + 120 + 60 m i 45 m² → tre kabler, felles CC 12,5 cm) og avviser ulik familie av seg selv.
+
+### Gjort
+
+1. **Modell.** `room.listMix = [{productId, count}, …]`; `_listSetRoomProductMix` (felles CC =
+   netto/Σlengde, klemt til strengeste `minSp`…`maxHard` over produktene), `_listMixRows`,
+   `_listMixCcCm`, `_listMixSumW`, `_listMixCableIds`, `_listPlacedProducts`, `_listMixProdText`.
+   `_listSetRoomProduct` nullstiller `listMix` — ett sted. Gaten i `_listAutoSuggest` ligger på
+   plasserings-laget, så areal/hindring/W-m² bare regner CC på nytt uten å røre radene.
+2. **Kortet.** «Ulike kabler»-knapp ved Antall (kun Kabel) → radliste med produktvelger, ▲▼,
+   antall, ✕, «+ Legg til kabel», «Foreslå», «Like kabler i stedet». Resultatboksen urørt.
+3. **Raden og eksportene.** `_listFinalizedRowHtml` viser «InFloor 10T 1800 W + 1200 W + 600 W»
+   med tooltip; `_listCountStr` lister per produkt. Materialliste/Romoversikt/Visma uendret
+   (0.3). 059s tegnede rader får samme radliste i kompakt form; «Tegn utlegg» kaller
+   `_placeMixedCables` med IDene utvidet med antall.
+4. **Regresjon.** `_listevisningRegressionTest()` utvidet fra 30 til 45 sjekker (§ 5).
+
+### Funn underveis
+
+- **Nedtrekket fulgte ikke modellen.** `_listMixSetRow` oppdaterte bare state, så et kall fra
+  modellsiden («Foreslå», test) lot rad 2 stå på «— velg kabel —» mens resultatboksen under sa
+  «3000 W / 14,7 cm / 1 × 1800 W, 1 × 1200 W». Samme feilklasse som statiske DOM-elementer mot
+  en ombygd container. Fikset (`select.value` settes eksplisitt) og låst med en DOM-sjekk i
+  regresjonstesten — ikke bare state.
+- **`pushUndo` kopierer rommene flatt**, så `listMix`-arrayet deles med angre-steget. Hver
+  mutasjon bygger derfor et nytt array; låst av egen sjekk.
+- To kosmetiske retter etter skjermbilde: «Foreslå»/«Like kabler i stedet» sto i `--dim` på
+  11 px og forsvant nesten i den kompakte raden (nå `--text`), og klasse-velgeren var midtstilt
+  mot en radstabel som vokser (nå toppstilt).
+
+### Målt resultat (ekte katalog, ekte handlere, ekte DOM)
+
+| Test | Fasit | Målt |
+|---|---|---|
+| 1 Stue 45 m²: 1800 + 1200 | 3000 W · 68 W/m² flate · CC 14,7 · «2 stk (1 × 1800 W, 1 × 1200 W)» | ✓ alle fire |
+| 1b + 600 W | 3600 W · CC 12,2 | ✓ |
+| 2 «Foreslå» | to rader innen ±12 % av 3520 W | 1700 + 1800 = 3500 W, CC 12,6 ✓ |
+| 3 ✕ ned til én rad | like kabler, Antall = 1 | ✓ |
+| 4 Ferdig rad + areal 45 → 60 | «1800 W + 1200 W + 600 W», CC regnes på nytt | 3600 W, CC 16,4, produktene står ✓ |
+| 5 Materialliste / Romoversikt / fryserom | tre linjer, reserve per kabel | 3 + 3 linjer; «6 stk (… + 3 reserve)», effekt fortsatt 3600 W ✓ |
+| 6 059 «Tegn utlegg» + Ctrl+Z | tre kabler, felles CC, ett angre-steg | 3 kabler, CC 12,5/12,5/12,5, 1 angre-steg, Ctrl+Z → «Kun label» ✓ |
+| 7 Regresjon | utvidet | 45/45 ✓ |
+
+Naboene står: `_foilRegressionTest` 9/9, `_matRegressionTest` 2/2, `_matZoneRegressionTest` 4/4,
+`_cableSkewRegressionTest` 16/16.
+
+### Åpent
+
+- Blanding **på tvers av klasser** (10T + 17T) er bevisst ikke bygget — ulik W/m gir ulik
+  flateeffekt i hver sone under felles CC. `_autoFillMixedCables` avviser det allerede selv.
+- `_placeCableLabelOnly` i hovedmodulen fikk ikke blandet modus (den har «Komponer ulike kabler
+  selv…» fra før). Bekreftet at et rom som fikk blandede label-kabler fra lista vises riktig i
+  hovedmodulens romstatistikk: 3000 W, CC 15,0, flate 67 W/m², breakdown per produkt, og
+  sidepanel + lerret rendrer uten feil.
+
+---
+
 ## 060: Prosjektlås — én redigerende bruker om gangen — 2026-10-12
 
 Kenneth: «Siden Fredrik nå skal begynne å jobbe i Varmeplan, kan det fort være at vi går
