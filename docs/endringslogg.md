@@ -4,6 +4,97 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 062: «Prosjektert av» — ingen felt ved opprettelse, lesbar linje med «Endre» — 2026-10-12
+
+Kenneth: «Vi trenger ikke utfylling av «Prosjektert av» nå som den henter infoen fra innlogget
+bruker?» Avklart: feltet bort fra opprettelsen, endres i prosjektinfo, og initialene i
+PDF-filnavnet skal følge **den som prosjekterte** — 051s åpne spørsmål er dermed besvart: ja.
+
+**Status: kodeferdig, UPUSHET. Én migrasjon gjenstår:**
+`supabase-migration-org-member-names.sql` (ny RPC). Appen er fail-open uten den.
+
+### STEG 0 — målt, ikke antatt
+
+- **0.1 RLS på `profiles`: en vanlig org-bruker ser i dag KUN sin egen profil.**
+  Basis er `supabase-migration-auth.sql:118-125` — `"Bruker ser egen profil" for select using
+  (auth.uid() = id)` + `"Superadmin full tilgang profiler" for all using (is_superadmin())`.
+  Det finnes altså ingen vanlig-bruker-vei til kollegers `full_name`/`initials`.
+  **Funn:** `supabase-migration-org-member-visibility.sql` legger til en bredere policy
+  («Medlem ser profiler i egne orgs», ALLE kolonner for medlemmer i egne orgs) via
+  `user_org_ids()`. Om den er kjørt i produksjon kan ikke leses av repoet. Den gir dessuten
+  mer enn 062 trenger. Derfor bygges RPC-en uansett — den er kolonne-låst og virker enten
+  den migrasjonen er kjørt eller ikke.
+  **Sidefunn:** `organization_members` har kolonnene `(org_id, user_id, role)` — det finnes
+  INGEN `status`-kolonne. Promptens «bare `status = 'active'`» er ikke byggbar; i dette skjemaet
+  ER en medlemsrad aktivt medlemskap (fjerning er en `DELETE`, se `_removeOrgMember`).
+  Filteret er utelatt med vilje, dokumentert i migrasjonen.
+- **0.2 Redigering til en kollega nullet `responsible_user_id` — bekreftet.**
+  `_wfKundeSave` hadde `if (S.project.responsible !== _myDisplayName()) responsible_user_id =
+  null`, og `_plResponsibleInitials` regnet da initialene av teksten («Fredrik Hansen» → FH,
+  selv om profilen hans sier FHA). **Verre enn beskrevet:** regelen slo til selv når ingenting
+  ble endret — bare å åpne og lagre Kunde-modalen på en kollegas prosjekt slettet id-en.
+  **Sidefunn:** `responsible_user_id` lever KUN i prosjekt-JSON (ingen DB-kolonne, `_saveToSupabase`
+  skriver `project: S.project` i sin helhet), og `_fetchProjects` bar den **aldri** fram til
+  prosjektlista — uten den kunne ikke lista slå opp noen profil-initialer i det hele tatt.
+- **0.3 Alle lesesteder for `S.project.responsible` — ingen endrer oppførsel:**
+  `_renderSbProjInfo` (sidepanelets «Prosjektert av …»), PDF-dialogens gule «tomt»-linje,
+  PDF-forsidens «Prosjektopplysninger»-rad, `_profileInitialsForFile` (filnavn på PDF **og**
+  Visma-fil), `_fetchProjects` → `_responsible` → prosjektlistas kolonne + fritekstsøket, og
+  `_restoreProject` som **kun** defaulter til `''`. 051-regelen holder: ingen autofyll ved
+  åpning (dekket av en `checkIkke` i regresjonstesten).
+
+### Endringer
+
+1. **Ny RPC `org_member_names()`** (`supabase-migration-org-member-names.sql`, idempotent,
+   ren ASCII). `security definer`, returnerer `(user_id, full_name, initials)` — bare de tre
+   kolonnene, bare for medlemmer i samme org som `auth.uid()`. `grant execute` til
+   `authenticated`, `revoke` fra `public`/`anon`.
+2. **Klient-cache per økt** — `_orgMemberNamesCache` / `_loadOrgMemberNames()` /
+   `_orgMemberList()`. Hentes JIT (første «Endre», eller første filnavn/listerad som trenger
+   en kollegas initialer), og samtidige kall deler ett nettverkskall. **Fail-open som 060s
+   prosjektlås:** mangler RPC-en, settes cachen til en tom `Map` og alt oppfører seg nøyaktig
+   som før 062. Lander cachen mens prosjektlista står åpen, tegnes lista på nytt — raden
+   retter seg selv.
+3. **Kunde & prosjektinfo: lesbar linje.** «Prosjektert av: **Navn** · Endre» (tomt →
+   «— · Sett meg · Endre»). «Endre» åpner et nedtrekk med org-medlemmene (innlogget bruker
+   først, så alfabetisk) + «Annen (fritekst) …». `#wf-k-resp` lever videre som **skjult
+   verdibærer** med `dataset.uid` — `_wfKundeSave` leser samme felt som før, ingen ny
+   lagringsvei. Valg fra nedtrekket setter `responsible_user_id`; fritekst nuller den.
+   `dataset.uid` forhåndssettes fra prosjektet, så 0.2-nullingen er borte.
+4. **Initialer følger den som prosjekterte.** `_plResponsibleInitials` slår opp
+   `responsible_user_id` i cachen → kollegaens egne `profiles.initials` (fallback: utledet av
+   hans fulle navn fra RPC-en, ikke av fritekst-navnet). Er det mitt eget prosjekt, vinner
+   mine initialer fra Innstillinger (ferskest). Cache-miss blokkerer aldri — dagens tekstregel
+   brukes og hentingen starter i bakgrunnen. `_fetchProjects` bærer nå `_responsibleUserId`,
+   og `_profileInitialsForFile` sender den med.
+5. **Rydding.** `#dash-proj-responsible` + label fjernet fra «Nytt prosjekt»;
+   `_toggleCreateProject` forhåndsfyller ikke lenger; `_createProjectInline` setter stille
+   `_myDisplayName()` + `_currentUser.id` (samme ene vei som `_quickStartModule`).
+   `_setMeAsResponsible` plukker ikke lenger knappen ut av DOM-en via `parentElement` —
+   linja avgjør selv at «Sett meg» skal bort.
+
+### Målt etter endringen (ekte kodesti i nettleseren, ikke syntetisk state)
+
+| | Resultat |
+|---|---|
+| `_prefsRegressionTest` | **43/43 BESTÅTT** (G oppdatert + 10 nye 062-sjekker) |
+| Opprettelse (`_createProjectInline`, lagring stubbet) | `responsible` = «Kenneth Skretteberg», `responsible_user_id` = `u-kenneth` |
+| Hurtig prosjektering | identisk |
+| Nedtrekk etter «Endre» | `Kenneth Skretteberg`, `Fredrik Hansen`, `Annen (fritekst) …` — meg først |
+| Velg Fredrik → Lagre | `responsible_user_id` = `u-fredrik`, **filnavn-initialer «FHA»** (ikke «FH») mens Kenneth er innlogget |
+| «Annen» → «Kari Nordmann» | `responsible_user_id` = `null`, filnavn «KN» |
+| Tomt prosjekt | «Prosjektert av: — · Sett meg · Endre»; «Sett meg» → navn + min id |
+| RPC mangler (fail-open) | cache-størrelse 0, filnavn «FH» — nøyaktig som før 062 |
+
+### Gjenstår
+
+- Kjør `supabase-migration-org-member-names.sql` i Supabase SQL Editor.
+- Ikke testet mot ekte Supabase med Fredriks konto (test 4 i prompten) — RPC-en er verifisert
+  mot et stubbet svar. Kryss-org-sperren er en `in`-join i SQL og kan bekreftes med
+  `select * from org_member_names();` fra hver konto etter at migrasjonen er kjørt.
+
+---
+
 ## 061: Hurtig prosjektering — «Ulike kabler» på ett rom — 2026-10-12
 
 Kenneth: «Kan vi få en knapp for å velge ulike kabler på et rom? Trykk «Ulike kabler», så kommer
