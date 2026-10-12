@@ -1900,6 +1900,13 @@ body.kunde-maal #minimap-widget{display:none !important}
   <div id="topbar">
     <span class="tb-logo">Varmeplan</span>
     <span class="tc-sep" data-modules="indoor stair snow list"></span>
+    <!-- 059 (Kenneth 12.10.2026): «Kan vi få alle rom/områdene over til listevisningen» — en
+         tegnet del (inne/ute) kan nå vises som SAMME tabell som Hurtig prosjektering. Valget
+         ligger per del i S.ui.partView og lagres med prosjektet. -->
+    <span class="tb-grp" id="tb-partview" data-modules="indoor snow">
+      <button class="snap-chip on" id="chip-view-canvas" onclick="_setPartView('canvas')" title="Tegn på lerretet"><span class="snap-dot"></span>Lerret</button>
+      <button class="snap-chip" id="chip-view-list" onclick="_setPartView('list')" title="Alle rom i tabell — velg produkt og antall uten å tegne utlegget"><span class="snap-dot"></span>Liste</button>
+    </span>
     <span class="tb-grp" data-modules="indoor snow">
       <button class="tool-chip" id="chip-tool-mode" onclick="toggleToolMode()" title="Bytt mellom marker og flytt (V/H)" data-ic="move" data-ic-size="14" data-ic-text="Flytt"></button>
     </span>
@@ -20933,6 +20940,191 @@ function _geoRegressionTest() {
   const ok = results.every(r => r.ok);
   console[ok ? 'log' : 'error']('_geoRegressionTest: ' + (ok ? 'BESTÅTT' : 'FEILET'), results);
   return { ok, results };
+}
+
+// 059 (Kenneth 12.10.2026): låser de fire reglene listevisningen i tegnede deler hviler på —
+// kilde etter deltype, låsing av tegnede rom, arveregelen (auto mot user) og Kalkyle-merkets
+// betingelse. Samme try/finally-mønster som _foilRegressionTest/_matRegressionTest: egen
+// syntetisk katalog og egne rom, hele S-tilstanden lagt tilbake etterpå.
+// Kjør fra konsollen: _listevisningRegressionTest()
+function _listevisningRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const saved = {
+    rooms: S.rooms, cables: S.cables, mats: S.mats, strips: S.strips, plates: S.plates,
+    matPaths: S.matPaths, hindrings: S.hindrings, zones: S.zones, floors: S.floors,
+    parts: S.project.parts, activePartId: S.ui.activePartId, activeFloorId: S.ui.activeFloorId,
+    selectedRoomId: S.ui.selectedRoomId, partView: S.ui.partView,
+    counters: { ...S.counters },
+  };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    // ── Syntetisk katalog: to snø-kabelfamilier + én snø-mattefamilie ──
+    HEATING_PRODUCTS.length = 0;
+    const CAT = (PRODUCT_CATEGORIES.find(c => c.module_type === 'cable' && _catAvailableInModule(c, 'snow')) || {}).id;
+    const MCAT = (PRODUCT_CATEGORIES.find(c => c.module_type === 'mat' && _catAvailableInModule(c, 'snow')) || {}).id;
+    if (CAT == null || MCAT == null) {
+      check('Produktkategorier for snø finnes', 'kabel + matte', false, 'CAT=' + CAT + ', MCAT=' + MCAT);
+      return { ok: false, results };
+    }
+    for (let m = 10; m <= 140; m += 10) {
+      HEATING_PRODUCTS.push({ id: 90000 + m, name: 'InSnow 30T ' + (m * 30) + 'W ' + m + 'm',
+        product_family: 'InSnow 30T', voltage: 230, category_id: CAT, active: true,
+        cable_length_m: m, watt_per_m: 30, total_effect_w: m * 30,
+        min_spacing_mm: 60, recommended_spacing_mm: 100 });
+      HEATING_PRODUCTS.push({ id: 91000 + m, name: 'InSnow 40T ' + (m * 40) + 'W ' + m + 'm',
+        product_family: 'InSnow 40T', voltage: 230, category_id: CAT, active: true,
+        cable_length_m: m, watt_per_m: 40, total_effect_w: m * 40,
+        min_spacing_mm: 60, recommended_spacing_mm: 100 });
+    }
+    for (let a = 2; a <= 20; a += 2) {
+      HEATING_PRODUCTS.push({ id: 92000 + a, name: 'InSnow 300T 0,5x' + (a * 2) + 'm',
+        product_family: 'InSnow 300T', voltage: 400, category_id: MCAT, active: true,
+        mat_area_m2: a, mat_width_mm: 500, watt_per_m2: 300, total_effect_w: a * 300 });
+    }
+
+    // ── Syntetisk snødel med fire TEGNEDE områder + én listedel med ett listerom ──
+    S.rooms = []; S.cables = []; S.mats = []; S.strips = []; S.plates = []; S.matPaths = [];
+    S.hindrings = []; S.zones = []; S.floors = []; S.project.parts = []; S.ui.partView = {};
+    const snowPart = { id: 90001, name: 'Utendørs — Snøsmelting', moduleType: 'snow' };
+    const listPart = { id: 90002, name: 'Hurtig prosjektering', moduleType: 'list' };
+    S.project.parts.push(snowPart, listPart);
+    const snowFloor = { id: 90011, name: 'Uteareal', order: 0, collapsed: false, partId: snowPart.id };
+    const listFloor = { id: 90012, name: 'Plan 1', order: 1, collapsed: false, partId: listPart.id };
+    S.floors.push(snowFloor, listFloor);
+    const mkDrawn = (id, name, wCm, hCm) => {
+      const pts = [{ x: 0, y: 0 }, { x: wCm, y: 0 }, { x: wCm, y: hCm }, { x: 0, y: hCm }];
+      const r = { id, name, floorId: snowFloor.id, partId: snowPart.id, shape: 'rect',
+        points: pts, walls: [], area: compArea(pts), dims: [], annotOffsets: {},
+        roomType: null, targetWm2: null, floorType: null, listModType: 'cable', listCount: 1 };
+      S.rooms.push(r); return r;
+    };
+    const A = mkDrawn(90101, 'Område 1', 400, 250);
+    const B = mkDrawn(90102, 'Område 2', 500, 300);
+    const C = mkDrawn(90103, 'Område 3', 600, 350);
+    const D = mkDrawn(90104, 'Område 4', 450, 280);
+    const L = { id: 90201, name: 'Listerom', floorId: listFloor.id, partId: listPart.id,
+      listMode: true, shape: 'list', points: [], walls: [], area: 200000, listHindCm2: 0,
+      targetWm2: null, roomType: null, floorType: null, dims: [], annotOffsets: {},
+      moduleType: 'snow', listModType: 'cable', listFamily: null, listCount: 1 };
+    S.rooms.push(L);
+    _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
+
+    // ── 1. Kilde etter deltype ──
+    S.ui.activePartId = snowPart.id; S.ui.activeFloorId = snowFloor.id;
+    const drawnRows = _listTableRooms();
+    check('Kilde, tegnet del: alle fire tegnede områder i tabellen', '4 rader (90101-90104)',
+      drawnRows.length === 4 && drawnRows.every(r => r.partId === snowPart.id),
+      drawnRows.map(r => r.id).join(','));
+    check('Kilde, tegnet del: listerommet i en ANNEN del er ikke med', 'ingen 90201',
+      !drawnRows.some(r => r.id === L.id), drawnRows.map(r => r.id).join(','));
+    check('Kilde, tegnet del: _listRooms() (listMode-filteret) gir fortsatt 0', '0',
+      _listRooms().length === 0, String(_listRooms().length));
+    S.ui.activePartId = listPart.id; S.ui.activeFloorId = listFloor.id;
+    const listRows = _listTableRooms().filter(r => !r.listDraft);
+    check('Kilde, listedel: bare listerommet (uendret oppførsel)', '1 rad (90201)',
+      listRows.length === 1 && listRows[0].id === L.id, listRows.map(r => r.id).join(','));
+    S.rooms = S.rooms.filter(r => !r.listDraft);   // rydd utkastet _listTableRooms nettopp lagde
+    S.ui.activePartId = snowPart.id; S.ui.activeFloorId = snowFloor.id;
+
+    // ── 2. Arveregel: auto-rader arver forrige rads familie, user-rader står ──
+    _listAutoSuggest(A.id);
+    check('Arv: første rad får standardfamilien (snø + kabel)', _LIST_SNOW_DEFAULT_FAM,
+      A.listFamily === _LIST_SNOW_DEFAULT_FAM, String(A.listFamily));
+    check('Arv: første rad stemples auto', 'auto', A.listFamilyBy === 'auto', String(A.listFamilyBy));
+    _listOnClass(A.id, 'InSnow 40T|230');
+    check('Manuelt klassevalg stempler rad 1 som user', 'user',
+      A.listFamilyBy === 'user' && A.listFamily === 'InSnow 40T|230',
+      A.listFamilyBy + '/' + A.listFamily);
+    _listAutoSuggest(B.id);
+    check('Arv: rad 2 (uten egen familie) arver rad 1', 'InSnow 40T|230',
+      B.listFamily === 'InSnow 40T|230', String(B.listFamily));
+    check('Arv: rad 2 har fått et produkt i den arvede familien', 'produkt satt',
+      _listRoomProductId(B.id) != null &&
+      _listFamKey(HEATING_PRODUCTS.find(p => p.id === _listRoomProductId(B.id))) === 'InSnow 40T|230',
+      String(_listRoomProductId(B.id)));
+    _listAutoSuggest(C.id);
+    _listOnClass(C.id, 'InSnow 30T|230');           // rad 3 settes MANUELT
+    check('Rad 3 manuelt valgt står som user', 'user', C.listFamilyBy === 'user', String(C.listFamilyBy));
+    _listAutoSuggest(D.id);
+    // Kaskade: bytt rad 1 igjen → rad 2 (auto) følger etter, rad 3 (user) står
+    const dFamBefore = D.listFamily;
+    _listOnClass(A.id, 'InSnow 30T|230');
+    check('Kaskade: rad 2 (auto) følger rad 1 sitt nye valg', 'InSnow 30T|230',
+      B.listFamily === 'InSnow 30T|230', String(B.listFamily));
+    check('Kaskade: rad 3 (user) står urørt', 'InSnow 30T|230 satt manuelt, listFamilyBy=user',
+      C.listFamilyBy === 'user', C.listFamilyBy + '/' + C.listFamily);
+    check('Kaskade: rad 4 (auto) følger også etter', 'InSnow 30T|230',
+      D.listFamily === 'InSnow 30T|230', dFamBefore + ' -> ' + D.listFamily);
+
+    // ── 3. Status + låsing av tegnede rom ──
+    check('Status: rom med «kun label»-kabler er «label»', 'label',
+      _listRoomDrawnState(B.id) === 'label', _listRoomDrawnState(B.id));
+    const bRowLabel = _listDrawnRowHtml(B);
+    check('Låsing: en label-rad HAR produktvelger og «Tegn utlegg»', 'li-prod + _listDrawLayout',
+      bRowLabel.includes('li-prod-' + B.id) && bRowLabel.includes('_listDrawLayout(' + B.id + ')'),
+      'prod=' + bRowLabel.includes('li-prod-' + B.id) + ', tegn=' + bRowLabel.includes('_listDrawLayout('));
+    // Gjør B til et «tegnet» rom (gi kabelen strenger — samme felt motoren setter)
+    const bCab = S.cables.filter(c => c.roomId === B.id);
+    bCab.forEach(c => { c.labelOnly = false; c.runs = [{ segments: [] }]; });
+    _invalidateCableCache();
+    check('Status: rom med strenger er «drawn»', 'drawn',
+      _listRoomDrawnState(B.id) === 'drawn', _listRoomDrawnState(B.id));
+    const bRowDrawn = _listDrawnRowHtml(B);
+    check('Låsing: en tegnet rad har INGEN produktvelger og ingen «Tegn utlegg»', 'ingen li-prod/li-class/li-count',
+      !bRowDrawn.includes('li-prod-' + B.id) && !bRowDrawn.includes('li-class-' + B.id)
+      && !bRowDrawn.includes('li-count-' + B.id) && !bRowDrawn.includes('_listDrawLayout('),
+      bRowDrawn.includes('li-prod-') ? 'fant li-prod' : 'ok');
+    check('Låsing: en tegnet rad tilbyr «Endre på lerretet»', '_listOpenOnCanvas',
+      bRowDrawn.includes('_listOpenOnCanvas(' + B.id + ')'), 'ok');
+    // Kaskaden skal ALDRI røre et tegnet rom
+    B.listFamilyBy = 'auto';
+    const bFamFrozen = B.listFamily, bRunsFrozen = S.cables.filter(c => c.roomId === B.id).length;
+    _listOnClass(A.id, 'InSnow 40T|230');
+    check('Én sannhet per rom: kaskaden hopper over et TEGNET rom', 'familie og kabler uendret',
+      B.listFamily === bFamFrozen && S.cables.filter(c => c.roomId === B.id).length === bRunsFrozen
+      && _listRoomDrawnState(B.id) === 'drawn',
+      B.listFamily + ' / ' + S.cables.filter(c => c.roomId === B.id).length + ' kabler');
+
+    // ── 4. Kalkyle-merkets betingelse ──
+    // A/C/D er label, B er tegnet, L er listerom (kalkyle per definisjon)
+    const kalMixed = _projectKalkyleStatus();
+    check('Kalkyle-merke: blandet prosjekt gir «Delvis detaljprosjektert»',
+      'Delvis detaljprosjektert (1 av 5 rom tegnet)',
+      kalMixed.row === 'Delvis detaljprosjektert (1 av 5 rom tegnet)', String(kalMixed.row));
+    check('Kalkyle-merke: _roomIsKalkyle treffer label-rom, ikke det tegnede',
+      'A=true, B=false', _roomIsKalkyle(A) === true && _roomIsKalkyle(B) === false,
+      'A=' + _roomIsKalkyle(A) + ', B=' + _roomIsKalkyle(B));
+    check('Kalkyle-merke: et listerom er alltid kalkyle', 'true', _roomIsKalkyle(L) === true, String(_roomIsKalkyle(L)));
+    // Alt tegnet → ingen rad
+    S.rooms = S.rooms.filter(r => r.id !== L.id);
+    for (const r of [A, C, D]) {
+      S.cables.filter(c => c.roomId === r.id).forEach(c => { c.labelOnly = false; c.runs = [{ segments: [] }]; });
+    }
+    _invalidateCableCache();
+    const kalAll = _projectKalkyleStatus();
+    check('Kalkyle-merke: ingen rad når ALT er tegnet', 'row=null',
+      kalAll.row === null && kalAll.kalkyle === 0, String(kalAll.row) + ' (kalkyle=' + kalAll.kalkyle + ')');
+    // Tomt rom (uten produkt) er ikke kalkyle — det er bare ikke startet
+    const E = mkDrawn(90105, 'Område 5', 300, 200);
+    _invalidateCableCache();
+    check('Kalkyle-merke: rom uten produkt teller ikke som kalkyle', 'empty + row=null',
+      _listRoomDrawnState(E.id) === 'empty' && _projectKalkyleStatus().row === null,
+      _listRoomDrawnState(E.id) + ' / ' + String(_projectKalkyleStatus().row));
+  } finally {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = saved.rooms; S.cables = saved.cables; S.mats = saved.mats; S.strips = saved.strips;
+    S.plates = saved.plates; S.matPaths = saved.matPaths; S.hindrings = saved.hindrings;
+    S.zones = saved.zones; S.floors = saved.floors; S.project.parts = saved.parts;
+    S.ui.activePartId = saved.activePartId; S.ui.activeFloorId = saved.activeFloorId;
+    S.ui.selectedRoomId = saved.selectedRoomId; S.ui.partView = saved.partView;
+    Object.assign(S.counters, saved.counters);
+    _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_listevisningRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
 }
 
 function _foilRegressionTest() {
@@ -46071,7 +46263,11 @@ function roomItemHtml(room, indented) {
     <span class="room-type-ico">${ico}</span>
     <div class="room-info">
       <span class="room-nm" title="${esc(room.name)}">${esc(room.name)}</span>${onske
-        ? `<span style="color:#4fa2b8;margin-left:3px" title="Kunden foreslår ${esc(_forslagRadTall(onske).ny)} — klikk for å se">💬</span>` : ''}
+        ? `<span style="color:#4fa2b8;margin-left:3px" title="Kunden foreslår ${esc(_forslagRadTall(onske).ny)} — klikk for å se">💬</span>` : ''}${
+        /* 059 §5: «K» = kalkyle — produkt valgt, utlegg ikke tegnet. Synlig også på lerretet,
+           ikke bare i listevisningen, så et utegnet rom ikke ser ferdig ut. */
+        (typeof _listRoomDrawnState==='function' && _listRoomDrawnState(room.id)==='label')
+        ? `<span style="margin-left:4px;font-size:10px;font-weight:700;color:var(--dim,#9aa0aa)" title="Kun produkt valgt — ikke tegnet utlegg">K</span>` : ''}
       <span class="room-area">${area} m²${_roomMaalBadge(room)}</span>
     </div>
     <span style="display:flex;gap:2px;align-items:center;margin-left:auto;flex-shrink:0">
@@ -54678,6 +54874,10 @@ function _enterPart(part) {
     return;   // listemodulen styrer sin egen visning (ingen canvas-render)
   }
   updateCtxBar(); render();
+  // 059: en tegnet del husker om den sto i Lerret eller Liste (S.ui.partView, lagret med
+  // prosjektet) — samme visning man forlot den i.
+  if ((part.moduleType==='indoor' || part.moduleType==='snow') && _partViewMode(part.id)==='list') _showListModule();
+  if (typeof _updatePartViewChips === 'function') _updatePartViewChips();
 }
 
 function switchActivePart(partId) {
@@ -54852,9 +55052,24 @@ function _listAutoSuggest(roomId){
   const envType=_roomModuleType(roomId);
   const target=_roomTargetWm2(roomId), net=roomAreas(room).net/10000;
   if(net<=0){ S.cables=S.cables.filter(c=>c.roomId!==roomId); S.mats=S.mats.filter(m=>m.roomId!==roomId); room.listCount=1; return; }
-  const modType=room.listModType||'cable';
-  const validFams=_listFamiliesFor(modType,envType);
+  let modType=room.listModType||'cable';
+  let validFams=_listFamiliesFor(modType,envType);
   let fam = (room.listFamily && validFams.includes(room.listFamily)) ? room.listFamily : null;
+  // 059 §3: har rommet ingen egen familie, ARVES familie + type fra FORRIGE RAD i tabellen —
+  // samme mekanisme `_listDraftRoom` alt bruker for varmetype og bygg, ikke en ny. Kenneth:
+  // «har rom 1 InSnow 300T 400 V, foreslås rom 2 med samme». En rad brukeren selv har rørt
+  // (listFamilyBy==='user') arver ALDRI — da er `_listOnType`/`_listOnClass` fasiten, og et
+  // eksplisitt type-valg skal ikke kunne bli overskrevet av forrige rads type.
+  if(!fam && room.listFamilyBy !== 'user'){
+    const inh=_listPrevRowFamily(roomId);
+    if(inh){
+      const fams2=_listFamiliesFor(inh.modType, envType);
+      if(fams2.includes(inh.family)){
+        modType=inh.modType; room.listModType=modType;
+        validFams=fams2; fam=inh.family;
+      }
+    }
+  }
   if(!fam){
     if(modType==='cable' && envType==='snow' && validFams.includes(_LIST_SNOW_DEFAULT_FAM)){
       // Kenneth: «la InSnow 30T 230V være standard» — ikke «nærmest ønsket W/m²» som for
@@ -54873,6 +55088,10 @@ function _listAutoSuggest(roomId){
     }
   }
   room.listFamily = fam;
+  // 059 §3: hvem valgte familien. `_listOnClass`/`_listOnType`/`_listOnProduct`/`_listOnEnv`
+  // stempler 'user'; denne funksjonen stempler 'auto' — og bare 'auto'-rader følger etter når
+  // en rad over endres (`_listCascadeFamily`).
+  if(room.listFamilyBy !== 'user') room.listFamilyBy = 'auto';
   if(modType==='cable'){
     const s=_listSuggestInFamily(roomId,'cable',fam,envType);
     _listSetRoomProduct(roomId,'cable', s?s.productId:null, s?s.count:1);
@@ -55040,15 +55259,17 @@ function _listRefreshCompat(roomId){
   el.innerHTML=_floorCompatBannerHtml(room.floorType, wm2);
 }
 // Type-bytte (Kabel/Matte): velg piltast → endrer på stedet, behold fokus på Type-feltet → TAB videre til Klasse.
-function _listOnType(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listModType=v; r.listFamily=null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+// 059 §3: et type-/varmetype-/klasse-/produktvalg er brukerens eget — raden stemples 'user' og
+// arver aldri fra raden over igjen, og alle SENERE 'auto'-rader følger etter (`_listCascadeFamily`).
+function _listOnType(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listModType=v; r.listFamily=null; r.listFamilyBy='user'; _listAutoSuggest(roomId); if(_listCascadeFamily(roomId)) { renderListModule(); return; } _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
 // Varmetype-bytte (Innendørs/Utendørs, DEL A): samme mekanisme som _listOnType over — raden har
 // ingen egen geometri (listMode), kun «kun label»-produkter som _listSetRoomProduct uansett bygger
 // på nytt for hvert bytte, så et rom kan aldri havne i en ugyldig tilstand av dette. Nullstiller
 // Klasse (families er envType-avhengige, DEL A Krav 5) og reberegner forslag/W-m² (Krav 4).
-function _listOnEnv(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.moduleType=(v==='snow')?'snow':'indoor'; r.listFamily=null; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
+function _listOnEnv(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.moduleType=(v==='snow')?'snow':'indoor'; r.listFamily=null; r.listFamilyBy='user'; _listAutoSuggest(roomId); _listUpdateRowSelects(roomId,false); _listRefreshComputed(roomId); }
 // Klasse-bytte (10T/17T el. 60/100/150T): behold fokus på Klasse → TAB videre til Produkt.
-function _listOnClass(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listFamily=v; const s=_listSuggestInFamily(roomId, r.listModType||'cable', v, _roomModuleType(roomId)); _listSetRoomProduct(roomId, r.listModType||'cable', s?s.productId:null, s?s.count:1); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
-function _listOnProduct(roomId,productId){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const pid=parseInt(productId,10); _listSetRoomProduct(roomId, r.listModType||'cable', pid, r.listCount||1); const p=HEATING_PRODUCTS.find(pr=>pr.id===pid); if(p) r.listFamily=_listFamKey(p); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+function _listOnClass(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; r.listFamily=v; r.listFamilyBy='user'; const s=_listSuggestInFamily(roomId, r.listModType||'cable', v, _roomModuleType(roomId)); _listSetRoomProduct(roomId, r.listModType||'cable', s?s.productId:null, s?s.count:1); if(_listCascadeFamily(roomId)) { renderListModule(); return; } _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
+function _listOnProduct(roomId,productId){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const pid=parseInt(productId,10); _listSetRoomProduct(roomId, r.listModType||'cable', pid, r.listCount||1); const p=HEATING_PRODUCTS.find(pr=>pr.id===pid); if(p){ r.listFamily=_listFamKey(p); r.listFamilyBy='user'; } _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
 // Antall-felt + ▲/▼: behold produkt/type, endre antall like elementer (reberegner CC/effekt).
 function _listEditCount(roomId,v){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=Math.max(1,Math.min(16, parseInt(String(v).replace(/[^0-9]/g,''),10)||1)); _listSetRoomProduct(roomId, r.listModType||'cable', _listRoomProductId(roomId), n); const el=document.getElementById('li-count-'+roomId); if(el) el.value=String(n); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
 function _listStepCount(roomId,dir){ const r=S.rooms.find(r=>r.id===roomId); if(!r) return; const n=Math.max(1,Math.min(16,(r.listCount||1)+dir)); _listSetRoomProduct(roomId, r.listModType||'cable', _listRoomProductId(roomId), n); const el=document.getElementById('li-count-'+roomId); if(el) el.value=String(n); _listUpdateRowSelects(roomId,true); _listRefreshComputed(roomId); }
@@ -55152,6 +55373,12 @@ function _listProductOptionsHtml(room){
 // Bygg Klasse-/Produkt-nedtrekkene + antall-feltet på stedet (uten full re-render → fokus/TAB bevares).
 function _listUpdateRowSelects(roomId, skipClass){
   const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  // 059 §3: arveregelen kan endre `room.listModType` (forrige rad var matte) — Type-nedtrekket må
+  // følge modellen, ellers står kortet og sier «Kabel» mens rommet faktisk har matter. Samme
+  // feilklasse som et statisk DOM-felt i en ombygd container: modellen og den synlige kontrollen
+  // gikk ut av synk. MÅLT 12.10.2026 (test 7). Setter verdien, bygger ikke om → fokus/TAB urørt.
+  { const ts=document.getElementById('li-type-'+roomId); const want=room.listModType||'cable';
+    if(ts && ts.value!==want) ts.value=want; }
   if(!skipClass){ const cs=document.getElementById('li-class-'+roomId); if(cs) cs.innerHTML=_listClassOptionsHtml(room); }
   const ps=document.getElementById('li-prod-'+roomId); if(ps) ps.innerHTML=_listProductOptionsHtml(room);
   const ce=document.getElementById('li-count-'+roomId); if(ce) ce.value=String(room.listCount||1);
@@ -55175,6 +55402,9 @@ function _listRefreshComputed(roomId){
   set('li-cov-'+roomId, net>0?Math.min(100,Math.round(heated/net*100))+' %':'—');
   set('li-ant-'+roomId, _listCountStr(room));   // 025b: «2 stk (1 + 1 reserve)»
   _listRefreshCompat(roomId);
+  // 059: Status-cellen i en tegnet del («—» → «Kun label») bygges om NÅR tilstanden faktisk
+  // endret seg. No-op i listedelen (raden finnes ikke) → den er bit-for-bit uendret.
+  if(typeof _listRefreshRowStatus==='function') _listRefreshRowStatus(roomId);
   _scheduleAutoSave&&_scheduleAutoSave();
 }
 // Stepp et nedtrekk med ▲/▼-knappene (gir samme effekt som piltast i feltet).
@@ -55306,14 +55536,60 @@ function _listFinalizedRowHtml(room,showBuilding){
     ${td(`<button onclick="event.stopPropagation();_listDeleteRoom(${rid})" title="Slett rom" style="cursor:pointer;background:transparent;border:none;color:var(--warn,#ef4444);font-size:14px">✕</button>`, ';text-align:right')}
   </tr>`;
 }
+// 059 §1: tabellen for en TEGNET del. Samme knapperad som listedelen, MINUS «Importer tegning
+// (PDF)» og utkast-kortet — rom lages på lerretet her. Pluss «Grovprosjekter alle» og en
+// Status-kolonne (se `_listDrawnRowHtml`).
+function _renderListModuleDrawn(el, part){
+  const rooms=_listDrawnPartRooms(part);
+  let totW=0, totNet=0;
+  for(const r of rooms){ totW+=_roomRatedEffectW(r); totNet+=roomAreas(r).net/10000; }
+  const nEmpty=rooms.filter(r=>_listRoomDrawnState(r.id)==='empty' && roomAreas(r).net>0).length;
+  const nLabel=rooms.filter(r=>_listRoomDrawnState(r.id)==='label').length;
+  const nDrawn=rooms.filter(r=>_listRoomDrawnState(r.id)==='drawn').length;
+  const omr = part.moduleType==='snow' ? 'områder' : 'rom';
+  const btn='cursor:pointer;border:1px solid var(--border,#2a2d36);border-radius:7px;background:var(--surface2,#1a1c22);color:var(--text,#e8eaed);padding:7px 12px;font-size:12px;font-weight:600';
+  const prim='cursor:pointer;border:none;border-radius:7px;background:var(--accent,#4fa2b8);color:#0d0e10;padding:7px 13px;font-size:12px;font-weight:700';
+  const th=(t,st,ti)=>`<th${ti?' title="'+ti+'"':''} style="text-align:left;font-size:11px;color:var(--dim,#9aa0aa);font-weight:600;padding:6px 7px;border-bottom:2px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${t}</th>`;
+  // Varmetype-kolonnen vises KUN når delen faktisk har begge slag — samme regel som Bygg-kolonnen
+  // i listedelen (se `showBuilding`). I en snødel sier hver eneste rad «Utendørs»; 78 px ren støy
+  // som dyttet Effekt-kolonnen ut av synsfeltet (målt: 266 px overflyt ved 1280 px vindu).
+  const showEnv = rooms.length>1 && rooms.some(r=>_isSnowRoom(r)) && rooms.some(r=>!_isSnowRoom(r));
+  let h=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap">
+    <div style="font-size:18px;font-weight:700;color:var(--text,#e8eaed)">${IC('clipboard',20)} ${esc(part.name||'Del')}</div>
+    <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} ${omr} · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W</div>
+    <div style="flex:1"></div>
+    ${nEmpty ? `<button style="${prim}" onclick="_listGrovprosjekterAlle()" title="Foreslå produkt og antall for alle ${omr} uten produkt">${IC('zap',14)} Grovprosjekter alle (${nEmpty})</button>` : ''}
+    <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
+    <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
+    ${_orgHasErpFormat('visma_paste') ? `<button style="${btn}" onclick="_showVismaPasteDialog()">Kopier til Visma</button>` : ''}
+    ${_orgHasErpFormat('gbao10') ? `<button style="${btn}" onclick="_showGbao10ExportDialog()">Eksporter fil til Visma</button>` : ''}
+  </div>
+  <div style="font-size:11.5px;color:var(--dim,#9aa0aa);margin-bottom:14px">
+    Arealet kommer fra tegningen. ${nDrawn} tegnet · ${nLabel} kun label (kalkyle) · ${nEmpty} uten produkt.
+    ${nDrawn ? 'Rader med tegnet utlegg er låst — endre dem på lerretet.' : ''}
+  </div>`;
+  if(rooms.length){
+    h+=`<div style="overflow-x:auto;max-width:100%"><table style="border-collapse:collapse;font-size:12.5px;min-width:820px"><thead><tr>
+      ${th('Etasje')}${th('Rom')}${showEnv?th('Varmetype'):''}${th('Netto')}${th('Type')}${th('Produkt / antall')}${th('Effekt')}${th('W/m²','',  'Flateeffekt — produktets effekt på dekket flate')}${th('CC/str.','','Senteravstand for kabel, eller mattestørrelse')}${th('Status',';text-align:right;position:sticky;right:0;background:var(--bg,#0d0e10);border-left:1px solid var(--border,#2a2d36)')}
+    </tr></thead><tbody>`;
+    for(const r of rooms) h+=_listDrawnRowHtml(r, showEnv);
+    h+=`</tbody></table></div>`;
+  } else {
+    h+=`<div style="color:var(--dim,#9aa0aa);font-size:12px">Ingen ${omr} tegnet ennå. Bytt til <b>Lerret</b> og tegn dem inn.</div>`;
+  }
+  el.innerHTML=h;
+}
 function renderListModule(){
   const el=document.getElementById('list-module'); if(!el) return;
+  const _lp=_listActivePart();
+  // 059: en TEGNET del (inne/ute) har sin egen, kortere topp og ingen utkast-kort — rom lages
+  // på lerretet der, ikke i lista. Listedelen under er uendret.
+  if(_listIsDrawnPart(_lp)){ _renderListModuleDrawn(el, _lp); return; }
   const draft=_listDraftRoom();
   // Inkluder rommet som redigeres (draft+_editing) i tabellen, så det IKKE forsvinner
   // fra lista når man klikker det — det vises i stedet uthevet. Det tomme «nytt rom»-
   // utkastet (draft uten _editing) holdes utenfor.
-  const _lp=_listActivePart();
-  const rooms=_lp ? S.rooms.filter(r=>r.partId===_lp.id && r.listMode && (!r.listDraft || r._editing)) : [];
+  const rooms=_listTableRooms();
   let totW=0, totNet=0; for(const r of rooms){ totW+=_roomRatedEffectW(r); totNet+=_computeRoomStats(r).nettoM2; }
   const btn='cursor:pointer;border:1px solid var(--border,#2a2d36);border-radius:7px;background:var(--surface2,#1a1c22);color:var(--text,#e8eaed);padding:7px 12px;font-size:12px;font-weight:600';
   const th=(t,st)=>`<th style="text-align:left;font-size:11px;color:var(--dim,#9aa0aa);font-weight:600;padding:6px 10px;border-bottom:2px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${t}</th>`;
@@ -55360,10 +55636,342 @@ function _showListModule(){
   if(!el){ el=document.createElement('div'); el.id='list-module';
     el.style.cssText='position:absolute;inset:0;background:var(--bg,#0d0e10);overflow:auto;z-index:60;padding:18px 22px';
     (document.getElementById('canvas-wrap')||document.body).appendChild(el); }
+  // 059 §2: i en TEGNET del er overlayet 92 % opakt, så rommet man klikker lyser opp på lerretet
+  // bak. Valgt framfor en egen miniatyr-renderer (minst arbeid, ingen ny tegnevei å vedlikeholde).
+  // ⚠ MÅ utledes av `--bg`, ikke hardkodes. Første forsøk skrev rgba(13,14,16,.92) rett inn og
+  // gjorde hele tabellen usynlig i LYST tema (målt: tekstfarge rgb(18,21,28) på nesten svart) —
+  // cellene arver tekstfargen fra body og har aldri hatt en egen. `color-mix` gir gjennomsikt
+  // uten å miste temaet; nettlesere uten støtte beholder den ugjennomsiktige `--bg` under.
+  el.style.background='var(--bg,#0d0e10)';
+  if(_listIsDrawnPart()) el.style.background='color-mix(in srgb, var(--bg,#0d0e10) 92%, transparent)';
   el.style.display='block';
   renderListModule();
 }
 function _hideListModule(){ const el=document.getElementById('list-module'); if(el) el.style.display='none'; }
+
+// ══════════════ 059: «Lerret | Liste» i tegnede deler ══════════════
+// Kenneth 12.10.2026: «Jeg har tegnet opp 15 utendørs områder for snøsmelting på en LARK-tegning.
+// Ofte er vi i tilbudsfase og vil ikke bruke tid på å detaljprosjektere. Kan vi få alle rom/
+// områdene over til listevisningen?»
+//
+// INGEN ny areal-, produkt- eller statistikk-logikk. STEG 0.1 målte at alt alt virker på et
+// TEGNET rom: `_listSetRoomProduct(<tegnet rom>, 'cable', 136, 2)` ga to labelOnly-kabler med
+// CC 50,0 cm og 600 W i `_computeRoomStats`, og `_listAutoSuggest` valgte InSnow 30T 230 V og
+// riktig variant (10,62 m² → InSnow 30T 3210W 106.9m, CC 9,9 cm, 303 W/m² mot 300 ønsket).
+// Det som manglet var bare at TABELLEN kunne vise rommene. Derfor:
+//   · kilde etter deltype (`_listTableRooms`), ikke `listMode` alene
+//   · arealet leses fra tegningen (roomAreas regner polygonet selv) — aldri redigerbart her
+//   · én sannhet per rom: en rad med ekte utlegg er LÅST, lista overskriver det aldri
+//   · familien arves fra forrige rad (§3), slik varmetype/bygg alt arves i `_listDraftRoom`
+function _partViewMode(partId){
+  const p=S.project.parts.find(x=>x.id===(partId!=null?partId:S.ui.activePartId));
+  if(!p) return 'canvas';
+  if(p.moduleType==='list') return 'list';                       // listedelen HAR ingen lerret
+  if(p.moduleType!=='indoor' && p.moduleType!=='snow') return 'canvas';   // trapp: uendret
+  return (S.ui.partView && S.ui.partView[p.id]==='list') ? 'list' : 'canvas';
+}
+// Er den aktive delen en TEGNET del (inne/ute) som viser listetabellen?
+function _listIsDrawnPart(part){
+  const p=part||_listActivePart();
+  return !!p && (p.moduleType==='indoor' || p.moduleType==='snow');
+}
+function _setPartView(mode, partId){
+  const pid=(partId!=null?partId:S.ui.activePartId);
+  const p=S.project.parts.find(x=>x.id===pid); if(!p) return;
+  if(p.moduleType!=='indoor' && p.moduleType!=='snow') return;
+  if(!S.ui.partView) S.ui.partView={};
+  S.ui.partView[pid]=(mode==='list')?'list':'canvas';
+  _markProjectDirty&&_markProjectDirty();
+  if(mode==='list'){ _showListModule(); }
+  else { _hideListModule(); resizeCanvas(); renderSidebar(); updateCtxBar(); render(); }
+  _updatePartViewChips();
+  _scheduleAutoSave&&_scheduleAutoSave();
+}
+function _updatePartViewChips(){
+  const grp=document.getElementById('tb-partview'); if(!grp) return;
+  const mode=_partViewMode();
+  const c=document.getElementById('chip-view-canvas'), l=document.getElementById('chip-view-list');
+  if(c) c.classList.toggle('on', mode!=='list');
+  if(l) l.classList.toggle('on', mode==='list');
+}
+// Kilde for tabellen, etter deltype. Listedelen er UENDRET (samme filter som før); en tegnet del
+// gir ALLE sine rom, etasje for etasje i samme rekkefølge som sidepanelets romliste.
+function _listTableRooms(){
+  const p=_listActivePart(); if(!p) return [];
+  if(_listIsDrawnPart(p)) return _listDrawnPartRooms(p);
+  return S.rooms.filter(r=>r.partId===p.id && r.listMode && (!r.listDraft || r._editing));
+}
+function _listDrawnPartRooms(part){
+  const floors=[...S.floors.filter(f=>f.partId===part.id)].sort((a,b)=>a.order-b.order);
+  const out=[], seen=new Set();
+  for(const f of floors) for(const r of S.rooms){
+    if(r.partId!==part.id || r.floorId!==f.id || r.listDraft) continue;
+    out.push(r); seen.add(r.id);
+  }
+  for(const r of S.rooms) if(r.partId===part.id && !r.listDraft && !seen.has(r.id)) out.push(r);
+  return out;
+}
+// ── Status per rad: «Tegnet» (ekte utlegg) · «Kun label» (kalkyle) · «—» (tomt) ──
+// Leser de SAMME per-rom-hjelperne romstatistikken bruker (ROOM_PRODUCT_KEYS-flatene), så en ny
+// produkttype ikke kan bli usynlig her uten å være usynlig alle andre steder også.
+function _listRoomDrawnState(roomId){
+  const cab=(S.cables||[]).filter(c=>c.roomId===roomId && !c.reserve);
+  const mats=_matsForRoom(roomId);
+  const drawn = cab.some(c=>(c.runs||[]).length>0)
+    || mats.some(m=>!m.labelOnly)
+    || _foilCountItemsForRoom(roomId).length>0
+    || _platesForRoom(roomId).length>0
+    || (S.matPaths||[]).some(mp=>mp.roomId===roomId)
+    || (typeof _aluboardRoomEffectW==='function' && _aluboardRoomEffectW(roomId)>0);
+  if(drawn) return 'drawn';
+  return (cab.some(c=>c.labelOnly) || mats.some(m=>m.labelOnly)) ? 'label' : 'empty';
+}
+// 059 §4/§5: «rommet er en kalkyle» — produkt valgt, utlegg ikke tegnet. Brukt av PDF-forsiden,
+// Romoversikten og «K»-merket i sidepanelet, slik at de tre aldri kan si ulike ting.
+function _roomIsKalkyle(room){
+  if(!room) return false;
+  if(room.listMode) return true;                 // Hurtig prosjektering er kalkyle per definisjon
+  return _listRoomDrawnState(room.id)==='label';
+}
+// Prosjektets kalkyle-status, ÉN kilde (PDF-forside + Romoversiktens fotnote).
+function _projectKalkyleStatus(){
+  let kalkyle=0, drawn=0;
+  for(const r of (S.rooms||[])){
+    if(r.listDraft || r._zoneId!=null) continue;
+    if(r.listMode){ kalkyle++; continue; }
+    const st=_listRoomDrawnState(r.id);
+    if(st==='label') kalkyle++; else if(st==='drawn') drawn++;
+  }
+  const tot=kalkyle+drawn;
+  let row=null;
+  if(kalkyle>0) row = drawn>0
+    ? 'Delvis detaljprosjektert (' + drawn + ' av ' + tot + ' rom tegnet)'
+    : 'Kalkyle \u2014 ikke detaljprosjektert';
+  return { kalkyle, drawn, tot, row };
+}
+// ── §3: arv av familie fra FORRIGE RAD ──
+// `_listDraftRoom` arver alt varmetype og bygg fra forrige rad; dette er samme ønske for familien.
+// Kenneth: «har rom 1 InSnow 300T 400 V, foreslås rom 2 med samme». Nærmeste rad OVER med et
+// faktisk valgt produkt vinner; finnes ingen, gjelder dagens regel (snø → InSnow 30T 230 V,
+// innendørs → nærmest ønsket W/m²).
+function _listPrevRowFamily(roomId){
+  const rows=_listTableRooms();
+  let i=rows.findIndex(r=>r.id===roomId);
+  // Utkast-rommet i listedelen står IKKE i tabellen — det ER den nye raden, og «forrige rad» er
+  // da den siste i tabellen. Uten dette arvet et nytt listerom aldri noe (test 7, målt 12.10.2026:
+  // rom 1 = InSnow 300T 400 V matte → rom 2 fikk InSnow 30T 230 V kabel).
+  if(i<0) i=rows.length;
+  if(i<=0) return null;
+  for(let k=i-1;k>=0;k--){
+    const r=rows[k];
+    if(r.listFamily && _listRoomProductId(r.id)!=null) return { family:r.listFamily, modType:r.listModType||'cable' };
+  }
+  return null;
+}
+// Etter et MANUELT familie-/type-valg følger alle SENERE auto-rader etter (§3). En rad brukeren
+// selv har rørt (listFamilyBy==='user') står, og et TEGNET utlegg røres aldri — én sannhet per rom.
+function _listCascadeFamily(fromRoomId){
+  const rows=_listTableRooms();
+  const i=rows.findIndex(r=>r.id===fromRoomId);
+  if(i<0) return 0;
+  let n=0;
+  for(let k=i+1;k<rows.length;k++){
+    const r=rows[k];
+    if(r.listFamilyBy==='user') continue;
+    if(_listRoomDrawnState(r.id)==='drawn') continue;
+    if(_listRoomProductId(r.id)==null) continue;        // tom rad — ingenting å føre videre i
+    r.listFamily=null;
+    _listAutoSuggest(r.id);
+    n++;
+  }
+  return n;
+}
+// «Grovprosjekter alle»: 15 områder ferdig kalkulert i ett klikk. Rom som ALLEREDE har produkt
+// (label eller tegnet) røres ikke.
+function _listGrovprosjekterAlle(){
+  const rows=_listTableRooms();
+  const todo=rows.filter(r=>_listRoomDrawnState(r.id)==='empty' && roomAreas(r).net>0);
+  if(!todo.length){ if(typeof _showToast==='function') _showToast('Alle rom har allerede produkt','warn'); return; }
+  pushUndo();
+  for(const r of todo){ r.listFamily=null; delete r.listFamilyBy; _listAutoSuggest(r.id); }
+  renderListModule(); renderSidebar(); render(); _scheduleAutoSave&&_scheduleAutoSave();
+  if(typeof _showToast==='function') _showToast(todo.length + (todo.length===1?' rom grovprosjektert':' rom grovprosjektert'), 'ok');
+}
+// ── «Tegn utlegg»: gjør radens «kun label» om til et EKTE utlegg ──
+// STEG 0.4 målte at begge motorveiene kan kjøres UTEN åpent produktpanel: `_cablePreviewPlace`
+// (→ 40 strenger, 98,1 m i Område 1) og snø-mattas `_upcPlaceMat`+`_confirmMatPreview` svarer
+// begge gjennom `_refreshCablePanel`/`_upcRefreshResults`, som er rene no-ops uten DOM.
+//
+// ETT angre-steg (test 4: «Ctrl+Z → tilbake til Kun label»). Motorveiene pusher ulikt mange
+// ganger: kabelveien én gang (`_beginProductSwapSession`), men snø-matta TO — `_packSnowMats`
+// → `autoFillMatSerpentine` pusher en gang til, ETTER at label-mattene alt er ryddet bort, så
+// ett Ctrl+Z landet på et tomt rom i stedet for på kalkylen. MÅLT 12.10.2026. Løsningen er den
+// etablerte: push ÉN gang her og undertrykk motorens egne pushes (`_undoSuppress`, samme
+// mønster som `_drawCreateRoomsFromReview`). Da er `undo()` på feilveien under også presis.
+// ⚠ Den doble pushen finnes også i snø-mattas EGEN panelvei (`_upcPlaceMat('auto')` fra
+// produktpanelet) — urørt her, rapportert som eget funn.
+function _listDrawLayout(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const toast=(m,k)=>{ if(typeof _showToast==='function') _showToast(m,k||'warn'); };
+  if(_listRoomDrawnState(roomId)==='drawn'){ toast('Rommet har allerede et tegnet utlegg'); return; }
+  const pid=_listRoomProductId(roomId);
+  if(pid==null){ toast('Velg produkt på raden først'); return; }
+  if(!room.points || room.points.length<3){ toast('Rommet har ingen tegning å legge utlegget i'); return; }
+  const modType=room.listModType||'cable', count=Math.max(1,room.listCount||1);
+  const prevSel=S.ui.selectedRoomId, prevFloor=S.ui.activeFloorId;
+  S.ui.activeFloorId=room.floorId; S.ui.selectedRoomId=roomId;
+  let failed=null, pending=false;
+  pushUndo();
+  _undoSuppress++;
+  try{
+    if(modType==='cable'){
+      const prod=HEATING_PRODUCTS.find(p=>p.id===pid);
+      const fam=prod?(prod.product_family||prod.name):null, cat=prod?prod.category_id:null;
+      _cablePreviewPlace(pid, count, fam, cat);
+      // `labelFallback` er motorens egen ærlighet: antallet er riktig, men tegningen mangler.
+      const meta=room._cablePreviewMeta;
+      if(meta && meta.labelFallback) failed='motoren fikk ikke plass til ' + count + (count>1?' kabler':' kabel') + ' i rommet';
+      _confirmCablePreview(fam, cat);
+    } else if(_isSnowRoom(room)){
+      // Snø: `_packSnowMats` er fasiten og kan velge en ANNEN variant i samme familie enn raden
+      // foreslo (målt: 252 → 266) — raden viser etterpå det som faktisk ligger der.
+      _upcPlaceMat(pid, 'variant');
+      _confirmMatPreview();
+    } else {
+      // Innendørs matte: hele motoren (sone-deling + flermatte-søk), samme vei som «Fyll rom
+      // automatisk». Krever den et valg, åpner den sitt eget forslagspanel — da kan ikke dette
+      // kallet avgjøre resultatet, og vi bytter til Lerret så brukeren ser panelet.
+      _upcPlaceMat(pid, 'auto');
+      if(document.getElementById('mat-multi-panel') || document.getElementById('mat-zone-panel')) pending=true;
+    }
+  }catch(e){ failed=e.message; }
+  finally{ _undoSuppress--; }
+  if(pending){
+    S.ui.selectedRoomId=roomId;
+    _setPartView('canvas');
+    fitRoom(roomId);
+    toast('Rommet trenger flere matter — fullfør valget på lerretet');
+    return;
+  }
+  if(!failed && _listRoomDrawnState(roomId)!=='drawn') failed='motoren fikk ikke lagt utlegget i rommet';
+  if(failed){
+    undo();
+    S.ui.selectedRoomId=prevSel; S.ui.activeFloorId=prevFloor;
+    toast('Kunne ikke tegne utlegget: ' + failed);
+  } else {
+    if(typeof _showToast==='function') _showToast('Utlegget er tegnet i ' + (room.name||'rommet'), 'ok');
+  }
+  renderListModule(); renderSidebar(); updateCtxBar(); render(); _scheduleAutoSave&&_scheduleAutoSave();
+}
+// «Åpne/Endre på lerretet»: bytt til Lerret, velg rommet og zoom til det.
+function _listOpenOnCanvas(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  S.ui.activeFloorId=room.floorId;
+  S.ui.selectedRoomId=roomId;
+  _setPartView('canvas');
+  if(typeof fitRoom==='function') fitRoom(roomId);
+}
+// Klikk på romnavnet i lista: rommet lyser opp på lerretet BAK overlayet. Valgt løsning er den
+// med minst arbeid av de to i §2 — overlayet er 92 % opakt i tegnede deler (ett CSS-felt i
+// `_showListModule`), så `selRoom` + `render()` er nok; ingen miniatyr-renderer å vedlikeholde.
+function _listPeekRoom(roomId){
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  S.ui.activeFloorId=room.floorId;
+  S.ui.selectedRoomId=roomId;
+  if(typeof fitRoom==='function') fitRoom(roomId);
+  renderSidebar(); render(); renderListModule();
+}
+// ── Raden for et TEGNET rom ──
+// STEG 0.2: ingenting INNE i `_listFinalizedRowHtml` forutsetter `listMode` (målt — den rendrer
+// feilfritt for et polygon-rom). Det listMode-bundne er radens KLIKKMÅL og slette-knappen:
+// `_listEditRoom` laster rommet inn i utkast-kortet, der «Brutto areal»/«Hindringer» skriver
+// rett til `room.area`/`room.listHindCm2` — for et tegnet rom ville det overskrive polygonets
+// eget areal. Også `Etasje`/`+ Bygg` (`_listMoveRoomToFloor` flytter rom og rydder etasjer) og
+// `_listDeleteRoom` hører til listedelen. Denne raden har derfor egne, trygge felt i stedet.
+function _listDrawnRowHtml(room, showEnv){
+  const rid=room.id;
+  const ar=roomAreas(room), netM2=ar.net/10000, bruttoM2=ar.gross/10000, hindM2=(ar.hindArea+(ar.zoneArea||0))/10000;
+  const stats=_computeRoomStats(room), ratedW=_roomRatedEffectW(room);
+  const state=_listRoomDrawnState(rid);
+  const modType=room.listModType||'cable';
+  const floor=S.floors.find(f=>f.id===room.floorId);
+  const sel=S.ui.selectedRoomId===rid;
+  const td=(c,st)=>`<td style="padding:6px 7px;border-bottom:1px solid var(--border,#2a2d36);white-space:nowrap${st||''}">${c}</td>`;
+  // Status-kolonnen bærer knappene («Tegn utlegg» / «Endre på lerretet») og er selve poenget med
+  // visningen — den klistres til høyre kant så den er synlig uten å scrolle sidelengs. MÅLT: uten
+  // dette lå den 320 px utenfor (tabellen er 1366 px, ruta 1046 px) og «Tegn utlegg» var usynlig.
+  // Ugjennomsiktig bakgrunn er et krav for sticky — ellers scroller radene gjennom cellen.
+  const STICKY=';position:sticky;right:0;background:var(--bg,#0d0e10);border-left:1px solid var(--border,#2a2d36);box-shadow:-6px 0 8px -6px rgba(0,0,0,.35)';
+  const base='box-sizing:border-box;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:5px;color:var(--text,#e8eaed);padding:4px 6px;font-size:12px';
+  const step=(which)=>`<span style="display:inline-flex;flex-direction:column;margin-left:3px;vertical-align:middle">`+
+    `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',-1)" title="Forrige" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:3px 3px 0 0;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9650;</button>`+
+    `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',1)" title="Neste" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 3px 3px;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9660;</button></span>`;
+  const _h={type:'_listOnType',class:'_listOnClass',prod:'_listOnProduct'};
+  const sel2=(key,inner,w)=>`<span style="display:inline-flex;align-items:center"><select id="li-${key}-${rid}" class="li-field" onkeydown="_listKey(event)" onchange="${_h[key]}(${rid},this.value)" style="${w?'max-width:'+w+'px;':''}${base}">${inner}</select>${step(key)}</span>`;
+  const nameCell=`<span onclick="event.stopPropagation();_listPeekRoom(${rid})" title="Vis rommet på lerretet bak" style="cursor:pointer;border-bottom:1px dotted var(--dim,#9aa0aa)"><b>${esc(room.name||'Rom')}</b></span>`;
+  const netCell=`<span id="li-net-${rid}" title="Fra tegningen — brutto ${bruttoM2.toFixed(2)} m²${hindM2>0?(', hindringer '+hindM2.toFixed(2)+' m²'):''}">${netM2?netM2.toFixed(2):'0'}</span> m²`;
+  const envCell=`<span style="color:var(--dim,#9aa0aa)" title="Låst til delens varmetype">${_isSnowRoom(room)?'Utendørs':'Innendørs'}</span>`;
+  const ccLbl=`<span id="li-cclabel-${rid}">${modType==='mat'?'Størrelse':'CC'}</span>`;
+  const ccVal=modType==='mat' ? _listMatSizeStr(room)
+    : (stats.cableCcCm>0 ? (_roomCcOverWarn(room)?'⚠ ':'')+stats.cableCcCm.toFixed(1)+' cm' : '—');
+
+  let typeCell, prodCell, statusCell;
+  if(state==='drawn'){
+    // LÅST: produktkolonnen viser tallene, ingen piler. Lista erstatter aldri et tegnet utlegg.
+    const bd=_roomProductBreakdown(room);
+    const txt=bd.length ? bd.map(v=>(v.count>1?v.count+'× ':'')+(v.product?v.product.name:'—')).join(' + ') : '—';
+    typeCell=`<span style="color:var(--dim,#9aa0aa)">${esc(bd[0]&&bd[0].kind?bd[0].kind:(modType==='mat'?'Matte':'Kabel'))}</span>`;
+    prodCell=`<span title="Tegnet utlegg — endres på lerretet">${esc(txt)}</span>`;
+    statusCell=`<span style="color:#22c55e;font-weight:600" title="Rommet har et ekte utlegg">● Tegnet</span>`
+      + ` <button onclick="event.stopPropagation();_listOpenOnCanvas(${rid})" title="Bytt til lerretet og velg rommet" style="cursor:pointer;background:transparent;border:1px solid var(--border,#2a2d36);border-radius:5px;color:var(--dim,#9aa0aa);font-size:11px;padding:2px 7px;margin-left:6px">Endre på lerretet</button>`;
+  } else {
+    typeCell=sel2('type',`<option value="cable"${modType==='cable'?' selected':''}>Kabel</option><option value="mat"${modType==='mat'?' selected':''}>Matte</option>`,78);
+    prodCell=sel2('class',_listClassOptionsHtml(room),126)
+      + '<span style="display:inline-block;width:5px"></span>'
+      + sel2('prod',_listProductOptionsHtml(room),200)
+      + `<span style="display:inline-flex;align-items:center;margin-left:8px"><input id="li-count-${rid}" class="li-field" onkeydown="_listKey(event)" value="${room.listCount||1}" inputmode="numeric" onchange="_listEditCount(${rid},this.value)" style="width:40px;text-align:center;${base}">`
+      + `<span style="display:inline-flex;flex-direction:column;margin-left:3px">`
+      + `<button tabindex="-1" onclick="_listStepCount(${rid},1)" title="Flere" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:3px 3px 0 0;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9650;</button>`
+      + `<button tabindex="-1" onclick="_listStepCount(${rid},-1)" title="Færre" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 3px 3px;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9660;</button></span></span>`;
+    if(state==='label'){
+      statusCell=`<span style="color:var(--dim,#9aa0aa)" title="Kun produkt valgt — ikke tegnet utlegg">Kun label</span>`
+        + ` <button onclick="event.stopPropagation();_listDrawLayout(${rid})" title="Kjør auto-utlegget med radens produkt og antall" style="cursor:pointer;background:var(--accent,#4fa2b8);border:none;border-radius:5px;color:#0d0e10;font-size:11px;font-weight:700;padding:3px 9px;margin-left:6px">Tegn utlegg</button>`
+        + ` <button onclick="event.stopPropagation();_listOpenOnCanvas(${rid})" title="Bytt til lerretet og velg rommet" style="cursor:pointer;background:transparent;border:1px solid var(--border,#2a2d36);border-radius:5px;color:var(--dim,#9aa0aa);font-size:11px;padding:2px 6px;margin-left:4px">Åpne</button>`;
+    } else {
+      statusCell=`<span style="color:var(--dim,#9aa0aa)">—</span>`
+        + ` <button onclick="event.stopPropagation();_listOpenOnCanvas(${rid})" title="Bytt til lerretet og velg rommet" style="cursor:pointer;background:transparent;border:1px solid var(--border,#2a2d36);border-radius:5px;color:var(--dim,#9aa0aa);font-size:11px;padding:2px 6px;margin-left:5px">Åpne</button>`;
+    }
+  }
+  const hlBg='rgba(79,162,184,.14)';
+  return `<tr id="li-row-${rid}" data-state="${state}" style="${sel?'background:'+hlBg+';box-shadow:inset 3px 0 0 var(--accent,#4fa2b8)':''}">
+    ${td(esc(floor?floor.name:''))}
+    ${td(nameCell)}
+    ${showEnv ? td(envCell) : ''}
+    ${td(netCell)}
+    ${td(typeCell)}
+    ${td(prodCell)}
+    ${td('<b><span id="li-eff-'+rid+'">'+(ratedW?ratedW+' W':'—')+'</span></b>')}
+    ${td('<span id="li-wm2f-'+rid+'">'+_listWm2FlateStr(room, ratedW, netM2)+'</span>')}
+    ${td(ccLbl+' <span id="li-cc-'+rid+'">'+ccVal+'</span>')}
+    ${td(statusCell,';text-align:right'+STICKY)}
+  </tr>`;
+}
+// Bygg Status-cellen og låsingen på nytt etter at produktet endret seg (kalt fra
+// `_listRefreshComputed`, som ellers bare oppdaterer tall). Finnes raden ikke, er dette et no-op —
+// slik at listedelen er bit-for-bit uendret.
+function _listRefreshRowStatus(roomId){
+  const tr=document.getElementById('li-row-'+roomId); if(!tr) return;
+  const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
+  const want=_listRoomDrawnState(roomId);
+  if(tr.dataset.state===want) return;
+  tr.dataset.state=want;
+  // showEnv må utledes på NYTT, med samme regel som `_renderListModuleDrawn` — bygges raden om
+  // uten den, mister den Varmetype-cellen og alle kolonnene under forskyver seg én plass.
+  const part=_listActivePart();
+  const rooms=part?_listDrawnPartRooms(part):[room];
+  const showEnv = rooms.length>1 && rooms.some(r=>_isSnowRoom(r)) && rooms.some(r=>!_isSnowRoom(r));
+  tr.outerHTML=_listDrawnRowHtml(room, showEnv);
+}
 
 // «Lagre prosjekt» fra hurtig prosjektering. Kompletterer autolagringen: flusher endringer
 // og gir tydelig bekreftelse. Skriver samme romtegner_projects-record som feltappen leser
@@ -57591,6 +58199,7 @@ function updateTopbarForModule() {
   document.querySelectorAll('#topbar [data-modules]').forEach(el => {
     el.style.display=el.dataset.modules.split(' ').includes(mod)?'':'none';
   });
+  if (typeof _updatePartViewChips === 'function') _updatePartViewChips();   // 059
   renderPartTabs();
 }
 
@@ -57736,7 +58345,10 @@ function _buildSaveData() {
         .filter(([, arr]) => arr.length)
     ),
     documentation: JSON.parse(JSON.stringify(S.documentation || {})),
-    ui: { drawColor: S.ui.drawColor, wallColor: S.ui.wallColor, activeFloorId: S.ui.activeFloorId },
+    // 059: partView — hvilken visning (Lerret/Liste) hver tegnet del sto i. Lagres her, sammen
+    // med de andre S.ui-feltene som faktisk skal overleve en lagring.
+    ui: { drawColor: S.ui.drawColor, wallColor: S.ui.wallColor, activeFloorId: S.ui.activeFloorId,
+          partView: {...(S.ui.partView || {})} },
   };
 }
 
@@ -58034,6 +58646,7 @@ function _restoreProject(data) {
   }
   // Restore color settings
   if (data.ui) { if(data.ui.drawColor) S.ui.drawColor=data.ui.drawColor; if(data.ui.wallColor) S.ui.wallColor=data.ui.wallColor; }
+  S.ui.partView = (data.ui && data.ui.partView) ? {...data.ui.partView} : {};   // 059
   const _cdot=document.getElementById('color-dot'); if(_cdot) _cdot.style.background=S.ui.drawColor;
   S.ui.selectedRoomId=null; S.ui.selectedWallId=null;
   S.ui.selectedHindringId=null; S.ui.selectedHindringWallIdx=null;
@@ -58714,6 +59327,10 @@ function _pdfCoverMetaRows(nextRev, prevDateStr) {
   // skriver riktig til S.project.responsible — lesingen her var aldri feil felt). Utelat raden helt
   // når den er tom, i stedet for å late som Kunde/Prosjektnr sine «—»-fallbacker gjelder likt her.
   if (proj.responsible) rows.push(['', ''], ['Prosjektert av', proj.responsible]);
+  // 059 §4 (Kenneth 12.10.2026): «PDF og romoversikt skal merke at prosjektet er kalkyle, ikke
+  // detaljprosjektert». Raden utelates HELT når alt er tegnet — se _projectKalkyleStatus.
+  { const _kal = (typeof _projectKalkyleStatus === 'function') ? _projectKalkyleStatus() : null;
+    if (_kal && _kal.row) rows.push(['Status', _kal.row]); }
   // 007: bruker prosjektet kartdata, skal kilden stå på forsiden — samme lisenskrav som
   // linja under hver romtegning.
   if (Object.values(S.bgs || {}).some(_bgIsGeo)) rows.push(['Kartgrunnlag', 'Kartverket (CC BY 4.0)']);
@@ -59411,6 +60028,9 @@ async function exportPDF(opts) {
   const _selectedRooms = Array.isArray(opts.rooms) ? S.rooms.filter(r => opts.rooms.includes(r.id)) : S.rooms;
   for (const room of _selectedRooms) {
     if (room.listMode) continue;   // Hurtig prosjektering-rom har ingen tegning → ingen detaljside (vises i Romoversikt + materialliste)
+    // 059 §4: samme begrunnelse for et TEGNET rom der alle produkter er «kun label» — det finnes
+    // ingen utlegg å vise. Rommet står i Romoversikten, merket «Kalkyle».
+    if (typeof _listRoomDrawnState === 'function' && _listRoomDrawnState(room.id) === 'label') continue;
     if (_pageStarted) _addPage(); else _pageStarted = true;
     const stats = _computeRoomStats(room);
     const targetWm2 = _roomTargetWm2(room.id) || 0;
@@ -60017,6 +60637,13 @@ async function exportPDF(opts) {
       return roomWm2 ? String(roomWm2) : '';
     };
     let _rNeedsFootnote = false;
+    // 059 §4: hvilke rom er ren kalkyle (alle produkter «kun label»). Regnet ÉN gang for tabellen,
+    // fra samme kilde som PDF-forsiden og «K»-merket i sidepanelet (_listRoomDrawnState).
+    let _rNeedsKalkyleNote = false;
+    const _kalkyleRooms = (typeof _listRoomDrawnState === 'function')
+      ? new Set((S.rooms || []).filter(r => !r.listMode && !r.listDraft && _listRoomDrawnState(r.id) === 'label').map(r => r.id))
+      : null;
+    const _prodColIdx = rHeads.indexOf('Produkt');
     const _rDrawHead = () => {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7);
@@ -60086,6 +60713,18 @@ async function exportPDF(opts) {
           for (let i = 0; i < cells.length; i++) doc.text(_fit(cells[i], rColW[i]), rColX[i], y);
           y += 5;
         }
+        // 059 §4: «Kalkyle» — liten grå tekst under produktnavnet når rommets produkter bare er
+        // «kun label». Egen underlinje framfor en ny kolonne: Romoversikten har faste
+        // x-posisjoner som summerer til nøyaktig 180 mm (se kommentaren over rColX), og en
+        // kolonne mer ville tvunget alle de andre smalere for alle prosjekter.
+        if (_kalkyleRooms && _kalkyleRooms.has(room.id)) {
+          if (y + 4 > H - M) { _addPage(); _rDrawHead(); }
+          doc.setFontSize(6); doc.setTextColor(130, 140, 160);
+          doc.text('Kalkyle \u2014 produkt valgt, utlegg ikke tegnet', rColX[_prodColIdx], y);
+          doc.setFontSize(7); doc.setTextColor(30, 40, 60);
+          y += 4;
+          _rNeedsKalkyleNote = true;
+        }
       }
     }
     if (_rNeedsFootnote) {   // 024
@@ -60094,6 +60733,14 @@ async function exportPDF(opts) {
       doc.setFontSize(6.5); doc.setTextColor(120, 130, 150);
       doc.text('Snøsmelting: W/m\u00b2 er flateeffekt (produktets effekt på dekket flate), '
              + 'og Dekn. er oppvarmet andel av brutto areal. Innendørs: W per m\u00b2 netto gulv.', M, y);
+      y += 4;
+    }
+    if (_rNeedsKalkyleNote) {   // 059 §4
+      if (y + 8 > H - M) _addPage();
+      y += 2;
+      doc.setFontSize(6.5); doc.setTextColor(120, 130, 150);
+      doc.text('«Kalkyle» betyr at produkt og antall er valgt, men utlegget ikke er tegnet inn. '
+             + 'Effekt, W/m\u00b2 og materialliste er like fullt beregnet.', M, y);
       y += 4;
     }
     _pageStarted = true;
