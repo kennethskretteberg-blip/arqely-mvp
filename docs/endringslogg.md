@@ -4,6 +4,67 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 063: W/m²-gulvet for kabel utledes av W/m og maks CC — 2026-10-12
+
+Kenneth: «10 W/m kabel forlagt med cc avstand mellom 30-50 cm gir mellom 3,33 meter og 2 meter
+kabel som igjen gir 33,3 W/m2 og 20 W/m2. Da bør min tillate cc med 10W/m kabel være 20 W/m2.
+Men hvis vi en gang får 8W/m kabel, så kan det fortsatt gå fint med 15 W/m2 så lenge cc ikke
+overstiger 50 cm.»
+
+### Regelen
+
+`W/m² = W/m × 100 / CC_cm`. Gulvet er derfor **ikke en konstant**, men laveste flateeffekt noen
+tilgjengelig kabel kan gi uten å overstige maks CC (`_cableWm2Floor`). Målt mot katalogen:
+
+| Kabel | W/m | Maks CC | Laveste W/m² |
+|---|---|---|---|
+| InFloor 10T | 10 | 50 cm | **20,0** |
+| InFloor 17T | 17 | 50 cm | 34,0 |
+
+og 10 W/m ved cc 30 cm = 33,3 W/m² — begge Kenneths tall, eksakt.
+
+**Politikk mot fysikk.** Romtypens `wm2Min` er en politikk («ikke undervarm et bad»); det utledede
+er fysikk («ingen kabel kan gi mindre»). Fysikken kan bare **løfte** politikken, aldri senke den.
+Derfor:
+
+- **fryserom: 10 → 20.** Gamle 10 W/m² krevde cc 100 cm — dobbelt av maks, altså uoppnåelig.
+- **Bad beholder 50**, matte-/folie-/uterom likeså (målt, ingen endring).
+
+Gulvet gjelder bare rom som faktisk varmes med KABEL (`_roomUsesCable`) — en matte har sin egen
+faste flateeffekt, folie regnes per bredde, og ingen av dem har en CC å regne gulvet fra.
+Taket i regnestykket er den HARDE grensen (`maxHard`), ikke anbefalingen: en CC over anbefaling
+er lovlig med varsel (016), så et gulv regnet på anbefalingen ville sperret lovlige utlegg.
+
+### ⚠ Avvik fra Kenneths eget tall
+
+Kenneth sa **15** W/m² for en framtidig 8 W/m kabel. Hans egen grense (cc ≤ 50 cm) gir
+8 × 100/50 = **16,0**. 15 W/m² ville krevd cc 53 cm. Koden følger regelen, ikke tallet.
+
+### ⚠ Databasen motsier koden for fryserom
+
+Org-raden for `fryserom` (`_source: 'org'`) overstyrer tre felt stikk i strid med det 025 bygget:
+
+| Felt | Kodens fasit (025) | DB-raden |
+|---|---|---|
+| `defaultModType` | `cable` | **`foil`** |
+| `reserveCable` | `true` | **`false`** |
+| `targetWm2` | 20 | 25 |
+
+Et fryselager får altså FOLIE som standard og **ingen reservekabel** — nettopp det 025 ble bygget
+for å hindre («en kabel støpt under et fryselager kan ikke byttes»). Ser ut som en backfill som
+har skrevet standardverdier over de tiltenkte. **Ikke rørt** — det er data, ikke kode, og
+Kenneths avgjørelse. `_reserveCableRegressionTest` sin «20 W/m² er standard» feiler av denne
+grunnen, og står rød med vilje framfor å sementere data som ser feil ut.
+
+### Verifisering
+
+`_reserveCableRegressionTest` utvidet (31 påstander): det utledede gulvet, at 15 løftes til 20,
+at 33 slipper gjennom, at Bad beholder 50. Testens syntetiske kabel hadde `category_id: 9000` —
+en kategori som ikke finnes, så de modul-scopede hjelperne aldri så den og `_cableWm2Floor` ga
+null. Nå peker den på en ekte kabelkategori. Resten av batteriet uendret.
+
+---
+
 ## 059b: resultatboks + tastaturflyt i listevisningen — 2026-10-12
 
 Kenneth: «på listevisning ønsker jeg mer likt "liste" hurtigprosjektering, hvor man har en

@@ -2896,14 +2896,56 @@ function _roomTypeOf(roomId) {
   if (!room || !room.roomType) return null;
   return ROOM_TYPES.find(t => t.id === room.roomType) || null;
 }
+// 063 (Kenneth 12.10.2026): FYSISK gulv for flateeffekt med kabel, utledet — ikke hardkodet.
+// «10 W/m kabel forlagt med cc mellom 30-50 cm gir mellom 3,33 meter og 2 meter kabel som igjen
+// gir 33,3 W/m2 og 20 W/m2. Da bør min tillate cc med 10W/m kabel være 20 W/m2. Men hvis vi en
+// gang får 8 W/m kabel, så kan det fortsatt gå fint med 15 W/m2 så lenge cc ikke overstiger 50 cm.»
+//
+// Regnestykket er W/m² = W/m × 100 / CC_cm. MÅLT mot katalogen 12.10.2026: InFloor 10T har
+// max_spacing_mm 500, altså 10 × 100/50 = 20,0 W/m² som laveste oppnåelige — nøyaktig Kenneths
+// tall, og 10 × 100/30 = 33,3 i andre enden. En framtidig 8 W/m kabel gir 8 × 100/50 = 16,0.
+// ⚠ Kenneth sa «15» for 8 W/m; hans EGEN grense (cc ≤ 50 cm) gir 16,0. Her følges regelen, ikke
+// det løse tallet — 15 W/m² ville krevd cc 53 cm.
+//
+// Taket er den HARDE grensen (`maxHard`), ikke anbefalingen (`maxWarn`): en CC over anbefaling er
+// lovlig med varsel (016), så et gulv regnet på anbefalingen ville sperret lovlige utlegg.
+// Returnerer null når ingen kabel er tilgjengelig — da finnes ingen fysisk grense å håndheve.
+function _cableWm2Floor(roomId) {
+  const envType = roomId != null ? _roomModuleType(roomId) : _activeModuleType();
+  let best = null;
+  for (const p of _listCableProducts(envType)) {
+    if (!(p.watt_per_m > 0)) continue;
+    const maxCc = _ccLimits(p, roomId).maxHard;
+    if (!(maxCc > 0)) continue;
+    const w = p.watt_per_m * 100 / maxCc;
+    if (best == null || w < best) best = w;
+  }
+  return best == null ? null : Math.ceil(best - 1e-9);   // aldri under det som faktisk er mulig
+}
+// Varmes rommet med KABEL? Det fysiske gulvet over gjelder bare da — en matte har sin egen faste
+// flateeffekt, og folie regnes per bredde; ingen av dem har en CC å regne gulvet fra.
+function _roomUsesCable(roomId) {
+  const room = roomId != null ? S.rooms.find(r => r.id === roomId) : null;
+  if (!room) return false;
+  if ((S.cables || []).some(c => c.roomId === room.id)) return true;
+  if (room.listModType) return room.listModType === 'cable';
+  if (room.roomType) return _roomTypeModType(room.roomType) === 'cable';
+  return false;
+}
 // 025: nedre grense for ønsket flateeffekt. Romtypen eier sitt eget minimum — fryserom skal
 // kunne settes til 15–20 W/m², mens 50 står for alle andre innendørs romtyper.
 // MÅLT 06.10.2026: uten dette ble 20 W/m² stille løftet til 50 med toast «Min 50 W/m²».
+//
+// 063: romtypens tall er en POLITIKK («ikke undervarm et bad»), det utledede er FYSIKK («ingen
+// kabel kan gi mindre»). Fysikken kan bare LØFTE politikken, aldri senke den — så Bad beholder
+// sine 50, mens fryserom går fra 10 (uoppnåelig: ville krevd cc 100 cm) til 20.
 function _wm2MinFor(roomId) {
   const rt = _roomTypeOf(roomId);
-  if (rt && rt.wm2Min != null) return rt.wm2Min;
   const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
-  return _moduleContext(modType).wm2Min;
+  const policy = (rt && rt.wm2Min != null) ? rt.wm2Min : _moduleContext(modType).wm2Min;
+  if (!_roomUsesCable(roomId)) return policy;
+  const floor = _cableWm2Floor(roomId);
+  return floor == null ? policy : Math.max(policy, floor);
 }
 // STEG 3 fallback: brukes når DB-raden mangler default_mod_type (før migrasjon kjøres).
 const _ROOMTYPE_FALLBACK_MODTYPE = { bathroom:'mat', laundry:'mat' };
@@ -29376,7 +29418,12 @@ function _reserveCableRegressionTest() {
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
   try {
-    const CAB = { id: 9990, category_id: 9000, active: true, product_family: 'FRYSETEST',
+    // 063: EKTE kabelkategori, ikke en oppdiktet 9000. De modul-scopede hjelperne
+    // (`_listCableProducts` → `_listCatFor` → `_catAvailableInModule`) slår opp kategorien, så en
+    // kategori som ikke finnes gjør produktet usynlig for dem — og `_cableWm2Floor` ga null i
+    // stedet for 20. Testen fant altså ikke sin egen kabel. MÅLT 12.10.2026.
+    const _CABCAT = (PRODUCT_CATEGORIES.find(c => c.module_type === 'cable' && _catAvailableInModule(c, 'indoor')) || {}).id;
+    const CAB = { id: 9990, category_id: _CABCAT, active: true, product_family: 'FRYSETEST',
       name: 'FRYSETEST 10T 1000W 100m', article_no: 'FT100', el_no: '1234567',
       watt_per_m: 10, cable_length_m: 100, total_effect_w: 1000, voltage: 230,
       min_spacing_mm: 50, max_spacing_mm: 500 };
@@ -29401,9 +29448,17 @@ function _reserveCableRegressionTest() {
     const rt = _roomTypeDefaults('fryserom');
     check('A: romtypen finnes', 'Fryserom/kjølerom', rt && /fryserom|kjølerom/i.test(rt.label), rt && rt.label);
     check('A: 20 W/m² er standard', 20, rt.targetWm2 === 20, rt.targetWm2);
-    check('A: wm2Min 10 — 50-gulvet gjelder ikke', 10, _wm2MinFor(RID) === 10, _wm2MinFor(RID));
+    // 063 (Kenneth 12.10.2026): gulvet er ikke lenger romtypens 10, men det FYSISK oppnåelige.
+    // 10 W/m ved maks CC 50 cm = 20 W/m². De to assertene under het før «wm2Min 10» og
+    // «15 W/m² går også» — de kodet et ønske ingen kabel kan innfri (15 W/m² ville krevd cc 53 cm).
+    check('A: 50-gulvet gjelder ikke — men det fysiske gjør', 20, _wm2MinFor(RID) === 20, _wm2MinFor(RID));
+    check('A: det fysiske gulvet er utledet av 10 W/m og maks CC 50 cm', 20,
+      _cableWm2Floor(RID) === 20, _cableWm2Floor(RID));
     check('A: 20 W/m² blir IKKE klemt til 50', 20, _clampTargetWm2(RID, 20) === 20, _clampTargetWm2(RID, 20));
-    check('A: 15 W/m² går også', 15, _clampTargetWm2(RID, 15) === 15, _clampTargetWm2(RID, 15));
+    check('A: 15 W/m² løftes til 20 — ingen kabel kan gi mindre', 20,
+      _clampTargetWm2(RID, 15) === 20, _clampTargetWm2(RID, 15));
+    check('A: 33 W/m² (10 W/m ved cc 30) slipper gjennom urørt', 33,
+      _clampTargetWm2(RID, 33) === 33, _clampTargetWm2(RID, 33));
 
     // ─── B — reserven genereres ───
     _invalidateCableCache();
