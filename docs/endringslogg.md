@@ -4,6 +4,87 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 059b: resultatboks + tastaturflyt i listevisningen — 2026-10-12
+
+Kenneth: «på listevisning ønsker jeg mer likt "liste" hurtigprosjektering, hvor man har en
+resultatboks som viser totalt areal, effekt, cc og flate effekt på både matter og kabler …
+la oss si det er 27 m². Hvis jeg da velger 2 stk matter à 12 m², bør det stå tydelig at mattene
+dekker 24 m², og hvor mange prosent det er av totalen. tab, pil og enter prinsippene.»
+
+**Status: ferdig, committet lokalt — IKKE pushet** (Kenneth jobbet i repoet fra en annen økt da
+dette ble skrevet). Bygget oppå 062; 060/061/062 landet derfra mens 059 lå ute.
+
+### Resultatboks
+
+Samme boks og samme visuelle språk som utkast-kortet i Hurtig prosjektering (`resItem`), over
+tabellen, for den VALGTE raden. Alle tallene fantes allerede i `_computeRoomStats` — boksen viser
+dem, den regner ingenting nytt. Målt på Kenneths eksempel:
+
+| | |
+|---|---|
+| Areal (netto) | 27,00 m² |
+| **Dekket** | **24 m² · 89 %** |
+| Udekket | 3 m² |
+| Ønsket effekt | 8100 W |
+| Installert | 7200 W |
+| W/m² brutto | 267 W/m² |
+| W/m² flate | 300 W/m² |
+| Størrelse | 2 × 12 m² |
+| Bestilles | 2 stk |
+
+Kabelrader viser CC i stedet for Størrelse, og «Dekket 100 %» med tooltip om at en «kun label»-
+kabel ANTAS å dekke hele nettoarealet (modellantakelse, ikke en måling). Topplinja fikk
+«· dekket 56,0 m² (95 %)» for hele delen. Egne id-er (`lb-*`), ikke radenes (`li-*-<rom>`).
+
+### Tastatur
+
+- **Pil opp/ned** stepper Type/Klasse/Produkt/antall (virket fra før).
+- **Enter** flytter til neste felt, og fra siste felt i en rad til FØRSTE felt i neste rad — som
+  i et regneark. Wrapper rundt fra siste til første.
+- **Tab** faller gjennom til nettleserens egen flyt (ingen «Legg til rom»-knapp å vikle seg i).
+- Boksen følger raden man er i, både ved pil, Tab (`onfocus`) og museklikk. Radmarkeringen følger
+  boksen, så de to aldri peker på hvert sitt rom.
+
+### Tre feil rettet
+
+1. **Enter opprettet et listerom inne i snødelen.** `_listKey` falt ned i `_listFinalizeDraft()`
+   fordi en tegnet del verken har utkast-kort eller «Legg til rom»-knapp. Målt: toast «Skriv inn
+   brutto areal først» og et `listMode`-utkastrom midt i en snødel. Innført i 059.
+2. **«Bestilles» sto som «—» for hvert eneste matte-rom.** `_listCountStr` leste bare `S.cables`.
+   Gjaldt også utkast-kortet i Hurtig prosjektering.
+3. **«(ingen produkter)» for et rom som beviselig hadde produkt.** `_listClassOptionsHtml` utledet
+   familien (produktets egen, ellers standard), mens `_listProductOptionsHtml` leste
+   `room.listFamily` rått. Et rom som fikk «kun label» fra LERRETET (der `listFamily` aldri settes)
+   og så ble åpnet i lista, viste klasse i det ene nedtrekket og tomt i det andre. Ny delt
+   `_listRowFamily` — én kilde for begge.
+
+### Verifisering
+
+`_listevisningRegressionTest` utvidet fra 24 til **54 påstander** (dekning 24/27 = 89 %,
+udekket 3 m², matte-telling, familie-utledning uten `listFamily`, Enter oppretter aldri listerom).
+Tastaturflyten målt ved å instrumentere `focus()` — fokus er ikke observerbar i en skjult rute
+(`document.hasFocus()` er false), så `document.activeElement` duger ikke som målepunkt.
+
+### ⚠ To feil som IKKE er mine — de lå på ren 062
+
+Kontrollert ved å stashe endringene og kjøre batteriet på ren 062: **nøyaktig samme to feil**.
+
+1. **`_reserveCableRegressionTest`: «20 W/m² er standard» — forventet 20, fikk 25.**
+   `_roomTypeDefaults('fryserom').targetWm2` er 25 i databasen. Enten er DB-verdien endret eller
+   testen er skrevet mot en annen verdi. Data mot test, ikke kode.
+2. **`_prosjektlaasRegressionTest`** feiler bare fordi en teststubb erstatter funksjonen den
+   kildeinspiserer. **Stubb `_performAutoSave`, ikke `_scheduleAutoSave`** — 060-testen leser
+   begges `.toString()`. (`_scheduleAutoSave` → `_performAutoSave` → `_ensureDraftProject` er
+   forresten veien som lager «Prosjekt – <dato>»-utkast i skyen under syntetisk testing.)
+
+### Testfelle
+
+**Test-rom-id-er kolliderer.** 90106 var 061-seksjonens eget «Område 6 (mix)»; jeg gjenbrukte den.
+To rom med samme id → `S.rooms.find` traff mitt, mens 061 holdt på sitt, og `M.listMix` ble
+stående undefined. Ny seksjon = ny id-serie (059b bruker 9012x).
+
+---
+
 ## 062: «Prosjektert av» — ingen felt ved opprettelse, lesbar linje med «Endre» — 2026-10-12
 
 Kenneth: «Vi trenger ikke utfylling av «Prosjektert av» nå som den henter infoen fra innlogget

@@ -21442,6 +21442,47 @@ function _listevisningRegressionTest() {
       _listRoomDrawnState(E.id) === 'empty' && _projectKalkyleStatus().row === null,
       _listRoomDrawnState(E.id) + ' / ' + String(_projectKalkyleStatus().row));
 
+    // ── 5. 059b: resultatboks, familie-utledning, matte-telling, Enter i en tegnet del ──
+    // Kenneths eksempel, eksakt: 27 m² område + 2 matter à 12 m² → dekket 24 m² = 89 %.
+    // ⚠ Egen id-serie (9012x). 90106 er 061-seksjonens eget «Område 6 (mix)» lenger nede —
+    // to rom med SAMME id gjorde at `S.rooms.find` traff mitt rom mens 061 holdt på sitt,
+    // og `M.listMix` ble stående undefined. Målt 12.10.2026.
+    const K = mkDrawn(90120, 'Gårdsplass', 600, 450);          // 27,00 m²
+    const MAT12 = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 12);
+    _listSetRoomProduct(K.id, 'mat', MAT12.id, 2);
+    K.listFamily = null;          // slik LERRETSVEIEN («Kun label» fra kabelpanelet) etterlater rommet
+    _invalidateMatCache();
+    const kStats = _computeRoomStats(K), kNet = roomAreas(K).net / 10000;
+    check('Boks: netto areal fra tegningen', 27, Math.abs(kNet - 27) < 0.005, kNet);
+    check('Boks: dekket areal = summen av mattene', 24,
+      Math.abs((kStats.heatedM2 || 0) - 24) < 0.005, kStats.heatedM2);
+    check('Boks: dekningsprosent', '89 %',
+      Math.round((kStats.heatedM2 || 0) / kNet * 100) === 89,
+      Math.round((kStats.heatedM2 || 0) / kNet * 100) + ' %');
+    check('Boks: udekket areal', 3, Math.abs(kNet - (kStats.heatedM2 || 0) - 3) < 0.005,
+      (kNet - (kStats.heatedM2 || 0)).toFixed(2));
+    const kBox = _listDrawnBoxHtml(K);
+    check('Boks: HTML viser både dekket areal og prosent', '24 m² og 89 %',
+      /24(\.0+)?\s*m²/.test(kBox) && />89 %</.test(kBox), kBox.length + ' tegn');
+    check('Boks: «Bestilles» teller MATTER, ikke bare kabler', '2 stk',
+      _listCountStr(K) === '2 stk', _listCountStr(K));
+    // Familie-utledning: klasse- og produktnedtrekket må vise SAMME virkelighet
+    const kFam = _listRowFamily(K);
+    check('Familie utledes fra rommets faktiske produkt når listFamily er null',
+      _listFamKey(MAT12), kFam.family === _listFamKey(MAT12), String(kFam.family));
+    const kProdOpts = _listProductOptionsHtml(K);
+    check('Produktnedtrekket er IKKE tomt for et rom med produkt men uten listFamily',
+      'produkter listet', !/ingen produkter/.test(kProdOpts) && kProdOpts.includes('value="' + MAT12.id + '"'),
+      /ingen produkter/.test(kProdOpts) ? '(ingen produkter)' : 'ok');
+    // Enter i en TEGNET del må aldri opprette et listerom
+    const roomsBefore = S.rooms.length, listBefore = S.rooms.filter(r => r.listMode).length;
+    const fakeEnter = { key: 'Enter', target: { id: 'li-count-' + K.id, classList: { contains: () => false } },
+      preventDefault() {} };
+    try { _listKey(fakeEnter); } catch (e) { /* ingen DOM i testen — det er _listFinalizeDraft som er poenget */ }
+    check('Enter i en tegnet del oppretter ALDRI et listerom', 'uendret',
+      S.rooms.length === roomsBefore && S.rooms.filter(r => r.listMode).length === listBefore,
+      S.rooms.length + ' rom, ' + S.rooms.filter(r => r.listMode).length + ' listerom');
+
     // ── 5. 061: «Ulike kabler» på ett rom ──
     // Eget rom, så § 1-4 over ikke påvirkes. Arealet er valgt så den LENGDEDREVNE CC-en faller
     // innenfor gyldig område for den syntetiske katalogen (min 6 cm, maxHard 50 cm) — er rommet
@@ -56091,6 +56132,18 @@ function _listKey(e){
   }
   const fields=[...document.querySelectorAll('#list-module .li-field')];
   const i=fields.indexOf(e.target);
+  // 059: en TEGNET del har verken utkast-kort eller «Legg til rom»-knapp — rom lages på lerretet.
+  // Enter flytter bare videre: neste felt, og fra siste felt i en rad til FØRSTE felt i neste rad,
+  // som i et regneark. Tab faller gjennom til nettleserens egen flyt (ingen knapp å vikle seg i).
+  // ⚠ Uten denne grenen falt Enter ned i `_listFinalizeDraft()` og opprettet et listMode-
+  // UTKASTROM inne i snødelen — målt 12.10.2026, toast «Skriv inn brutto areal først».
+  if(_listIsDrawnPart()){
+    if(e.key==='Enter'){
+      e.preventDefault();
+      if(i>=0 && fields.length){ const nx=fields[(i+1)%fields.length]; nx.focus(); nx.select&&nx.select(); }
+    }
+    return;
+  }
   const btn=document.querySelector('#list-module .li-addbtn');
   const isBtn=e.target.classList && e.target.classList.contains('li-addbtn');
   if(e.key==='Enter'){
@@ -56114,7 +56167,14 @@ function _listKey(e){
 function _listFamKeyLabel(key){
   const i=key.lastIndexOf('|'); return key.slice(0,i)+' '+key.slice(i+1)+'V';
 }
-function _listClassOptionsHtml(room){
+// Hvilken familie VISER denne raden? Utledet, ikke nødvendigvis `room.listFamily`: en rad uten
+// eget valg viser familien til produktet den faktisk har, ellers standarden.
+// 059b: dette var duplisert — `_listClassOptionsHtml` gjorde hele utledningen, mens
+// `_listProductOptionsHtml` leste `room.listFamily` rått. Et rom som fikk «kun label» fra
+// LERRETET (der `listFamily` aldri settes) og så ble åpnet i lista, viste derfor en klasse i
+// det ene nedtrekket og «(ingen produkter)» i det andre — samtidig som rommet beviselig hadde
+// produktet. MÅLT 12.10.2026 på et rom med 2 × InSnow 300T 12 m². Nå én kilde for begge.
+function _listRowFamily(room){
   const envType=_roomModuleType(room.id);
   const modType=room.listModType||'cable';
   let cur=room.listFamily;
@@ -56123,7 +56183,11 @@ function _listClassOptionsHtml(room){
   // Ingen familie valgt ennå (rad uten areal, _listAutoSuggest har aldri kjørt) — vis InSnow 30T
   // 230V som «ville blitt valgt», samme standard som _listAutoSuggest selv bruker, ikke en
   // tilfeldig første-i-lista.
-  if(!cur) cur = (modType==='cable' && envType==='snow' && fams.includes(_LIST_SNOW_DEFAULT_FAM)) ? _LIST_SNOW_DEFAULT_FAM : (fams[0]||null);
+  if(!cur || !fams.includes(cur)) cur = (modType==='cable' && envType==='snow' && fams.includes(_LIST_SNOW_DEFAULT_FAM)) ? _LIST_SNOW_DEFAULT_FAM : (fams[0]||null);
+  return { family:cur, fams, modType, envType };
+}
+function _listClassOptionsHtml(room){
+  const {family:cur, fams}=_listRowFamily(room);
   let o='';
   for(const f of fams){ o+=`<option value="${esc(f)}"${f===cur?' selected':''}>${esc(_listFamKeyLabel(f))}</option>`; }
   return o || `<option value="">—</option>`;
@@ -56139,7 +56203,25 @@ function _listCountStr(room){
   const all=(S.cables||[]).filter(c=>c.roomId===room.id);
   const res=all.filter(c=>c.reserve).length;
   const main=all.length-res;
-  if(!all.length) return '—';
+  // 059b: MATTER telles også. Denne leste bare `S.cables`, så «Bestilles» sto som «—» for hvert
+  // eneste matte-rom — både i resultatboksen og i utkast-kortet i Hurtig prosjektering. Målt på
+  // Kenneths eksempel (2 stk à 12 m²). Matter har ingen reserve, så grupperingen under (som
+  // finnes for 061s blandede kabler) gjelder fortsatt bare kabel.
+  if(!all.length){
+    const mats=_matsForRoom(room.id);
+    if(!mats.length) return '—';
+    const byProd=new Map();
+    for(const m of mats) byProd.set(m.productId,(byProd.get(m.productId)||0)+1);
+    if(byProd.size>1){
+      const parts=[];
+      for(const [pid,n] of byProd){
+        const p=HEATING_PRODUCTS.find(x=>x.id===pid);
+        parts.push(n+' × '+(p?p.name:'?'));
+      }
+      return `${mats.length} stk (${parts.join(', ')})`;
+    }
+    return `${mats.length} stk`;
+  }
   const byProd=new Map();
   for(const c of all){ if(c.reserve) continue; byProd.set(c.productId,(byProd.get(c.productId)||0)+1); }
   if(byProd.size>1){
@@ -56163,9 +56245,11 @@ function _listWm2FlateStr(room, ratedW, net){
 }
 
 function _listProductOptionsHtml(room){
-  const rid=room.id, envType=_roomModuleType(rid), modType=room.listModType||'cable', curId=_listRoomProductId(rid);
+  const rid=room.id, curId=_listRoomProductId(rid);
   const net=roomAreas(room).net/10000, count=room.listCount||1;
-  const family=room.listFamily;
+  // 059b: SAMME utledning som klasse-nedtrekket (se `_listRowFamily`) — ellers kan de to vise
+  // hver sin virkelighet for samme rad.
+  const {family, modType, envType}=_listRowFamily(room);
   let opts='';
   if(modType==='cable'){
     const fam=_listFamilyProducts('cable', family, envType);
@@ -56284,6 +56368,9 @@ function _listRefreshComputed(roomId){
   // 059: Status-cellen i en tegnet del («—» → «Kun label») bygges om NÅR tilstanden faktisk
   // endret seg. No-op i listedelen (raden finnes ikke) → den er bit-for-bit uendret.
   if(typeof _listRefreshRowStatus==='function') _listRefreshRowStatus(roomId);
+  // 059b: resultatboksen følger raden man jobber i — pil/Tab gjennom tabellen oppdaterer den
+  // uten at man må klikke noe. No-op i listedelen (boksen finnes ikke der).
+  if(typeof _listRefreshBox==='function') _listRefreshBox(roomId);
   _scheduleAutoSave&&_scheduleAutoSave();
 }
 // Stepp et nedtrekk med ▲/▼-knappene (gir samme effekt som piltast i feltet).
@@ -56423,6 +56510,86 @@ function _listFinalizedRowHtml(room,showBuilding){
     ${td(`<button onclick="event.stopPropagation();_listDeleteRoom(${rid})" title="Slett rom" style="cursor:pointer;background:transparent;border:none;color:var(--warn,#ef4444);font-size:14px">✕</button>`, ';text-align:right')}
   </tr>`;
 }
+// 059b (Kenneth 12.10.2026): «en resultatboks som viser totalt areal, effekt, cc og flate effekt
+// på både matter og kabler … 27 m² rom, 2 stk matter à 12 m² → det bør stå tydelig at mattene
+// dekker 24 m², og hvor mange prosent det er av totalen.»
+//
+// Samme boks og samme visuelle språk som utkast-kortet i Hurtig prosjektering (`resItem` i
+// `_listDraftCardHtml`) — ikke en ny slags oppsummering. Alle tallene finnes ALLEREDE i
+// `_computeRoomStats`; målt på nettopp Kenneths eksempel: 27,00 m² netto, matAreaM2 24,00,
+// heatedM2 24,00, uncoveredM2 3,00, 7200 W, flate 300 W/m², brutto 267 W/m². Boksen viser dem,
+// den regner ingenting nytt.
+//
+// Egne id-er (`lb-*`), ikke radenes (`li-*-<rom>`) — ellers kolliderer boksen med raden for
+// samme rom, og `_listRefreshComputed` ville skrevet til feil element.
+function _listBoxRoom(){
+  const part=_listActivePart(); if(!part) return null;
+  const rooms=_listDrawnPartRooms(part); if(!rooms.length) return null;
+  return rooms.find(r=>r.id===S.ui.selectedRoomId) || rooms[0];
+}
+function _listDrawnBoxHtml(room){
+  if(!room) return '';
+  const ar=roomAreas(room), netM2=ar.net/10000, bruttoM2=ar.gross/10000;
+  const stats=_computeRoomStats(room), ratedW=_roomRatedEffectW(room);
+  const modType=room.listModType||'cable';
+  const heated=stats.heatedM2||0, uncovered=Math.max(0, netM2-heated);
+  const covPct=netM2>0?Math.round(heated/netM2*100):0;
+  const target=_roomTargetWm2(room.id);
+  const state=_listRoomDrawnState(room.id);
+  const fm=n=>(Math.abs(n%1)<1e-9)?String(Math.round(n)):n.toFixed(2).replace(/0$/,'');
+  // «Kun label»-kabel har ingen geometri og regnes å dekke HELE nettoarealet (se
+  // `_computeRoomStats`). Da er 100 % en modellantakelse, ikke en måling — si det i tooltipen
+  // i stedet for å la tallet se ut som noe motoren har regnet ut av en tegning.
+  const labelCable = state==='label' && modType==='cable';
+  const covTitle = labelCable
+    ? 'Kun label-kabel regnes å dekke hele nettoarealet — ingen tegnet geometri å måle på'
+    : 'Oppvarmet areal av netto ' + netM2.toFixed(2) + ' m²';
+  const covColor = covPct>=95 ? '#22c55e' : (covPct>=80 ? 'var(--text,#e8eaed)' : '#eab308');
+  const item=(lbl,id,val,ti,col)=>`<div style="display:flex;flex-direction:column;gap:2px;min-width:86px"${ti?' title="'+ti+'"':''}>`
+    + `<span style="font-size:10px;color:var(--dim,#9aa0aa);text-transform:uppercase;letter-spacing:.3px">${lbl}</span>`
+    + `<span id="${id}" style="font-size:15px;font-weight:600;color:${col||'var(--text,#e8eaed)'};font-variant-numeric:tabular-nums">${val}</span></div>`;
+  const ccLbl = modType==='mat' ? 'Størrelse' : 'CC';
+  const ccVal = modType==='mat' ? _listMatSizeStr(room)
+    : (stats.cableCcCm>0 ? (_roomCcOverWarn(room)?'⚠ ':'')+stats.cableCcCm.toFixed(1)+' cm' : '—');
+  const stateChip = state==='drawn'
+    ? '<span style="color:#22c55e;font-weight:600;font-size:11.5px">● Tegnet</span>'
+    : (state==='label' ? '<span style="color:var(--dim,#9aa0aa);font-size:11.5px">Kun label (kalkyle)</span>'
+                       : '<span style="color:var(--dim,#9aa0aa);font-size:11.5px">Uten produkt</span>');
+  return `<div style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text,#e8eaed);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>${esc(room.name||'Rom')}</span>${stateChip}
+      <span style="font-size:11.5px;color:var(--dim,#9aa0aa);font-weight:400">Brutto ${bruttoM2.toFixed(2)} m²${(ar.hindArea+(ar.zoneArea||0))>0?(' − hindringer '+((ar.hindArea+(ar.zoneArea||0))/10000).toFixed(2)+' m²'):''}</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:14px 24px">
+      ${item('Areal (netto)','lb-net', netM2.toFixed(2)+' m²', 'Fra tegningen')}
+      ${item('Dekket','lb-cov', fm(heated)+' m² <span style="font-size:12.5px;font-weight:700;color:'+covColor+'">'+covPct+' %</span>', covTitle)}
+      ${item('Udekket','lb-unc', uncovered>0.005 ? fm(uncovered)+' m²' : '—', 'Netto minus oppvarmet areal')}
+      ${item('Ønsket effekt','lb-want', netM2>0?Math.round(netM2*target)+' W':'—', netM2>0?('Netto × '+target+' W/m²'):'')}
+      ${item('Installert','lb-eff', ratedW?ratedW+' W':'—', 'Produktenes ratede effekt')}
+      ${item('W/m² brutto','lb-wm2b', (ratedW&&bruttoM2>0)?Math.round(ratedW/bruttoM2)+' W/m²':'—', 'Effekt per m² brutto areal')}
+      ${item('W/m² flate','lb-wm2f', _listWm2FlateStr(room, ratedW, netM2), 'Produktets effekt på den flaten det faktisk dekker')}
+      ${item(ccLbl,'lb-cc', ccVal)}
+      ${item('Bestilles','lb-ant', _listCountStr(room), 'Antall elementer, inkl. evt. reserve')}
+    </div>`;
+}
+// Boksen bygges om i sin helhet — den har ingen felt å miste fokus i, i motsetning til radene.
+function _listRefreshBox(roomId){
+  const el=document.getElementById('list-result-box'); if(!el) return;
+  if(roomId!=null){
+    const part=_listActivePart();
+    if(part && _listDrawnPartRooms(part).some(r=>r.id===roomId)) S.ui.selectedRoomId=roomId;
+  }
+  const room=_listBoxRoom();
+  el.style.display = room ? 'block' : 'none';
+  if(room) el.innerHTML=_listDrawnBoxHtml(room);
+  // Radmarkeringen må følge boksen — ellers viser boksen ett rom mens stripen står ved et annet.
+  // Stilen settes direkte (ingen ombygging), så fokus i raden er urørt.
+  const hl='rgba(79,162,184,.14)';
+  for(const tr of document.querySelectorAll('#list-module tbody tr')){
+    const on = room && tr.id==='li-row-'+room.id;
+    tr.style.background = on ? hl : '';
+    tr.style.boxShadow  = on ? 'inset 3px 0 0 var(--accent,#4fa2b8)' : '';
+  }
+}
 // 059 §1: tabellen for en TEGNET del. Samme knapperad som listedelen, MINUS «Importer tegning
 // (PDF)» og utkast-kortet — rom lages på lerretet her. Pluss «Grovprosjekter alle» og en
 // Status-kolonne (se `_listDrawnRowHtml`).
@@ -56430,6 +56597,8 @@ function _renderListModuleDrawn(el, part){
   const rooms=_listDrawnPartRooms(part);
   let totW=0, totNet=0;
   for(const r of rooms){ totW+=_roomRatedEffectW(r); totNet+=roomAreas(r).net/10000; }
+  let totHeated=0; for(const r of rooms) totHeated+=_computeRoomStats(r).heatedM2||0;
+  const totCovPct = totNet>0 ? Math.round(totHeated/totNet*100) : 0;
   const nEmpty=rooms.filter(r=>_listRoomDrawnState(r.id)==='empty' && roomAreas(r).net>0).length;
   const nLabel=rooms.filter(r=>_listRoomDrawnState(r.id)==='label').length;
   const nDrawn=rooms.filter(r=>_listRoomDrawnState(r.id)==='drawn').length;
@@ -56443,7 +56612,7 @@ function _renderListModuleDrawn(el, part){
   const showEnv = rooms.length>1 && rooms.some(r=>_isSnowRoom(r)) && rooms.some(r=>!_isSnowRoom(r));
   let h=`<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap">
     <div style="font-size:18px;font-weight:700;color:var(--text,#e8eaed)">${IC('clipboard',20)} ${esc(part.name||'Del')}</div>
-    <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} ${omr} · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W</div>
+    <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} ${omr} · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W${totHeated>0?` · dekket ${totHeated.toFixed(1)} m² (${totCovPct} %)`:''}</div>
     <div style="flex:1"></div>
     ${nEmpty ? `<button style="${prim}" onclick="_listGrovprosjekterAlle()" title="Foreslå produkt og antall for alle ${omr} uten produkt">${IC('zap',14)} Grovprosjekter alle (${nEmpty})</button>` : ''}
     <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
@@ -56455,6 +56624,9 @@ function _renderListModuleDrawn(el, part){
     Arealet kommer fra tegningen. ${nDrawn} tegnet · ${nLabel} kun label (kalkyle) · ${nEmpty} uten produkt.
     ${nDrawn ? 'Rader med tegnet utlegg er låst — endre dem på lerretet.' : ''}
   </div>`;
+  // 059b: resultatboksen for den VALGTE raden, over tabellen — samme plass og samme språk som
+  // utkast-kortet har i Hurtig prosjektering.
+  h+=`<div id="list-result-box" style="max-width:1100px;background:var(--surface,#15171c);border:1px solid var(--border,#2a2d36);border-radius:10px;padding:13px 16px;margin-bottom:16px"></div>`;
   if(rooms.length){
     h+=`<div style="overflow-x:auto;max-width:100%"><table style="border-collapse:collapse;font-size:12.5px;min-width:820px"><thead><tr>
       ${th('Etasje')}${th('Rom')}${showEnv?th('Varmetype'):''}${th('Netto')}${th('Type')}${th('Produkt / antall')}${th('Effekt')}${th('W/m²','',  'Flateeffekt — produktets effekt på dekket flate')}${th('CC/str.','','Senteravstand for kabel, eller mattestørrelse')}${th('Status',';text-align:right;position:sticky;right:0;background:var(--bg,#0d0e10);border-left:1px solid var(--border,#2a2d36)')}
@@ -56465,6 +56637,7 @@ function _renderListModuleDrawn(el, part){
     h+=`<div style="color:var(--dim,#9aa0aa);font-size:12px">Ingen ${omr} tegnet ennå. Bytt til <b>Lerret</b> og tegn dem inn.</div>`;
   }
   el.innerHTML=h;
+  _listRefreshBox();
 }
 function renderListModule(){
   const el=document.getElementById('list-module'); if(!el) return;
@@ -56801,7 +56974,9 @@ function _listDrawnRowHtml(room, showEnv){
     `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',-1)" title="Forrige" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:3px 3px 0 0;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9650;</button>`+
     `<button tabindex="-1" onclick="_listStepSelect(${rid},'${which}',1)" title="Neste" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 3px 3px;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9660;</button></span>`;
   const _h={type:'_listOnType',class:'_listOnClass',prod:'_listOnProduct'};
-  const sel2=(key,inner,w)=>`<span style="display:inline-flex;align-items:center"><select id="li-${key}-${rid}" class="li-field" onkeydown="_listKey(event)" onchange="${_h[key]}(${rid},this.value)" style="${w?'max-width:'+w+'px;':''}${base}">${inner}</select>${step(key)}</span>`;
+  // 059b: `onfocus` flytter resultatboksen til raden man er i — Tab og museklikk oppdaterer den
+  // like fullt som piltastene (som går via `_listRefreshComputed`).
+  const sel2=(key,inner,w)=>`<span style="display:inline-flex;align-items:center"><select id="li-${key}-${rid}" class="li-field" onkeydown="_listKey(event)" onfocus="_listRefreshBox(${rid})" onchange="${_h[key]}(${rid},this.value)" style="${w?'max-width:'+w+'px;':''}${base}">${inner}</select>${step(key)}</span>`;
   const nameCell=`<span onclick="event.stopPropagation();_listPeekRoom(${rid})" title="Vis rommet på lerretet bak" style="cursor:pointer;border-bottom:1px dotted var(--dim,#9aa0aa)"><b>${esc(room.name||'Rom')}</b></span>`;
   const netCell=`<span id="li-net-${rid}" title="Fra tegningen — brutto ${bruttoM2.toFixed(2)} m²${hindM2>0?(', hindringer '+hindM2.toFixed(2)+' m²'):''}">${netM2?netM2.toFixed(2):'0'}</span> m²`;
   const envCell=`<span style="color:var(--dim,#9aa0aa)" title="Låst til delens varmetype">${_isSnowRoom(room)?'Utendørs':'Innendørs'}</span>`;
@@ -56835,7 +57010,7 @@ function _listDrawnRowHtml(room, showEnv){
     prodCell=classSel
       + '<span style="display:inline-block;width:5px"></span>'
       + sel2('prod',_listProductOptionsHtml(room),200)
-      + `<span style="display:inline-flex;align-items:center;margin-left:8px"><input id="li-count-${rid}" class="li-field" onkeydown="_listKey(event)" value="${room.listCount||1}" inputmode="numeric" onchange="_listEditCount(${rid},this.value)" style="width:40px;text-align:center;${base}">`
+      + `<span style="display:inline-flex;align-items:center;margin-left:8px"><input id="li-count-${rid}" class="li-field" onkeydown="_listKey(event)" onfocus="_listRefreshBox(${rid})" value="${room.listCount||1}" inputmode="numeric" onchange="_listEditCount(${rid},this.value)" style="width:40px;text-align:center;${base}">`
       + `<span style="display:inline-flex;flex-direction:column;margin-left:3px">`
       + `<button tabindex="-1" onclick="_listStepCount(${rid},1)" title="Flere" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-bottom:none;border-radius:3px 3px 0 0;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9650;</button>`
       + `<button tabindex="-1" onclick="_listStepCount(${rid},-1)" title="Færre" style="cursor:pointer;background:var(--surface2,#1a1c22);border:1px solid var(--border,#2a2d36);border-radius:0 0 3px 3px;color:var(--dim,#9aa0aa);width:16px;height:12px;font-size:8px;line-height:1;padding:0">&#9660;</button></span></span>`
