@@ -2872,8 +2872,12 @@ let ROOM_TYPES = [
   // isolasjonen for å hindre at frosten går ned i bakken — derfor den lave flateeffekten, og
   // derfor reserven: en kabel støpt under et fryselager kan ikke byttes.
   // `wm2Min: 10` fjerner 50-gulvet KUN for denne romtypen (se `_wm2MinFor`).
+  // 064 (Kenneth 12.10.2026): «cc skal ligge mellom 30 og 50 cm uavhengig kabeltype. w/m skal
+  // ligge mellom 15 - 30 w/m2 uavhengig type.» Begge er ROMTYPENS område, uavhengig av hvilken
+  // kabel som velges. Tidligere sto ccMinCm 20 og wm2Min 10 — begge utenfor det Kenneth nå
+  // oppgir, og 10 W/m² er dessuten fysisk uoppnåelig (se `_cableWm2Floor`).
   {id:'fryserom',  label:'Fryserom/kjølerom', icon:'🧊', targetWm2:20, defaultModType:'cable',
-   reserveCable:true, wm2Min:10, ccMinCm:20, ccMaxCm:50},
+   reserveCable:true, wm2Min:15, wm2Max:30, ccMinCm:30, ccMaxCm:50},
   {id:'other',     label:'Annet',    icon:'<svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg>', targetWm2:100, defaultModType:'foil'},
 ];
 function _roomTypeDefaults(typeId) {
@@ -2884,7 +2888,7 @@ function _roomTypeDefaults(typeId) {
 const _ROOMTYPE_HARDCODED = {
   // Kenneth 06.10.2026: «la min 200mm og max 500mm være grenser man kan bryte med advarsel».
   // Begge er ADVARSLER, ikke sperrer — produktets `min_spacing_mm` er fortsatt den harde grensen.
-  fryserom: { reserveCable: true, wm2Min: 10, ccMinCm: 20, ccMaxCm: 50 },
+  fryserom: { reserveCable: true, wm2Min: 15, wm2Max: 30, ccMinCm: 30, ccMaxCm: 50 },
 };
 function _roomTypeFallbackFlag(typeId, key) {
   const t = _ROOMTYPE_HARDCODED[typeId];
@@ -2947,6 +2951,14 @@ function _wm2MinFor(roomId) {
   const floor = _cableWm2Floor(roomId);
   return floor == null ? policy : Math.max(policy, floor);
 }
+// 064: ØVRE grense, speilbilde av _wm2MinFor. Romtypen eier sitt eget tak når den har et
+// (fryserom: 30 W/m²); ellers gjelder modulens (innendørs 300, utendørs 450).
+function _wm2MaxFor(roomId) {
+  const rt = _roomTypeOf(roomId);
+  const modType = roomId ? _roomModuleType(roomId) : _activeModuleType();
+  const mcMax = _moduleContext(modType).wm2Max;
+  return (rt && rt.wm2Max != null) ? Math.min(mcMax, rt.wm2Max) : mcMax;
+}
 // STEG 3 fallback: brukes når DB-raden mangler default_mod_type (før migrasjon kjøres).
 const _ROOMTYPE_FALLBACK_MODTYPE = { bathroom:'mat', laundry:'mat' };
 // Standard varmetype ('foil'|'cable'|'mat') for en romtype — respekterer DB-override.
@@ -2996,6 +3008,18 @@ async function _loadRoomTypeDefaults() {
       .order('sort_order');
     if (error || !data || data.length === 0) return;
 
+    // 064 (MÅLT 12.10.2026): lagene ble slått sammen med rå spread, så en org-/bruker-rad
+    // overskrev globale verdier med NULL. Org-raden for `fryserom` setter bare `target_wm2` og
+    // `reserve_cable`; resten er null — og nullene vant. Resultatet var at et FRYSELAGER mistet
+    // `default_mod_type: 'cable'` (ble 'foil' via fallbacken) og CC-området 200–500 mm, altså
+    // nøyaktig det 025 ble bygget for. En null i et overstyringslag betyr «arv», ikke «sett til
+    // ingenting» — bare felt som FAKTISK har en verdi skal overstyre.
+    const _overlay = (base, d, src) => {
+      const out = { ...(base || {}) };
+      for (const [k, v] of Object.entries(d)) if (v != null) out[k] = v;
+      out._source = src;
+      return out;
+    };
     const merged = {};
     // Layer 1: global defaults
     for (const d of data.filter(d => d.scope === 'global')) {
@@ -3004,14 +3028,14 @@ async function _loadRoomTypeDefaults() {
     // Layer 2: org overrides
     if (_userOrg?.id) {
       for (const d of data.filter(d => d.scope === 'org' && d.org_id === _userOrg.id)) {
-        merged[d.room_type_id] = { ...merged[d.room_type_id], ...d, _source: 'org' };
+        merged[d.room_type_id] = _overlay(merged[d.room_type_id], d, 'org');
       }
     }
     // Layer 3: user overrides
     const uid = _currentUser?.id;
     if (uid) {
       for (const d of data.filter(d => d.scope === 'user' && d.user_id === uid)) {
-        merged[d.room_type_id] = { ...merged[d.room_type_id], ...d, _source: 'user' };
+        merged[d.room_type_id] = _overlay(merged[d.room_type_id], d, 'user');
       }
     }
 
@@ -3028,6 +3052,9 @@ async function _loadRoomTypeDefaults() {
       // den hardkodede raden over for samme id — så funksjonen virker også uten migrasjon.
       reserveCable: d.reserve_cable != null ? !!d.reserve_cable : !!_roomTypeFallbackFlag(d.room_type_id, 'reserveCable'),
       wm2Min:  d.wm2_min != null ? d.wm2_min : _roomTypeFallbackFlag(d.room_type_id, 'wm2Min'),
+      // 064: additiv kolonne som de andre — mangler den (migrasjonen ikke kjørt), gjelder den
+      // hardkodede raden over, og uten den igjen er det modulens tak som står.
+      wm2Max:  d.wm2_max != null ? d.wm2_max : _roomTypeFallbackFlag(d.room_type_id, 'wm2Max'),
       ccMinCm: d.cc_min_mm != null ? d.cc_min_mm / 10 : _roomTypeFallbackFlag(d.room_type_id, 'ccMinCm'),
       ccMaxCm: d.cc_max_mm != null ? d.cc_max_mm / 10 : _roomTypeFallbackFlag(d.room_type_id, 'ccMaxCm'),
       _source: d._source,
@@ -3083,10 +3110,11 @@ function _clampTargetWm2(roomId, val) {
   const requested = Number(val);
   const hasRequest = isFinite(requested) && requested > 0;
   const minWm2 = _wm2MinFor(roomId);   // 025: romtypens eget minimum, ellers modulens
-  const clamped = Math.max(minWm2, Math.min(mc.wm2Max, hasRequest ? requested : mc.wm2Default));
+  const maxWm2 = _wm2MaxFor(roomId);   // 064: romtypens eget tak (fryserom 30), ellers modulens
+  const clamped = Math.max(minWm2, Math.min(maxWm2, hasRequest ? requested : mc.wm2Default));
   if (hasRequest && clamped !== requested && typeof _showToast === 'function') {
     const overMax = requested > clamped;
-    const bound = overMax ? mc.wm2Max : minWm2;
+    const bound = overMax ? maxWm2 : minWm2;
     _showToast(`${overMax ? 'Maks' : 'Min'} ${bound} W/m² for ${mc.isSnow ? 'utendørs' : 'innendørs'} — satt til ${clamped}.`, 'warn');
   }
   return clamped;
@@ -7545,7 +7573,7 @@ function showUnifiedProductPanel() {
         <div style="flex:1">
           <label style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px">Flateeffekt</label>
           <div style="display:flex;align-items:center;gap:4px;margin-top:2px">
-            <input type="number" id="upc-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
+            <input type="number" id="upc-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2MaxFor(roomId)}" step="10"
               style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface2);color:var(--text);font-family:inherit"
               onchange="_upcWm2Changed(parseInt(this.value)||${_wm2Mc.wm2Default})">
             <span style="font-size:12px;color:var(--dim)">W/m²</span>
@@ -18025,7 +18053,7 @@ function showCablePlacePanel(familyName, categoryId) {
         <div style="font-size:11px;color:var(--dim)">${areaLabel}: ${nettoM2.toFixed(1)} m² netto</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <label style="font-size:11px;white-space:nowrap">Ønsket W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2MaxFor(roomId)}" step="10"
             style="width:60px;padding:3px 5px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
             onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <label style="font-size:11px;white-space:nowrap">Ønsket CC cm</label>
@@ -18056,7 +18084,7 @@ function showCablePlacePanel(familyName, categoryId) {
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <label style="font-size:11px;white-space:nowrap">W/m²</label>
-          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2Mc.wm2Max}" step="10"
+          <input type="number" id="cable-target-wm2" value="${defaultWm2}" min="${_wm2MinFor(roomId)}" max="${_wm2MaxFor(roomId)}" step="10"
             style="width:60px;padding:4px 6px;border:1px solid var(--brd);border-radius:4px;font-size:12px;background:var(--bg)"
             onchange="_setRoomOrGlobalWm2(parseInt(this.value)||${_wm2Mc.wm2Default});_updateCableSelection(${sq(familyName)},${categoryId})">
           <button onclick="_savePersonalWm2Override()" title="Lagre som din standard for denne romtypen" style="font-size:10px;padding:2px 6px;border:1px solid var(--brd);border-radius:4px;background:var(--bg);color:var(--dim);cursor:pointer;white-space:nowrap"><svg class="ic ic-save" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg> Min std</button>
@@ -29445,9 +29473,27 @@ function _reserveCableRegressionTest() {
       spacing_cm: 50, totalLength_cm: 10000, runs }];
 
     // ─── A — romtypen ───
+    // 064: PINN romtypen til kodens egen fasit (`_ROOMTYPE_HARDCODED` + Kenneths område).
+    // Før dette leste testen den LEVENDE ROOM_TYPES, altså databasens innhold — og feilet når
+    // en org satte target_wm2 til 25 (fullt lovlig innenfor 15–30). En regresjonstest skal måle
+    // koden, ikke hva en organisasjon har stilt inn. DB-avvik rapporteres i endringsloggen.
+    // Erstatter oppføringen (muterer den ikke) — `saved.types` er en grunn kopi.
+    {
+      const i = ROOM_TYPES.findIndex(t => t.id === 'fryserom');
+      const pinned = { ...(ROOM_TYPES[i] || { id: 'fryserom', label: 'Fryserom/kjølerom' }),
+        targetWm2: 20, defaultModType: 'cable', reserveCable: true,
+        wm2Min: 15, wm2Max: 30, ccMinCm: 30, ccMaxCm: 50 };
+      if (i >= 0) ROOM_TYPES[i] = pinned; else ROOM_TYPES.push(pinned);
+    }
     const rt = _roomTypeDefaults('fryserom');
     check('A: romtypen finnes', 'Fryserom/kjølerom', rt && /fryserom|kjølerom/i.test(rt.label), rt && rt.label);
     check('A: 20 W/m² er standard', 20, rt.targetWm2 === 20, rt.targetWm2);
+    // Kenneth 12.10.2026: «cc skal ligge mellom 30 og 50 cm uavhengig kabeltype.
+    // w/m skal ligge mellom 15 - 30 w/m2 uavhengig type.»
+    check('A: romtypens W/m²-område er 15–30', '15–30',
+      rt.wm2Min === 15 && rt.wm2Max === 30, rt.wm2Min + '–' + rt.wm2Max);
+    check('A: romtypens CC-område er 30–50 cm', '30–50',
+      rt.ccMinCm === 30 && rt.ccMaxCm === 50, rt.ccMinCm + '–' + rt.ccMaxCm);
     // 063 (Kenneth 12.10.2026): gulvet er ikke lenger romtypens 10, men det FYSISK oppnåelige.
     // 10 W/m ved maks CC 50 cm = 20 W/m². De to assertene under het før «wm2Min 10» og
     // «15 W/m² går også» — de kodet et ønske ingen kabel kan innfri (15 W/m² ville krevd cc 53 cm).
@@ -29457,8 +29503,16 @@ function _reserveCableRegressionTest() {
     check('A: 20 W/m² blir IKKE klemt til 50', 20, _clampTargetWm2(RID, 20) === 20, _clampTargetWm2(RID, 20));
     check('A: 15 W/m² løftes til 20 — ingen kabel kan gi mindre', 20,
       _clampTargetWm2(RID, 15) === 20, _clampTargetWm2(RID, 15));
-    check('A: 33 W/m² (10 W/m ved cc 30) slipper gjennom urørt', 33,
-      _clampTargetWm2(RID, 33) === 33, _clampTargetWm2(RID, 33));
+    check('A: 30 W/m² (romtypens tak) slipper gjennom urørt', 30,
+      _clampTargetWm2(RID, 30) === 30, _clampTargetWm2(RID, 30));
+    // ⚠ De to områdene møtes IKKE i den nedre CC-enden: 10 W/m ved cc 30 gir 33,3 W/m², over
+    // taket på 30. Det brukbare vinduet for en 10 W/m kabel er derfor 20–30 W/m² / cc 33,3–50 cm.
+    check('A: 33 W/m² (10 W/m ved cc 30) klemmes til taket 30', 30,
+      _clampTargetWm2(RID, 33) === 30, _clampTargetWm2(RID, 33));
+    check('A: romtypens tak slår modulens 300', 30, _wm2MaxFor(RID) === 30, _wm2MaxFor(RID));
+    check('A: CC-advarselen gjelder under 30 og over 50', '30 / 50',
+      _ccLimits(CAB, RID).minWarn === 30 && _ccLimits(CAB, RID).maxWarn === 50,
+      _ccLimits(CAB, RID).minWarn + ' / ' + _ccLimits(CAB, RID).maxWarn);
 
     // ─── B — reserven genereres ───
     _invalidateCableCache();
@@ -29514,10 +29568,14 @@ function _reserveCableRegressionTest() {
     check('F: Bad beholder 50-gulvet', 50, _wm2MinFor(RID) === 50, _wm2MinFor(RID));
     check('F: 20 W/m² i Bad klemmes til 50', 50, _clampTargetWm2(RID, 20) === 50, _clampTargetWm2(RID, 20));
     S.rooms[0].roomType = 'fryserom';
-    check('F: CC 15 under 20 gir advarsel for fryserom', true,
+    check('F: CC 15 under 30 gir advarsel for fryserom', true,
       _ccOverWarn(CAB, 15, RID) === true, _ccOverWarn(CAB, 15, RID));
-    check('F: CC 25 er INNENFOR 20-50 — ingen advarsel', false,
-      _ccOverWarn(CAB, 25, RID) === false, _ccOverWarn(CAB, 25, RID));
+    // 064: området er 30–50, ikke 20–50 (Kenneth 12.10.2026). 25 cm er nå UNDER nedre grense og
+    // skal varsle — denne påstanden het før «CC 25 er INNENFOR 20-50 — ingen advarsel».
+    check('F: CC 25 under 30 gir advarsel', true,
+      _ccOverWarn(CAB, 25, RID) === true, _ccOverWarn(CAB, 25, RID));
+    check('F: CC 35 er INNENFOR 30-50 — ingen advarsel', false,
+      _ccOverWarn(CAB, 35, RID) === false, _ccOverWarn(CAB, 35, RID));
     check('F: CC 55 over 50 gir advarsel', true,
       _ccOverWarn(CAB, 55, RID) === true, _ccOverWarn(CAB, 55, RID));
     check('F: CC 48 innenfor 30-50 gir INGEN advarsel', false,
@@ -47236,7 +47294,7 @@ function _renderDetailPanel(roomId) {
     <select style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:10px;flex:1;min-width:0" onchange="setRoomType(${roomId},this.value)">
       <option value="">${_isSnowModule() ? 'Områdetype' : 'Romtype'}...</option>${_rtOpts}
     </select>
-    <input type="number" min="${_wm2MinFor(roomId)}" max="${_wm2McSb.wm2Max}" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
+    <input type="number" min="${_wm2MinFor(roomId)}" max="${_wm2MaxFor(roomId)}" step="5" value="${_twVal}" placeholder="W/m²" style="width:52px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 4px;font-size:10px" onchange="setRoomTargetWm2(${roomId},+this.value)" title="Mål W/m²">
     <button class="sb-detail-act" onclick="_showDupeRoomMenu(event,${roomId})">Dupliser</button>
     <button class="sb-detail-act danger" onclick="delRoom(${roomId})">Slett</button>
   </div>`;

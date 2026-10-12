@@ -4,6 +4,82 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 064: Fryserom — CC 30–50 cm og 15–30 W/m², og en arvefeil i romtype-lagene — 2026-10-12
+
+Kenneth: «cc skal ligge mellom 30 og 50 cm uavhengig kabel type. w/m skal ligge mellom
+15 - 30 w/m2 uavhengig type.»
+
+### Grensene
+
+Romtypen eier begge områdene, uavhengig av hvilken kabel som velges:
+
+| | Før | Nå |
+|---|---|---|
+| CC | 20–50 cm | **30–50 cm** |
+| W/m² | min 10, tak = modulens 300 | **15–30** |
+
+`wm2Max` er ny per romtype (`_wm2MaxFor`, speilbilde av `_wm2MinFor`) og klemmer sammen med
+`_clampTargetWm2`. De fire W/m²-inputfeltene leste modulens tak (300) mens klemmen kappet på 30 —
+de leser nå samme kilde, ellers viser feltet ett tall og koden gjør noe annet.
+
+### ⚠ De to områdene møtes ikke i den nedre CC-enden
+
+Med 10 W/m: cc 30 cm gir 33,3 W/m², altså **over** taket på 30. Det brukbare vinduet for en
+10 W/m kabel er derfor:
+
+- **W/m²: 20–30** (nedre grense fra fysikken, 063)
+- **CC: 33,3–50 cm**
+
+Cc helt ned til 30 cm krever en kabel på **9 W/m eller svakere**. Begge reglene står som oppgitt;
+det er skjæringspunktet som gjelder, og klemmen håndhever det (målt: 10/15/18 → 20, 20/25/30
+slipper, 33/50 → 30).
+
+### Arvefeilen — rettet, og en korreksjon av det jeg rapporterte i 063
+
+I 063 skrev jeg at «databasen motsier koden på tre punkter». Det var upresist. Det er **to rader**:
+
+| | `default_mod_type` | `reserve_cable` | `target_wm2` | `cc_min_mm` | `wm2_min` |
+|---|---|---|---|---|---|
+| **global** | `cable` | `true` | 20 | 200 | 10 |
+| **org** | `null` | `false` | 25 | `null` | `null` |
+
+Den globale raden er riktig. Feilen lå i KODEN: lagene ble slått sammen med rå spread
+(`{...global, ...org}`), så org-radens **null-er overskrev** de globale verdiene. Et fryselager
+mistet dermed `default_mod_type: 'cable'` (ble 'foil' via fallbacken) og CC-området 200–500 mm —
+nøyaktig det 025 ble bygget for å sikre. En null i et overstyringslag betyr **arv**, ikke «sett
+til ingenting». Rettet: bare felt som faktisk har en verdi overstyrer.
+
+Etter rettingen arver fryserom `cable` igjen. `reserve_cable: false` står fortsatt, fordi den er
+en EKSPLISITT false i org-raden — den må respekteres som et valg. Se under.
+
+### Migrasjon: `supabase-migration-fryserom-grenser.sql`
+
+Den globale raden holder fortsatt `cc_min_mm = 200` og `wm2_min = 10`, og de vinner over kodens
+hardkodede fasit. **Taket på 30 virker allerede** (ingen `wm2_max`-kolonne → fallbacken gjelder),
+men CC-30 og W/m²-gulvet 15 krever at migrasjonen kjøres.
+
+### ⚠ Krever Kenneths avgjørelse
+
+1. **Org-raden slår AV reservekabel for fryserom** (`reserve_cable: false`). 025 ble bygget fordi
+   «en kabel støpt under et fryselager kan ikke byttes». Skal den tilbake, settes feltet til null
+   (= arv fra global = true). SQL-en ligger klar, utkommentert, nederst i migrasjonen.
+2. **Org-raden har `target_wm2 = 25`** mot globalt 20. 25 er lovlig innenfor 15–30 — men hvilket
+   tall er riktig for organisasjonen?
+
+### Verifisering
+
+`_reserveCableRegressionTest` **pinner nå romtypen** til kodens egen fasit i stedet for å lese den
+levende ROOM_TYPES. Før målte den databasens innhold og feilet når en org satte et fullt lovlig
+`target_wm2 = 25`. En regresjonstest skal måle koden, ikke hva en organisasjon har stilt inn.
+To påstander kodet dessuten det gamle CC-området («CC 25 er INNENFOR 20-50») og er oppdatert.
+
+**Hele batteriet grønt** (20 tester). `_prosjektlaasRegressionTest` består med 62 påstander når
+den kjøres UTEN stubber — den kildeinspiserer hele lagringskjeden (`_scheduleAutoSave`,
+`_performAutoSave`, `_saveToSupabase`), så det finnes ikke noe trygt stubbepunkt for den.
+Kontrollert at ingen nye prosjekter ble opprettet (315 før og etter).
+
+---
+
 ## 063: W/m²-gulvet for kabel utledes av W/m og maks CC — 2026-10-12
 
 Kenneth: «10 W/m kabel forlagt med cc avstand mellom 30-50 cm gir mellom 3,33 meter og 2 meter
