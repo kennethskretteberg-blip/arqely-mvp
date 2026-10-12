@@ -4,6 +4,43 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Opprydding: den døde fasebalanse-seksjonen fjernet — 2026-10-12
+
+Sidefunn fra 058s STEG 0.1, nå ryddet bort.
+
+### Målt før sletting
+
+`showCablePlacePanel` ruter snø rett til `showUnifiedProductPanel()`, så
+`_updateCableSelectionInner` nås **bare innendørs** — og der er `isSnow` alltid false. Målt
+live med en teller rundt begge funksjonene mens snø-panelet ble åpnet: **0 kall** til
+`_updateCableSelectionInner` og **0** til `_snowPhaseBalance`. I DOM-en finnes `#upc-results`,
+ikke `#cable-selection-results`.
+
+### Fjernet
+
+- Snø-grenen «Beste løsninger» i `_updateCableSelectionInner` (~1 220 tegn)
+- Snø-grenen «Fasebalanse (3 eller 6 like kabler)» samme sted (~2 560 tegn)
+- `_snowPhaseBalance` og `_snowNCandidates`, som dermed ble ubrukte
+
+Begge `if (isSnow) { … } else …` er erstattet av den grenen som faktisk kjører, med en
+kommentar som sier hva som sto der og hvorfor det ble målt som dødt. Vakten `if (!isSnow)`
+rundt «Andre gyldige» står igjen: den hopper bare over en liste, den tegner ikke en funksjon
+brukeren tror finnes.
+
+### ⚠ Hva som IKKE lenger finnes noe sted
+
+Den gamle seksjonen tilbød et fasebalansert alternativ (3/6 like kabler) **også når én kabel
+nådde målet**. 058s `overBalanced` fyrer bare når ingen enkeltkabel rekker. For et snøområde
+der én kabel holder, finnes det nå **ingen** fasebalansert forslag.
+
+Det var allerede tilfellet før denne oppryddingen — koden kjørte jo ikke. Forskjellen er at
+hullet nå er synlig i stedet for skjult bak kode som så ut til å dekke det.
+
+**Regresjon:** 17 batterier, 735 sjekker, alle grønne. Innendørs-panelet verifisert manuelt:
+«▼ Under» og «▲ Over» som før.
+
+---
+
 ## Kabelforslag: alltid to valg — «Over» fylles med N × like kabler — 2026-10-12
 
 Prompt 058. Kenneth: «14,4 m², ønsket 300 W/m². Appen foreslår 1 stk InSnow 30T 4200 W som gir
