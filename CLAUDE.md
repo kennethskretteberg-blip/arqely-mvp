@@ -359,6 +359,29 @@ don't short-circuit the way OR-conditions inside one policy do).
 
 ---
 
+# Prosjektlås (060) — én redigerende bruker per prosjekt
+
+`S.ui.readOnly` er **ikke** en egenskap ved prosjektet, men ved dette vinduets forhold til
+det. Den lagres aldri i `data`-blobben og settes aldri av `_restoreProject`.
+
+**To lag, og begge må stå:**
+1. UI-gaten i `index.html` (seksjonen «060 · PROSJEKTLÅS») — førstelinje, den brukeren ser.
+2. Triggeren `romtegner_projects_lock_guard_trg` (`before update of data`) — sikringen,
+   reiser `PROJECT_LOCKED`.
+
+**Ny kode som skriver prosjektet til skyen MÅ gates på `S.ui.readOnly`**, på samme sted og
+på samme måte som `S.ui.kundeMode` — én gate, to grunner. ⚠ `pushUndo` er en BAKSTOPP, ikke
+garantien: alle 230 kallsteder kaller den som en bar setning og ser aldri returverdien.
+
+Låsen er **fail-open**: finnes ikke RPC-ene (migrasjonen ikke kjørt), settes
+`_lockDisabled` og appen oppfører seg nøyaktig som før 060. Ikke bygg om på dette —
+en nettverksblipp skal ikke bli en arbeidsstans.
+
+`?present=` og `?kunde=` tar **aldri** en lås, og feltappens opprettelse av prosjekter
+(INSERT) er aldri låst. Se `docs/spec-prosjektlaas.md`.
+
+---
+
 # Future (not yet implemented)
 
 The following features are planned but do not exist in the codebase yet.

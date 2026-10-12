@@ -4,6 +4,100 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 060: Prosjektlås — én redigerende bruker om gangen — 2026-10-12
+
+Kenneth: «Siden Fredrik nå skal begynne å jobbe i Varmeplan, kan det fort være at vi går
+inn på samme prosjekt samtidig. Kan vi få en sikkerhet på dette?»
+
+**Status: kodeferdig, UPUSHET. ⚠ `supabase-migration-prosjektlaas.sql` MÅ kjøres i Supabase
+før deploy.** Spec: `docs/spec-prosjektlaas.md`.
+
+### STEG 0 — målt, ikke antatt
+
+- **0.1 Tapet er reelt og tyst.** To vinduer mot den EKTE databasen, prosjekt «R-test»:
+  vindu A satte `rooms[0].name = 'A-ENDRET-AV-VINDU-A'` og lagret → databasen hadde
+  `['A-ENDRET-AV-VINDU-A', 'Område 2']`. Vindu B (blob bygget FØR A lagret) satte
+  `rooms[1].name` og lagret → databasen hadde `['Område 1', 'B-ENDRET-AV-VINDU-B']`.
+  **A sin endring var borte.** Ingen feilmelding i noen av vinduene, og begge
+  lagre-indikatorene sto på grønt «Lagret». Prosjektet er gjenopprettet etterpå.
+- **0.2 `_fetchProjectList` er en fallback-stige** av tolv kolonnesett. Tåler to (fire)
+  kolonner til — men BARE i de øverste rungene, samme mønster som `project_no` fikk i
+  DEL B. Står de i alle tolv, blir lista tom for et skjema uten migrasjonen.
+- **0.3 `_currentProfile.full_name` er tilgjengelig i tide.** Den settes i
+  `_authCheckProfileAndProceed` (linje ~63105), som kaller `_initAfterAuth`, som kaller
+  `_kundeOpenFromMail` helt til slutt. Målt verdi i dev-økta: «Kenneth Skretteberg (test)».
+- **0.4 Det fantes INGEN `visibilitychange`-håndterer i fila** før 060, og `readOnly`
+  fantes bare som DOM-egenskap på input-felter — ikke som app-begrep.
+
+### Fem målte funn underveis
+
+1. **Promptens `pushUndo`-plan holder ikke alene.** Alle 230 kallsteder kaller
+   `pushUndo()` som en bar setning og ser aldri på returverdien — et `return false`
+   stopper ikke mutasjonen på neste linje. Gaten er beholdt som bakstopp (den toaster og
+   holder angre-stabelen ren), men garantien ligger i gaten mot skyen, triggeren,
+   lerret-/tastatur-gaten og `body.readonly`.
+2. **`#sb-hdr` fantes ikke.** Elementet har `sb-hdr` som KLASSE, ikke id. «Nytt område»
+   sto fullt klikkbar i skrivebeskyttet modus. En ren kildesjekk ville ikke funnet det —
+   CSS-en var «der», den pekte bare på ingenting. Målt i nettleseren: antall fortsatt
+   klikkbare mutasjonsknapper gikk fra **64 → 0** etter at dette og fire JS-gater kom på.
+3. **`project_lock_is_stale` må være `stable`, ikke `immutable`** (som prompten sa).
+   Funksjonen leser `now()`; en immutable funksjon kan foldes ved planlegging.
+4. **`acquire` trenger `for update`.** Uten radlåsen kunne to samtidige forsøk begge lest
+   «fri» og begge skrevet seg inn som eier.
+5. **RLS kan slippe SELECT men nekte UPDATE** (f.eks. `org_id is null` og `user_id` = en
+   kollega). Da traff `acquire` sin UPDATE null rader og ville svart `ok=true` på en lås
+   den aldri fikk. Lagt til en `row_count`-sjekk → `no_write` → skrivebeskyttet.
+
+### Nytt
+
+- **Migrasjon** `supabase-migration-prosjektlaas.sql` (ren ASCII, idempotent): fem
+  kolonner, fire funksjoner, og triggeren `before update of data` som reiser
+  `PROJECT_LOCKED`. INSERT og andre kolonner røres ikke — feltappen oppretter fortsatt
+  prosjekter, og statusendringer slipper gjennom.
+- **`_lockSession`** — tilfeldig uuid per SIDELASTING (regel 6), ikke per bruker.
+- **Seksjonen «060 · PROSJEKTLÅS»** i `index.html`: `_lockAcquire`,
+  `_lockHeartbeatStart/Stop/Tick`, `_lockRelease`, `_lockReleaseKeepalive`, `_lockLost`,
+  `_lockRetryNow`, `_lockBusyModal`, `_lockEnterProject`, bannerets tekstfunksjoner.
+- **`S.ui.readOnly`** med gater i `_scheduleAutoSave`, `_performAutoSave`,
+  `_saveToSupabase` (kaster), `_createVersionSnapshot`, `saveProject`, `_restoreVersion`,
+  `_duplicateProject`, `_wfKundeSave`, `_spiPickCustomer`, `_addBgToFloor`, `pushUndo`.
+- **Lerret-gaten** i `canvas mousedown` — ren panorering, samme form som den eksisterende
+  `S.ui.present`-grenen rett under (den var fasiten å kopiere).
+- **Tastatur-HVITELISTE**: `Escape ? + - = 0` og Ctrl/Cmd. Piltastene er med vilje
+  utelatt — de flytter valgt objekt.
+- **Banner + modal + `body.readonly`-CSS**, og «Skrivebeskyttet» på lagre-indikatoren.
+- **🔒-brikke i prosjektlista** (grå; sovende lås gir intet merke; egen lås sier «Deg
+  (annet vindu)»).
+- **`_prosjektlaasRegressionTest()`** — 62 sjekker. Verifisert at den har tenner: fire
+  bevisste regresjoner (fjernet autosave-gate, fjernet pushUndo-gate, lot indikatoren
+  lyve «Lagret», lot sovende lås gi merke) ga 7 røde sjekker; alle grønne etter at de ble
+  tatt ut igjen.
+
+### Valget i §4: hjerteslag via triggeren
+
+Prompten åpnet for to løsninger. **Valgt: triggeren setter `lock_seen_at = now()` når
+`locked_by = auth.uid()`.** Den fyrer uansett på hver `data`-skriving, og den som lagrer
+er aktiv per definisjon. Alternativet (et eget `project_lock_heartbeat`-kall etter hver
+vellykkede autosave) ville doblet antall nettverkskall uten å gi noe ekstra.
+
+### Hva som IKKE er testet
+
+Serversiden. Migrasjonen er ikke kjørt — å legge en trigger som kan AVVISE skrivinger på
+en produksjonsbase med 303 prosjekter er Kenneths avgjørelse, ikke min. Det betyr at
+`PROJECT_LOCKED`, `p_force`-vakten, `for update`-serialiseringen og selve SQL-syntaksen er
+HÅNDGJENNOMGÅTT, ikke kjørt — det fantes ingen lokal Postgres-server på maskinen (kun
+libpq-klientverktøy, ingen `postgres`-binær, ingen Docker). Testpunkt 1–7 i prompten
+krever to ekte brukere og en kjørt migrasjon.
+
+Det som ER testet mot den ekte appen: STEG 0.1-tapet, fail-open uten migrasjonen (prosjekt
+åpnes og lagres nøyaktig som før), alle tre modalvariantene, banneret, de fire gatene
+(ingen rom lagt til, intet navn endret, angre-stabelen urørt, `drawMode` null etter «r»),
+at normal redigering er helt uendret når `readOnly` er av, at `_restoreProject` ikke
+nullstiller `readOnly`, 🔒-brikka i lista, og at `_kundeforslagRegressionTest` og
+`_geoRegressionTest` fortsatt består.
+
+---
+
 ## 059: «Lerret | Liste» i snø- og innendørsdelen — 2026-10-12
 
 Tegnede deler (inne/ute) kan nå vises som SAMME tabell som Hurtig prosjektering, med
