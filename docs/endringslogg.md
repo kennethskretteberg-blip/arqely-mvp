@@ -167,12 +167,29 @@ PDF-filnavnet skal følge **den som prosjekterte** — 051s åpne spørsmål er 
 | Tomt prosjekt | «Prosjektert av: — · Sett meg · Endre»; «Sett meg» → navn + min id |
 | RPC mangler (fail-open) | cache-størrelse 0, filnavn «FH» — nøyaktig som før 062 |
 
+### Etterpå — migrasjonen kjørt og verifisert mot ekte Supabase (12.10.2026)
+
+Innlogget som `ksk@cenika.no`: `org_member_names()` gir nøyaktig `user_id, full_name, initials`
+og 2 rader (Fredrik + Kenneth i Cenika) — ingen e-post, ingen roller, ingen andre orgs.
+`_loadOrgMemberNames()` fyller cachen via den ekte veien.
+
+**Men begge profilene har `initials = null` i databasen**, så kollega-oppslaget faller tilbake
+på `_initialsOf(full_name)` til noen fyller inn feltet «Initialer» i Innstillinger. Koden er
+riktig; dataene mangler.
+
+**Pre-eksisterende feil funnet i samme sveip (rettet):** `_initialsOf('Kenneth Skretteberg
+(test)')` ga **«KS(»** — parentes-tillegget ble et tegn i initialene, i prosjektlista og i
+PDF-/Visma-filnavn. `_userInitials` har alltid strippet parenteser; `_initialsOf` gjorde det
+ikke, så de to ga ulikt svar på samme navn. Nå strippes parentesen begge steder. Består navnet
+KUN av en parentes, fjernes selve tegnene i stedet («(test)» → «T») — første forsøk returnerte
+råteksten og ga «(», altså nøyaktig feilen som skulle rettes; fanget av en egen sjekk.
+
+Regresjon etter rettelsen: **47/47 bestått** (fire nye `_initialsOf`-sjekker, inkludert at
+`_initialsOf` og `_userInitials` er enige om samme navn).
+
 ### Gjenstår
 
-- Kjør `supabase-migration-org-member-names.sql` i Supabase SQL Editor.
-- Ikke testet mot ekte Supabase med Fredriks konto (test 4 i prompten) — RPC-en er verifisert
-  mot et stubbet svar. Kryss-org-sperren er en `in`-join i SQL og kan bekreftes med
-  `select * from org_member_names();` fra hver konto etter at migrasjonen er kjørt.
+- Ingenting. Migrasjonen er kjørt og RPC-en er verifisert mot ekte data.
 
 ---
 
