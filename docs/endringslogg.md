@@ -4,6 +4,110 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 059: «Lerret | Liste» i snø- og innendørsdelen — 2026-10-12
+
+Tegnede deler (inne/ute) kan nå vises som SAMME tabell som Hurtig prosjektering, med
+«kun label»-produkter per rom. Kenneth: «Jeg har tegnet opp 15 utendørs områder for
+snøsmelting på en LARK-tegning. Ofte er vi i tilbudsfase og vil ikke bruke tid på å
+detaljprosjektere.»
+
+**Status: ferdig, pushet (`2dae80b`).** Spec: `docs/spec-utendors-produkter-hurtig-prosjektering.md`.
+
+### STEG 0 — målt, ikke antatt
+
+- **0.1** `_listRooms()` ga `[]` for 15 tegnede snøområder (filteret krever `listMode`).
+  Men `_listSetRoomProduct` virker fullt ut på et TEGNET rom: `(rom, 'cable', 136, 2)` på
+  Område 2 (brutto 12,42 m², hindring 1,80 → **netto 10,62 m²**) ga to `labelOnly`-kabler,
+  **CC 50,0 cm, 600 W**, dekning 86 %, flate 60 W/m². `_listAutoSuggest` valgte
+  `InSnow 30T|230` → InSnow 30T 3210W 106.9m, CC 9,9 cm, **303 W/m² mot 300 ønsket**.
+  → Ingen ny areal-, produkt- eller statistikk-logikk trengs. Kun tabellens KILDE manglet.
+- **0.2** Ingenting *inne i* `_listFinalizedRowHtml` forutsetter `listMode` — den rendrer
+  feilfritt for et polygon-rom (målt). Det listMode-bundne er radens **klikkmål**
+  (`_listEditRoom` → utkast-kortet, der Brutto areal/Hindringer skriver rett til
+  `room.area`/`listHindCm2` og ville overskrevet polygonets eget areal), `Etasje`/«+ Bygg»
+  (`_listMoveRoomToFloor` flytter rom og rydder etasjer) og slette-knappen.
+- **0.3** `_pdfCoverMetaRows` er ETT sted, delt av `exportPDF` og `_expPreviewSection('cover')`.
+  Romoversikten hadde **ingen** `labelOnly`-markering (`_roomProductBreakdown` har ikke feltet).
+- **0.4** Begge motorveiene kjører UTEN åpent produktpanel — `_refreshCablePanel` og
+  `_upcRefreshResults` er rene no-ops uten DOM. `_cablePreviewPlace(150, 1, …)` ga 40 strenger
+  / 98,1 m i Område 1.
+
+### Nytt
+
+- **Bryter «Lerret | Liste»** i topplinja (`#tb-partview`, `_setPartView`) for `indoor`/`snow`.
+  Tilstand i `S.ui.partView[partId]`, lagret med prosjektet (`_buildSaveData` → `ui.partView`,
+  lest i loaderen). Trapp og listedelen urørt.
+- **Kilde etter deltype** (`_listTableRooms` / `_listDrawnPartRooms`). Listedelen er bit-for-bit
+  uendret; en tegnet del gir alle sine rom, etasje for etasje.
+- **Egen rad for tegnede rom** (`_listDrawnRowHtml`): netto lesbart med tooltip «Fra tegningen —
+  brutto X, hindringer Y», Varmetype låst, Type/Klasse/Produkt/antall som i dag (gjenbruker
+  `_listOnType`/`_listOnClass`/`_listStepProduct`/`_listStepCount`).
+- **Status-kolonne** (`_listRoomDrawnState`): `Tegnet` (LÅST, «Endre på lerretet») /
+  `Kun label` («Tegn utlegg») / `—`. Lista erstatter aldri et tegnet utlegg.
+- **«Tegn utlegg»** (`_listDrawLayout`) og **«Grovprosjekter alle»** (`_listGrovprosjekterAlle`).
+- **Arv av familie + type** fra nærmeste rad over med produkt (`_listPrevRowFamily`), med
+  `room.listFamilyBy = 'auto'|'user'` og kaskade til senere auto-rader (`_listCascadeFamily`).
+  Gjelder også listedelen.
+- **Kalkyle-merke** fra ÉN kilde (`_roomIsKalkyle` / `_projectKalkyleStatus`): PDF-forside
+  («Status: Kalkyle — ikke detaljprosjektert» / «Delvis detaljprosjektert (9 av 15 rom tegnet)»),
+  grå underlinje + fotnote i Romoversikten, ingen romdetaljside for rene kalkyle-rom, «K» i
+  sidepanelets romliste.
+- **`_listevisningRegressionTest()`** — 24 påstander: kilde per deltype, låsing av tegnede rom,
+  arveregel (auto mot user, inkl. kaskade), Kalkyle-merkets betingelse.
+
+### Fem feil funnet ved MÅLING, ikke ved lesing
+
+1. **Snø-matta pushet TO angre-steg.** `_packSnowMats` → `autoFillMatSerpentine` pusher igjen
+   ETTER at `_beginProductSwapSession` alt har ryddet label-mattene, så ett Ctrl+Z landet på et
+   TOMT rom i stedet for på kalkylen. `_listDrawLayout` pusher nå én gang og undertrykker
+   motorens egne (`_undoSuppress`, samme mønster som `_drawCreateRoomsFromReview`).
+2. **Utkast-rommet står ikke i tabellen**, så et nytt listerom arvet aldri forrige rads familie
+   (test 7: rom 1 = InSnow 300T 400 V matte → rom 2 fikk InSnow 30T 230 V kabel). `i<0` tolkes
+   nå som «raden er den nye siste».
+3. **Type-nedtrekket fulgte ikke modellen** når arveregelen endret `listModType` — kortet sa
+   «Kabel» mens rommet hadde matter. `_listUpdateRowSelects` synkroniserer nå `li-type-*`.
+4. **Overlayet hardkodet mørk bakgrunn** → hele tabellen usynlig i LYST tema (målt tekstfarge
+   `rgb(18,21,28)` på nesten svart; cellene arver tekstfarge fra body og har aldri hatt egen).
+   Nå `color-mix(in srgb, var(--bg) 92%, transparent)`.
+5. **Status-kolonnen lå 266 px utenfor synsfeltet** (tabell 1366 px, rute 1046 px) — «Tegn
+   utlegg» var usynlig. Nå `position:sticky;right:0`, og Varmetype-kolonnen vises bare når delen
+   faktisk har begge slag (samme regel som Bygg-kolonnen), som frigjorde 78 px ren støy.
+
+### Verifisering
+
+`http://localhost:4000/?dev` (appens egen auto-innlogging), `await _loadProducts()`, ekte
+produktkatalog (321 produkter), ekte DOM-hendelser (`.click()` / `dispatchEvent('change')`).
+Alle åtte testene i prompten kjørt. **19 regresjonsbatterier grønne.** Begge temaer verifisert
+visuelt. Ingen horisontal scroll på `body`; tabellen scroller i sin egen rute (132 px).
+
+### ⚠ ÅPNE SPØRSMÅL / IKKE RØRT
+
+1. **«Forrige rad» = nærmeste rad over med produkt, ikke rad 1.** Setter Kenneth rad 5 manuelt
+   til kabel, arver rad 6–15 fra RAD 5, ikke fra rad 1. Prompten sier både «nærmeste rom over»
+   (§3 arveregel) og «rad 2…15 følger rad 1» (§3 kaskade) — de divergerer når en manuell rad
+   ligger i midten. Valgt tolkning: nærmeste over. Test 2 krever bare at rad 5 selv står fast,
+   og det gjør den. **Bør bekreftes av Kenneth.**
+2. **Et rent Hurtig prosjektering-prosjekt får nå «Status: Kalkyle» på PDF-forsiden**
+   (`_roomIsKalkyle` teller et listerom som kalkyle per definisjon). Korrekt etter §4s ordlyd,
+   men nytt for de prosjektene.
+3. **Snø-pakkeren kan bytte variant.** `_packSnowMats` er fasiten og valgte produkt 266 der
+   raden foreslo 252 — effekten kan endre seg når «Tegn utlegg» kjøres. Raden viser etterpå det
+   som faktisk ligger der. Med vilje, men verdt å vite.
+4. **SIDEFUNN, IKKE RETTET:** den doble angre-pushen finnes også i snø-mattas EGEN panelvei
+   (`_upcPlaceMat('auto')` fra produktpanelet). Ett Ctrl+Z etter «Bruk» gir et tomt rom i stedet
+   for forrige produkt.
+5. **SIDEFUNN, IKKE RETTET:** `_kundelenkeRegressionTest` ERSTATTER `S.counters` med et partielt
+   objekt (via loaderens `S.counters = data.counters || S.counters`). Etterpå er `nextRoomId`,
+   `nextWallId` og `nextHindringId` **NaN**, så alt som lages i samme fane får NaN-id — og
+   `NaN !== NaN` gjør at rom, strips og hindringer ikke finner hverandre. Dette kostet to
+   feilsøkingsrunder her. **Kjør aldri hele batteriet før en syntetisk live-test.**
+   Fiks: `Object.assign(S.counters, saved)` i testens `finally` i stedet for en erstatning.
+6. **Spec-filen fantes ikke i repoet** — bare referert fra kodekommentarer (DEL A/B/C). Opprettet
+   `docs/spec-utendors-produkter-hurtig-prosjektering.md` med KUN den nye seksjonen; det gamle
+   DEL A–C-innholdet er ikke rekonstruert (ville vært gjetting) og bor fortsatt i kommentarene.
+
+---
+
 ## Opprydding: den døde fasebalanse-seksjonen fjernet — 2026-10-12
 
 Sidefunn fra 058s STEG 0.1, nå ryddet bort.
