@@ -4,6 +4,70 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## Kabelforslag: alltid to valg — «Over» fylles med N × like kabler — 2026-10-12
+
+Prompt 058. Kenneth: «14,4 m², ønsket 300 W/m². Appen foreslår 1 stk InSnow 30T 4200 W som gir
+290 W/m². Jeg ønsker alltid to valg.»
+
+### STEG 0 — tre målinger
+
+**0.1 Hvilket panel?** `showCablePlacePanel` ruter rett til `showUnifiedProductPanel()` når
+`_isSnowModule()`. Snø bruker altså **UPC-panelet**. ⚠ Sidefunn: den gamle veiens
+«Fasebalanse»-seksjon (`_snowPhaseBalance`, bygget i snøkabel-serien) er dermed **død for snø**
+— den bor i et panel snø aldri åpner.
+
+**0.2 Reprodusert.** `selectCableByPower.above` er **tom** (største InSnow 30T 230 V er 4197 W,
+målet 4320). Og `selectMultiCables` hjelper ikke: `byN[2]` er **2 × 2100 = 4200 W** — fortsatt
+*under* målet, fordi den velger minst **avvik**. `strategy` er `'1x'` (4197/4320 = 97 % ≥
+`SINGLE_OK_COVERAGE`), så «Flere kabler»-seksjonen skjules helt. Tre mekanismer, ingen av dem
+med ansvar for å fylle den tomme plassen.
+
+**0.3** 2 × 2361 gir CC 9,1 cm og 3 × 1491 gir CC 9,7 — begge innenfor InSnow 30Ts [6, 50].
+De var lovlige hele tiden; de ble bare aldri foreslått.
+
+### En rettelse av promptens egen regel
+
+Prompten sa: «over = kandidaten med **minst totalW**; ved likhet færrest kabler → 2 × 2360 =
+4720». Målt gir den regelen **3 × 1491 = 4473**, som er mindre enn 4722 og dermed vinner på
+totalW. Kenneths egne ord lister to kabler først («2 stk à 2360 W, evt. 3 like à 1490 W»), og
+det er også riktig teknisk: hver kabel er en kurs og en termostatutgang. Regelen er derfor
+**færrest kabler først, så minst overskytende effekt** — og da faller tallene nøyaktig på plass.
+
+### Resultat
+
+`_cableTwoPicks(roomId, prods, targetWm2, {isSnow})` er én delt seleksjon brukt av begge
+panelene. På Kenneths område:
+
+| | |
+|---|---|
+| ▼ Under | 1 × InSnow 30T 4200 W — 291 W/m² — CC 10,3 — **▼ under mål** |
+| ▲ Over ★ | **2 × InSnow 30T 2360 W = 4722 W** — 328 W/m² — CC 9,1 — **● ok** |
+| ⚡ Fasebalansert | **3 × InSnow 30T 1490 W = 4473 W** — 311 W/m² — CC 9,7 |
+
+Klikk legger ut riktig antall (`_cablePreviewPlace(pid, N, …)`), raden sier «2 kabler → 2
+kurser/termostatutganger», og «Manuelt» starter på antallet fra Over.
+
+**Snø-merket:** «▼ under mål» for alt under målet, «● ok» 0…+15 %, «▲ høy» over +15 %. Før
+fikk 328 mot 300 merket «▲ høy» i samme panel som anbefalte nettopp den raden. Innendørs er
+uendret (±8 %).
+
+### Målt på de andre tilfellene
+
+- **Innendørs 60 m², 80 W/m² (4800 W), InFloor 10T (maks 2000):** Over = **3 × 1600 = 4800 W**
+  på målet. Ingen fasebalansert rad (ikke snø).
+- **Innendørs der begge enkeltkabler finnes:** nøyaktig som før — samme produkter, N = 1, ingen
+  ekstra rad.
+- **0,4 m² ved 300 W/m² (120 W), minste kabel 150 W:** «Under» mangler, bare «Over» vises —
+  ingen tom plass, ingen feil.
+
+Motorene er urørt: `selectCableByPower`, `selectMultiCables` og `SINGLE_OK_COVERAGE` styrer
+fortsatt auto-utlegg og rangering. Dette er bare hva som *vises* som to valg.
+
+**Regresjon:** 17 batterier, **735 sjekker** (fra 718), alle grønne. Kontrollert: slås N×-fyllet
+av, blir «Over» `null` igjen.
+
+---
+
 ## Plantegning: de manglende veggene — én linje kan pares med flere biter — 2026-10-11
 
 047d-fortsettelsen Kenneth ba om. Etter 057 sto 177 vegg-kandidater fortsatt ubrukt, dekningen
