@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const FILE = path.join(__dirname, 'index.html');
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 
 const MIME = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.css': 'text/css' };
 const DEV_AUTH_FILE = path.join(__dirname, '.dev-auth.json');
