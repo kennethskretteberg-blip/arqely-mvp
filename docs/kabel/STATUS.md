@@ -107,10 +107,16 @@ akseparallelt» og overlates til skew-motoren, som består galleriet for dem.
 egen CC og kjenner ikke bindingen. Soner kjører derfor uendret på dagens kaskade.
 
 ### f) ⚠ Utlegg som allerede er lagret
-Kontrollen kjører ved **auto-utlegg**, ikke ved åpning av et prosjekt. Et prosjekt lagret før
-denne serien beholder utlegget sitt umerket til kabelen legges på nytt. Det er et bevisst valg —
-å merke alle gamle prosjekter ved åpning er en stor endring — men det er også et **hull mot
-målet «aldri et ulovlig utlegg uten merking»**, og bør avgjøres før merge.
+Kontrollen kjører ved **auto-utlegg**, ikke ved åpning av et prosjekt.
+
+**Men merkingen overlever lagring.** `_geomDefects` (med posisjon) legges på kabelobjektet og
+følger med i prosjekt-JSON-en, og `drawCables` leser den ved tegning. Et utlegg som ble merket da
+det ble lagt, er altså fortsatt merket neste gang prosjektet åpnes — verifisert på
+«Ekebergveien 28», der et ⚠-merket utlegg kom tilbake med alle seks defektene etter lagring.
+
+Hullet som står igjen er derfor smalere enn først beskrevet: det gjelder bare utlegg lagret
+**før** denne serien. De står umerket til kabelen legges på nytt. Å kontrollere alle gamle
+prosjekter ved åpning er en større endring og bør være et bevisst valg.
 
 ---
 
@@ -178,4 +184,5 @@ Den kjører alle rom × begge retninger × kaskaden + fem motorer, skriver
 3. **Nye utlegg kan ikke dras** (spørsmål 3) — `pathEls`-formen er auto-utfylling-bare.
 4. **Rettvinklede overganger** regnes som hardt bøyebrudd (spørsmål 4).
 5. **Transittkorridor** for hindringsrom (spørsmål 5) — eller er «2 kabler» riktig svar der?
-6. **Skal lagrede utlegg kontrolleres ved åpning** (§3f)? I dag: nei.
+6. **Skal utlegg lagret FØR denne serien kontrolleres ved åpning** (§3f)? I dag: nei — men
+   merkingen overlever lagring for alt som legges etter 070, så dette gjelder bare gamle data.
