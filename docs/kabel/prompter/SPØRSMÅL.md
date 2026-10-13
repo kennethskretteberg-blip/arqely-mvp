@@ -71,7 +71,18 @@ Nytt spørsmål fra 069:
 
 ## 070
 
--
+6. **Soner er holdt utenfor ny motor.** `_buildNCableZones` tvinger felles CC i alle soner av et
+   område (lik W/m² over sømmen), og ny motor søker sin egen CC for å treffe produktlengden.
+   Første forsøk ga 20,67 cm i én sone og 20,6 i nabosonen. Flerkabel-soner kjører derfor
+   uendret på dagens kaskade. Skal ny motor ta imot en bundet CC i en senere runde?
+
+7. **Åtte rom står igjen med ⚠** (hindring midt i rommet ×4, kabel for lang ×2, bøyeradius
+   umulig ×2). De har alle årsak og forslag, men ingen gyldig én-kabel-løsning finnes.
+   Spørsmål 5 (transittkorridor) avgjør om de fire hindringsrommene kan løses.
+
+8. **Rektangel loddrett får ⚠ på lengde.** Et rent 400×300-rom med 96 m kabel: ny motor treffer
+   96,00 m eksakt og tar over, så dette er løst — men i rom der dagens motor vinner på dekning
+   og bommer på lengden med 1–2 %, blir det ⚠. Henger sammen med spørsmål 1 (toleransen).
 
 ## 071
 

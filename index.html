@@ -6862,7 +6862,7 @@ function drawHindrings() {
       ctx.fillStyle=_lc('rgba(180,60,20,0.65)','rgba(255,140,80,0.4)');
       ctx.font="10px 'Space Grotesk',sans-serif";
       ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(h.label||h.type,cx,cy);
+      ctx.fillText(h.label||h.type||'Hindring',cx,cy);   // 070 sidefunn: uten begge ble teksten «undefined» på tegningen OG i PDF
     }
     ctx.restore();
   }
@@ -27237,7 +27237,7 @@ function _cableGalleryBuildScene(fx) {
     walls: [], dims: null, color: null, roomType: null, targetWm2: null };
   S.rooms = [room];
   let hid = 1;
-  for (const pts of (fx.hindrings || [])) S.hindrings.push({ id: hid++, roomId: 1, points: pts.map(p => ({ x: p.x, y: p.y })) });
+  for (const pts of (fx.hindrings || [])) S.hindrings.push({ id: hid++, roomId: 1, type: 'Hindring', points: pts.map(p => ({ x: p.x, y: p.y })) });
   let zid = 1;
   for (const z of (fx.zones || [])) S.zones.push({ id: zid++, roomId: 1, type: z.type, points: z.points.map(p => ({ x: p.x, y: p.y })) });
   if (typeof _cableCovCache !== 'undefined' && _cableCovCache.clear) _cableCovCache.clear();
@@ -28143,7 +28143,174 @@ function _geoNoSolution(room, prod, roomId, productId, legal, ctx) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 070 · GEOMETRIKONTROLLEN INN I KASKADEN
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Etter 070 kan appen aldri vise et utlegg som bryter et hardt krav UTEN at det står merket.
+//
+// Hvordan ny motor tar over: ikke med en hviteliste over romklasser, men med en KONKURRANSE.
+// Begge motorveiene (ny `generateCableGeo` og dagens kaskade) kjøres, begge måles med
+// `_cableGeometryCheck`, og den beste vinner. Det er strengere enn en hviteliste og oppfyller
+// merge-kriterium §8.2 («ingen rom dårligere enn med dagens motor») direkte: taper den nye på
+// et mål, taper den konkurransen, og rommet får nøyaktig samme utlegg som før.
+// Målt på galleriet: et rent rektangel VANNRETT beholder dagens boustrophedon (dekning 98,8 %
+// mot ny motors 97,1 %), mens badet vannrett bytter til ny motor (dagens har 203 cm utenfor
+// lovlig område, ny har 0).
+//
+// Poengsummen er bevisst grov og leksikografisk i praksis: gyldig slår ugyldig med 1000 poeng,
+// så ingen kombinasjon av dekning og lengde kan løfte et ulovlig utlegg over et lovlig.
+function _cableCandidateScore(chk) {
+  if (!chk || !chk.metrics) return -Infinity;
+  const m = chk.metrics;
+  let s = chk.ok ? 1000 : 0;
+  s -= (chk.hard || []).length * 50;
+  s += (m.coveragePct || 0);
+  s -= Math.abs(m.lenDevPct || 0) * 5;
+  s -= (chk.soft || []).length * 2;
+  return s;
+}
+
+// Hvem vinner — og hvorfor det ikke er en ren poengsum.
+// Merge-kriterium §8.2 sier «ingen rom dårligere enn med dagens motor, på hvert mål». En
+// poengsum kan bytte dekning mot lengde og likevel komme ut på topp; da ville et rent rektangel
+// fått et NYTT utlegg som er litt dårligere på dekning, bare fordi lengden ble bedre. Derfor er
+// overtakelsen en DOMINANS-test, ikke en sum:
+//   · dagens kaskade ugyldig, ny gyldig        → ny motor tar over
+//   · ny ugyldig, dagens gyldig                → dagens beholdes
+//   · begge gyldige                            → ny tar over BARE om den ikke er dårligere på
+//                                                noe mål (dekning og lengdeavvik)
+//   · begge ugyldige                           → den med færrest harde brudd, så poeng
+// Målt: et rent rektangel beholder dagens boustrophedon (dekning 98,8 % mot 97,1 %), mens
+// asymmetriske vegger bytter til ny motor (93,9 % mot 81,1 %, og bedre lengde).
+function _cablePickWinner(cands) {
+  if (!cands || !cands.length) return null;
+  const geo = cands.find(c => c.source === 'geo');
+  const legacy = cands.find(c => c.source !== 'geo');
+  const gOk = !!(geo && geo.chk.ok), lOk = !!(legacy && legacy.chk.ok);
+  if (gOk && !lOk) return geo;
+  if (lOk && !gOk) return legacy;
+  if (gOk && lOk) {
+    const gm = geo.chk.metrics, lm = legacy.chk.metrics;
+    const covOk = (gm.coveragePct || 0) >= (lm.coveragePct || 0) - 0.5;      // 0,5 pp slingringsmonn
+    const lenOk = Math.abs(gm.lenDevPct || 0) <= Math.abs(lm.lenDevPct || 0) + 0.1;
+    return (covOk && lenOk) ? geo : legacy;
+  }
+  return cands[0];   // begge ugyldige — lista er allerede sortert på poeng (færrest brudd først)
+}
+
+// Kjør dagens kaskade i en bestemt retning. `S.varmefolie` er inngangen alle de fire gamle
+// motorene leser, så retningen settes der og legges tilbake etterpå — samme mønster galleriet
+// bruker. Ingen av motorene endres.
+function _cableLegacyInDirection(roomId, productId, opts, dir) {
+  const vf = S.varmefolie;
+  const saved = { direction: vf.direction, dirExplicit: vf.dirExplicit };
+  if (dir) { vf.direction = dir; vf.dirExplicit = true; }
+  try { return _autoFillCableLegacy(roomId, productId, opts); }
+  finally { vf.direction = saved.direction; vf.dirExplicit = saved.dirExplicit; }
+}
+
+// Bygg alle kandidater for én retning (ny motor + dagens kaskade), målt.
+function _cableCandidatesForDirection(roomId, productId, opts, dir, room) {
+  const out = [];
+  // Ny motor: returnerer enten et kabelobjekt eller et strukturert «ingen løsning» (spec §5).
+  let geoNo = null;
+  try {
+    const g = generateCableGeo(roomId, productId, dir ? { direction: dir, startCorner: S.varmefolie.startCorner } : {});
+    if (g && g.ok === false) geoNo = g;
+    else if (g) {
+      const chk = _cableGeometryCheck(g, room);
+      out.push({ cable: g, chk, score: _cableCandidateScore(chk), source: 'geo', dir });
+    }
+  } catch (e) { if (S.ui && S.ui.debugCableEngine) console.warn('[cable-070] geo feilet', e); }
+  // Dagens kaskade.
+  try {
+    const l = _cableLegacyInDirection(roomId, productId, opts, dir);
+    if (l) {
+      const chk = _cableGeometryCheck(l, room);
+      out.push({ cable: l, chk, score: _cableCandidateScore(chk), source: l._engine || 'kaskade', dir });
+    }
+  } catch (e) { if (S.ui && S.ui.debugCableEngine) console.warn('[cable-070] kaskade feilet', e); }
+  out.sort((a, b) => b.score - a.score);
+  return { cands: out, geoNo };
+}
+
 function _autoFillCableImpl(roomId, productId, opts) {
+  opts = opts || {};
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room) return null;
+  // Uten geometrikontroll (biblioteket lastet ikke, eller rommet har ingen form) oppfører
+  // 070 seg nøyaktig som før — fail-open, samme prinsipp som prosjektlåsen i 060.
+  if (!room.points || room.points.length < 3 || typeof _cableGeometryCheck !== 'function') {
+    return _autoFillCableLegacy(roomId, productId, opts);
+  }
+  // FLERKABEL-SONER OG TVUNGET CC: holdes utenfor konkurransen i 070.
+  // `_buildNCableZones` tvinger samme CC (`_forcedSpacingCm`) og samme vinkel i ALLE soner av et
+  // område, slik at sonene får lik W/m². `generateCableGeo` søker sin egen CC for å treffe
+  // produktlengden og kjenner ikke den bindingen — målt ga det 20,67 cm i én sone og 20,6 i
+  // nabosonen, altså ulik flateeffekt over en søm som skal være usynlig
+  // (`_cableZoneRegressionTest`: «felles CC i alle soner»). Til ny motor kan ta imot en bundet
+  // CC, kjører soner og tvungne utlegg uendret på dagens kaskade.
+  if (room._forcedSpacingCm != null || room._zoneId != null || S.ui.fillTargetZoneId != null) {
+    return _autoFillCableLegacy(roomId, productId, opts);
+  }
+
+  const vf = S.varmefolie || {};
+  const userDir = vf.direction || null;
+  const dirExplicit = !!(vf.dirExplicit && userDir);
+  // Eksplisitt valgt retning prøves alene først; auto lar kaskaden gjøre sitt eget retningsvalg
+  // (den prøver allerede begge internt) og gir ny motor begge retninger å velge mellom.
+  const primary = dirExplicit ? userDir : null;
+
+  let { cands, geoNo } = _cableCandidatesForDirection(roomId, productId, opts, primary, room);
+  let best = _cablePickWinner(cands);
+  let fallback = null;
+
+  // Valgt retning gir ikke noe gyldig utlegg, men den andre gjør det → legg ut den gyldige,
+  // og SI DET. Aldri et stille retningsbytte (det er Kenneths bad: loddrett går ikke, vannrett
+  // er perfekt).
+  if (!(best && best.chk.ok) && dirExplicit) {
+    const other = userDir === 'v' ? 'h' : 'v';
+    const alt = _cableCandidatesForDirection(roomId, productId, opts, other, room);
+    const altBest = _cablePickWinner(alt.cands);
+    if (altBest && altBest.chk.ok) {
+      fallback = { wanted: userDir, used: other,
+        reason: (geoNo && geoNo.reason) || 'Retningen gir ikke et gyldig utlegg i dette rommet.',
+        rejected: cands.length ? cands[0] : null };
+      best = altBest;
+    }
+  }
+
+  // Ingen gyldig kandidat i noen retning → legg ut den beste likevel, MERKET (spec §5 / 070.3).
+  const chosen = (best && best.chk.ok) ? best : (best || cands[0] || null);
+  if (!chosen) {
+    // Ingen motor ga i det hele tatt geometri. Ny motors begrunnelse er det eneste vi har.
+    if (geoNo) { room._cableNoSolution = geoNo; }
+    return null;
+  }
+  const cable = chosen.cable;
+  cable._geomOk = !!chosen.chk.ok;
+  cable._geomEngine = chosen.source;
+  cable._geomDefects = chosen.chk.ok ? null : (chosen.chk.hard || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
+  cable._geomMetrics = chosen.chk.metrics;
+  if (fallback) {
+    cable._dirFallback = { wanted: fallback.wanted, used: fallback.used, reason: fallback.reason };
+    if (typeof _showToast === 'function') {
+      _showToast(`${fallback.wanted === 'v' ? 'Vertikal' : 'Horisontal'} gir ikke et gyldig utlegg i dette rommet — lagt ${fallback.used === 'v' ? 'vertikalt' : 'horisontalt'}.`, 'warn');
+    }
+  }
+  room._cableNoSolution = (!chosen.chk.ok && geoNo) ? geoNo : null;
+  if (!chosen.chk.ok && typeof _showToast === 'function' && !fallback) {
+    _showToast('⚠ Utlegget bryter regler: ' + (chosen.chk.hard || []).slice(0, 2).map(d => d.kind).join(' · ') + ' — se panelet.', 'warn');
+  }
+  if (S.ui && S.ui.debugCableEngine) {
+    console.log('[cable-070]', room.name, 'vant:', chosen.source, chosen.chk.ok ? 'GYLDIG' : 'UGYLDIG',
+      cands.map(c => c.source + ':' + Math.round(c.score) + (c.chk.ok ? '' : '✗')).join(' '));
+  }
+  return cable;
+}
+
+// Dagens kaskade, uendret fra 069 og tilbake. Kalles nå bare gjennom konkurransen over.
+function _autoFillCableLegacy(roomId, productId, opts) {
   opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);
   if (!room) return null;
@@ -29527,6 +29694,78 @@ function _autoFillMixedCables(roomId, productIds, forcedDir) {
 // _foilRegressionTest. Låser fem fasit-tilfeller (A-E) for skew-motoren mot flerkabel-soner og
 // eksplisitt lang-/kortside-valg. Bygger sitt eget isolerte katalog/rom, gjenoppretter S/
 // HEATING_PRODUCTS fullstendig etterpå (try/finally), rører ALDRI det virkelige prosjektet.
+// ─── 070 · REGRESJON: geometrikontrollen i kaskaden ─────────────────────────────────────────
+// Feiler hvis (a) et rom som var GYLDIG med dagens kaskade har blitt ugyldig, (b) et ugyldig
+// utlegg slipper gjennom UTEN merking, eller (c) et rent rektangel har fått et nytt utlegg.
+// Fasiten er galleriets egne fixture-rom, ikke håndskrevne tall — da følger testen med når
+// rommene endres.
+async function _cableGeometryRegressionTest() {
+  const results = [];
+  const add = (name, ok, expected, got) => results.push({ name, ok: !!ok, expected, got });
+  if (typeof _cableFixtures === 'undefined' || typeof _cableGeometryCheck !== 'function') {
+    add('kontrollen og fixturene finnes', false, 'ja', 'nei');
+    return { ok: false, results };
+  }
+  if (typeof _cblLoadClipper === 'function') await _cblLoadClipper();
+  const snap = _cableGallerySnapshotState();
+  const quiet = window._showToast; window._showToast = function () {};
+  try {
+    for (const key of Object.keys(_cableFixtures)) {
+      const fx = _cableFixtures[key];
+      for (const dir of ['v', 'h']) {
+        // FØR: dagens kaskade alene.
+        let room = _cableGalleryBuildScene(fx);
+        S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: 'bl' });
+        const before = _autoFillCableLegacy(1, fx.productId, { allowPartial: true });
+        const bChk = before ? _cableGeometryCheck(before, room) : null;
+        // ETTER: 070-kaskaden.
+        room = _cableGalleryBuildScene(fx);
+        S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: 'bl' });
+        const after = _autoFillCableImpl(1, fx.productId, { allowPartial: true });
+        const tag = key + '/' + dir;
+
+        // (a) var gyldig før → må være gyldig nå
+        if (bChk && bChk.ok) {
+          add(tag + ': var gyldig før, er gyldig nå', !!(after && after._geomOk), 'gyldig',
+              after ? (after._geomOk ? 'gyldig' : 'UGYLDIG: ' + (after._geomDefects || []).map(d => d.kind).join('+')) : 'ingen kabel');
+          // ...og ikke dårligere på dekning
+          if (after && after._geomOk && after._geomMetrics) {
+            add(tag + ': dekning ikke dårligere', (after._geomMetrics.coveragePct || 0) >= (bChk.metrics.coveragePct || 0) - 0.5,
+                '>= ' + (bChk.metrics.coveragePct || 0).toFixed(1) + ' %', (after._geomMetrics.coveragePct || 0).toFixed(1) + ' %');
+          }
+        }
+        // (b) ugyldig utlegg MÅ være merket
+        if (after && !after._geomOk) {
+          add(tag + ': ugyldig utlegg er merket', !!(after._geomDefects && after._geomDefects.length),
+              'defektliste satt', (after._geomDefects || []).length + ' defekter');
+        }
+        // (c) ingen stille retningsbytte
+        if (after && after.direction && after.direction !== dir) {
+          add(tag + ': retningsbytte er annonsert', !!after._dirFallback, '_dirFallback satt',
+              after._dirFallback ? 'ja' : 'NEI (stille bytte)');
+        }
+      }
+    }
+    // (c2) rent rektangel vannrett: samme utlegg som før, løp for løp
+    let room = _cableGalleryBuildScene(_cableFixtures.rektangel);
+    S.varmefolie = Object.assign({}, snap.vf, { direction: 'h', dirExplicit: true, startCorner: 'bl' });
+    const legacyRect = _autoFillCableLegacy(1, _cableFixtures.rektangel.productId, { allowPartial: true });
+    _cableGalleryBuildScene(_cableFixtures.rektangel);
+    S.varmefolie = Object.assign({}, snap.vf, { direction: 'h', dirExplicit: true, startCorner: 'bl' });
+    const newRect = _autoFillCableImpl(1, _cableFixtures.rektangel.productId, { allowPartial: true });
+    const sig = c => c && c.runs ? c.runs.map(r => Math.round(r.pos_cm * 10) + ':' + (r.segments || []).map(s => Math.round(s.start_cm * 10) + '-' + Math.round(s.end_cm * 10)).join(',')).join('|') : 'pathEls/' + ((c && c.pathEls || []).length);
+    add('rektangel vannrett: identisk utlegg som før', sig(legacyRect) === sig(newRect),
+        'samme løp', sig(legacyRect) === sig(newRect) ? 'samme' : 'ENDRET (' + (newRect && newRect._geomEngine) + ')');
+    void room;
+  } finally {
+    window._showToast = quiet;
+    _cableGalleryRestoreState(snap);
+  }
+  const ok = results.every(r => r.ok);
+  if (!ok) console.error('_cableGeometryRegressionTest: FEILET', results.filter(r => !r.ok));
+  return { ok, results };
+}
+
 function _cableSkewRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
   const savedRooms = S.rooms, savedHindrings = S.hindrings, savedZones = S.zones, savedCables = S.cables,
@@ -29607,9 +29846,16 @@ function _cableSkewRegressionTest() {
       S.rooms = [mkRoom(RID, pts)];
       S.varmefolie.direction = null;
       const cable = autoFillCable(RID, 9004);
+      // ENDRET I 070 — og det er en bevisst, målt endring, ikke en justert terskel:
+      // dette rommet er 600×300 cm med en 30 m kabel. Dagens boustrophedon la 36,3 m av en 30 m
+      // kabel (+20,98 %) — altså mer kabel enn produktet har. Geometrikontrollen avviser det som
+      // et hardt lengdebrudd, og `generateCableGeo` legger 30,00 m (avvik 0,00 %, dekning 87,8 %).
+      // Testens navn og egentlige hensikt — «et akseparallelt rom skal ikke falle til SKEW-motoren»
+      // — står uendret og holder fortsatt. Det som er løsnet er kravet om at resultatet må være i
+      // `runs`-form; ny motor leverer `pathEls` (samme form skew bruker, se arkitektur.md §1).
       check('D: akseparallelt rom bruker IKKE skew (uendret motor)', 'ikke skew',
-        cable && cable._engine !== 'skew' && (cable.runs || []).length > 0,
-        cable && { engine: cable._engine, runs: (cable.runs || []).length });
+        cable && cable._engine !== 'skew' && ((cable.runs || []).length > 0 || (cable.pathEls || []).length > 0),
+        cable && { engine: cable._engine, runs: (cable.runs || []).length, pathEls: (cable.pathEls || []).length });
     }
 
     // ─── E — rotert rektangel 1500×400cm, rotert 12°, TRE kabler: samme vinkel i alle soner ───
@@ -33860,6 +34106,11 @@ function drawCables() {
     // Skew/obstacle engine: draw explicit world-space path elements
     if (cable.pathEls && cable.pathEls.length) _drawCableSkewPath(cable);
 
+    // 070: harde brudd merkes PÅ tegningen — aldri et ugyldig utlegg som ser gyldig ut.
+    if (cable._geomDefects && cable._geomDefects.length) _drawCableGeomDefects(cable, room);
+    // 070 (spec §7): debug-visning, av som standard, påvirker ikke PDF.
+    if (S.ui && S.ui.debugCableGeom && !S.ui._pdfMode) _drawCableGeomDebug(cable, room);
+
     // Draw cell connection paths (polygon-aware engine)
     if (cable.connections && cable.connections.length > 0) {
       ctx.save();
@@ -33935,11 +34186,18 @@ function drawCables() {
           cPt = w2s(cable.labelPos.x, cable.labelPos.y);
         } else if (cable.pathEls && cable.pathEls.length) {
           // Skew/obstacle engine: center on the path-element bounding box
+          // 070: et pathEls-element kan ha TRE former — `a`/`b` (run), `from`/`to` (connector og
+          // enkelte uturn) og `pts` (samplet bue). Den siste manglet her, og `generateCableGeo`
+          // leverer hele banen som ETT `pts`-element — da krasjet labelen på `el.from.x`
+          // (`_soneRegressionTest`). Alle tre dekkes nå, i samme rekkefølge som
+          // `_cableWorldSegments` leser dem.
           const xs = [], ys = [];
           for (const el of cable.pathEls) {
-            if (el.kind === 'run') { xs.push(el.a.x, el.b.x); ys.push(el.a.y, el.b.y); }
-            else { xs.push(el.from.x, el.to.x); ys.push(el.from.y, el.to.y); }
+            if (el.kind === 'run' && el.a && el.b) { xs.push(el.a.x, el.b.x); ys.push(el.a.y, el.b.y); }
+            else if (el.pts && el.pts.length) { for (const p of el.pts) { xs.push(p.x); ys.push(p.y); } }
+            else if (el.from && el.to) { xs.push(el.from.x, el.to.x); ys.push(el.from.y, el.to.y); }
           }
+          if (!xs.length) { xs.push(0); ys.push(0); }
           cPt = w2s((Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2);
         } else {
           // Default: center of cable area, then OFFSET along the sweep axis away from the room
@@ -33977,7 +34235,8 @@ function drawCables() {
         const _info = [];
         if (flateWm2 > 0) _info.push(flateWm2 + ' W/m² flate');
         if (btaWm2 > 0)   _info.push(btaWm2 + ' W/m² BTA');
-        if (ccCm > 0)     _info.push((_ccOverWarn(prod, ccCm) ? '⚠ ' : '') + 'CC ' + ccCm.toFixed(1) + ' cm');   // 016
+        // 070: ⚠ foran CC også når geometrikontrollen fant et hardt brudd (ikke bare ved for stor CC).
+        if (ccCm > 0)     _info.push(((_ccOverWarn(prod, ccCm) || (cable._geomDefects && cable._geomDefects.length)) ? '⚠ ' : '') + 'CC ' + ccCm.toFixed(1) + ' cm');   // 016 + 070
         const infoLine = _info.join(' · ');
 
         ctx.save();
@@ -34139,6 +34398,125 @@ function _drawCableSkewPath(cable) {
       ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(corner.x, corner.y); ctx.lineTo(p1.x, p1.y); ctx.stroke();
       ctx.restore();
     }
+  }
+}
+
+// ─── 070 · ⚠-VISNING OG DEBUG-VISNING ───────────────────────────────────────────────────────
+// Begge tegner UTENFOR rom-klippingen i drawCables ville skjult dem; de kalles derfor mens
+// klippet fortsatt står, og defektpunkter utenfor rommet markeres i tillegg på romkonturen.
+function _drawCableGeomDefects(cable, room) {
+  ctx.save();
+  // Rød stiplet romkontur: utlegget i dette rommet er ikke i orden.
+  const sp = room.points.map(p => w2s(p.x, p.y));
+  ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1.5; ctx.setLineDash([7, 4]);
+  ctx.beginPath(); ctx.moveTo(sp[0].x, sp[0].y);
+  for (let i = 1; i < sp.length; i++) ctx.lineTo(sp[i].x, sp[i].y);
+  ctx.closePath(); ctx.stroke();
+  ctx.setLineDash([]);
+  for (const d of cable._geomDefects) {
+    if (!d.at) continue;
+    const p = w2s(d.at.x, d.at.y);
+    ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(239,68,68,0.25)'; ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Spec §7: cellegrenser, senterlinje, start/slutt, CC-mål, kantmarginer, lagt lengde mot
+// produktlengde. Av som standard (`S.ui.debugCableGeom`), aldri med i PDF.
+function _drawCableGeomDebug(cable, room) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId);
+  ctx.save();
+  // Lovlig område (rom − kantavstand − hindringer), slik kontrollen ser det.
+  const legal = (typeof _cableLegalRegion === 'function') ? _cableLegalRegion(cable.roomId, cable.productId) : null;
+  if (legal && legal.paths) {
+    ctx.strokeStyle = 'rgba(34,197,94,0.8)'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    for (const path of legal.paths) {
+      if (!path.length) continue;
+      const s0 = w2s(path[0].x, path[0].y);
+      ctx.beginPath(); ctx.moveTo(s0.x, s0.y);
+      for (let i = 1; i < path.length; i++) { const s = w2s(path[i].x, path[i].y); ctx.lineTo(s.x, s.y); }
+      ctx.closePath(); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  // Senterlinjen slik kontrollen leser den — ikke slik kabelen tegnes. Er de to ulike, er DET
+  // funnet (068: rendereren, lengden og dekningen var uenige om samme kabel).
+  const polys = (typeof _cableCenterlinePaths === 'function') ? _cableCenterlinePaths(cable) : [];
+  ctx.strokeStyle = 'rgba(37,99,235,0.9)'; ctx.lineWidth = 1;
+  for (const pl of polys) {
+    if (pl.length < 2) continue;
+    const s0 = w2s(pl[0].x, pl[0].y);
+    ctx.beginPath(); ctx.moveTo(s0.x, s0.y);
+    for (let i = 1; i < pl.length; i++) { const s = w2s(pl[i].x, pl[i].y); ctx.lineTo(s.x, s.y); }
+    ctx.stroke();
+    // Start (grønn) og slutt (oransje) på hver delbane — flere enn to prikker = brutt bane.
+    const a = w2s(pl[0].x, pl[0].y), b = w2s(pl[pl.length - 1].x, pl[pl.length - 1].y);
+    ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(a.x, a.y, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f59e0b'; ctx.beginPath(); ctx.arc(b.x, b.y, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+  // Tallene: lagt lengde mot produktlengde, CC, minste klaring, minste bøyeradius.
+  const m = cable._geomMetrics;
+  if (m) {
+    const lines = [
+      `${(m.laidCm / 100).toFixed(2)} m lagt` + (m.targetCm ? ` / ${(m.targetCm / 100).toFixed(2)} m (${m.lenDevPct > 0 ? '+' : ''}${(m.lenDevPct || 0).toFixed(1)} %)` : ''),
+      `CC ${m.ccMedCm != null ? m.ccMedCm.toFixed(1) : '–'} cm (min ${m.ccMinCm != null ? m.ccMinCm.toFixed(1) : '–'}, maks ${m.ccMaxCm != null ? m.ccMaxCm.toFixed(1) : '–'})`,
+      `klaring ${m.minClearCm != null ? m.minClearCm.toFixed(1) : '–'} / krav ${m.minSpacingReqCm} cm`,
+      `bøy ${m.minBendCm != null ? m.minBendCm.toFixed(1) : '–'} / krav ${m.minBendReqCm} cm`,
+      `kant ${m.marginCm} cm · utenfor ${m.outsideLenCm} cm · kryss ${m.crossings} · deler ${m.polys}`,
+      `dekning ${m.coveragePct != null ? m.coveragePct.toFixed(0) : '–'} % · motor ${cable._geomEngine || cable._engine || '?'}`
+    ];
+    const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+    const o = w2s(Math.min(...xs), Math.min(...ys));
+    ctx.font = '10px ' + (typeof CANVAS_NUM_FONT !== 'undefined' ? CANVAS_NUM_FONT : 'monospace');
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 10;
+    ctx.fillStyle = 'rgba(17,17,20,0.82)';
+    ctx.fillRect(o.x + 4, o.y + 4, w, lines.length * 12 + 8);
+    ctx.fillStyle = '#e5e7eb';
+    lines.forEach((l, i) => ctx.fillText(l, o.x + 9, o.y + 9 + i * 12));
+  }
+  void prod;
+  ctx.restore();
+}
+
+function _cableToggleGeomDebug() {
+  S.ui.debugCableGeom = !S.ui.debugCableGeom;
+  renderSidebar(); render();
+  if (typeof _showToast === 'function') _showToast('Kabelgeometri-debug ' + (S.ui.debugCableGeom ? 'på' : 'av'), 'ok');
+}
+
+// «Prøv vertikal likevel» / «Prøv annen retning»: legg ut i den valgte retningen uansett, og
+// behold merkingen hvis den bryter noe. Brukeren får se det han ba om — bare aldri i stillhet.
+function _cableForceDirection(cableId, dir) {
+  const cable = S.cables.find(c => c.id === cableId);
+  if (!cable) return;
+  const room = S.rooms.find(r => r.id === cable.roomId);
+  if (!room) return;
+  const vf = S.varmefolie;
+  const saved = { direction: vf.direction, dirExplicit: vf.dirExplicit };
+  vf.direction = dir; vf.dirExplicit = true;
+  let fresh = null;
+  try { fresh = _cableLegacyInDirection(cable.roomId, cable.productId, { allowPartial: true }, dir); }
+  finally { vf.direction = saved.direction; vf.dirExplicit = saved.dirExplicit; }
+  if (!fresh) { if (typeof _showToast === 'function') _showToast('Fikk ikke lagt kabelen i den retningen i det hele tatt.', 'warn'); return; }
+  const chk = _cableGeometryCheck(fresh, room);
+  fresh._geomOk = !!chk.ok;
+  fresh._geomEngine = fresh._engine;
+  fresh._geomDefects = chk.ok ? null : (chk.hard || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
+  fresh._geomMetrics = chk.metrics;
+  fresh._forcedDirection = true;
+  pushUndo();
+  S.cables = S.cables.filter(c => c.id !== cable.id);
+  S.cables.push(fresh);
+  S.ui.selectedCableId = fresh.id;
+  _cableViolationsDirty = true;
+  _invalidateCableCache();
+  renderSidebar(); updateCtxBar(); render();
+  if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
+  if (typeof _showToast === 'function') {
+    _showToast(chk.ok ? 'Lagt i valgt retning — ingen regelbrudd.' : ('⚠ Lagt i valgt retning, men bryter: ' + (chk.hard || []).map(d => d.kind).join(' · ')), chk.ok ? 'ok' : 'warn');
   }
 }
 
@@ -50930,6 +51308,23 @@ function updateObjInfo() {
       if (_cv.maxCC && _isSnowModule()) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Maks CC</span><span class="soi-v">${Math.round(_cv.maxCC.actual*10)} mm (maks ${Math.round(_cv.maxCC.max*10)} mm, avr. ${_cv.maxCC.screed} cm)</span></div>`;
       if (_cv.forbiddenStart) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Start i forbudt sone</span><span class="soi-v">${esc(_cv.forbiddenStart.zoneName)}</span></div>`;
       if (_cv.forbiddenEnd) _cvHtml += `<div class="soi-row soi-warn"><span class="soi-k">⚠ Slutt i forbudt sone</span><span class="soi-v">${esc(_cv.forbiddenEnd.zoneName)}</span></div>`;
+      // 070: geometrikontrollens harde brudd, med posisjon — og veiene videre.
+      if (cable._dirFallback) {
+        const fb = cable._dirFallback;
+        _cvHtml += `<div class="soi-row soi-warn" style="display:block"><span class="soi-k">⚠ ${fb.wanted === 'v' ? 'Vertikal' : 'Horisontal'} gikk ikke</span>
+          <div style="font-size:10px;color:var(--dim);margin:2px 0 4px">${esc(fb.reason)} Lagt ${fb.used === 'v' ? 'vertikalt' : 'horisontalt'} i stedet.</div>
+          <button style="background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer" onclick="_cableForceDirection(${cable.id},'${fb.wanted}')">Prøv ${fb.wanted === 'v' ? 'vertikal' : 'horisontal'} likevel</button></div>`;
+      }
+      if (cable._geomDefects && cable._geomDefects.length) {
+        const _dl = cable._geomDefects.map(d => `<div style="font-size:10px;color:var(--dim);margin:1px 0">· ${esc(d.msg)}</div>`).join('');
+        const _ns = (S.rooms.find(r => r.id === cable.roomId) || {})._cableNoSolution;
+        const _sug = (_ns && _ns.suggestions || []).map(s => `<div style="font-size:10px;color:var(--dim);margin:1px 0">→ ${esc(s.msg)}</div>`).join('');
+        _cvHtml += `<div class="soi-row soi-warn" style="display:block"><span class="soi-k">⚠ Utlegget bryter regler</span>${_dl}${_sug}
+          <div style="margin-top:4px;display:flex;gap:5px;flex-wrap:wrap">
+            <button style="background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer" onclick="_cableForceDirection(${cable.id},'${cable.direction === 'v' ? 'h' : 'v'}')">Prøv annen retning</button>
+            <button style="background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer" onclick="_cableToggleGeomDebug()">${(S.ui && S.ui.debugCableGeom) ? 'Skjul feil' : 'Vis feil'}</button>
+          </div></div>`;
+      }
       // Build supplier info rows
       let _supHtml = '';
       if (cp?.article_no) _supHtml += `<div class="soi-row"><span class="soi-k">Art.nr</span><span class="soi-v">${esc(cp.article_no)}</span></div>`;
@@ -63292,6 +63687,20 @@ async function exportPDF(opts) {
     const totalW = Math.round(stats.totalW || 0);
     const flateeffekt = _roomFlateeffektWm2(room, stats);   // 024: én kilde, delt med tabellene
     const wPerBrutto = stats.bruttoM2 > 0 ? Math.round(totalW / stats.bruttoM2) : 0;
+
+    // 070: bryter et utlegg i rommet et hardt krav, skal det stå på papiret også — ikke bare i
+    // appen. Tegningen arver den røde merkingen gjennom `_renderRoomToImage` (samme vei som de
+    // usikre veggene i 027); dette er linja som sier hvorfor. Eksport blokkeres aldri.
+    {
+      const _ugyldig = S.cables.filter(c => c.roomId === room.id && c._geomDefects && c._geomDefects.length);
+      if (_ugyldig.length) {
+        const _kinds = [...new Set(_ugyldig.flatMap(c => c._geomDefects.map(d => d.kind)))].join(', ');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5);
+        doc.setTextColor(185, 40, 35);
+        doc.text('Utlegget er ikke kontrollert \u2014 se app (' + _kinds + ')', M, y); y += 4.5;
+        doc.setTextColor(20, 60, 130);
+      }
+    }
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
@@ -77185,6 +77594,14 @@ const _debug = {
       return `<div style="color:#fecaca;border-top:1px solid #334155;padding-top:4px;margin-top:4px"><b style="color:#ef4444">⚠ ${ago}s</b> ${x.msg}</div>`;
     }).join('');
     const head = 'font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-top:8px;margin-bottom:4px';
+    // 070 (spec §7): «Kabelgeometri» — av som standard, påvirker verken vanlig bruk eller PDF.
+    const _geomOn = !!(S.ui && S.ui.debugCableGeom);
+    const _geomHtml = `<div style="line-height:1.6"><label style="cursor:pointer;display:flex;align-items:center;gap:6px">
+      <input type="checkbox" ${_geomOn ? 'checked' : ''} onchange="_cableToggleGeomDebug()" style="cursor:pointer">
+      <span style="color:${_geomOn ? '#22c55e' : '#94a3b8'}">Kabelgeometri${_geomOn ? ' PÅ' : ''}</span></label>
+      <div style="color:#475569;font-size:10px">lovlig område · senterlinje · start/slutt · CC · klaring · bøy · lengde</div>
+      ${(S.cables || []).filter(c => c._geomDefects && c._geomDefects.length).length
+        ? `<div style="color:#ef4444;margin-top:3px">${(S.cables || []).filter(c => c._geomDefects && c._geomDefects.length).length} kabel(er) med harde brudd</div>` : ''}</div>`;
     const ceEntries = Object.entries(snap.cableEngines).sort((a, b) => b[1] - a[1]);
     const ceHtml = ceEntries.length
       ? ceEntries.map(([k, v]) => `<div style="line-height:1.4"><span style="color:#e2e8f0">${v}×</span> <span style="color:#94a3b8">${k}</span></div>`).join('')
@@ -77196,6 +77613,8 @@ const _debug = {
        </div>
        <div style="${head}">State</div>
        <div>${stateHtml}</div>
+       <div style="${head}">Kabelgeometri (070)</div>
+       <div>${_geomHtml}</div>
        <div style="${head}">Cable engines (P1)</div>
        <div style="max-height:140px;overflow-y:auto">${ceHtml}</div>
        <div style="${head}">Events (last 15)</div>

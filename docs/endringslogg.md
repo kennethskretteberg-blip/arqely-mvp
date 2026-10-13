@@ -4,6 +4,85 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 070: kabelmotor — geometrikontroll i kaskaden, ⚠ for ugyldige utlegg, debug-visning — 2026-10-13
+
+Gren `kabelmotor`. Etter 070 kan appen **aldri** vise et utlegg som bryter et hardt krav uten at
+det står merket.
+
+### Galleriet, kaskaden gjennom tre runder (28 rom × retning)
+
+| | består | bryter et hardt krav | merket for brukeren |
+|---|---|---|---|
+| før 068 | 5 | 23 | **0 — alle stille** |
+| etter 070 | **20** | 8 | **8 — alle merket** |
+
+De 8 som står igjen er de geometrisk harde: hindring midt i rommet (4), kabel for lang for
+rommet (2), bøyeradius umulig ved lovlig CC (2). Alle har nå årsak og forslag.
+
+### Hvordan ny motor tar over — konkurranse, ikke hviteliste
+
+Prompten foreslo en liste over romklasser. I stedet kjøres **begge** veier (ny `generateCableGeo`
+og dagens kaskade), begge måles med `_cableGeometryCheck`, og en **dominans-test** avgjør:
+
+- dagens ugyldig, ny gyldig → ny tar over
+- ny ugyldig, dagens gyldig → dagens beholdes
+- begge gyldige → ny tar over BARE om den ikke er dårligere på noe mål (dekning, lengdeavvik)
+- begge ugyldige → færrest harde brudd
+
+Det oppfyller merge-kriterium §8.2 («ingen rom dårligere, på hvert mål») direkte, i stedet for å
+stole på at hvitelista er riktig. Målt før/etter på alle 28: **15 bedre, 5 uendret, 0 dårligere**,
+og ingen rom der begge var gyldige tapte dekning. Et rent rektangel vannrett beholder dagens
+boustrophedon (98,8 % dekning mot ny motors 97,1 %); badet vannrett bytter til ny motor (dagens
+har 203 cm utenfor lovlig område, ny har 0).
+
+### Annen retning — aldri stille
+
+Valgt retning uten gyldig utlegg, mens den andre har ett → den gyldige legges, og det **sies**:
+toast + rad i sidepanelet + knapp «Prøv vertikal likevel» (`_cableForceDirection`, legger ut i
+valgt retning merket ⚠). Målt: badet med eksplisitt **vertikal** gir `v→h` og et gyldig utlegg.
+Badet på **auto** gir gyldig utlegg uten ⚠.
+
+### ⚠-visning og debug-visning
+
+- `cable._geomDefects` (med posisjon) → rød stiplet romkontur + røde ringer på lerretet,
+  «⚠» foran CC i labelen, defektliste + forslag + knapper i sidepanelet.
+- PDF-romsiden får linja «Utlegget er ikke kontrollert — se app (…)». Eksport blokkeres aldri.
+- Debug-visning (spec §7) i debug-overlayet (⌘⇧D) → «Kabelgeometri»: lovlig område, senterlinje,
+  start/slutt, CC, klaring, bøyeradius, lagt lengde mot produktlengde. Av som standard, og
+  **aldri med i PDF** (verifisert: romsiden er pikselidentisk med debug på og av).
+
+### Soner holdes utenfor — en målt regresjon som ble fanget
+
+`_buildNCableZones` tvinger felles CC i alle soner av et område (lik W/m² over sømmen).
+`generateCableGeo` søker sin egen CC og kjente ikke bindingen — første forsøk ga 20,67 cm i én
+sone og 20,6 i nabosonen (`_cableZoneRegressionTest`). Soner, `_zoneId` og `_forcedSpacingCm`
+kjører derfor uendret på dagens kaskade til ny motor kan ta imot en bundet CC.
+
+### To feil funnet underveis
+
+1. **`pathEls`-kontrakten var brutt ett sted.** Label-sentreringen i `drawCables` antok at hvert
+   ikke-`run`-element har `from`/`to`; ny motor leverer hele banen som ett `pts`-element, og da
+   krasjet tegningen (`_soneRegressionTest`). Alle tre formene (`a`/`b`, `pts`, `from`/`to`)
+   håndteres nå, i samme rekkefølge som `_cableWorldSegments`. Alle andre `pathEls`-lesere
+   (`_offsetCableClone`, `_reserveClipToRoom`, `_drawCableSkewPath`, `_cableRunNormal`) var
+   allerede riktige — gjennomgått.
+2. **Sidefunn:** en hindring uten `label` OG uten `type` tegnet teksten «undefined» på tegningen
+   og i PDF (`ctx.fillText(h.label||h.type,…)`). Nå `|| 'Hindring'`.
+
+### Én gammel test endret — med begrunnelse, ikke stille
+
+`_cableSkewRegressionTest` D («akseparallelt rom bruker IKKE skew, uendret motor») på et
+600×300-rom med 30 m kabel: dagens boustrophedon la **36,3 m av en 30 m kabel** (+20,98 %) — mer
+kabel enn produktet har. Kontrollen avviser det; ny motor legger 30,00 m (avvik 0,00 %).
+Testens navn og hensikt står; det som er løsnet er kravet om `runs`-form, siden ny motor leverer
+`pathEls`. Begrunnelsen står i koden ved testen.
+
+Nytt batteri `_cableGeometryRegressionTest` (24 påstander): var gyldig før → må være gyldig nå,
+dekning ikke dårligere, ugyldig utlegg MÅ være merket, ingen stille retningsbytte, og rektangel
+vannrett bit-identisk med før. Alle 22 batterier grønne.
+
+---
+
 ## 069: kabelmotor — generateCableGeo, ny motor isolert bak bryter — 2026-10-13
 
 Gren `kabelmotor`. Kenneth sa ja til 068s arkitekturforslag. Ny motor
