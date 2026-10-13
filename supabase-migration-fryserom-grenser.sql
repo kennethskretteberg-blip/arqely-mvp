@@ -45,6 +45,23 @@ select scope, org_id, default_mod_type, reserve_cable, target_wm2, wm2_min, wm2_
 --   tegnes opp     -- reserven far egen geometri (12 lop, 97,4 m lagt), som hovedkabelen
 --   materialliste  -- 1 stk -> 2 stk, og "2 stk (1 + 1 reserve)" i Bestilles
 --   effekt         -- 1000 W bade med og uten; Romoversikten gir reserven egen rad med 0 W
+-- ROTARSAK (funnet 13.10.2026): reserve_cable er den ENESTE av de fire 025-kolonnene som ble
+-- lagt til som "boolean not null default false" -- wm2_min, cc_min_mm og cc_max_mm er alle
+-- nullable. Konsekvensen: HVER org-rad som opprettes far automatisk reserve_cable = false, som
+-- deretter overstyrer global true. Org-raden var altsa aldri et valg; kolonnedefaultet skrev den.
+-- Uten denne endringen kan et overstyringslag ikke si "arv" for nettopp dette feltet, og enhver
+-- ny org mister reservekabelen for fryserom pa samme mate.
+--
+-- Gjor den lik sine tre sosken. Eksisterende false-verdier blir staende som false (ingen data
+-- endres av selve alter-setningen); raden under settes eksplisitt til null = arv.
+alter table public.room_type_defaults
+  alter column reserve_cable drop not null,
+  alter column reserve_cable drop default;
+
+comment on column public.room_type_defaults.reserve_cable is
+  '025/064b: romtypen prosjekteres med reservekabel (kopi av hovedkabelen forskjovet 1/2 CC). '
+  'null = arv fra laget under (global), som for wm2_min/cc_min_mm/cc_max_mm.';
+
 update room_type_defaults
    set reserve_cable = null, updated_at = now()
  where room_type_id = 'fryserom'
