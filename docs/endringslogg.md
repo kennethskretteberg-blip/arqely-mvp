@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 071: kabelmotor — dokumentasjon og merge-sjekkliste — 2026-10-13
+
+`docs/kabel/STATUS.md`: hva motoren gjør (lag A–H) på én side, galleritabellen rom for rom før
+(068) og etter (070), **hva den ikke løser** med årsak og hva brukeren får se, hvordan et nytt
+testrom legges til, og den utfylte merge-sjekklista.
+
+`main` hadde ingen nye commits — ingen rebase nødvendig.
+
+Sjekklista er oppfylt på seks av sju punkter; det sjuende er Kenneths «merge».
+Dataformat-punktet er verifisert på tre ekte prosjekter, åpnet **lesende**, med begge lagrede
+former: «Vidsynveien 175» (1 kabel, `runs`), «Vålerengahjemmet» (4 kabler, `runs`, 15 rom) og
+«Kiwi Søvik» (16 kabler, `pathEls`). Alle gir romstatistikk og tegnet romside uten feil.
+
+**Ett hull dokumentert, ikke tettet:** kontrollen kjører ved auto-utlegg, ikke ved åpning av et
+prosjekt. Utlegg lagret før denne serien står umerket til kabelen legges på nytt. Å merke alle
+gamle prosjekter ved åpning er en stor endring og bør være Kenneths valg (STATUS §3f).
+
+---
+
 ## 070: kabelmotor — geometrikontroll i kaskaden, ⚠ for ugyldige utlegg, debug-visning — 2026-10-13
 
 Gren `kabelmotor`. Etter 070 kan appen **aldri** vise et utlegg som bryter et hardt krav uten at
