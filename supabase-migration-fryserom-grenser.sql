@@ -33,20 +33,28 @@ select scope, org_id, default_mod_type, reserve_cable, target_wm2, wm2_min, wm2_
  where room_type_id = 'fryserom'
  order by scope;
 
+-- 4. Reservekabelen tilbake for organisasjonen.
+--
+-- Kenneth 12.10.2026: "jeg onsker at reservekabelen tegnes opp slik den gjorde sist jeg provde,
+-- den skal hensyntas pa materiallister, men ikke pavirke effekten da reservekabelen aldri star pa."
+--
+-- Org-raden hadde reserve_cable = false, som slo den AV. null betyr na "arv" (arvefeilen i
+-- koden er rettet i 064), altsa arv fra global = true. Ingen kodeendring trengs: alle tre
+-- egenskapene er allerede bygget i 025 og MALT 12.10.2026 pa et 48 m2 fryselager med
+-- InFloor 10T 1000W 100m:
+--   tegnes opp     -- reserven far egen geometri (12 lop, 97,4 m lagt), som hovedkabelen
+--   materialliste  -- 1 stk -> 2 stk, og "2 stk (1 + 1 reserve)" i Bestilles
+--   effekt         -- 1000 W bade med og uten; Romoversikten gir reserven egen rad med 0 W
+update room_type_defaults
+   set reserve_cable = null, updated_at = now()
+ where room_type_id = 'fryserom'
+   and scope = 'org';
+
 -- ---------------------------------------------------------------------------
--- IKKE KJORT AUTOMATISK -- krever Kenneths avgjorelse:
+-- FORTSATT APENT -- krever Kenneths avgjorelse:
 --
--- Org-raden (scope='org') har reserve_cable = false. 025 ble bygget nettopp fordi "en kabel
--- stopt under et fryselager kan ikke byttes", sa en org som slar AV reservekabelen for
--- fryserom ser ut som en uhellig backfill, ikke et valg. Null i de andre feltene betyr na
--- "arv" (rettet i koden, 064) -- men en EKSPLISITT false ma respekteres som false.
+-- Org-raden har target_wm2 = 25 mot globalt 20. 25 er innenfor 15-30, altsa fullt lovlig.
+-- Hvilket tall er riktig for organisasjonen? Skal den arve globalt, kjor:
 --
--- Skal reservekabelen tilbake for organisasjonen, kjor:
---
---   update room_type_defaults set reserve_cable = null, updated_at = now()
+--   update room_type_defaults set target_wm2 = null, updated_at = now()
 --    where room_type_id = 'fryserom' and scope = 'org';
---
--- (null = arv fra global = true. Sett den til false bare hvis org FAKTISK skal ha den av.)
---
--- Org-raden har ogsa target_wm2 = 25 mot globalt 20. 25 er innenfor 15-30, altsa lovlig --
--- men _reserveCableRegressionTest forventer 20. Avklar hvilket tall som er riktig for org.
