@@ -4,6 +4,76 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 066: «Nytt prosjekt» går rett inn — dialogen velger typen — 2026-10-13
+
+Kenneth: «ønsker å komme rett inn på prosjektet når jeg trykker Opprett prosjekt … Fjern
+nedtrekksmenyen og la dialogboksen bestemme.»
+
+### STEG 0 (målt før endring)
+
+| | Målt | |
+|---|---|---|
+| Opprett | `_createProjectInline` lagret og kalte `_renderProjectList()` | Brukeren sto igjen på dashbordet |
+| Type | `#dash-proj-type` → `S.project.type` | Leses ALDRI for oppførsel — kun lista-ikonet og typefilteret |
+| Åpning | `_openCloudProject` → 060-låsen → `_restoreProject` → ingen deler → `showModuleScreen()` | Dialogen som faktisk lager delen |
+| Dialogen | viste alle sju `MODULE_TYPES` | Kenneth vil ha fire |
+| `PROJECT_TYPE_MAP` | ingen `list`-oppføring | Et Hurtig prosjektering-prosjekt sto som «Innendørs gulvvarme» |
+
+### Rettet
+
+- **Rett inn i prosjektet.** `_createProjectInline` går nå via `await _openCloudProject(...)` —
+  samme vei som et klikk i lista, så 060-låsen tas og kundestatus hentes. Ingen snarvei rundt
+  låsen. Feiler lagringen: skjemaet blir stående med «Kunne ikke opprette prosjektet — prøv
+  igjen», ikke en tom dialog over et ulagret prosjekt.
+- **Type-nedtrekket fjernet** (`#dash-proj-type` + `_populateProjTypeSelect`). Prosjekttypen
+  eies nå av **første del**: `addPart` setter den når den mangler, senere deler endrer den ikke.
+- **Dialogen gir fire valg i fast rekkefølge** — Innendørs gulvvarme · Utendørs snøsmelting ·
+  Snøsmelting i trapper · Hurtig prosjektering (`MODULE_SCREEN_ORDER`). Kalkulatorene og tak
+  vises ikke der. `MODULE_TYPES` sin egen rekkefølge er urørt — fem andre steder leser den.
+- **«Snøsmelting i grunn» → «Utendørs snøsmelting»** alle fem stedene. Eksisterende, lagrede
+  deler døpes ikke om — `part.name` kan være brukerens eget.
+- **Egne dialogikoner** (`_MODSCREEN_ICON`): hus med varme inne / hus med varme ute.
+  `_MOD_ICON` er urørt — sidepanelets modul-nav skal ikke ha husmotiv (sak 6b).
+
+### Tre funn utover oppgaven
+
+- **`_newProjectState()` satte `type:'indoor'`.** Uten å endre den til `null` ville regelen
+  «addPart setter typen når den mangler» ALDRI slått til — et nytt prosjekt var allerede
+  innendørs før dialogen var vist. Prompten nevner ikke funksjonen; den er forutsetningen.
+- **`type:'list'` lagres nå for ekte.** `_prosjekteringBridgeHtml` («Gjør om til prosjektering»
+  på en vunnet kalkyle) hadde ventet på den typen siden STEG 4, men ingen kodesti satte den —
+  broen var i praksis død kode. `PROJECT_TYPE_MAP` har fått `list`, `_PL_TYPE_ICON` har fått
+  `clipboard`, og begge typefiltre har fått valget.
+- **Ingen flere forekomster av det gamle navnet.** PDF-forsiden leser ikke prosjekttypen i det
+  hele tatt, og sidepanelets korte etikett het allerede «Ute».
+
+### Ikonene måtte tegnes om
+
+`home-heat-out` tegnet bølgen på y=21,5 mot en husbunn på y=20. Med strektykkelse 1,75 smeltet
+de **helt sammen**: huset mistet gulvet sitt og leste som et hus på knudrete bein, ikke som
+varme utenfor. Å flytte bølgen 1–2 enheter ned går ikke — viewBox-en slutter på 24 og bølgen
+ville blitt klippet. Huset er derfor krympet (bunn 20 → 17,6) i **begge** ikonene med samme
+tak/vegg-bane, så paret står likt i prosjektlistas Type-kolonne; `home-heat-in` sine
+innvendige bølger er flyttet opp tilsvarende. Egen farge ble ikke nødvendig.
+
+### Målefelle
+
+**Nettleserpanelets skjermbilde er 0,625× og duger ikke til å vurdere et 32 px-ikon.** Målingen
+ble gjort med en piksel-eksakt probe i stedet: SVG → `drawImage` på et 32×32-canvas → 8×
+oppforstørring med `imageSmoothingEnabled = false`. Det var først der sammensmeltingen ble
+synlig — på det nedskalerte skjermbildet så ikonet bare «litt rotete» ut.
+
+### Verifisering
+
+Ny `_nyttProsjektRegressionTest()` (25 påstander). Hele kjeden opprett → dialog kjørt for ekte
+med DB-laget og 060-RPC-ene stubbet, så ingen junk-prosjekter ble laget i skyen. Feilgrenen
+testet med simulert nettverksfeil. 21 suiter / 912 påstander grønne; konsollstøyen ved
+innlasting er identisk med `78fc852` (verifisert ved å stashe og laste om).
+
+Kenneth må kjøre test 1–5 live én gang for å se låsen og lagringen i ekte drift.
+
+---
+
 ## 067: Fryserom kontrollert mot BL-001 / DEVI / Nexans — 2026-10-13
 
 Kenneth samlet kildene; denne økten gikk gjennom 025 og 063–064f mot dem.
