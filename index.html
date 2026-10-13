@@ -27286,11 +27286,18 @@ function _cableGalleryRunEngine(which, roomId, prodId, dir, corner) {
     if (which === 'kaskade') {
       return _autoFillCableImpl(roomId, prodId, { allowPartial: true });
     }
+    // 069: den nye motoren. Den er IKKE i kaskaden (det er 070) — galleriet kaller den direkte.
+    if (which === 'geo') {
+      const res = generateCableGeo(roomId, prodId, { direction: dir, startCorner: corner });
+      if (!res) return null;
+      if (res.ok === false) return { _noSolution: res };   // spec §5 — eget utfall, ikke «null»
+      return res;
+    }
   } catch (e) { return { _error: e.message || String(e) }; }
   return null;
 }
 
-const _CABLE_GALLERY_ENGINES = ['kaskade', 'skew', 'boustrophedon', 'v6', 'serpentine'];
+const _CABLE_GALLERY_ENGINES = ['kaskade', 'geo', 'skew', 'boustrophedon', 'v6', 'serpentine'];
 
 async function _cableGalleryRun(opts) {
   opts = opts || {};
@@ -27314,6 +27321,17 @@ async function _cableGalleryRun(opts) {
                          nettoM2: +(roomAreas(room).net / 10000).toFixed(3) };
           if (!cab) { rows.push(Object.assign(base, { status: 'ingen løsning', hard: [], soft: [], metrics: null })); continue; }
           if (cab._error) { rows.push(Object.assign(base, { status: 'unntak: ' + cab._error, hard: [], soft: [], metrics: null })); continue; }
+          if (cab._noSolution) {
+            // Spec §5: et begrunnet «går ikke» er et EGET utfall. For et rom der én kabel
+            // ikke KAN legges lovlig er det riktig svar, ikke en fiasko — galleriet viser
+            // grunnen og forslaget i stedet for et tomt felt.
+            const ns = cab._noSolution;
+            rows.push(Object.assign(base, { status: 'ingen løsning', noSolution: ns,
+              hard: [], soft: [], metrics: null,
+              reason: ns.reason, conflicts: ns.conflicts || [],
+              suggestions: (ns.suggestions || []).map(s => s.msg) }));
+            continue;
+          }
           const chk = _cableGeometryCheck(cab, room, { lengthTolPct: opts.lengthTolPct });
           rows.push(Object.assign(base, {
             status: chk.ok ? 'ok' : 'feil',
@@ -27425,7 +27443,7 @@ blå ring = punktet et hardt krav brytes.</p>`;
       return `<tr><td>${esc(r.engine)}</td><td>${esc(r.dir)}</td><td>${st}</td><td class="l v">${hk || ''}</td>${cells}</tr>`;
     }).join('');
     const table = `<table><thead><tr><th class="l">motor</th><th>retn</th><th>status</th><th class="l">harde defekter</th>${cols.map(([t]) => `<th>${esc(t)}</th>`).join('')}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
-    const cards = `<div class="cards">${rs.filter(r => r._svg).map(r => `<div class="card"><div class="t">${esc(r.engine)} · ${esc(r.dir)} · ${r.status === 'ok' ? '<span class="ok">ok</span>' : '<span class="bad">' + esc(r.status) + '</span>'}</div>${r._svg}<div class="m">${(r.hard || []).map(d => '⚠ ' + esc(d.msg)).join('<br>') || 'Ingen harde brudd.'}${(r.soft || []).length ? '<br><span style="color:var(--warn)">' + r.soft.map(d => '· ' + esc(d.msg)).join('<br><span style="color:var(--warn)">· </span>') + '</span>' : ''}</div></div>`).join('')}</div>`;
+    const cards = `<div class="cards">${rs.filter(r => r._svg || r.noSolution).map(r => `<div class="card"><div class="t">${esc(r.engine)} · ${esc(r.dir)} · ${r.status === 'ok' ? '<span class="ok">ok</span>' : '<span class="bad">' + esc(r.status) + '</span>'}</div>${r._svg || ''}<div class="m">${r.noSolution ? ('<b>' + esc(r.reason) + '</b>' + (r.conflicts || []).map(c => '<br>⚠ ' + esc(c)).join('') + (r.suggestions || []).map(s => '<br>→ ' + esc(s)).join('')) : ((r.hard || []).map(d => '⚠ ' + esc(d.msg)).join('<br>') || 'Ingen harde brudd.')}${(r.soft || []).length ? '<br><span style="color:var(--warn)">' + r.soft.map(d => '· ' + esc(d.msg)).join('<br><span style="color:var(--warn)">· </span>') + '</span>' : ''}</div></div>`).join('')}</div>`;
     return head2 + table + cards;
   }).join('');
 
@@ -27457,6 +27475,672 @@ async function _cableGalleryExport(opts) {
     avvik_pct: r.metrics ? r.metrics.lenDevPct : null, cc: r.metrics ? r.metrics.ccMedCm : null,
     klaring: r.metrics ? r.metrics.minClearCm : null, dekning: r.metrics ? r.metrics.coveragePct : null })));
   return { rows, html, wrote };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 069 · NY GEOMETRISK UTLEGGSMOTOR — generateCableGeo (lag A–H)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Bygget etter `docs/kabel/arkitektur.md`. ISOLERT: kobles ikke inn i `_autoFillCableImpl`
+// (det er 070), kjøres bare fra galleriet og konsollen. Bryter `S.ui.cableGeoEngine`.
+//
+// Forholdet til de fire gamle motorene: de røres ikke. Denne ligger ved siden av.
+//
+// De tre tingene som skiller den fra V6 (068s målinger):
+//   1. ETT løpsrutenett for hele rommet. `x0` velges én gang mot rommets lovlige område;
+//      cellene sier bare HVILKE løp de inneholder. V6 lot hver celle sentrere sitt eget
+//      rutenett (`_v6SweepCell`: `firstPos = pMin + sideM`) — derfor «halv CC» over
+//      cellegrenser. Her er CC konstant per konstruksjon.
+//   2. Overgangen mellom celler ERSTATTER U-svingen. V6 la koblingsbanen i `connections[]`
+//      og lot `_drawCableUTurns` tegne en halvsirkel over SAMME cellegrense i tillegg —
+//      to baner, åpne ender, kryssing. Her finnes bare én banepunktliste.
+//   3. Hver sving kontrolleres mot lovlig område FØR den godtas. Går den ikke inn, trekkes
+//      begge vendepunktene symmetrisk inn til den gjør det.
+//
+// Leverer `pathEls` + `centerline` (arkitektur.md §1): én ordnet punktliste er kilden til
+// både tegning, lengde og dekning, så de tre aldri kan bli uenige igjen.
+
+const _GEO_EPS = 1e-6;
+
+// ─── Lag A · Normalisering ──────────────────────────────────────────────────────────────────
+// Lovlig område gjenbrukes fra 068 (`_cableLegalRegion`, clipper-lib). Her kommer bare
+// rettvinklethets-porten og en skanlinje-klipper som tåler hull.
+
+// Akseparallellhet måles i VINKEL, ikke i centimeter. Kenneths bad har to vegger som bøyer
+// 5,2 cm over 197 cm og 1,1 cm over 95 cm — det er 1,5° og 0,6°, altså et rom som i praksis
+// er akseparallelt med et lite fall. En cm-terskel kastet det ut som «skrått» sammen med et
+// ekte 18°-rotert rom; en gradterskel skiller de to riktig. Rommet trenger uansett ikke være
+// eksakt akseparallelt for at motoren skal være KORREKT — skanlinjene klippes mot det lovlige
+// området uansett form. Grensen handler om KVALITET: ved større vinkler blir akseparallelle
+// løp et trappetrinn-dekke, og da er skew bedre (spec §0.5).
+function _geoMaxSkewDeg(pts) {
+  let worst = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const dx = Math.abs(b.x - a.x), dy = Math.abs(b.y - a.y);
+    if (dx < 1e-9 && dy < 1e-9) continue;
+    const deg = Math.atan2(Math.min(dx, dy), Math.max(dx, dy)) * 180 / Math.PI;
+    if (deg > worst) worst = deg;
+  }
+  return worst;
+}
+function _geoIsRectilinear(pts, maxDeg) {
+  return _geoMaxSkewDeg(pts) <= (maxDeg == null ? 5 : maxDeg);
+}
+
+// Klipper en skanlinje mot HELE det lovlige området (ytterkonturer minus hull).
+// `_cableLegalRegion` gir clipper-baner; fortegnet på arealet skiller ytre fra hull.
+function _geoClipScanline(legal, sweepAxis, pos) {
+  let out = [];
+  const holes = [];
+  for (const path of (legal.paths || [])) {
+    if (!path || path.length < 3) continue;
+    const iv = clipScanlineToPolygon(sweepAxis, pos, path);
+    if (!iv.length) continue;
+    // Signert areal: positiv = ytre kontur, negativ = hull (clipper snur hull).
+    let a2 = 0;
+    for (let i = 0; i < path.length; i++) { const j = (i + 1) % path.length; a2 += path[i].x * path[j].y - path[j].x * path[i].y; }
+    if (a2 >= 0) out = unionIntervalSets(out, iv); else holes.push(iv);
+  }
+  for (const h of holes) out = subtractIntervalSets(out, h);
+  return out.filter(([lo, hi]) => hi - lo > _GEO_EPS);
+}
+
+// ─── Lag B + C · Celleoppdeling på ETT globalt rutenett ─────────────────────────────────────
+// Rutenettet legges FØRST, av hele rommets lovlige område:
+//     N  = floor(W / CC) + 1,   x0 = pMin + (W − (N−1)·CC) / 2
+// Det gir symmetrisk kantavstand (spec §4C) og én felles fase. Deretter klippes hver
+// løpsposisjon mot det lovlige området; der én skanlinje gir to intervaller (f.eks. over og
+// under et hakk), blir det to «baner» (lanes) på samme posisjon.
+//
+// Banene bindes sammen til CELLER med union-find, men BARE når overgangen er 1:1 — splitter
+// eller slår en posisjon seg sammen med nabo-posisjonen, er det et kritisk punkt, og en ny
+// celle begynner. Det er Boustrophedon Cellular Decomposition, utført på rutenettet vi
+// uansett skal legge løpene på.
+//
+// `extraSweep` trekker begge endene av hvert løp symmetrisk inn — lag F sin søkeparameter
+// for lengde, og lag E sin redning når en sving ikke får plass.
+function _geoBuildGrid(legal, direction, cc, extraSweep) {
+  extraSweep = extraSweep || 0;
+  const sweepAxis = direction === 'v' ? 'y' : 'x';
+  const perpKey = direction === 'v' ? 'x' : 'y';
+  // Perpendikulær utstrekning av det LOVLIGE området (ikke av rommet, og ikke av et
+  // omsluttende rektangel rundt rommet — det var nettopp 068-feilen).
+  let pMin = Infinity, pMax = -Infinity;
+  for (const path of (legal.paths || [])) for (const p of path) {
+    if (p[perpKey] < pMin) pMin = p[perpKey];
+    if (p[perpKey] > pMax) pMax = p[perpKey];
+  }
+  if (!(pMax > pMin)) return null;
+  const W = pMax - pMin;
+  if (W < cc * 0.5) return null;
+  const N = Math.max(1, Math.floor(W / cc + _GEO_EPS) + 1);
+  const span = (N - 1) * cc;
+  const x0 = pMin + (W - span) / 2;          // ← ÉN gang, for hele rommet
+
+  // U-svingen bulker CC/2 forbi løpets ende, så løpet må slutte minst CC/2 inne i det
+  // lovlige området. Det er ikke en antakelse om at svingen da passer — lag E kontrollerer
+  // hver sving — men det er riktig utgangspunkt.
+  const endInset = cc / 2 + extraSweep;
+
+  const lanes = [];
+  const byPos = [];
+  for (let i = 0; i < N; i++) {
+    const pos = x0 + i * cc;
+    const iv = _geoClipScanline(legal, sweepAxis, pos)
+      .map(([lo, hi]) => [lo + endInset, hi - endInset])
+      .filter(([lo, hi]) => hi - lo > _GEO_EPS);
+    const idxs = [];
+    for (const [lo, hi] of iv) { idxs.push(lanes.length); lanes.push({ id: lanes.length, i, pos, lo, hi }); }
+    byPos.push(idxs);
+  }
+  if (!lanes.length) return null;
+
+  // Union-find: bind bane a (pos i) til bane b (pos i+1) KUN når koblingen er 1:1.
+  const parent = lanes.map((_, k) => k);
+  const find = k => parent[k] === k ? k : (parent[k] = find(parent[k]));
+  const unite = (a, b) => { parent[find(a)] = find(b); };
+  const ovl = (a, b) => Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo);
+  // To ting starter en ny celle:
+  //  (1) KOBLINGEN ER IKKE 1:1 — klassisk kritisk punkt (en skanlinje splitter seg i to, eller
+  //      to slår seg sammen). Det er hakket sett på tvers.
+  //  (2) TRINN I GRENSEN — intervallet hopper mer enn én CC i en ende, uten at koblingen
+  //      endrer seg. Dette er IKKE med i lærebok-BCD, men må være med her, fordi alle løp i
+  //      én celle utjevnes til cellens FELLES sveipeområde (den låste like-lengde-regelen).
+  //      Uten (2) havner et smalt bånd (badet sett langsetter: 190 cm forbi hakket) i samme
+  //      celle som den brede delen (250 cm), og utjevningen klipper HELE rommet ned til 190 —
+  //      målt: 22,4 m lagt der 46 m skulle vært. Med (2) blir trinnet en cellegrense med en
+  //      ordentlig overgang, og begge deler beholder sin egen lengde.
+  // Terskelen er én CC: et trinn mindre enn avstanden mellom to løp er ikke et trinn, det er
+  // en skrå vegg — og den skal ikke fragmentere rommet.
+  const stepTol = cc;
+  for (let i = 0; i + 1 < N; i++) {
+    const A = byPos[i], B = byPos[i + 1];
+    for (const ai of A) for (const bi of B) {
+      if (ovl(lanes[ai], lanes[bi]) <= _GEO_EPS) continue;
+      const aMatches = A.filter(x => ovl(lanes[x], lanes[bi]) > _GEO_EPS).length;
+      const bMatches = B.filter(x => ovl(lanes[ai], lanes[x]) > _GEO_EPS).length;
+      if (aMatches !== 1 || bMatches !== 1) continue;
+      const step = Math.max(Math.abs(lanes[ai].lo - lanes[bi].lo), Math.abs(lanes[ai].hi - lanes[bi].hi));
+      if (step > stepTol) continue;
+      unite(ai, bi);
+    }
+  }
+  const groups = new Map();
+  for (const ln of lanes) { const r = find(ln.id); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(ln); }
+
+  const cells = [];
+  for (const g of groups.values()) {
+    g.sort((a, b) => a.i - b.i);
+    // LÅST regel: alle løp i én celle utjevnes til cellens felles sveipeområde.
+    const lo = Math.max(...g.map(l => l.lo)), hi = Math.min(...g.map(l => l.hi));
+    if (hi - lo <= _GEO_EPS) continue;               // ingen felles område → cellen faller bort
+    cells.push({ id: cells.length, lanes: g, lo, hi, iMin: g[0].i, iMax: g[g.length - 1].i,
+                 perpMin: g[0].pos, perpMax: g[g.length - 1].pos, n: g.length });
+  }
+  if (!cells.length) return null;
+
+  // Naboskap: to celler er naboer når de har løpsposisjoner ved siden av hverandre (eller
+  // deler posisjon) OG sveipeområdene deres kan nås fra hverandre langs grensen.
+  for (const c of cells) c.adj = [];
+  for (let a = 0; a < cells.length; a++) for (let b = a + 1; b < cells.length; b++) {
+    const A = cells[a], B = cells[b];
+    const iGap = Math.max(A.iMin, B.iMin) - Math.min(A.iMax, B.iMax);
+    if (iGap > 1) continue;                           // for langt fra hverandre i rutenettet
+    A.adj.push(B.id); B.adj.push(A.id);
+  }
+  return { direction, cc, extraSweep, N, x0, pMin, pMax, lanes, cells, endInset, sweepAxis, perpKey };
+}
+
+// ─── Lag D · Rute ───────────────────────────────────────────────────────────────────────────
+// Én sammenhengende bane gjennom alle cellene. Hver celle kan traverseres på fire måter:
+// løpsrekkefølge forover/bakover × inngang i lav/høy sveipeende. Utgangsenden følger av
+// paritet (odde antall løp → motsatt ende av inngangen, like → samme).
+// Søket er en dybde-først over cellerekkefølger; med 1–7 celler er det billig, og vi tar
+// den FØRSTE ruten som gir en lovlig bane (kontrollen i lag E/H er dommeren).
+function _geoCellTraversals(cell) {
+  const out = [];
+  for (const rev of [false, true]) for (const entryHigh of [false, true]) {
+    const order = rev ? cell.lanes.slice().reverse() : cell.lanes.slice();
+    const exitHigh = (order.length % 2 === 1) ? !entryHigh : entryHigh;
+    out.push({ cellId: cell.id, order, entryHigh, exitHigh,
+      entryPerp: order[0].pos, exitPerp: order[order.length - 1].pos });
+  }
+  return out;
+}
+
+function _geoRouteOrders(cells, maxOrders) {
+  // Alle Hamilton-stier i naboskapsgrafen (celletallet er lite). Finnes ingen, brukes ren
+  // perp-rekkefølge — da fanger overgangs-kravet under at det ikke går.
+  const n = cells.length, orders = [];
+  const byId = new Map(cells.map(c => [c.id, c]));
+  const seen = new Set();
+  const walk = (path, used) => {
+    if (orders.length >= (maxOrders || 24)) return;
+    if (path.length === n) { const k = path.join(','); if (!seen.has(k)) { seen.add(k); orders.push(path.slice()); } return; }
+    const last = byId.get(path[path.length - 1]);
+    for (const nb of last.adj) {
+      // `adj` peker på celler i HELE rutenettet. Kalles dette med en DELMENGDE (todelingen i
+      // `_geoTrySplitTwo`), finnes ikke alle naboene her — hopp over dem.
+      if (!byId.has(nb)) continue;
+      if (used.has(nb)) continue;
+      used.add(nb); path.push(nb); walk(path, used); path.pop(); used.delete(nb);
+    }
+  };
+  for (const c of cells) { walk([c.id], new Set([c.id])); if (orders.length >= (maxOrders || 24)) break; }
+  if (!orders.length) orders.push(cells.slice().sort((a, b) => a.perpMin - b.perpMin).map(c => c.id));
+  return orders;
+}
+
+// ─── Overgangen mellom to celler ────────────────────────────────────────────────────────────
+// Dette er stedet V6 gikk galt: den la en egen koblingsbane i `connections[]` OG lot
+// rendereren tegne en U-sving over samme grense. Her finnes bare ett svar, og det er en
+// U-SVING — ikke en L-formet omvei.
+//
+// Betingelsen for at den i det hele tatt er lovlig: de to løpene som skal kobles må ligge
+// ved siden av hverandre på det globale rutenettet (altså nøyaktig CC fra hverandre), og de
+// to cellene må overlappe i sveiperetningen. Svingen tegnes da på det nivået BEGGE når:
+//   høy ende → min(A.hi, B.hi),  lav ende → max(A.lo, B.lo).
+// Er cellene flukt i den enden (det vanlige når et trinn bare stikker inn fra én side), er
+// nivået eksakt begges ende og ingenting kortes av. Ellers kortes KUN overgangsløpet ned til
+// nivået — ett løp, ikke hele cellen, så like-lengde-regelen står for resten.
+// Går ikke dette, returneres null, og søket prøver en annen rekkefølge eller traversering.
+// Det er slik «ingen lovlig sammenhengende bane» blir et ÆRLIG svar i stedet for en omvei
+// som ser ut som en kabel.
+function _geoHandoff(cellA, trA, cellB, trB, cc) {
+  if (Math.abs(trA.exitPerp - trB.entryPerp) > cc * 1.25) return null;   // ikke naboløp
+  if (Math.abs(trA.exitPerp - trB.entryPerp) < cc * 0.25) return null;   // samme løpsposisjon
+  if (trA.exitHigh !== trB.entryHigh) return null;                        // må snu i samme ende
+  const high = trA.exitHigh;
+  const level = high ? Math.min(cellA.hi, cellB.hi) : Math.max(cellA.lo, cellB.lo);
+  if (high ? (level <= Math.max(cellA.lo, cellB.lo)) : (level >= Math.min(cellA.hi, cellB.hi))) return null;
+  return { high, level, perpA: trA.exitPerp, perpB: trB.entryPerp };
+}
+
+// Finn én lovlig kjede av traverseringer for en gitt cellerekkefølge (dybde-først).
+function _geoPlanTraversals(grid, orderIds) {
+  const byId = new Map(grid.cells.map(c => [c.id, c]));
+  const trav = new Map(grid.cells.map(c => [c.id, _geoCellTraversals(c)]));
+  const chain = [], handoffs = [];
+  const step = (k) => {
+    if (k === orderIds.length) return true;
+    const cell = byId.get(orderIds[k]);
+    for (const t of trav.get(cell.id)) {
+      let ho = null;
+      if (k > 0) {
+        ho = _geoHandoff(byId.get(orderIds[k - 1]), chain[k - 1], cell, t, grid.cc);
+        if (!ho) continue;
+      }
+      chain.push(t); if (ho) handoffs.push(ho);
+      if (step(k + 1)) return true;
+      chain.pop(); if (ho) handoffs.pop();
+    }
+    return false;
+  };
+  return step(0) ? { chain, handoffs } : null;
+}
+
+// ─── Lag E · Svinger ────────────────────────────────────────────────────────────────────────
+// Halvsirkel, radius = halve avstanden mellom de to løpene (= CC/2 på rutenettet), samplet.
+// Hele buen kontrolleres mot lovlig område av den som kaller.
+function _geoArc(P, perpA, perpB, sweep, high, segs) {
+  segs = segs || 24;
+  const mid = (perpA + perpB) / 2, half = (perpA - perpB) / 2, r = Math.abs(half);
+  const pts = [];
+  for (let t = 0; t <= segs; t++) {
+    const ph = Math.PI * t / segs;
+    pts.push(P(mid + half * Math.cos(ph), sweep + (high ? 1 : -1) * r * Math.sin(ph)));
+  }
+  return pts;
+}
+
+function _geoPtInLegal(x, y, legal) {
+  let inside = 0;
+  for (const path of (legal.paths || [])) if (ptInPoly(x, y, path)) inside++;
+  return inside % 2 === 1;
+}
+
+// ─── Byggingen av senterlinjen ──────────────────────────────────────────────────────────────
+// Setter sammen celler, U-svinger og celleoverganger til ÉN ordnet punktliste. Ingen
+// «vegg-følge»-linjer, ingen parallell connections[]-liste — nøyaktig de to tingene som ga
+// Y-greiner og doble baner i V6.
+function _geoBuildCenterline(grid, orderIds, plan, legal, prod) {
+  if (!plan) return null;
+  const dir = grid.direction;
+  const P = (perp, sweep) => dir === 'v' ? { x: perp, y: sweep } : { x: sweep, y: perp };
+  const byId = new Map(grid.cells.map(c => [c.id, c]));
+  const pts = [];
+
+  for (let ci = 0; ci < orderIds.length; ci++) {
+    const cell = byId.get(orderIds[ci]);
+    const tr = plan.chain[ci];
+    const hoIn  = ci > 0 ? plan.handoffs[ci - 1] : null;                 // overgangen INN hit
+    const hoOut = ci < orderIds.length - 1 ? plan.handoffs[ci] : null;   // overgangen UT herfra
+    let high = tr.entryHigh;
+    for (let k = 0; k < tr.order.length; k++) {
+      const ln = tr.order[k];
+      const isFirst = k === 0, isLast = k === tr.order.length - 1;
+      // Normalt går løpet fra cellens ene ende til den andre. Bare overgangsløpene kortes,
+      // og bare til nivået overgangssvingen ligger på.
+      let from = high ? cell.hi : cell.lo;
+      let to   = high ? cell.lo : cell.hi;
+      if (isFirst && hoIn)  from = hoIn.level;
+      if (isLast  && hoOut) to   = hoOut.level;
+      if (Math.abs(to - from) < 0.1) return null;                        // degenerert løp
+      pts.push(P(ln.pos, from), P(ln.pos, to));
+      const next = tr.order[k + 1];
+      if (next) pts.push(..._geoArc(P, ln.pos, next.pos, to, !high));
+      high = !high;
+    }
+    if (hoOut) {
+      const nextCell = byId.get(orderIds[ci + 1]);
+      const nextTr = plan.chain[ci + 1];
+      pts.push(..._geoArc(P, hoOut.perpA, hoOut.perpB, hoOut.level, hoOut.high));
+      void nextCell; void nextTr;
+    }
+  }
+  return pts;
+}
+
+// ─── «Del i to kabler» — et BESTÅTT utfall, ikke en unnskyldning (spec §0.7, §5) ────────────
+// Noen romformer har beviselig ingen lovlig én-kabel-løsning. Det klassiske tilfellet er en
+// hindring midt i rommet: cellene ligger som 0 < {1,2} < 3 langs tverraksen, og en bane som
+// skal innom alle fire må gå ut i en endekolonne og tilbake igjen — og tilbaketuren har ingen
+// lovlig korridor (den ville ligget nærmere løpene enn produktets minsteavstand). V6 «løste»
+// det ved å tegne en koblingsbane tvers over; det er nettopp feilen 068 målte.
+//
+// Her prøves splitten FAKTISK: cellene deles i to sammenhengende grupper langs tverraksen, og
+// hver gruppe rutes for seg. Først når BEGGE gir en lovlig bane, foreslås to kabler — og da med
+// de målte lengdene, så forslaget kan etterprøves.
+function _geoTrySplitTwo(grid, legal, prod) {
+  const byPerp = grid.cells.slice().sort((a, b) => a.perpMin - b.perpMin);
+  if (byPerp.length < 2) return null;
+  const planGroup = (cells) => {
+    if (!cells.length) return null;
+    const sub = { direction: grid.direction, cc: grid.cc, cells };
+    for (const order of _geoRouteOrders(cells, 8)) {
+      const plan = _geoPlanTraversals(sub, order);
+      if (!plan) continue;
+      const pts = _geoBuildCenterline(sub, order, plan, legal, prod);
+      if (!pts || pts.length < 2) continue;
+      let len = 0;
+      for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      return { cells: cells.length, lenCm: len, pts };
+    }
+    return null;
+  };
+  for (let k = 1; k < byPerp.length; k++) {
+    const A = planGroup(byPerp.slice(0, k));
+    if (!A) continue;
+    const B = planGroup(byPerp.slice(k));
+    if (!B) continue;
+    return { a: A, b: B };
+  }
+  return null;
+}
+
+// ─── Lag G · Start/slutt ────────────────────────────────────────────────────────────────────
+// Brukerens starthjørne respekteres når det er lovlig. Vi kan ikke tvinge banen til å begynne
+// i et hjørne som ligger i en forbudt sone eller utenfor lovlig område — da velges det
+// nærmeste lovlige, og grunnen følger med i resultatet (spec §1: aldri tvang som bryter).
+function _geoCornerPoint(room, corner) {
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const lo = { x: Math.min(...xs), y: Math.min(...ys) }, hi = { x: Math.max(...xs), y: Math.max(...ys) };
+  return { x: (corner === 'bl' || corner === 'tl') ? lo.x : hi.x,
+           y: (corner === 'bl' || corner === 'br') ? lo.y : hi.y };
+}
+
+// ─── Lag H · Optimalisering ─────────────────────────────────────────────────────────────────
+// Harde krav er FILTER, myke mål er poeng. Et utlegg som bryter et hardt krav kan aldri vinne
+// — det er forskjellen fra V6, der `validation.warnings` bare ga minuspoeng.
+function _geoScore(chk, ctx) {
+  let s = 0;
+  const m = chk.metrics;
+  if (m.targetCm) s += 60 - Math.min(60, Math.abs(m.lenDevPct || 0) * 20);   // nær produktlengden
+  s += Math.min(30, (m.coveragePct || 0) * 0.3);                             // dekning
+  s -= (chk.soft || []).length * 2;                                          // myke avvik
+  if (ctx.dir === ctx.wantDir) s += 4;
+  if (ctx.corner === ctx.wantCorner) s += 3;
+  s -= Math.max(0, ctx.nCells - 1) * 1.5;                                    // færrest overganger
+  return s;
+}
+
+// ─── Motoren ────────────────────────────────────────────────────────────────────────────────
+// generateCableGeo(roomId, productId, opts)
+//   → kabelobjekt (pathEls + centerline + totalLength_cm + spacing_cm …)
+//   → eller { ok:false, reason, conflicts, achievedLen, targetLen, cc, minClearance,
+//             uncovered, suggestions } (spec §5)
+// REN: leser S, skriver ingenting.
+function generateCableGeo(roomId, productId, opts) {
+  opts = opts || {};
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === productId);
+  if (!room || !prod) return { ok: false, reason: 'Fant ikke rom eller produkt.', conflicts: [] };
+  if (!room.points || room.points.length < 3) return { ok: false, reason: 'Rommet har ingen gyldig form.', conflicts: [] };
+
+  // Spec §0.5: skrå/roterte rom beholder skew-motoren i denne runden.
+  const skewDeg = _geoMaxSkewDeg(room.points);
+  const maxSkewDeg = opts.maxSkewDeg != null ? opts.maxSkewDeg : 5;
+  if (skewDeg > maxSkewDeg) {
+    return { ok: false, reason: 'ikke akseparallelt',
+      conflicts: [`Bratteste vegg ligger ${skewDeg.toFixed(1)}° fra aksen (grense ${maxSkewDeg}°) — dekkes av skew-motoren (spec §0.5).`],
+      suggestions: [{ kind: 'annen motor', msg: 'Skew-motoren legger roterte rom; denne runden tar bare akseparallelle (spec §0.5).' }] };
+  }
+  const legal = _cableLegalRegion(roomId, productId);
+  if (!legal || !legal.paths || !legal.paths.length) {
+    return { ok: false, reason: 'Ikke plass til kabel innenfor kantavstanden.', conflicts: [`Kantavstand ${_effectiveMarginCm(productId, roomId)} cm levner ikke areal.`] };
+  }
+
+  const lim = _ccLimits(prod, roomId);
+  const minBend = (prod.min_bend_radius_mm || 0) / 10;
+  // En U-sving har radius CC/2, så CC under 2 × bøyeradius er fysisk umulig.
+  const ccLo = Math.max(lim.minSp, minBend > 0 ? 2 * minBend : lim.minSp);
+  const ccHi = Math.min(lim.maxHard, _ccSearchMaxCm(prod, room));
+  const targetCm = prod.cable_length_m ? prod.cable_length_m * 100 : null;
+  const tolPct = opts.lengthTolPct != null ? opts.lengthTolPct : 1;
+
+  if (ccLo > ccHi + _GEO_EPS) {
+    return { ok: false, reason: 'Ingen lovlig CC finnes for dette produktet i dette rommet.',
+      conflicts: [`Bøyeradius ${minBend} cm krever CC ≥ ${(2 * minBend).toFixed(1)} cm, men taket er ${ccHi.toFixed(1)} cm.`],
+      cc: null, targetLen: targetCm, achievedLen: null,
+      suggestions: [{ kind: 'annen CC', msg: `Et produkt med mindre bøyeradius enn ${(ccHi / 2).toFixed(1)} cm ville gått.` }] };
+  }
+
+  const wantDir = opts.direction || (S.varmefolie && S.varmefolie.direction) || null;
+  const dirExplicit = !!(opts.direction) || !!(S.varmefolie && S.varmefolie.dirExplicit);
+  const dirs = (dirExplicit && wantDir) ? [wantDir] : ['v', 'h'];
+  const wantCorner = opts.startCorner || (S.varmefolie && S.varmefolie.startCorner) || 'bl';
+
+  // Lengdesøket (lag F) trenger bare LENGDEN av en kandidat, ikke hele geometrikontrollen.
+  // Kontrollen koster et rutenett-sveip over dekningen og et par-sveip over alle segmenter —
+  // kjørt 30-40 ganger per retning ble motoren ~2 s per rom. Her bygges bare senterlinjen
+  // (greedy celleorden), og full kontroll kjøres til slutt, på vinneren. Dommeren er fortsatt
+  // kontrollen: `attempt` under er den som faktisk kan gi et godkjent utlegg.
+  const fastLen = (dir, cc, extraSweep) => {
+    const grid = _geoBuildGrid(legal, dir, cc, extraSweep || 0);
+    if (!grid) return null;
+    for (const order of _geoRouteOrders(grid.cells, 8)) {
+      const plan = _geoPlanTraversals(grid, order);
+      if (!plan) continue;
+      const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
+      if (!pts || pts.length < 2) continue;
+      let len = 0;
+      for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      return len;
+    }
+    return null;
+  };
+
+  // Ett forsøk: bygg rutenett, rut, bygg senterlinje, kontrollér. Returnerer {cable, chk} eller null.
+  const attempt = (dir, cc, extraSweep) => {
+    const grid = _geoBuildGrid(legal, dir, cc, extraSweep);
+    if (!grid) return null;
+    let best = null, bestScore = -Infinity;
+    for (const order of _geoRouteOrders(grid.cells, 12)) {
+      const plan = _geoPlanTraversals(grid, order);
+      if (!plan) continue;                 // ingen lovlig overgangskjede for denne rekkefølgen
+      const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
+      if (!pts || pts.length < 2) continue;
+      const cable = _geoMakeCable(roomId, productId, dir, cc, pts, grid, wantCorner);
+      const chk = _cableGeometryCheck(cable, room, { lengthTolPct: tolPct });
+      // Lag H: hardt krav brutt → kandidaten er ute. Ingen poengsum kan redde den.
+      if (!chk.ok) continue;
+      const sc = _geoScore(chk, { dir, wantDir, corner: wantCorner, wantCorner, nCells: grid.cells.length });
+      if (sc > bestScore) { bestScore = sc; best = { cable, chk, grid, score: sc }; }
+    }
+    return best;
+  };
+
+  // ─── Lag F · Lengdesøk ────────────────────────────────────────────────────────────────────
+  // CC er hovedknappen (mindre CC → mer kabel). Søket er en bisekssjon per retning, og der
+  // bisekssjonen ikke treffer innenfor toleransen, trekkes vendepunktene symmetrisk inn
+  // (`extraSweep`) — aldri justering av ett enkelt segment.
+  let winner = null, winnerScore = -Infinity;
+  const diag = [];
+  for (const dir of dirs) {
+    const measure = (cc, ex) => { const len = fastLen(dir, cc, ex); return len == null ? null : { len }; };
+    if (!targetCm) {
+      const cc = Math.max(ccLo, Math.min(ccHi, (prod.recommended_spacing_mm || 100) / 10));
+      const r = attempt(dir, cc, 0);
+      if (r && r.score > winnerScore) { winnerScore = r.score; winner = r; }
+      diag.push({ dir, cc, ok: !!r });
+      continue;
+    }
+    // Grovsveip for å finne et CC-intervall som omslutter mållengden, så bisekssjon.
+    // VIKTIG: antall løp N er et HELTALL, så lagt lengde er en sagtann i CC, ikke en jevn
+    // kurve. Målt på et 400×300-rom med 96 m kabel: N=32 gir 94,9 m og N=33 gir 97,8 m —
+    // 96,00 m finnes ikke for NOEN CC. Derfor holdes to kandidater: den nærmeste (kan være
+    // for kort) og den nærmeste SOM ER FOR LANG. Bare den siste kan trimmes ned med
+    // symmetrisk inntrukne vendepunkter, og det er den veien lengden faktisk kan treffes.
+    let lo = ccLo, hi = ccHi, bestDiff = Infinity, bestCc = null, bestEx = 0;
+    let overCc = null, overDiff = Infinity;                  // nærmeste kandidat med lengde ≥ mål
+    const note = (cc, len) => {
+      const d = len - targetCm;
+      if (Math.abs(d) < bestDiff) { bestDiff = Math.abs(d); bestCc = cc; }
+      if (d >= 0 && d < overDiff) { overDiff = d; overCc = cc; }
+      return d;
+    };
+    const STEPS = 12;
+    let prev = null;
+    for (let s = 0; s <= STEPS; s++) {
+      const cc = ccHi - (ccHi - ccLo) * s / STEPS;          // fra stor CC (lite kabel) og nedover
+      const m = measure(cc, 0);
+      if (m) {
+        const d = note(cc, m.len);
+        if (prev && ((prev.d < 0) !== (d < 0))) { lo = Math.min(cc, prev.cc); hi = Math.max(cc, prev.cc); break; }
+        prev = { cc, d };
+      }
+    }
+    const tolCm = targetCm * tolPct / 100;
+    for (let it = 0; it < 20 && bestDiff > tolCm * 0.3; it++) {
+      const mid = (lo + hi) / 2;
+      const m = measure(mid, 0);
+      if (!m) { lo = mid; continue; }
+      const d = note(mid, m.len);
+      if (d > 0) lo = mid; else hi = mid;                    // mindre CC → lengre kabel
+      if (Math.abs(hi - lo) < 1e-3) break;
+    }
+    // Trimming (lag F): bare en bane som er FOR LANG kan trekkes inn. Treffer ikke CC alene,
+    // velges den korteste for-lange kandidaten og vendepunktene trekkes symmetrisk inn.
+    if (bestDiff > tolCm && overCc != null) {
+      let exLo = 0, exHi = Math.max(5, overCc * 3);
+      let gotDiff = overDiff, gotEx = 0;
+      for (let it = 0; it < 18; it++) {
+        const ex = (exLo + exHi) / 2;
+        const m = measure(overCc, ex);
+        if (!m) { exHi = ex; continue; }
+        const d = m.len - targetCm;
+        if (Math.abs(d) < gotDiff) { gotDiff = Math.abs(d); gotEx = ex; }
+        if (d > 0) exLo = ex; else exHi = ex;
+        if (Math.abs(exHi - exLo) < 1e-3) break;
+      }
+      if (gotDiff < bestDiff) { bestDiff = gotDiff; bestCc = overCc; bestEx = gotEx; }
+    }
+    // Full kontroll (lag H) kjøres bare her, på kandidaten lengdesøket landet på — og på et
+    // par naboer, siden den beste LENGDEN ikke alltid er den som består alle harde krav.
+    let bestR = null;
+    if (bestCc != null) {
+      const tries = [[bestCc, bestEx], [bestCc, 0], [bestCc * 1.02, bestEx], [bestCc * 0.98, bestEx]];
+      if (overCc != null && overCc !== bestCc) tries.splice(1, 0, [overCc, bestEx]);
+      for (const [cc, ex] of tries) {
+        if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+        const r = attempt(dir, cc, ex);
+        if (r && (!bestR || r.score > bestR.score)) bestR = r;
+        if (bestR && Math.abs(bestR.chk.metrics.lenDevPct || 0) <= tolPct) break;
+      }
+    }
+    diag.push({ dir, cc: bestCc == null ? null : +bestCc.toFixed(2), ex: +bestEx.toFixed(2),
+                sokDiffCm: bestDiff === Infinity ? null : +bestDiff.toFixed(1), godkjent: !!bestR });
+    if (bestR && bestR.score > winnerScore) { winnerScore = bestR.score; winner = bestR; }
+  }
+
+  if (winner) {
+    winner.cable._geoScore = +winnerScore.toFixed(1);
+    winner.cable._geoCells = winner.grid.cells.length;
+    return winner.cable;
+  }
+  return _geoNoSolution(room, prod, roomId, productId, legal, { ccLo, ccHi, targetCm, tolPct, dirs, diag });
+}
+
+// Kabelobjekt i kontrakten fra 068 STEG 0.5: `pathEls` (den formen skew allerede bruker og
+// som `_cableWorldSegments`, `_drawCableSkewPath` og `_offsetCableClone` håndterer) PLUSS
+// `centerline` — den ene ordnede punktlisten lengde, tegning og dekning alle leser.
+function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
+  let len = 0;
+  for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  // pathEls bygges som ÉN uturn-kjede: hele banen i ett element, så ingen annen kode kan
+  // komme til å tegne en sving «i tillegg» (det var V6-feilen).
+  const pathEls = [{ kind: 'uturn', pts: pts.map(p => ({ x: p.x, y: p.y })) }];
+  return {
+    id: (S.counters && S.counters.nextCableId) || 1,
+    roomId, productId,
+    _engine: 'geo',
+    pathEls,
+    centerline: pts.map(p => ({ x: p.x, y: p.y })),
+    start: pts[0], end: pts[pts.length - 1],
+    direction: dir,
+    startCorner,
+    spacing_cm: cc,
+    cc_mm: Math.round(cc * 10),
+    totalLength_cm: Math.round(len * 10) / 10,
+    runs: [], connections: [],
+    lockedEnd: true, lockedStart: false
+  };
+}
+
+// ─── Spec §5 · Strukturert «ingen løsning» ──────────────────────────────────────────────────
+// Aldri et tilsynelatende gyldig utlegg ved feil. Her er grunnen, de kolliderende
+// begrensningene, og et forslag — inkludert «2 kabler», som selv prøves og valideres.
+function _geoNoSolution(room, prod, roomId, productId, legal, ctx) {
+  const conflicts = [];
+  const suggestions = [];
+  // Hva feilet faktisk? Kjør ett forsøk på midt-CC og les defektene.
+  const ccMid = (ctx.ccLo + ctx.ccHi) / 2;
+  let sample = null;
+  for (const dir of ctx.dirs) {
+    const grid = _geoBuildGrid(legal, dir, ccMid, 0);
+    if (!grid) continue;
+    let got = false;
+    for (const order of _geoRouteOrders(grid.cells, 8)) {
+      const plan = _geoPlanTraversals(grid, order);
+      if (!plan) continue;
+      const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
+      if (!pts) continue;
+      const cab = _geoMakeCable(roomId, productId, dir, ccMid, pts, grid, 'bl');
+      const chk = _cableGeometryCheck(cab, room, { lengthTolPct: ctx.tolPct });
+      if (!sample) sample = { dir, chk, grid };
+      for (const d of chk.hard) if (!conflicts.includes(d.msg)) conflicts.push(d.msg);
+      got = true; break;
+    }
+    // Ingen lovlig overgangskjede i det hele tatt: da er det RUTINGEN, ikke målene, som stopper.
+    if (!got) {
+      if (!sample) sample = { dir, chk: { hard: [], metrics: {} }, grid };
+      const m = `${dir === 'v' ? 'Loddrett' : 'Vannrett'}: de ${grid.cells.length} sonene kan ikke kobles til én bane — ingen to av dem møtes med naboløp som snur i samme ende.`;
+      if (!conflicts.includes(m)) conflicts.push(m);
+    }
+  }
+  const nCells = sample ? sample.grid.cells.length : null;
+  let reason = 'Fant ingen lovlig sammenhengende bane for én kabel.';
+  if (nCells && nCells > 1) reason = `Rommet deler seg i ${nCells} soner i denne retningen, og de kan ikke sys sammen til én sammenhengende bane uten å bryte et hardt krav.`;
+
+  // «2 kabler»: del cellene i to grupper og se om hver for seg FAKTISK gir en lovlig bane.
+  if (sample && sample.grid && nCells && nCells > 1) {
+    const split = _geoTrySplitTwo(sample.grid, legal, prod);
+    if (split) {
+      const fam = (typeof getProductFamily === 'function' ? getProductFamily(prod.id) : []).filter(p => p.cable_length_m);
+      const pick = (lenCm) => fam.slice().sort((a, b) => Math.abs(a.cable_length_m - lenCm / 100) - Math.abs(b.cable_length_m - lenCm / 100))[0];
+      const pa = pick(split.a.lenCm), pb = pick(split.b.lenCm);
+      suggestions.push({ kind: '2 kabler', count: 2,
+        productIds: [pa && pa.id, pb && pb.id],
+        msg: `Del rommet i to soner: den ene tar ${(split.a.lenCm / 100).toFixed(1)} m${pa ? ' (' + pa.name + ')' : ''}, den andre ${(split.b.lenCm / 100).toFixed(1)} m${pb ? ' (' + pb.name + ')' : ''}. Begge er prøvd ut og gir hver sin sammenhengende slynge.` });
+    } else {
+      suggestions.push({ kind: '2 kabler', count: 2, uncertain: true,
+        msg: 'To kabler er trolig svaret, men en ren todeling av dette rommet ga heller ikke to lovlige baner — formen må deles manuelt i soner.' });
+    }
+  }
+  if (ctx.dirs.length > 1 || nCells > 1) suggestions.push({ kind: 'annen retning',
+    msg: 'Prøv den andre retningen — går løpene uavbrutt forbi hindringen, blir rommet én sone.' });
+  if (ctx.targetCm) {
+    const fam = (typeof getProductFamily === 'function' ? getProductFamily(prod.id) : []).filter(p => p.cable_length_m && p.id !== prod.id);
+    const achieved = sample ? sample.chk.metrics.laidCm : null;
+    if (achieved && fam.length) {
+      const want = achieved / 100;
+      const alt = fam.slice().sort((a, b) => Math.abs(a.cable_length_m - want) - Math.abs(b.cable_length_m - want))[0];
+      if (alt) suggestions.push({ kind: 'annen lengde',
+        msg: `Rommet tar ${want.toFixed(1)} m ved lovlig CC. ${alt.name} (${alt.cable_length_m} m) ville passet.`, productId: alt.id });
+    }
+  }
+  return {
+    ok: false, reason, conflicts,
+    achievedLen: sample ? sample.chk.metrics.laidCm : null,
+    targetLen: ctx.targetCm,
+    cc: sample ? sample.chk.metrics.ccMedCm : null,
+    minClearance: sample ? sample.chk.metrics.minClearCm : null,
+    uncovered: [],
+    cells: nCells,
+    suggestions,
+    _diag: ctx.diag
+  };
 }
 
 function _autoFillCableImpl(roomId, productId, opts) {

@@ -4,6 +4,67 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 069: kabelmotor — generateCableGeo, ny motor isolert bak bryter — 2026-10-13
+
+Gren `kabelmotor`. Kenneth sa ja til 068s arkitekturforslag. Ny motor
+`generateCableGeo(roomId, productId, opts)` ved siden av de fire gamle; **ikke** i kaskaden
+(det er 070). Bryter `S.ui.cableGeoEngine`, av som standard. Galleriet fikk `geo` som egen
+kolonne (168 rader nå).
+
+### Resultat, målt
+
+| | Kaskaden i dag | `generateCableGeo` |
+|---|---|---|
+| består alle harde krav | 5 av 28 | **13 av 28** |
+| bryter et hardt krav | **23 av 28** | **0 av 28** |
+| ærlig «ingen løsning» (spec §5) | 0 | 15 |
+
+Den viktigste egenskapen er den siste raden: motoren leverer **aldri** et ulovlig utlegg.
+Ytelse: median 13 ms per rom, maks 83 ms (mål: godt under 500 ms).
+
+**Kenneths bad vannrett: 47,00 m, avvik 0,00 %, CC 11,22, 0 kryssinger, 0 knekker, 0 cm utenfor
+lovlig område, minste klaring 11,22 cm.** Referansen (skew) hadde 203 cm utenfor og −2,03 %.
+
+### Fire ting STEG 0-modellen ikke forutså
+
+1. **Akseparallellhet må måles i grader.** Badets vegger bøyer 5,2 cm over 197 cm = 1,5°. En
+   cm-terskel kastet badet ut sammen med et ekte 18°-rotert rom. Grensen er nå 5°.
+2. **En celle må også deles ved TRINN i grensen**, ikke bare ved kritiske punkter. Uten det
+   havner badets smale bånd (190 cm forbi hakket) i samme celle som den brede delen (250 cm),
+   og like-lengde-utjevningen klipper hele rommet ned til 190 — målt 22,4 m der 46 m skulle vært.
+   Terskel: ett trinn større enn én CC.
+3. **Lengden er en SAGTANN i CC.** N er et heltall: på 400×300 med 96 m gir N=32 → 94,9 m og
+   N=33 → 97,8 m. 96,00 m finnes ikke for noen CC. Søket holder nå også den nærmeste
+   FOR LANGE kandidaten, siden bare den kan trimmes ned med inntrukne vendepunkter. Etter
+   fiksen: 96,00 m, avvik 0,00 %.
+4. **Celleovergangen må være en U-sving, ikke en L-formet omvei.** Første forsøk rutet
+   ortogonalt fra celle til celle; det beinet går tvers over løpenes ender og ga kryssing,
+   klaring 0 og skarpe knekker i hvert eneste flercelle-rom.
+
+### Hva den ikke løser — og hvorfor det er riktig
+
+Hindring midt i rommet (`enHindring`, `flereHindringer`, badet LODDRETT): cellene ligger som
+`0 < {1,2} < 3` langs tverraksen. En bane innom alle fire må ut i en endekolonne og tilbake,
+og tilbaketuren har ingen lovlig korridor. **Geometrisk kjensgjerning, ikke en kodemangel** —
+V6 «løste» det ved å tegne tvers over, som er feilen 068 målte.
+`_geoTrySplitTwo` PRØVER todelingen før den foreslås: begge gruppene rutes for seg, og bare når
+begge gir lovlig bane foreslås to kabler, med målte lengder og produkt i riktig størrelse
+(`enHindring` loddrett: 39,2 m + 39,2 m).
+
+### Åpent til 070/071
+
+- **Dekning er litt lavere enn kaskaden i noen rom** (badet vannrett 88,3 % mot skews 96,5 %;
+  rektangel vannrett 97,1 % mot 98,8 %) — prisen for like lange løp i hver celle. Merge-kriterium
+  §8.2 («ikke dårligere på hvert mål») må Kenneth ta stilling til.
+- `kabelForKort` godtas med CC 48,6 og 44 % dekning — lovlig etter `_ccLimits.maxHard` (50), men
+  ikke et godt utlegg. Hører hjemme i romtypens CC-grenser.
+- Transittkorridor for hindringsrom er mulig senere (som `leadRun` for flerkabel), men koster
+  dekning og bør være et bevisst valg.
+
+Alle 21 regresjonsbatterier grønne.
+
+---
+
 ## 068: kabelmotor — geometrikontroll for harde krav, romgalleri, analyse — 2026-10-13
 
 Gren `kabelmotor` (worktree). Kenneth: «Jeg forstår ikke at kablene i bildet kan krysse

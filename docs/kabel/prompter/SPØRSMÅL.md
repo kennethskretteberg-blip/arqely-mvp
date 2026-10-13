@@ -48,7 +48,26 @@ Claude Code: legg spørsmål under riktig prompt mens du kjører, med valget du 
 
 ## 069
 
--
+Kenneth sa «ja» til 068 uten å svare på de fire spørsmålene. Jeg bygde videre på disse
+antakelsene — alle kan endres uten å bygge om:
+
+1. **Lengdetoleranse ±1 %** som spec §0.4 sier. Motoren treffer den i alle rom den løser
+   (flere på 0,00 %), så den er ikke lenger den bremsen den var i 068.
+2. **Kenneths vannrette referanse skal også rettes.** Den nye motoren legger badet vannrett
+   med 0 cm utenfor lovlig område, der skew hadde 203 cm. Prisen er dekning: 88,3 % mot 96,5 %.
+   **Dette er det eneste stedet den nye motoren er dårligere enn dagens**, og merge-kriterium
+   §8.2 sier «ikke dårligere på hvert mål». Trenger svar før 071.
+3. **`pathEls` + `centerline`** som format → utleggene er auto-utfylling-bare (kan ikke dras).
+4. **Rettvinklede overganger regnes som hardt brudd** på bøyeradius. Motoren lager dem derfor
+   ikke i det hele tatt — den kobler celler med U-svinger, eller svarer «ingen løsning».
+
+Nytt spørsmål fra 069:
+
+5. **Hindring midt i rommet har beviselig ingen lovlig én-kabel-løsning** (cellene ligger
+   `0 < {1,2} < 3`; tilbaketuren har ingen lovlig korridor). Motoren svarer «2 kabler» med
+   prøvde lengder. Alternativet er en **transittkorridor** — reservert plass langs en vegg,
+   slik `leadRun` gjør for flerkabel — som koster dekning. Vil du ha den i 070, eller er
+   «2 kabler» riktig svar for de rommene?
 
 ## 070
 

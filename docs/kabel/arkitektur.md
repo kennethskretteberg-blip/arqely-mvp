@@ -190,3 +190,81 @@ F (søket) er det meste av volumet.
 5. **Flerkabel-soner og fryserom-reserve.** `_buildNCableZones` tvinger felles CC og vinkel;
    `_offsetCableClone` klonerer banen. Begge er bygget for dagens former og må testes mot den
    nye — de står ikke i galleriet i dag.
+
+---
+
+# Som bygget (069, 13.10.2026)
+
+`generateCableGeo(roomId, productId, opts)` ligger i `index.html` ved siden av de fire gamle
+motorene. Den er **ikke** i kaskaden — galleriet og konsollen kaller den direkte. Bryter:
+`S.ui.cableGeoEngine` (av som standard; brukes først i 070).
+
+## Avvik fra forslaget over, og hvorfor
+
+**1. Akseparallellhet måles i grader, ikke i centimeter.**
+Kenneths bad har to vegger som bøyer 5,2 cm over 197 cm og 1,1 cm over 95 cm — altså 1,5° og
+0,6°. En cm-terskel kastet badet ut som «skrått» sammen med et ekte 18°-rotert rom. Grensen er
+nå 5°, og den handler om *kvalitet*, ikke korrekthet: skanlinjene klippes mot det lovlige
+området uansett form, men ved større vinkler blir akseparallelle løp et trappetrinn-dekke, og
+da er skew bedre (spec §0.5).
+
+**2. En celle deles også ved TRINN i grensen, ikke bare ved kritiske punkter.**
+Lærebok-BCD starter en ny celle bare når koblingen mellom to skanlinjer ikke er 1:1. Det er
+ikke nok her, fordi alle løp i én celle utjevnes til cellens felles sveipeområde (den låste
+like-lengde-regelen). Badet sett langsetter har ett smalt bånd (190 cm forbi hakket) og en bred
+del (250 cm) uten at koblingen endrer seg — og utjevningen klipper da HELE rommet ned til 190.
+Målt: 22,4 m lagt der 46 m skulle vært. Terskelen er én CC: et trinn mindre enn avstanden mellom
+to løp er ikke et trinn, det er en skrå vegg, og den skal ikke fragmentere rommet.
+
+**3. Lengden er en sagtann i CC, ikke en jevn kurve.**
+Antall løp N er et heltall. På et 400×300-rom med 96 m kabel gir N=32 → 94,9 m og N=33 → 97,8 m;
+**96,00 m finnes ikke for noen CC.** Søket holder derfor to kandidater: den nærmeste, og den
+nærmeste *som er for lang*. Bare den siste kan trimmes ned med symmetrisk inntrukne vendepunkter,
+og det er den veien lengden faktisk treffes. Etter fiksen: 96,00 m, avvik 0,00 %.
+
+**4. Celleovergangen er en U-SVING, ikke en L-formet omvei.**
+Første forsøk rutet overgangen ortogonalt fra forrige celles utgang til neste celles inngang.
+Det beinet går tvers over løpenes ender og ga kryssing, klaring 0 og skarpe knekker i hvert
+eneste flercelle-rom. Riktig svar: to celler kan bare kobles når løpene deres ligger ved siden
+av hverandre på det globale rutenettet (nøyaktig CC fra hverandre) og begge snur i samme ende.
+Svingen legges på nivået begge når; er cellene flukt i den enden, kortes ingenting. Finnes ingen
+slik kjede, er svaret «ingen løsning» — og det er et ærlig svar, ikke en omvei som ser ut som
+en kabel.
+
+## Hva motoren ikke løser, og hvorfor
+
+**Hindring midt i rommet** (`enHindring`, `flereHindringer`, og badet LODDRETT).
+Cellene ligger som `0 < {1,2} < 3` langs tverraksen: to endekolonner og to celler stablet i
+midten. En bane som skal innom alle fire må ut i en endekolonne og tilbake igjen, og
+tilbaketuren har ingen lovlig korridor — den ville ligget nærmere løpene enn produktets
+minsteavstand. **Dette er en geometrisk kjensgjerning, ikke en mangel i koden.** V6 «løste» det
+ved å tegne en koblingsbane tvers over; det er nettopp feilen 068 målte.
+
+Motoren svarer derfor med spec §5-formatet, og `_geoTrySplitTwo` **prøver todelingen ut** før
+den foreslås: cellene deles i to sammenhengende grupper, hver gruppe rutes for seg, og bare når
+begge gir en lovlig bane foreslås to kabler — med de målte lengdene og et produkt i riktig
+størrelse. For `enHindring` loddrett: 39,2 m + 39,2 m.
+
+En senere runde kan åpne dette med en **validert transittkorridor** (reservert plass langs en
+vegg, slik `leadRun` allerede gjør for flerkabel-soner). Det koster dekning og bør være et
+bevisst valg, ikke en stille omvei.
+
+## Målt, 069
+
+| | Kaskaden i dag | `generateCableGeo` |
+|---|---|---|
+| består alle harde krav | 5 av 28 | **13 av 28** |
+| bryter et hardt krav | **23 av 28** | **0 av 28** |
+| ærlig «ingen løsning» | 0 | 15 |
+
+Ytelse: median **13 ms** per rom, maks 83 ms (`boyUmulig`, der søket uttømmer hele CC-intervallet
+før det gir opp). Målet var «godt under 500 ms».
+
+Kjente svakheter å ta med til 070:
+- **Dekning er litt lavere enn kaskaden i noen rom** (badet vannrett: 88,3 % mot skews 96,5 %;
+  rektangel vannrett 97,1 % mot 98,8 %). Det er prisen for at alle løp i en celle er like lange.
+  Merge-kriterium §8.2 sier «ikke dårligere på hvert mål» — dette må Kenneth ta stilling til.
+- `kabelForKort` godtas med CC 48,6 cm og 44 % dekning. Det er innenfor `_ccLimits.maxHard` (50),
+  altså lovlig etter reglene slik de står — men det er ikke et godt utlegg. Hører hjemme i
+  romtypens CC-grenser, ikke i motoren.
+- Skrå rom returnerer «ikke akseparallelt» og overlates til skew, som spec §0.5 sier.
