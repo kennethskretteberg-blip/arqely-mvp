@@ -1,6 +1,6 @@
-# Kabelmotor 068–071 — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–072 — status, merge-sjekkliste og hva som ikke er løst
 
-Gren `kabelmotor`. Fire commits på toppen av `1519bb0`. `main` er urørt.
+Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
 Spørsmål: `docs/kabel/prompter/SPØRSMÅL.md`
 
@@ -39,53 +39,59 @@ labelen, defektliste og forslag i panelet, egen linje på PDF-romsiden.
 
 28 rader = 14 fixture-rom × 2 retninger. «Før» = kaskaden slik den var ved `1519bb0`.
 
-| | består | bryter et hardt krav | merket for brukeren |
-|---|---|---|---|
-| **Før (068)** | 5 | 23 | **0 — alle stille** |
-| **Etter (070)** | **20** | 8 | **8 — alle merket** |
+| | består | bryter et hardt krav |
+|---|---|---|
+| **Før (068)** | 5 | 23 |
+| **Etter (070)** | 20 | 8 |
+| **Etter (072)** | **22** | **6** |
 
-| Rom | Retn | Før | Etter | Motor etter |
-|---|---|---|---|---|
-| Rektangel 400×300 | v | feil: lengde | **ok** | geo |
-| Rektangel 400×300 | h | ok | ok (uendret) | boustrophedon |
-| L-rom | v | feil: utenfor | **ok** | geo |
-| L-rom | h | feil: utenfor+nærføring+bøy+lengde | **ok** | geo |
-| U-rom | v | feil: utenfor+lengde | **ok** | geo |
-| U-rom | h | feil: utenfor+nærføring+lengde+brudd | **ok** (h→v, annonsert) | geo |
-| Én hindring | v | feil: utenfor+nærføring+lengde+brudd | ⚠ samme | v6 |
-| Én hindring | h | feil: utenfor+kryssing+nærføring+lengde+brudd | ⚠ samme | v6 |
-| Flere hindringer | v | feil: utenfor+nærføring+lengde+brudd | ⚠ samme | v6 |
-| Flere hindringer | h | feil: utenfor+kryssing+nærføring+lengde+brudd | ⚠ samme | v6 |
-| Smal passasje | v | feil: seks brudd | **ok** | geo |
-| Smal passasje | h | feil: fem brudd | **ok** (h→v, annonsert) | geo |
-| Utsparing | v | feil: utenfor+nærføring+lengde+brudd | **ok** (v→h, annonsert) | geo |
-| Utsparing | h | feil: lengde | **ok** | geo |
-| Asymmetriske vegger | v | feil: fem brudd | **ok** (v→h, annonsert) | geo |
-| Asymmetriske vegger | h | ok (dekning 81,1 %) | **ok (dekning 93,9 %)** | geo |
-| Kabel for lang | v/h | feil: bøy+lengde | ⚠ samme | v6 |
-| Kabel for kort | v/h | feil: lengde (+147 %) | **ok** | geo |
-| Bøyeradius umulig | v/h | feil: bøy+lengde | ⚠ samme | v6 |
-| Umulig starthjørne | v | ok (dekning 96,3 %) | **ok (97,4 %)** | geo |
-| Umulig starthjørne | h | feil: lengde | **ok** | geo |
-| Skrå (18°) | v/h | ok | ok (uendret) | skew |
-| **Kenneths bad** | **v** | feil: seks brudd | **ok** (v→h, annonsert) | geo |
-| **Kenneths bad** | **h** | feil: utenfor+lengde | **ok** | geo |
+De to som kom til i 072 er **Kenneths bad loddrett** (var «ingen løsning» — fantes ingen lovlig
+én-kabel-bane) og **`enHindring` i begge retninger** (var ⚠ i begge). Begge løses av
+transittløpet. `enHindring` loddrett erstatter dermed «2 kabler»-forslaget med én kabel.
 
-**15 bedre, 5 uendret, 0 dårligere.** Ingen rom der begge var gyldige tapte dekning.
+Dekningen steg bredt da løpsrutenettet begynte å nå helt ut til det lovlige områdets kant
+(lag C, se §7): rektangel 98,8 → 99,5 %, L-rom 97,9/98,5, U-rom 92,6/93,1,
+asymmetriske vegger 93,9 → 96,1 %.
 
----
+| Rom | v | h |
+|---|---|---|
+| Rektangel 400×300 | ok 97,9 % | ok 99,5 % |
+| L-rom | ok 97,9 % | ok 98,5 % |
+| U-rom | ok 92,6 % | ok 93,1 % |
+| **Én hindring** | **ok 94,2 %** (1 transitt) | **ok 91,8 %** (1 transitt) |
+| Flere hindringer | ⚠ (se §3a) | ⚠ (se §3a) |
+| Smal passasje | ok 90,3 % | ok 90,3 % |
+| Utsparing | ok 95,1 % | ok 93,8 % |
+| Asymmetriske vegger | ok 96,1 % | ok 96,1 % |
+| Kabel for lang | ⚠ (§3b) | ⚠ (§3b) |
+| Kabel for kort | ok | ok |
+| Bøyeradius umulig | ⚠ (§3c) | ⚠ (§3c) |
+| Umulig starthjørne | ok 99,0 % | ok 99,1 % |
+| Skrå (18°) | ok 97,4 % | ok 96,8 % |
+| **Kenneths bad** | **ok 92,7 %** (1 transitt) | ok 88,5 % |
+
+⚠ **Én endring i et rom som alt var gyldig:** rent rektangel vannrett lå på boustrophedon og
+ligger nå på ny motor. Den er bedre på hvert eneste mål (CC 12,40 → 12,60 cm, dekning
+98,8 → 99,5 %, lengdeavvik −0,94 → −0,91 %, klaring 12,40 → 12,60, bøyeradius 6,20 → 6,30) og
+dårligere på ingen, så overtakelsen følger dominans-regelen fra 070. Påstanden i
+`_cableGeometryRegressionTest` er endret fra «identisk utlegg som før» til «identisk ELLER bedre
+på hvert mål», med målingene i koden ved testen. **Dette må godkjennes før merge.**
 
 ## 3. Hva motoren IKKE løser — og hva brukeren får se
 
-### a) Hindring midt i rommet (`enHindring`, `flereHindringer`)
-Cellene ligger som `0 < {1,2} < 3` langs tverraksen: to endekolonner og to celler stablet i
-midten. En bane innom alle fire må ut i en endekolonne og tilbake igjen, og tilbaketuren har
-ingen lovlig korridor — den ville ligget nærmere løpene enn produktets minsteavstand.
-**Dette er en geometrisk kjensgjerning, ikke en mangel i koden.**
+### a) Hindring midt i rommet
+**`enHindring`: LØST i 072.** Transittløpet (§7) reserverer én bane langs hindringens kant, og
+begge retninger gir nå én sammenhengende, lovlig kabel (94,2 % / 91,8 % dekning).
+
+**`flereHindringer`: står igjen.** Målt: rommet deler seg i **10 celler** i begge retninger, og
+**6 av cellepartene er stablet** — de ligger på samme løpsposisjoner, bare oppå hverandre, og
+krever hver sin transittkorridor. Søket bygger varianter i to lag (inntil 2 reserverte baner);
+ingen av de 11–12 variantene × alle Hamilton-rekkefølgene gir en lovlig kjede. Det er altså ikke
+at transitten ikke virker — det er at rommet trenger flere korridorer enn det er plass til.
+Seks reserverte baner i et 4 m²-rom er mesteparten av gulvet, og hver av dem er en kald stripe.
 **Brukeren får:** dagens V6-utlegg, merket ⚠ med defektlista, pluss et prøvd «2 kabler»-forslag
-med målte lengder (`enHindring` loddrett: 39,2 m + 39,2 m) og riktig produkt i hver sone.
-**Vei videre:** en validert transittkorridor (reservert plass langs en vegg, slik `leadRun` gjør
-for flerkabel-soner). Koster dekning — se spørsmål 5.
+med målte lengder. Kenneths beslutning 5 gjelder altså for én hindring; for flere er «2 kabler»
+fortsatt riktig svar.
 
 ### b) Kabel for lang for rommet (`kabelForLang`)
 Et 3 m² rom med 96 m kabel: CC klemmes til produktets minimum 5 cm, og bøyeradien 3,2 cm krever
@@ -106,19 +112,30 @@ akseparallelt» og overlates til skew-motoren, som består galleriet for dem.
 `_buildNCableZones` tvinger felles CC i alle soner (lik W/m² over sømmen). Ny motor søker sin
 egen CC og kjenner ikke bindingen. Soner kjører derfor uendret på dagens kaskade.
 
-### f) ⚠ Utlegg som allerede er lagret
-Kontrollen kjører ved **auto-utlegg**, ikke ved åpning av et prosjekt.
+### f) Utlegg som allerede er lagret — LØST i 072
+Kenneths beslutning 6: «Lagrede utlegg kontrolleres **ved åpning** — bare merkes (⚠), aldri
+endres.» `_geomSjekkLagredeUtlegg()` kjører fra `_restoreProject`, som er DET ENE punktet alle
+lastinger går gjennom (sky, fil, versjon, duplisering). Den skriver bare merkefeltene
+(`_geomDefects`/`_geomMetrics`/`_geomOk`), rører ikke geometrien, markerer ikke prosjektet som
+endret og utløser ingen autolagring. Er noe merket, kommer banneret
+«⚠ N kabelutlegg i prosjektet bryter regler — se ⚠ i romlista.» Kontrollen er asynkron og
+fail-soft: laster ikke polygonbiblioteket, skjer ingenting.
 
-**Men merkingen overlever lagring.** `_geomDefects` (med posisjon) legges på kabelobjektet og
-følger med i prosjekt-JSON-en, og `drawCables` leser den ved tegning. Et utlegg som ble merket da
-det ble lagt, er altså fortsatt merket neste gang prosjektet åpnes — verifisert på
-«Ekebergveien 28», der et ⚠-merket utlegg kom tilbake med alle seks defektene etter lagring.
+### g) Dekningen har et ARITMETISK tak
+Dekning er andelen av netto areal som ligger innenfor ½ CC fra kabelen. En slynge med lengde L og
+avstand CC dekker derfor høyst `L × CC`. For badet: 47,00 m × CC mot 5,887 m² netto.
 
-Hullet som står igjen er derfor smalere enn først beskrevet: det gjelder bare utlegg lagret
-**før** denne serien. De står umerket til kabelen legges på nytt. Å kontrollere alle gamle
-prosjekter ved åpning er en større endring og bør være et bevisst valg.
+| CC | tak | merknad |
+|---|---|---|
+| 11,21 cm (vannrett, N=19) | **89,5 %** | motoren måler 88,5 — 1 poeng under taket |
+| 11,60 cm (loddrett, N=18 + transitt) | **93,1 %** | motoren måler 92,7 |
+| 11,65 cm | 93,0 % | det som trengs for målet «≥ 93 %» |
+| 12,53 cm | 100 % | nøyaktig det referansen (skew) brukte — men den lå 0,83 cm fra veggen |
 
----
+Vannrett kan rutenettet bare tilby CC 11,21 (19 løp) eller 11,87 (18 løp). 18 løp gir **44,31 m**,
+altså 5,7 % for kort — utenfor ±1 %. **Målet «≥ 93 % i begge retninger» er derfor ikke oppnåelig
+vannrett med InFloor 17T 47 m**, og det er ikke en mangel i koden. Kenneths EGEN vannrette fasit,
+bygget og målt, lander på 92,1 % — og bruker da 48,83 m, 3,9 % mer kabel enn produktet har.
 
 ## 4. Legge til et nytt testrom i galleriet
 
@@ -150,39 +167,104 @@ Den kjører alle rom × begge retninger × kaskaden + fem motorer, skriver
 
 ## 5. Merge-sjekkliste (spec §8)
 
-- [x] **badHakk får gyldig utlegg.** Vannrett: **47,00 m, avvik 0,00 %, CC 11,22 cm**,
-      0 kryssinger, 0 knekker, 0 cm utenfor lovlig område, minste klaring 11,22 cm, 1 sammenhengende
-      bane. Loddrett (eksplisitt valgt): ingen gyldig én-kabel-løsning finnes — appen legger
-      vannrett og sier fra, med «Prøv vertikal likevel». På auto: gyldig, uten ⚠.
-- [x] **badHakk vannrett er minst like godt som referansen.** Kenneths referanse (skew) var én
-      slynge med CC 12,5 — men lå **0,83 cm fra veggen der produktet krever 5 cm**, over 213 cm av
-      lengden, og traff lengden med −2,03 %. Ny motor: 0 cm utenfor, lengde 0,00 %.
-      **Unntak som må godkjennes:** dekningen er 88,3 % mot referansens 96,5 %. Det er prisen for
-      at alle løp i en celle er like lange (den låste regelen). Se spørsmål 2.
-- [x] **Ingen galleri-rom dårligere enn før.** 15 bedre, 5 uendret, 0 dårligere (tabell i §2).
-      Målt automatisk av `_cableGeometryRegressionTest`, som feiler hvis et rom som var gyldig
-      blir ugyldig, eller taper dekning.
-- [x] **Alle regresjonsbatterier grønne: 22 batterier.** Herunder nytt
-      `_cableGeometryRegressionTest` (24 påstander) og `_prosjektlaasRegressionTest` (62 påstander).
-      Én gammel påstand er endret, med begrunnelsen i koden ved testen — se endringsloggen for 070.
-- [x] **Ingen endring i lagret dataformat.** Tre ekte prosjekter åpnet **lesende** med begge
-      lagrede former: «Vidsynveien 175» (1 kabel, `runs`/boustrophedon), «Vålerengahjemmet»
-      (4 kabler, `runs`, 15 rom) og «Kiwi Søvik» (16 kabler, `pathEls`/skew). Alle rom gir
-      romstatistikk og tegnet romside uten feil; ingen kabel endret form eller ble merket.
-- [x] **`docs/kabel/galleri.html` oppdatert** — 168 rader (14 rom × 2 retninger × kaskaden +
-      5 motorer), generert etter 070.
+- [x] **badHakk får gyldig utlegg i BEGGE retninger, med én kabel.**
+      Loddrett: **47,24 m, avvik +0,51 %, CC 11,60 cm, dekning 92,7 %**, 0 kryssinger, 0 knekker,
+      minste klaring 11,60 cm, bøyeradius 5,79 cm (krav 3,2), 1 sammenhengende bane, 1 transittløp.
+      Vannrett: **47,00 m, avvik 0,00 %, CC 11,21 cm, dekning 88,5 %**, 0 utenfor.
+- [x] **Kenneths fasit er bygget og kontrollert** (`_cableFasitCable`, vist i galleriet).
+      Loddrett-fasiten **består** — og er numerisk identisk med det motoren legger.
+      Vannrett-fasiten **faller på lengden alene**: formen rommer 48,83 m (+3,9 %) der produktet
+      har 47,00. Alt annet er rent (0 utenfor, 0 kryssinger, klaring 11,21, dekning 92,1 %).
+      Nærmeste lovlige variant er samme form med vendepunktene trukket symmetrisk inn — det er
+      nøyaktig det motoren gjør, og det koster 3,6 prosentpoeng dekning.
+- [ ] **Dekning ≥ 93 % i begge retninger** — loddrett 92,7 %, vannrett 88,5 %.
+      **Ikke oppnåelig** med dette produktet; aritmetikken står i §3g. Kenneth må avgjøre om
+      målet skal justeres, eller om badet skal ha et annet produkt/en annen kabellengde.
+- [x] **Ingen galleri-rom dårligere enn før.** 22 gyldige mot 20, ingen tapte dekning.
+      Ett rom BYTTET motor uten å bli dårligere (rektangel vannrett, se §2) — må godkjennes.
+- [x] **Alle regresjonsbatterier grønne: 22 batterier.** `_cableGeometryRegressionTest` utvidet
+      fra 24 til **36 påstander** (badHakk begge retninger, hindringsrom, åpningskontroll).
+- [x] **Ingen endring i lagret dataformat.** Transittløpet er vanlige punkter i den samme
+      `pathEls`-kjeden; ingen nye felt i prosjekt-JSON-en utover merkefeltene 070 alt skrev.
+- [x] **`docs/kabel/galleri.html` oppdatert** — med Kenneths tegninger i tre kolonner for badet.
 - [ ] **Kenneth har sett galleriet og forhåndsvisningen, og sagt «merge».**
 
 ---
 
 ## 6. Åpne beslutninger før merge
 
-1. **Lengdetoleransen ±1 %** (spørsmål 1). Motoren treffer den i alle rom den løser, flere på
-   0,00 %, så den bremser ikke lenger — men den avgjør fortsatt når ⚠ vises.
-2. **Dekning mot kantavstand i badet** (spørsmål 2): 88,3 % og lovlig, mot 96,5 % og 0,83 cm fra
-   veggen. Dette er det eneste målet der ny motor er dårligere enn dagens.
-3. **Nye utlegg kan ikke dras** (spørsmål 3) — `pathEls`-formen er auto-utfylling-bare.
-4. **Rettvinklede overganger** regnes som hardt bøyebrudd (spørsmål 4).
-5. **Transittkorridor** for hindringsrom (spørsmål 5) — eller er «2 kabler» riktig svar der?
-6. **Skal utlegg lagret FØR denne serien kontrolleres ved åpning** (§3f)? I dag: nei — men
-   merkingen overlever lagring for alt som legges etter 070, så dette gjelder bare gamle data.
+1. **Dekningsmålet ≥ 93 %** (§3g). Vannrett kan ikke nå det med InFloor 17T 47 m. Skal målet
+   justeres til «så nær taket som mulig», eller skal badet ha et annet produkt?
+2. **Rektangel vannrett bytter motor** (§2). Bedre på hvert mål, men det er en endring i et rom
+   som alt var gyldig. Godkjennes?
+3. **Dra-redigering** (Kenneths beslutning 3: uavklart). Ingenting bygget. Spørsmålet står.
+4. **`flereHindringer`** (§3a) beholder «2 kabler» som forslag. Godtas det?
+5. **`auto`-retningen på badet** velger fortsatt vannrett (lengdeavviket 0,00 % veier tyngre i
+   poengsummen enn 4,2 prosentpoeng dekning). Loddrett får man ved å velge retningen selv.
+   Skal poengsummen vekte dekning høyere når begge retninger er lovlige?
+
+---
+
+## 7. Transittløpet (072) — hva det er, og hva det koster
+
+**Problemet, målt:** veggstubben i badet deler de ni venstre løpene i to celler som ligger på
+NØYAKTIG samme løpsposisjoner, bare stablet oppå hverandre. En U-sving kobler to naboløp ved
+siden av hverandre — ikke to biter av samme løp. `_geoHandoff` svarte «samme løpsposisjon», og
+hele retningen endte som «ingen løsning». Det var ikke en geometrisk kjensgjerning; det var en
+manglende korridor.
+
+**Hva et transittløp er:** ett vanlig løp som får sin egen bane i rutenettet —
+(1) et **tverrløp** langs hindringens kant, én CC fra nærmeste U-sving og med kantavstand til
+veggen, (2) en **sving rundt hindringens ende**, (3) et **nedløp** i den reserverte banen, der en
+helt alminnelig U-sving tar over. Det er ikke et hopp, og det får ingen dispensasjon:
+`utenfor`, `naerforing`, `boy` og `kryssing` måles på det som på alt annet.
+
+**Hva det koster:** banen tas ut av cellen den ellers hørte til, så overgangen over den blir én
+bredere halvsirkel (radius CC i stedet for CC/2 — en *slakere* sving, ikke en trangere), og
+stykket av banen som ikke brukes blir en kald stripe. Søket prøver derfor alltid **uten** transitt
+først; færrest transitter vinner når alt annet er likt.
+
+**Kenneths egen tegning viser nøyaktig dette:** over stubben ligger løpene hans på 778 og 801 —
+to CC fra hverandre, med bane ~790 tom. Målt i tegningen med pikselprobe, ikke anslått.
+
+**Grensen:** inntil to transitter per utlegg (to lag varianter). `flereHindringer` trenger seks
+og løses ikke — se §3a.
+
+---
+
+## 8. Lag C: rutenettet når helt ut til kanten (072)
+
+**Før:** `N = floor(W/cc)+1`, og resten av bredden (opptil én CC) ble delt likt på begge sider.
+Symmetrisk — men ytterste løp havnet opptil en halv CC inne i det lovlige området, og hele
+kantstripen lå kaldt uten at noe krav var brutt. Målt på badet: 5 cm-marginbåndet rundt rommet
+er 0,58 m² av 5,89 m² = **9,9 %**.
+
+**Nå:** antallet løp N er den frie HELTALLS-knappen, og CC utledes av den: `cc = W/(N−1)`.
+Rutenettet spenner nøyaktig over det lovlige området, ytterste løp ligger PÅ grensen, og
+dekningen deres rekker helt bort til veggen. Kantavstanden er fortsatt symmetrisk — nå med null
+slark i stedet for lik slark. Kallerens `cc` er et ØNSKE; `grid.cc` er den faktiske, og kabelen
+bærer den videre (uten det siste løy `spacing_cm` om CC, og kontrollen målte dekningen med feil
+radius).
+
+---
+
+## 9. Like lange løp — regelen er BEGRENSET, ikke fjernet
+
+Kenneths beslutning 2: «Løpene skal følge vegger og trinn innenfor sin celle … ikke kappes til
+lik lengde.» Den låste regelen i CLAUDE.md («Equal-length runs (LOCKED) — after generating
+polygon-clipped runs, find the shortest common sweep range and clip ALL runs to match») klippet
+hvert eneste løp i cellen til `[max(lo), min(hi)]`.
+
+**Nå gjelder den bare for PARET som faktisk møtes i en U-sving.** Svingen mellom løp k og k+1
+legges på det nivået begge når; løp mellom to trinn blir nøyaktig så langt dets eget lovlige
+område tillater. Trinn-splitten (et trinn større enn én CC gir en cellegrense) står uendret — uten
+den ville «paret» måtte spenne over et 107 cm sprang, og svingen blitt en lang diagonal: nettopp
+Y-greina den låste regelen verner mot.
+
+⚠ **Ved merge må CLAUDE.md oppdateres.** Den låste regelen der er skrevet for de gamle motorene og
+stemmer ikke lenger for `generateCableGeo`. Endringen er gjort på Kenneths eksplisitte ønske
+(beslutning 2), ikke på eget initiativ.
+
+⚠ **Målt, mot forventning:** like-lengde-regelen var *ikke* der dekningen forsvant. Den klippet
+bare 0,1 % vannrett og 0,7 % loddrett i badet. De manglende prosentpoengene lå i kantstripen
+(§8) og i lengdetrimmingen (§3g).

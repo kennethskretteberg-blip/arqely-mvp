@@ -244,6 +244,95 @@ om `pathEls` (auto-bare) er greit, og om rettvinklede overganger skal regnes som
 
 ---
 
+## 072: Kabelmotor — transittløp, løp som følger veggene, Kenneths fasit — 2026-10-13
+
+Gren `kabelmotor`, **ikke merget**. Kenneths håndtegnede fasit for badet
+(`docs/kabel/fasit/*.png`) er oppgaven; spec `docs/kabel/spec-kabelmotor.md`, status
+`docs/kabel/STATUS.md`.
+
+### STEG 0 (målt før endring)
+
+| | Målt |
+|---|---|
+| badHakk loddrett | **«ingen løsning»** — 4 soner, ingen lovlig kjede |
+| badHakk vannrett | gyldig, 47,00 m, 0,00 %, dekning **88,3 %** |
+| Hvorfor like lange løp? | `_geoBuildGrid` klippet hvert løp til cellens felles `[max(lo), min(hi)]` — CLAUDE.md «Equal-length runs (LOCKED)» |
+| Hva den regelen faktisk kostet | **0,1 %** vannrett, 0,7 % loddrett. Ikke der dekningen forsvant. |
+
+### Rotårsaken til «ingen løsning»
+
+Veggstubben deler de ni venstre løpene i to celler som ligger på **nøyaktig samme
+løpsposisjoner**, bare stablet oppå hverandre. En U-sving kobler to naboløp ved siden av
+hverandre — ikke to biter av samme løp. `_geoHandoff` svarte «samme løpsposisjon», og hele
+retningen falt. Det var ikke en geometrisk kjensgjerning, slik 071 antok; det var en manglende
+korridor.
+
+### Rettet
+
+- **Transittløp (lag D).** Én bane reserveres i det globale rutenettet: tverrløp langs
+  hindringens kant (én CC fra nærmeste sving, kantavstand til veggen) · sving rundt enden ·
+  nedløp i banen. Ikke et hopp, og ingen dispensasjon fra kontrollen. Søket prøver alltid uten
+  transitt først. Inntil to per utlegg.
+- **Løp som følger veggene.** Like-lengde-regelen er BEGRENSET til paret som møtes i en U-sving,
+  ikke hele cellen. Trinn-splitten står — uten den blir svingen en lang diagonal.
+- **Rutenettet når helt ut til kanten (lag C).** `N` er heltalls-knappen og `cc = W/(N−1)`, så
+  ytterste løp ligger PÅ det lovlige områdets grense i stedet for opptil en halv CC inne i det.
+- **Kabelen bærer rutenettets faktiske CC.** `spacing_cm` var kallerens ØNSKE; kontrollen brukte
+  det som dekningsradius og målte 10,93 der løpene lå 11,21 fra hverandre.
+- **Kontroll av lagrede utlegg ved åpning.** `_geomSjekkLagredeUtlegg()` fra `_restoreProject`
+  (det ene punktet alle lastinger går gjennom). Merker bare — endrer aldri geometri, markerer
+  aldri prosjektet som endret, utløser aldri autolagring. Banner når noe er merket.
+- **Galleriet** viser badet i tre kolonner: Kenneths tegning · fasiten bygget og kontrollert ·
+  motoren.
+
+### Resultat
+
+| | før 072 | etter |
+|---|---|---|
+| Galleriet (kaskaden) | 20 ok / 8 feil | **22 ok / 6 feil** |
+| badHakk loddrett | ingen løsning | **47,24 m, +0,51 %, CC 11,60, dekning 92,7 %, 1 transitt** |
+| badHakk vannrett | 88,3 % | 88,5 % |
+| `enHindring` v/h | ⚠ begge | **ok 94,2 % / 91,8 %**, én kabel via transitt |
+
+### Fasiten, bygget og kontrollert
+
+**Loddrett består** — og er numerisk identisk med det motoren legger.
+**Vannrett faller på lengden alene:** formen rommer 48,83 m (+3,9 %) der produktet har 47,00.
+Alt annet er rent (0 utenfor, 0 kryssinger, dekning 92,1 %). Nærmeste lovlige variant er samme
+form med vendepunktene trukket symmetrisk inn — det er nøyaktig det motoren gjør, og det koster
+3,6 prosentpoeng dekning.
+
+### Dekningsmålet ≥ 93 % er ikke oppnåelig vannrett
+
+Dekning har et aritmetisk tak: en slynge med lengde L og avstand CC dekker høyst `L × CC`. Med
+47,00 m i 5,887 m² kreves CC ≥ 11,65 cm for 93 %. Vannrett kan rutenettet bare tilby 11,21 (19
+løp) eller 11,87 (18 løp), og 18 løp gir 44,31 m — 5,7 % for kort. Kenneths egen vannrette fasit
+lander på 92,1 %, med 3,9 % for mye kabel. Loddrett når 92,7 % mot et tak på 93,1 %.
+
+### To funn utover oppgaven
+
+- **Rent rektangel vannrett bytter motor.** Kant-rutenettet gjorde ny motor dominerende også der:
+  CC 12,40 → 12,60, dekning 98,8 → 99,5 %, lengdeavvik −0,94 → −0,91 %, klaring og bøyeradius
+  begge opp. Påstanden i regresjonstesten er endret fra «identisk utlegg som før» til «identisk
+  ELLER bedre på hvert mål». **Må godkjennes før merge.**
+- **CLAUDE.md må oppdateres ved merge.** «Equal-length runs (LOCKED)» stemmer ikke lenger for
+  `generateCableGeo`. Endringen er gjort på Kenneths eksplisitte beslutning 2.
+
+### Målefelle
+
+Tegningene ble lest med **pikselprobe**, ikke anslått: kartlegg cyan romkontur → to
+referansepunkter → skala 3,988 px/cm, og les rødt per rad. Det var slik det ble bekreftet at
+Kenneths loddrette fasit har to CC mellom løpene over stubben (778 og 801, med bane ~790 tom) —
+altså at han selv ofrer en bane til transitten. Et øyemål på det nedskalerte bildet hadde ikke
+skilt 1 CC fra 2 CC.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` utvidet 24 → **36 påstander**. **22 batterier grønne.**
+Galleriet regenerert: 170 rader.
+
+---
+
 ## 066: «Nytt prosjekt» går rett inn — dialogen velger typen — 2026-10-13
 
 Kenneth: «ønsker å komme rett inn på prosjektet når jeg trykker Opprett prosjekt … Fjern
