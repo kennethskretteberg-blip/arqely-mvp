@@ -2876,7 +2876,10 @@ let ROOM_TYPES = [
   // ligge mellom 15 - 30 w/m2 uavhengig type.» Begge er ROMTYPENS område, uavhengig av hvilken
   // kabel som velges. Tidligere sto ccMinCm 20 og wm2Min 10 — begge utenfor det Kenneth nå
   // oppgir, og 10 W/m² er dessuten fysisk uoppnåelig (se `_cableWm2Floor`).
-  {id:'fryserom',  label:'Fryserom/kjølerom', icon:'🧊', targetWm2:20, defaultModType:'cable',
+  // 067: standard 25 W/m² = BL-001 sin godkjente c/c 40 cm med InFloor 10T (10 × 100/40).
+  // Tallet er ikke en smakssak: CC-en utledes av målet (se `_autoFillCableImpl`), så 25 er det
+  // som faktisk gir 40 cm. Med 20 landet auto-utlegget på 49,9 cm — målt 13.10.2026.
+  {id:'fryserom',  label:'Fryserom/kjølerom', icon:'🧊', targetWm2:25, defaultModType:'cable',
    reserveCable:true, wm2Min:15, wm2Max:30, ccMinCm:30, ccMaxCm:50},
   {id:'other',     label:'Annet',    icon:'<svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg>', targetWm2:100, defaultModType:'foil'},
 ];
@@ -2893,6 +2896,128 @@ const _ROOMTYPE_HARDCODED = {
 function _roomTypeFallbackFlag(typeId, key) {
   const t = _ROOMTYPE_HARDCODED[typeId];
   return t ? t[key] : (key === 'reserveCable' ? false : null);
+}
+
+// ═══════════════ 067 · FRYSEROM — BL-001 / DEVI / NEXANS ═══════════════
+// Kildene, i prioritert rekkefølge. Se `docs/spec-fryserom.md` for hele tabellen.
+//
+//  1. BL-001, Thermopads 22.03.2026 («01 - Bekreftede løsninger.md») — BINDENDE for Cenika.
+//     InFloor 10T godkjent for frostsikring av fryseromsgulv. c/c 40 cm → 25 W/m².
+//     Hovedkabel + reservekabel 2,5–5 cm fra hverandre, to termostater med alarm.
+//     Minst 50 mm ned i sand/grus under isolasjonen; innstøping i betong ANBEFALES.
+//     Ansvar for design, effekt og montasje ligger hos prosjekterende.
+//  2. DEVI VGLUB102 s. 8–10 — 15–30 W/m², c/c maks 50 cm, reserve PÅKREVD,
+//     termostat per kabel (hoved +5 °C, reserve +3 °C med alarm), egen kurs + jordfeilvern,
+//     varmetapskontroll P = Δt × U × 1,3.
+//  3. Nexans Varmehåndboka 2020–21 del 2 s. 20 — 10–15 W/m², c/c 50–70 cm, reserve anbefalt.
+//     ⚠ Nexans' c/c 50–70 BRUKES IKKE: DEVI setter maks 50, og BL-001 ligger på 40.
+//     Fra Nexans bruker vi kun følerplasseringen (i rør, i kabeldybde, midt mellom to strenger).
+//
+// CVA-veiledningene sier ingenting om fryserom, så BL-001 er det som gjelder.
+const FRYSEROM = {
+  godkjentFamilie: 'InFloor 10T',          // BL-001: den ENESTE godkjente for fryseromsgulv
+  ccStandardCm: 40,                        // BL-001: c/c 40 cm → 25 W/m² med 10 W/m
+  reserveOffsetCm: 5,                      // BL-001/DEVI: 2,5–5 cm — øvre grense gir mest plass
+  // Varmetapskontroll (DEVI): standardene i eksempelet −25/+5 °C, 200 mm, λ 0,04 → 7,8 W/m².
+  tapRomTempC: -25, tapGrunnTempC: 5, tapIsolasjonMm: 200, tapLambda: 0.04,
+  tapSikkerhetsfaktor: 1.3,                // DEVI: P = Δt × U × 1,3
+  tapMarginFaktor: 1.5,                    // installert skal ligge GODT over — se SPØRSMÅL i 067
+};
+function _isFryserom(room) {
+  const r = (typeof room === 'object' && room) ? room : S.rooms.find(x => x.id === room);
+  return !!r && r.roomType === 'fryserom';
+}
+// Varmetap gjennom gulvet: P = Δt × U × 1,3, der U = λ / tykkelse (DEVI VGLUB102 s. 10).
+// Rommets egne felt overstyrer standardene, slik at et kjølerom på −5 °C kan regnes for seg.
+function _fryseromVarmetap(room) {
+  if (!room) return null;
+  const romT  = room.frysRomTempC      != null ? room.frysRomTempC      : FRYSEROM.tapRomTempC;
+  const grunnT= room.frysGrunnTempC    != null ? room.frysGrunnTempC    : FRYSEROM.tapGrunnTempC;
+  const isolMm= room.frysIsolasjonMm   != null ? room.frysIsolasjonMm   : FRYSEROM.tapIsolasjonMm;
+  const lambda= room.frysLambda        != null ? room.frysLambda        : FRYSEROM.tapLambda;
+  if (!(isolMm > 0) || !(lambda > 0)) return null;
+  const dT = Math.abs(grunnT - romT);
+  const U = lambda / (isolMm / 1000);                 // W/m²K
+  const tapWm2 = dT * U * FRYSEROM.tapSikkerhetsfaktor;
+  const stats = _computeRoomStats(room);
+  const installertWm2 = stats.nettoM2 > 0 ? _roomRatedEffectW(room) / stats.nettoM2 : 0;
+  return { romT, grunnT, isolMm, lambda, dT, U,
+    tapWm2: Math.round(tapWm2 * 10) / 10,
+    installertWm2: Math.round(installertWm2),
+    // ⚠ når installert ikke ligger godt over beregnet tap. Faktoren er et FORSLAG (067 §4).
+    knapp: installertWm2 > 0 && installertWm2 < tapWm2 * FRYSEROM.tapMarginFaktor };
+}
+// Avvik fra BL-001 for ETT rom. Rene ADVARSLER — ingenting blokkeres (Kenneth 067 §3).
+// Én kilde, lest av både sidepanelet og PDF-en, så de aldri kan si hver sin ting.
+function _fryseromAvvik(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!_isFryserom(room)) return [];
+  const ut = [];
+  if (!room.reserveCable) {
+    ut.push({ id: 'reserve', tekst: 'Reservekabel er påkrevd for fryserom (BL-001 / DEVI).' });
+  }
+  // Produkt: bare InFloor 10T er godkjent. Ser på det som FAKTISK ligger i rommet.
+  const fams = new Set();
+  for (const c of (S.cables || []).filter(c => c.roomId === roomId)) {
+    const p = HEATING_PRODUCTS.find(x => x.id === c.productId);
+    if (p) fams.add(p.product_family || p.name);
+  }
+  for (const m of _matsForRoom(roomId)) {
+    const p = HEATING_PRODUCTS.find(x => x.id === m.productId);
+    if (p) fams.add(p.product_family || p.name);
+  }
+  for (const s of _foilCountItemsForRoom(roomId)) {
+    const p = HEATING_PRODUCTS.find(x => x.id === s.productId);
+    if (p) fams.add(p.product_family || p.name);
+  }
+  const feil = [...fams].filter(f => f !== FRYSEROM.godkjentFamilie);
+  if (feil.length) {
+    ut.push({ id: 'produkt', tekst: 'Bare ' + FRYSEROM.godkjentFamilie
+      + ' er godkjent for fryserom (Thermopads BL-001). Rommet har ' + feil.join(', ') + '.' });
+  }
+  const t = _fryseromVarmetap(room);
+  if (t && t.knapp) {
+    ut.push({ id: 'varmetap', tekst: 'Installert ' + t.installertWm2 + ' W/m² ligger under '
+      + FRYSEROM.tapMarginFaktor + ' × beregnet varmetap (' + t.tapWm2.toFixed(1) + ' W/m²).' });
+  }
+  return ut;
+}
+// Montasje- og styringsteksten. ÉN streng-liste, brukt på skjerm og i PDF (067 §3).
+function _fryseromMontasjeLinjer() {
+  return [
+    'Hovedkabel og reservekabel parallelt, 2,5–5 cm mellomrom.',
+    'Egen termostat per kabel: hoved +5 °C, reserve +3 °C med alarm (lys og lyd).',
+    'Egen kurs, vern og jordfeilvern per kabel.',
+    'Kabel minst 50 mm under isolasjonen i sand/grus — anbefalt innstøpt i betong.',
+    'Føler i rør, i kabeldybde, midt mellom to strenger.',
+    'Godkjent løsning: Thermopads BL-001 (22.03.2026).',
+    'Ansvar for design, effekt og montasje ligger hos prosjekterende.',
+  ];
+}
+// Skjermblokk for sidepanelets romdetaljer.
+function _fryseromNotesHtml(roomId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!_isFryserom(room)) return '';
+  const avvik = _fryseromAvvik(roomId);
+  const t = _fryseromVarmetap(room);
+  let h = `<div class="sb-detail-section"><div class="sb-detail-section-hdr" onclick="_toggleDetailSection(this)">
+      <span class="sb-detail-section-toggle">▼</span> Fryserom — BL-001
+    </div><div class="sb-detail-section-body" style="padding:6px 12px 10px">`;
+  for (const a of avvik) {
+    h += `<div style="display:flex;gap:6px;font-size:11px;color:#f59e0b;margin-bottom:6px;line-height:1.35">
+      <span style="flex:0 0 auto">⚠</span><span>${esc(a.tekst)}</span></div>`;
+  }
+  if (t) {
+    h += `<div style="font-size:11px;margin-bottom:8px;line-height:1.4;color:var(--text)">
+      <b>Beregnet varmetap ${t.tapWm2.toFixed(1)} W/m²</b> · installert ${t.installertWm2} W/m²
+      ${t.knapp ? '<span style="color:#f59e0b">⚠</span>' : '<span style="color:#22c55e">✓</span>'}
+      <div style="color:var(--dim);margin-top:2px">Δt ${Math.round(t.dT)} K · ${t.isolMm} mm · λ ${t.lambda} → U ${t.U.toFixed(2)} W/m²K · faktor ${FRYSEROM.tapSikkerhetsfaktor}</div>
+    </div>`;
+  }
+  h += `<div style="font-size:10.5px;color:var(--dim);line-height:1.45">`
+    + _fryseromMontasjeLinjer().map(l => '• ' + esc(l)).join('<br>')
+    + `</div></div></div>`;
+  return h;
 }
 // Rommets romtype som objekt (null når rommet ikke har en).
 function _roomTypeOf(roomId) {
@@ -3089,8 +3214,8 @@ function _reserveCheckboxHtml(roomId) {
       padding:5px 7px;border:1px solid ${on ? 'var(--accent)' : 'var(--brd)'};border-radius:6px;
       background:${on ? 'rgba(34,211,238,0.10)' : 'transparent'}">
     <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleReserveCable(${roomId}, this.checked)">
-    <span><b>Reservekabel</b> <span style="color:var(--dim)">— legges forskjøvet ½ CC, telles i
-    lister, men ikke i effekt</span></span>
+    <span><b>Reservekabel</b> <span style="color:var(--dim)">— legges ${RESERVE_OFFSET_CM} cm
+    ved siden av hovedkabelen (BL-001: 2,5–5 cm), telles i lister, men ikke i effekt</span></span>
   </label>`;
 }
 
@@ -5037,7 +5162,10 @@ function _reserveOffsetSign(cab, room, d) {
 // 10cm forskjøvet slik at det er litt bedre plass til hovedkabel». Klemt til maks ½ CC: med en
 // trang CC (f.eks. 15 cm) ville 10 cm lagt reserven NÆRMERE neste hovedløp enn det den skal
 // erstatte, og da er den ikke lenger en reserve for riktig kabel.
-const RESERVE_OFFSET_CM = 10;
+// 067: BL-001 og DEVI VGLUB102 s. 9 oppgir begge 2,5–5 cm mellom hoved- og reservekabel.
+// Øvre grense valgt — den gir mest plass, som var Kenneths grunn til 10 cm i sin tid (025).
+// Klemmen under holder den uansett under halve CC-en.
+const RESERVE_OFFSET_CM = 5;
 function _reserveOffsetCm(spacingCm) {
   return Math.min(RESERVE_OFFSET_CM, (spacingCm || 0) / 2);
 }
@@ -29490,13 +29618,14 @@ function _reserveCableRegressionTest() {
     {
       const i = ROOM_TYPES.findIndex(t => t.id === 'fryserom');
       const pinned = { ...(ROOM_TYPES[i] || { id: 'fryserom', label: 'Fryserom/kjølerom' }),
-        targetWm2: 20, defaultModType: 'cable', reserveCable: true,
+        targetWm2: 25, defaultModType: 'cable', reserveCable: true,
         wm2Min: 15, wm2Max: 30, ccMinCm: 30, ccMaxCm: 50 };
       if (i >= 0) ROOM_TYPES[i] = pinned; else ROOM_TYPES.push(pinned);
     }
     const rt = _roomTypeDefaults('fryserom');
     check('A: romtypen finnes', 'Fryserom/kjølerom', rt && /fryserom|kjølerom/i.test(rt.label), rt && rt.label);
-    check('A: 20 W/m² er standard', 20, rt.targetWm2 === 20, rt.targetWm2);
+    // 067: BL-001 godkjenner InFloor 10T ved c/c 40 cm = 25 W/m². Sto før 20.
+    check('A: 25 W/m² er standard (BL-001: 10 W/m ved c/c 40)', 25, rt.targetWm2 === 25, rt.targetWm2);
     // Kenneth 12.10.2026: «cc skal ligge mellom 30 og 50 cm uavhengig kabeltype.
     // w/m skal ligge mellom 15 - 30 w/m2 uavhengig type.»
     check('A: romtypens W/m²-område er 15–30', '15–30',
@@ -29532,11 +29661,12 @@ function _reserveCableRegressionTest() {
     check('B: samme produkt og CC', true,
       res[0] && res[0].productId === CAB.id && res[0].spacing_cm === 50, res[0] && res[0].spacing_cm);
     const off = res[0] ? Math.abs(res[0].runs[0].pos_cm - 30) : 0;
-    // Kenneth 06.10.2026: ~10 cm, ikke ½ CC — gir bedre plass til hovedkabelen. Med CC 50 er
-    // ½ CC 25, så 10 er den som gjelder her.
-    check('B: forskjøvet 10 cm (ikke ½ CC)', 10, Math.abs(off - 10) < 0.1, +off.toFixed(2));
-    check('B: trang CC klemmes til ½ CC', 7.5, _reserveOffsetCm(15) === 7.5, _reserveOffsetCm(15));
-    check('B: romslig CC gir 10 cm', 10, _reserveOffsetCm(50) === 10, _reserveOffsetCm(50));
+    // 067: BL-001 og DEVI VGLUB102 s. 9 oppgir 2,5–5 cm. De tre påstandene het før «forskjøvet
+    // 10 cm», «trang CC klemmes til ½ CC» (7,5 ved CC 15) og «romslig CC gir 10 cm» — de kodet
+    // Kenneths anslag fra 06.10, før kildene var samlet.
+    check('B: forskjøvet 5 cm (BL-001/DEVI 2,5–5)', 5, Math.abs(off - 5) < 0.1, +off.toFixed(2));
+    check('B: trang CC klemmes til ½ CC', 2.5, _reserveOffsetCm(5) === 2.5, _reserveOffsetCm(5));
+    check('B: romslig CC gir 5 cm', 5, _reserveOffsetCm(50) === 5, _reserveOffsetCm(50));
 
     // ─── C — usynlig for effekt ───
     const st = _computeRoomStats(S.rooms[0]);
@@ -29587,6 +29717,45 @@ function _reserveCableRegressionTest() {
       _ccOverWarn(CAB, 35, RID) === false, _ccOverWarn(CAB, 35, RID));
     check('F: CC 55 over 50 gir advarsel', true,
       _ccOverWarn(CAB, 55, RID) === true, _ccOverWarn(CAB, 55, RID));
+    // ─── G — 067: BL-001-reglene ───
+    S.rooms[0].roomType = 'fryserom';
+    check('G: reserveavstand er 5 cm (BL-001/DEVI 2,5–5)', 5, RESERVE_OFFSET_CM === 5, RESERVE_OFFSET_CM);
+    check('G: offset klemmes til halve CC-en', 2.5, _reserveOffsetCm(5) === 2.5, _reserveOffsetCm(5));
+    // Varmetap: DEVIs eget eksempel −25/+5 °C, 200 mm, λ 0,04 → 7,8 W/m²
+    const vt = _fryseromVarmetap(S.rooms[0]);
+    check('G: varmetap P = Δt × U × 1,3 gir 7,8 W/m²', 7.8, vt && vt.tapWm2 === 7.8, vt && vt.tapWm2);
+    check('G: U = λ / tykkelse = 0,20 W/m²K', 0.2, vt && Math.abs(vt.U - 0.2) < 1e-9, vt && vt.U);
+    // Avvik: reserve av
+    S.rooms[0].reserveCable = false;
+    const aRes = _fryseromAvvik(RID);
+    check('G: reserve av gir påkrevd-advarsel', true,
+      aRes.some(a => a.id === 'reserve'), aRes.map(a => a.id).join(','));
+    S.rooms[0].reserveCable = true;
+    // Avvik: feil produkt. Testkabelen heter FRYSETEST, ikke InFloor 10T.
+    const aProd = _fryseromAvvik(RID);
+    check('G: annet produkt enn InFloor 10T gir advarsel', true,
+      aProd.some(a => a.id === 'produkt'), aProd.map(a => a.id).join(','));
+    // ... og ingen produktadvarsel når familien ER den godkjente
+    const _famFør = CAB.product_family; CAB.product_family = 'InFloor 10T';
+    _invalidateCableCache();
+    const aOk = _fryseromAvvik(RID);
+    // ⚠ `check` setter ok = !!betingelse, så en NEGATIV påstand må skrives negert — ellers
+    // feiler den nettopp når koden er riktig (samme felle som _kundelenkeRegressionTest
+    // advarer mot ved `checkIkke`). Gikk i den her 13.10.2026.
+    check('G: InFloor 10T gir INGEN produktadvarsel', 'ingen produktadvarsel',
+      !aOk.some(a => a.id === 'produkt'), aOk.map(a => a.id).join(',') || '(ingen)');
+    CAB.product_family = _famFør; _invalidateCableCache();
+    // Et vanlig rom skal aldri få fryseromsblokken
+    S.rooms[0].roomType = 'bathroom';
+    check('G: ikke-fryserom gir ingen avvik og ingen blokk', true,
+      _fryseromAvvik(RID).length === 0 && _fryseromNotesHtml(RID) === '',
+      _fryseromAvvik(RID).length + ' avvik');
+    S.rooms[0].roomType = 'fryserom';
+    check('G: montasjeteksten nevner 2,5–5 cm, +5/+3 °C, 50 mm og BL-001', true,
+      (() => { const t = _fryseromMontasjeLinjer().join(' ');
+        return /2,5–5 cm/.test(t) && /\+5 °C/.test(t) && /\+3 °C/.test(t)
+            && /50 mm/.test(t) && /BL-001/.test(t); })(),
+      _fryseromMontasjeLinjer().length + ' linjer');
     check('F: CC 48 innenfor 30-50 gir INGEN advarsel', false,
       _ccOverWarn(CAB, 48, RID) === false, _ccOverWarn(CAB, 48, RID));
     S.rooms[0].roomType = 'bathroom';
@@ -47014,6 +47183,9 @@ function _renderDetailPanel(roomId) {
   const rt = room.roomType ? ROOM_TYPES.find(t => t.id === room.roomType) : null;
   title.textContent = esc(room.name);
   let h = '';
+  // 067: fryseromsblokken øverst — avvik fra BL-001, varmetapskontroll og montasjetekst.
+  // No-op for alle andre romtyper.
+  h += _fryseromNotesHtml(roomId);
 
   // Strips section
   const roomStrips = _stripsForRoom(roomId);
@@ -61423,6 +61595,15 @@ async function exportPDF(opts) {
     const _noteLines = (_docNotes && _docNotes.trim())
       ? doc.splitTextToSize(_docNotes.trim(), pw - 4) : null;
     const _noteH = _noteLines ? (8 + Math.max(10, _noteLines.length * 4 + 4)) : 0;
+    // 067: fryseromsblokken (avvik + varmetap + montasje) budsjetteres sammen med de andre
+    // blokkene, slik at HELE rommet fortsatt får plass på én A4-side — bildet krymper i stedet
+    // for at blokken havner på side 2. Tom for alle andre romtyper.
+    const _frysAvvik = (typeof _fryseromAvvik === 'function') ? _fryseromAvvik(room.id) : [];
+    const _frysTap   = (typeof _fryseromVarmetap === 'function' && _isFryserom(room)) ? _fryseromVarmetap(room) : null;
+    const _frysMont  = _isFryserom(room) ? _fryseromMontasjeLinjer() : [];
+    const _frysH = _frysMont.length
+      ? (8 + (_frysAvvik.length * 4) + (_frysTap ? 8 : 0) + _frysMont.length * 3.6 + 4)
+      : 0;
 
     // Room drawing — height budgeted so key figures + spec fit on the SAME page.
     try {
@@ -61440,7 +61621,7 @@ async function exportPDF(opts) {
       const metricsH = 30;                       // header + 2 rows + divider
       const specH = 5 + 5 + _specRowCount * 5 + 4; // header + colrow/line + rows + pad
       const gaps = 12;                           // air between blocks
-      const availImgH = (pageH - bottom) - y - metricsH - specH - _hindZoneH - _ccLineH - _noteH - gaps;
+      const availImgH = (pageH - bottom) - y - metricsH - specH - _hindZoneH - _ccLineH - _noteH - _frysH - gaps;
       let imgH = Math.min(imgW * aspect, Math.max(40, availImgH)); // floor 40 mm
       let imgW2 = imgW, imgX = M;
       if (imgH < imgW * aspect) {                // height-constrained → keep aspect
@@ -61724,6 +61905,32 @@ async function exportPDF(opts) {
         doc.text(ln, M + 2, y + 4 + i * 4);
       });
       y += boxH + 4;
+    }
+
+    // ── 067: Fryserom — BL-001 ──
+    // Samme kilde som sidepanelet (`_fryseromAvvik` / `_fryseromVarmetap` /
+    // `_fryseromMontasjeLinjer`), så skjerm og PDF aldri kan si hver sin ting.
+    if (_frysMont.length) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(20, 60, 130);
+      doc.text('Fryserom — godkjent løsning BL-001 (Thermopads 22.03.2026)', M, y); y += 4;
+      for (const a of _frysAvvik) {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(190, 120, 20);
+        doc.text('! ' + a.tekst, M + 2, y); y += 4;
+      }
+      if (_frysTap) {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(30, 40, 60);
+        doc.text('Beregnet varmetap ' + _frysTap.tapWm2.toFixed(1) + ' W/m\u00b2  \u00b7  installert '
+          + _frysTap.installertWm2 + ' W/m\u00b2 ' + (_frysTap.knapp ? '!' : 'OK'), M + 2, y); y += 3.6;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5); doc.setTextColor(120, 130, 150);
+        doc.text('\u0394t ' + Math.round(_frysTap.dT) + ' K \u00b7 ' + _frysTap.isolMm + ' mm \u00b7 '
+          + '\u03bb ' + _frysTap.lambda + ' \u2192 U ' + _frysTap.U.toFixed(2) + ' W/m\u00b2K \u00b7 faktor '
+          + FRYSEROM.tapSikkerhetsfaktor, M + 2, y); y += 4;
+      }
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(60, 70, 90);
+      for (const ln of _frysMont) { doc.text('\u2022 ' + ln, M + 2, y); y += 3.6; }
+      y += 2;
     }
   }
 

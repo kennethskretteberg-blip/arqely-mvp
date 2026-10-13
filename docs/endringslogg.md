@@ -4,6 +4,73 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 067: Fryserom kontrollert mot BL-001 / DEVI / Nexans — 2026-10-13
+
+Kenneth samlet kildene; denne økten gikk gjennom 025 og 063–064f mot dem.
+Spec: `docs/spec-fryserom.md`. Migrasjon: `supabase-migration-fryserom-067.sql`.
+
+### Avvikstabell (STEG 0, før endring)
+
+| # | Regel | I dag | |
+|---|---|---|---|
+| 1 | Standard **25** W/m² | `targetWm2 20`, DB global 20 | **Avvik** |
+| 2 | c/c standard **40**, aldri > 50 | auto-utlegg landet på **49,9 cm**; område 30–50 OK | **Avvik** |
+| 3 | 15–30 W/m² | `wm2Min 15`/`wm2Max 30`, fysisk gulv 20 → 20–30. 10T@40 = 25 slipper | OK |
+| 4 | Reserve **2,5–5 cm** | `RESERVE_OFFSET_CM = 10` | **Avvik** |
+| 5 | Reserve påkrevd | arves som `true`, men kan slås av **uten advarsel** | **Avvik** |
+| 6 | Reserve i liste, ikke effekt | 2 stk / 1000 W begge veier | OK |
+| 7 | Bare InFloor 10T godkjent | 17T i fryserom gav **40 W/m²** uten noen advarsel | **Avvik** |
+| 8 | To termostater + alarm, egne kurser | ingenting for fryserom | **Mangler** |
+| 9 | Montasjetekst | fantes ikke noe sted | **Mangler** |
+| 10 | Varmetap P = Δt × U × 1,3 | fantes ikke | **Mangler** |
+| 11 | Kilder i koden | kun «Kenneth 06.10 / 12.10» | **Avvik** |
+
+### Rettet
+
+- **Standard 25 W/m².** BL-001: InFloor 10T ved c/c 40 → 10 × 100/40 = 25.
+- **c/c 40 følger av seg selv.** CC **lagres ikke noe sted** — den utledes av målet og
+  kabellengden i `_autoFillCableImpl`. Med mål 25 lander auto-utlegget på **39,4 cm** (målt).
+  Den ene kilden er altså rommets `targetWm2`; ingen egen CC-standard er innført.
+- **Reserveavstand 5 cm** (`RESERVE_OFFSET_CM`), klemmen `min(…, cc/2)` beholdt. Teksten i
+  avkrysningen sa «forskjøvet ½ CC» og er rettet.
+- **Advarsler** (`_fryseromAvvik`, én kilde for skjerm og PDF): reserve av, annet produkt enn
+  InFloor 10T, og installert effekt under 1,5 × beregnet varmetap. Ingenting blokkeres.
+- **Montasje- og styringstekst** (`_fryseromMontasjeLinjer`, sju linjer) i romdetaljene og på
+  PDF-ens romside.
+- **Varmetapskontroll** (`_fryseromVarmetap`): P = Δt × U × 1,3, U = λ/tykkelse. DEVIs eksempel
+  −25/+5 °C, 200 mm, λ 0,04 → **7,8 W/m²**. Rommet kan overstyre alle fire feltene.
+  Påvirker aldri utlegget.
+- **Kildene** står nå i koden (`FRYSEROM`-blokken) og i spec-en, med begrunnelse for at Nexans'
+  c/c 50–70 ikke brukes.
+
+### Verifisering
+
+Test 1–4 kjørt mot ekte katalog: 48 m² fryserom → mål 25, InFloor 10T 1200W 120m,
+**c/c 39,4 cm**, installert 25 W/m², reserve **5 cm**, «2 stk (1 + 1 reserve)», effekt 1200 W,
+varmetap 7,8 ✓. c/c 55 og 25 gir advarsel, 40 ikke. 12 W/m² → 20, 35 → 30. 17T gir
+produktadvarsel; reserve av gir påkrevd-advarsel. PDF-en verifisert ved å bytte ut
+`jspdf.jsPDF` med en spion — hele blokken skrives, 103 tekstkall, ingen feil.
+
+`_reserveCableRegressionTest` utvidet til **46 påstander**. Hele batteriet grønt.
+
+### To målefeller
+
+- **jsPDF legger `text` og `save` som EGNE EGENSKAPER på instansen**, ikke på prototypen. To
+  PDF-målinger var derfor verdiløse («0 tekstkall») før jeg byttet ut selve konstruktøren.
+- **`check(navn, false, betingelse, …)` feiler nettopp når koden er riktig.**
+  `_kundelenkeRegressionTest` advarer mot akkurat dette; jeg gikk i den likevel.
+
+### SPØRSMÅL (ikke bygget)
+
+1. **Ekstra strenger langs yttervegger** (c/c 5–7,5 cm) og **varme ved søylefot** (DEVI) — skal
+   appen foreslå dette, eller holder det å nevne det i montasjeteksten? I dag: ingen av delene.
+2. **Termostater i materiallista** — skal to termostater + alarmmodul legges til automatisk for
+   fryserom, og hvilke artikler? I dag legges de ikke inn.
+3. **Terskelen for varmetapskontrollen** står på **1,5 ×** beregnet tap (`FRYSEROM.tapMarginFaktor`).
+   Mitt forslag, ikke bekreftet.
+
+---
+
 ## 064: Fryserom — CC 30–50 cm og 15–30 W/m², og en arvefeil i romtype-lagene — 2026-10-12
 
 Kenneth: «cc skal ligge mellom 30 og 50 cm uavhengig kabel type. w/m skal ligge mellom
