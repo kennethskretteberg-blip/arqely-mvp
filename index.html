@@ -26635,6 +26635,830 @@ function _finishCableAutoFill(cable, room, prod, opts) {
   }
   return cable;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 068 · KABEL-GEOMETRIKONTROLL + ROMGALLERI   (spec: docs/kabel/spec-kabelmotor.md)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Dette er MÅLEINSTRUMENTET for serien 068-071, ikke en motor. Alt her LESER: ingen funksjon
+// under endrer S, en kabel eller kaskaden. Kontrollen er fasiten alle motorer - gamle og nye -
+// måles mot (spec §0.1).
+//
+// STEG 0-FUNN som bestemte hvordan kontrollen er bygget (målt 13.10.2026 på Kenneths bad,
+// «Ekebergveien 28» / rom «Bad», 5,887 m², InFloor 17T 800W 47m):
+//
+//   Det finnes INGEN ENKELT SANNHET om hvor kabelen ligger. Tre uavhengige
+//   representasjoner er i bruk samtidig, og de er UENIGE:
+//     (1) RENDEREREN  - drawCables + _drawCableUTurns (halvsirkel med radius
+//         |posB-posA|/2 + to «vegg-følgende» forlengelseslinjer) + connections[] som EGNE
+//         baner. Dette er det Kenneth SER. Det finnes bare i skjermkoordinater.
+//     (2) LENGDEN     - _calcTotalCableLength: bue = PI*spacing_cm/2 (altså CC/2, IKKE den
+//         faktiske avstanden mellom løpene) + max(diffLo,diffHi) som forlengelse. Teller
+//         ALDRI connections[].
+//     (3) DEKNINGEN   - _cableWorldSegments: løper + rekonstruerte halvsirkler, men hopper
+//         over både vegg-følgelinjene OG connections[].
+//   Målt på v6/vertikal i badet: (1) 5102,5 cm, (2) 4698,6 cm, (3) 4639,1 cm. Et avvik på
+//   404 cm - 8,6 % av en 47 m kabel - mellom det som tegnes og det som rapporteres.
+//
+// Derfor bygger kontrollen EN senterlinje (_cableCenterlinePaths) som er tro mot RENDEREREN,
+// og måler alt mot den. Alt annet ville målt noe brukeren ikke ser.
+//
+// Lovlig område regnes med clipper-lib@6.4.2 (spec §0.6) - ekte polygon-offset, ikke
+// `_offsetPolygon`s hjørnevis forskyvning. Mangler biblioteket (ingen nett), faller
+// kontrollen tilbake på _offsetPolygon og setter `metrics.legalAreaApprox = true`.
+
+const _CBL_CLIPPER_URL = 'https://cdn.jsdelivr.net/npm/clipper-lib@6.4.2/clipper.js';
+const _CBL_SC = 100;          // clipper regner i heltall -> 1 cm = 100 enheter (0,01 cm oppløsning)
+let _cblClipperState = 'idle'; // 'idle' | 'loading' | 'ready' | 'failed'
+let _cblClipperPromise = null;
+
+function _cblClipperReady() { return _cblClipperState === 'ready' && typeof ClipperLib !== 'undefined'; }
+
+// Lastes som de andre bibliotekene (pinnet versjon, jsDelivr) - men LAT, bare når kontrollen
+// faktisk kjøres, så vanlig bruk av appen ikke får et nytt blokkerende skript i <head>.
+function _cblLoadClipper() {
+  if (_cblClipperPromise) return _cblClipperPromise;
+  if (typeof ClipperLib !== 'undefined') { _cblClipperState = 'ready'; return Promise.resolve(true); }
+  _cblClipperState = 'loading';
+  _cblClipperPromise = new Promise(resolve => {
+    const s = document.createElement('script');
+    s.src = _CBL_CLIPPER_URL;
+    s.onload = () => { _cblClipperState = (typeof ClipperLib !== 'undefined') ? 'ready' : 'failed'; resolve(_cblClipperState === 'ready'); };
+    s.onerror = () => { _cblClipperState = 'failed'; resolve(false); };
+    document.head.appendChild(s);
+  });
+  return _cblClipperPromise;
+}
+
+// ─── Senterlinje, tro mot rendereren ────────────────────────────────────────────────────────
+// Returnerer en LISTE av ordnede punktbaner (world-cm). Flere baner = banen er BRUTT; det er
+// en målt egenskap, ikke en feil i leseren. Rekkefølgen i hver bane er den kabelen faktisk
+// følger, så bue-/knekk-måling blir riktig.
+function _cableCenterlinePaths(cable) {
+  const polys = [];
+  const push = pl => { const d = _cblDedupe(pl); if (d.length > 1) polys.push(d); };
+
+  // pathEls-form (skew): elementene er ALLEREDE en ordnet bane i world-cm.
+  if (cable.pathEls && cable.pathEls.length) {
+    let cur = [];
+    for (const el of cable.pathEls) {
+      if (el.kind === 'run' && el.a && el.b) cur.push({ x: el.a.x, y: el.a.y }, { x: el.b.x, y: el.b.y });
+      else if (el.kind === 'uturn') {
+        if (el.pts && el.pts.length > 1) for (const p of el.pts) cur.push({ x: p.x, y: p.y });
+        else if (el.from && el.to) cur.push({ x: el.from.x, y: el.from.y }, { x: el.to.x, y: el.to.y });
+      } else if (el.kind === 'connector' && el.from && el.to) {
+        // Samme L-form _cableWorldSegments og _drawCableSkewPath bruker.
+        cur.push({ x: el.from.x, y: el.from.y }, { x: el.from.x, y: el.to.y }, { x: el.to.x, y: el.to.y });
+      }
+    }
+    push(cur);
+    return polys;
+  }
+
+  // runs-form: løper + U-svinger slik _drawCableUTurns tegner dem.
+  const dir = cable.direction, runs = (cable.runs || []).filter(r => r.segments && r.segments.length);
+  if (!runs.length) return polys;
+  const brk = (cable._chainBreaks && cable._chainBreaks.length) ? new Set(cable._chainBreaks) : null;
+  const P = (perp, sweep) => dir === 'v' ? { x: perp, y: sweep } : { x: sweep, y: perp };
+  let cur = [];
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    const hiOut = _uTurnIsHigh(i, dir, cable.startCorner);
+    const segs = run.segments.slice().sort((a, b) => a.start_cm - b.start_cm);
+    // Løpet traverseres mot den enden U-svingen går ut fra. Hull MELLOM segmenter i samme løp
+    // legges inn som de er - de er `brudd`, og skal måles, ikke skjules.
+    const order = hiOut ? segs : segs.slice().reverse();
+    for (const s of order) {
+      if (hiOut) cur.push(P(run.pos_cm, s.start_cm), P(run.pos_cm, s.end_cm));
+      else       cur.push(P(run.pos_cm, s.end_cm),   P(run.pos_cm, s.start_cm));
+    }
+    const next = runs[i + 1];
+    if (!next) continue;
+    if (brk && brk.has(i)) { push(cur); cur = []; continue; }
+    const segA = hiOut ? run.segments[run.segments.length - 1] : run.segments[0];
+    const segB = hiOut ? next.segments[next.segments.length - 1] : next.segments[0];
+    const endA = hiOut ? segA.end_cm : segA.start_cm;
+    const endB = hiOut ? segB.end_cm : segB.start_cm;
+    const common = hiOut ? Math.min(endA, endB) : Math.max(endA, endB);
+    if (Math.abs(endA - common) > 0.5) cur.push(P(run.pos_cm, common));       // vegg-følge, løp A
+    const posA = run.pos_cm, posB = next.pos_cm, rad = Math.abs(posB - posA) / 2;
+    if (rad >= 0.5) {
+      // Halvsirkel med radius = HALVE AVSTANDEN MELLOM LØPENE (det rendereren tegner), ikke CC/2.
+      const sgn = hiOut ? 1 : -1, N = 24, mid = (posA + posB) / 2, half = (posA - posB) / 2;
+      for (let t = 0; t <= N; t++) {
+        const ph = Math.PI * t / N;
+        cur.push(P(mid + half * Math.cos(ph), common + sgn * rad * Math.sin(ph)));
+      }
+    }
+    if (Math.abs(endB - common) > 0.5) cur.push(P(next.pos_cm, common));      // vegg-følge, løp B
+  }
+  push(cur);
+  // connections[] tegnes som SELVSTENDIGE baner i drawCables - de kobles ikke inn i løplista,
+  // så de blir egne baner her også. Nettopp derfor blir «antall frie ender» stort for V6.
+  for (const c of (cable.connections || [])) if (c.path && c.path.length > 1) push(c.path.map(p => ({ x: p.x, y: p.y })));
+  if (cable.leadRun) {
+    const lr = cable.leadRun;
+    if (dir === 'h') push([{ x: lr.wallPos, y: lr.fromPerp }, { x: lr.wallPos, y: lr.toPerp }]);
+    else             push([{ x: lr.fromPerp, y: lr.wallPos }, { x: lr.toPerp, y: lr.wallPos }]);
+  }
+  return polys;
+}
+function _cblDedupe(pts) {
+  const out = [];
+  for (const p of pts) { const l = out[out.length - 1]; if (!l || Math.hypot(p.x - l.x, p.y - l.y) > 0.01) out.push(p); }
+  return out;
+}
+
+// ─── Små geometri-hjelpere (lokale, for a ikke røre noe eksisterende) ───────────────────────
+const _cblLen = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+const _cblOrient = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+function _cblPtSegDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  let t = l2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  return Math.hypot(a.x + t * dx - p.x, a.y + t * dy - p.y);
+}
+function _cblSegsCross(p1, p2, p3, p4) {
+  const d1 = _cblOrient(p3, p4, p1), d2 = _cblOrient(p3, p4, p2);
+  const d3 = _cblOrient(p1, p2, p3), d4 = _cblOrient(p1, p2, p4);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+function _cblSegSegDist(p1, p2, p3, p4) {
+  if (_cblSegsCross(p1, p2, p3, p4)) return 0;
+  return Math.min(_cblPtSegDist(p1, p3, p4), _cblPtSegDist(p2, p3, p4), _cblPtSegDist(p3, p1, p2), _cblPtSegDist(p4, p1, p2));
+}
+function _cblPolyDistToBoundary(x, y, pts) {
+  let m = Infinity;
+  for (let i = 0; i < pts.length; i++) { const d = _cblPtSegDist({ x, y }, pts[i], pts[(i + 1) % pts.length]); if (d < m) m = d; }
+  return m;
+}
+
+// ─── Lovlig område: rom - kantavstand - hindringer - forbudte soner ─────────────────────────
+// Returnerer { paths:[[{x,y}..]..], approx:bool }. `paths` er ytterkonturer; et hull inne i
+// området kommer som en egen bane med motsatt omløpsretning - signedDist under håndterer det
+// ved a bruke ren «inni ytre, utenfor hull»-logikk via ClipperLib.PointInPolygon på alle baner.
+function _cableLegalRegion(roomId, productId) {
+  const room = S.rooms.find(r => r.id === roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const margin = _effectiveMarginCm(productId, roomId);
+  const blockers = [];
+  for (const h of S.hindrings.filter(h => h.roomId === roomId && h.points && h.points.length >= 3)) blockers.push(h.points);
+  for (const z of (S.zones || []).filter(z => z.roomId === roomId && z.type === 'forbidden' && z.points && z.points.length >= 3)) blockers.push(z.points);
+
+  if (!_cblClipperReady()) {
+    // Fallback: hjørnevis offset (samme som motorene bruker) - mindre riktig i konkave hjørner.
+    const inner = _offsetPolygon(room.points, margin);
+    return { paths: inner && inner.length >= 3 ? [inner] : [], blockers, margin, approx: true };
+  }
+  const toC = pts => pts.map(p => ({ X: Math.round(p.x * _CBL_SC), Y: Math.round(p.y * _CBL_SC) }));
+  const fromC = p => p.map(q => ({ x: q.X / _CBL_SC, y: q.Y / _CBL_SC }));
+  const off = (pts, delta) => {
+    const co = new ClipperLib.ClipperOffset(2, 0.25 * _CBL_SC);
+    co.AddPath(toC(pts), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+    const sol = new ClipperLib.Paths();
+    co.Execute(sol, delta * _CBL_SC);
+    return sol;
+  };
+  const inner = off(room.points, -margin);
+  if (!inner.length) return { paths: [], blockers, margin, approx: false };
+  let result = inner;
+  for (const b of blockers) {
+    const grown = off(b, margin);
+    if (!grown.length) continue;
+    const cl = new ClipperLib.Clipper();
+    cl.AddPaths(result, ClipperLib.PolyType.ptSubject, true);
+    cl.AddPaths(grown, ClipperLib.PolyType.ptClip, true);
+    const out = new ClipperLib.Paths();
+    cl.Execute(ClipperLib.ClipType.ctDifference, out, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    result = out;
+  }
+  return { paths: result.map(fromC), blockers, margin, approx: false };
+}
+
+// Hvor langt UTENFOR det lovlige området ligger punktet? <=0 = innenfor (returnerer 0).
+function _cblOutsideBy(x, y, legal, room) {
+  const paths = legal.paths || [];
+  if (!paths.length) return _cblPolyDistToBoundary(x, y, room.points) + legal.margin;
+  // Odd-even over alle baner: ytre og hull vekselvirker riktig.
+  let insideCount = 0, nearest = Infinity;
+  for (const p of paths) {
+    if (ptInPoly(x, y, p)) insideCount++;
+    const d = _cblPolyDistToBoundary(x, y, p);
+    if (d < nearest) nearest = d;
+  }
+  return (insideCount % 2 === 1) ? 0 : nearest;
+}
+
+// ─── Parallelle løp: eneste lovlige sted a MÅLE CC (spec §3) ────────────────────────────────
+// Samler lange rette segmenter, grupperer dem på retning, og måler vinkelrett avstand mellom
+// naboer innenfor hver retningsgruppe. Virker for både runs-form og pathEls-form (skew).
+function _cblParallelRuns(segs, ccHint) {
+  const minLen = Math.max(2 * (ccHint || 10), 15);
+  const longs = segs.filter(s => _cblLen(s.a, s.b) >= minLen);
+  const groups = [];
+  for (const s of longs) {
+    let ang = Math.atan2(s.b.y - s.a.y, s.b.x - s.a.x);
+    if (ang < 0) ang += Math.PI;                              // retning uten fortegn
+    let g = groups.find(q => Math.abs(q.ang - ang) < 0.035 || Math.abs(Math.abs(q.ang - ang) - Math.PI) < 0.035);
+    if (!g) { g = { ang, segs: [] }; groups.push(g); }
+    g.segs.push(s);
+  }
+  // Største retningsgruppe = hovedretningen. Innenfor den: offset langs normalen.
+  groups.sort((a, b) => b.segs.reduce((t, s) => t + _cblLen(s.a, s.b), 0) - a.segs.reduce((t, s) => t + _cblLen(s.a, s.b), 0));
+  const main = groups[0];
+  if (!main) return { offsets: [], gaps: [], ang: null, nOther: 0 };
+  const nx = -Math.sin(main.ang), ny = Math.cos(main.ang);
+  const lanes = [];
+  for (const s of main.segs) {
+    const o = s.a.x * nx + s.a.y * ny;
+    let lane = lanes.find(l => Math.abs(l.o - o) < 0.5);
+    if (!lane) { lane = { o, len: 0 }; lanes.push(lane); }
+    lane.len += _cblLen(s.a, s.b);
+  }
+  lanes.sort((a, b) => a.o - b.o);
+  const gaps = [];
+  for (let i = 0; i + 1 < lanes.length; i++) {
+    const g = lanes[i + 1].o - lanes[i].o;
+    // Overlapp i lengderetningen kreves for at avstanden skal VÆRE en CC (ellers er det to
+    // løp som ligger etter hverandre, ikke ved siden av hverandre).
+    if (g > 0.5) gaps.push({ gap: g, lo: lanes[i].o, hi: lanes[i + 1].o, lenLo: lanes[i].len, lenHi: lanes[i + 1].len });
+  }
+  return { offsets: lanes, gaps, ang: main.ang, nOther: groups.length - 1 };
+}
+
+// ─── Hovedkontrollen ───────────────────────────────────────────────────────────────────────
+// _cableGeometryCheck(cable, room) -> { ok, hard:[...], soft:[...], metrics }
+// Hver defekt: { kind, at:{x,y}, value, msg }.  REN LESING.
+function _cableGeometryCheck(cable, room, opts) {
+  opts = opts || {};
+  const hard = [], soft = [];
+  const prod = HEATING_PRODUCTS.find(p => p.id === cable.productId) || {};
+  const tolPct = opts.lengthTolPct != null ? opts.lengthTolPct : 1;     // spec §0.4: +/-1 %
+  const minSpacing = (prod.min_spacing_mm || 0) / 10;                   // kabel-til-kabel klaring
+  const minBend = (prod.min_bend_radius_mm || 0) / 10;
+  const targetCm = prod.cable_length_m ? prod.cable_length_m * 100 : null;
+
+  const polys = _cableCenterlinePaths(cable);
+  const segs = [];
+  // `s0`/`s1` = segmentets intervall i kumulativ BANELENGDE. Det, ikke indeksnummeret, er målet
+  // på «hvor langt unna langs kabelen» to deler er — se klaringssveipet nedenfor. Intervallet må
+  // til: et 378 cm langt løp har midtpunktet 189 cm fra sin egen naboskjøt, så et midtpunkt-mål
+  // hadde sluppet gjennom to segmenter som deler endepunkt.
+  polys.forEach((pl, pi) => {
+    let run = 0;
+    for (let i = 0; i + 1 < pl.length; i++) {
+      const L = _cblLen(pl[i], pl[i + 1]);
+      if (L > 1e-4) segs.push({ a: pl[i], b: pl[i + 1], poly: pi, idx: i, s0: run, s1: run + L, L });
+      run += L;
+    }
+  });
+  const laidCm = segs.reduce((t, s) => t + _cblLen(s.a, s.b), 0);
+
+  if (!segs.length) {
+    return { ok: false, hard: [{ kind: 'brudd', at: null, value: 0, msg: 'Kabelen har ingen geometri.' }], soft: [],
+             metrics: { laidCm: 0, targetCm, polys: 0, openEnds: 0 } };
+  }
+
+  const legal = _cableLegalRegion(cable.roomId, cable.productId) || { paths: [], blockers: [], margin: 0, approx: true };
+
+  // ── UTENFOR lovlig område (hard: > 1 cm utenfor)
+  let outsideLen = 0, worstOut = 0, worstOutAt = null;
+  for (const s of segs) {
+    const L = _cblLen(s.a, s.b), n = Math.max(2, Math.ceil(L / 2));
+    for (let t = 0; t < n; t++) {
+      const u = (t + 0.5) / n;
+      const x = s.a.x + (s.b.x - s.a.x) * u, y = s.a.y + (s.b.y - s.a.y) * u;
+      const ov = _cblOutsideBy(x, y, legal, room);
+      if (ov > 0.01) { outsideLen += L / n; if (ov > worstOut) { worstOut = ov; worstOutAt = { x, y }; } }
+    }
+  }
+  if (worstOut > 1) hard.push({ kind: 'utenfor', at: worstOutAt, value: +worstOut.toFixed(2),
+    msg: `Kabelen ligger ${worstOut.toFixed(1)} cm utenfor lovlig område (kantavstand ${legal.margin} cm) - ${Math.round(outsideLen)} cm av banen.` });
+
+  // ── KRYSSING + NÆRFØRING, over ett rutenett-indeksert segmentpar-sveip
+  // Et rom med 5 cm CC og 200 m kabel gir godt over tusen segmenter. Et rått O(n²)-sveip over
+  // dem (og over hele galleriet) er for tregt, så segmentene bøttes i et rutenett med
+  // cellestørrelse = søkeradius: to segmenter kan bare ligge nærmere enn radien om de deler
+  // eller grenser til samme celle. Resultatet er identisk med det rå sveipet innenfor radien —
+  // og `minClear` er bare interessant når den er LITEN, så en radius på 2 × kravet (minst 1 ×
+  // CC, minst 10 cm) er rikelig. Finner sveipet ingen nærføring innenfor radien, rapporteres
+  // `minClear` som null — aldri som et falskt lite tall.
+  const _searchR = Math.max(minSpacing * 2, (cable.spacing_cm || 10), 10);
+  const _turnArc = Math.PI * (cable.spacing_cm || 10) / 2 * 0.98;
+  const _grid = new Map();
+  const _gkey = (gx, gy) => gx + ',' + gy;
+  segs.forEach((s, si) => {
+    const x0 = Math.min(s.a.x, s.b.x), x1 = Math.max(s.a.x, s.b.x);
+    const y0 = Math.min(s.a.y, s.b.y), y1 = Math.max(s.a.y, s.b.y);
+    for (let gx = Math.floor(x0 / _searchR); gx <= Math.floor(x1 / _searchR); gx++)
+      for (let gy = Math.floor(y0 / _searchR); gy <= Math.floor(y1 / _searchR); gy++) {
+        const k = _gkey(gx, gy); let b = _grid.get(k); if (!b) { b = []; _grid.set(k, b); } b.push(si);
+      }
+  });
+  let crossings = 0, firstCross = null, minClear = Infinity, clearAt = null;
+  const _seenPair = new Set();
+  for (const [k, bucket] of _grid) {
+    const gp = k.split(','), gx = +gp[0], gy = +gp[1];
+    const cand = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      const nb = _grid.get(_gkey(gx + dx, gy + dy)); if (nb) for (const si of nb) cand.push(si);
+    }
+    for (const i of bucket) for (const j of cand) {
+      if (j <= i) continue;
+      const pk = i * segs.length + j; if (_seenPair.has(pk)) continue; _seenPair.add(pk);
+      const A = segs[i], B = segs[j];
+      // Kryssing: naboer i samme bane (delt endepunkt) hoppes over; alt annet teller.
+      if (!(A.poly === B.poly && Math.abs(A.idx - B.idx) < 2) && _cblSegsCross(A.a, A.b, B.a, B.b)) {
+        crossings++;
+        if (!firstCross) firstCross = { x: (A.a.x + A.b.x) / 2, y: (A.a.y + A.b.y) / 2 };
+      }
+      // Nærføring: to deler av kabelen er bare ULIKE deler når de ligger langt nok fra hverandre
+      // LANGS kabelen. Et indeksvindu duger ikke: en U-sving tegnes som 24 punkter, og to prøver
+      // 4 indekser fra hverandre i SAMME sving ligger 2,4 cm fra hverandre rent geometrisk — det
+      // er svingens egen krumning, ikke to kabeldeler. (Målt: det ga «nærføring» i 117 av 140
+      // utlegg, et rent rektangel med CC 12,4 inkludert.) Vinduet er derfor banelengden til en
+      // hel U-sving, π × CC/2: nærmere enn det langs kabelen KAN man ikke komme uten å være i
+      // samme sving. Hvor trang svingen selv er, måles av `bøy` — spec §3 holder nettopp CC,
+      // klaring og bøyeradius fra hverandre, og det gjør kontrollen her også.
+      // Terskelen er bevisst LITT UNDER en hel U-sving (× 0,98): to nabo-løp ligger nøyaktig én
+      // svinglengde fra hverandre langs kabelen, og de SKAL måles mot hverandre.
+      if (A.poly === B.poly && Math.max(0, Math.max(A.s0, B.s0) - Math.min(A.s1, B.s1)) < _turnArc) continue;
+      const d = _cblSegSegDist(A.a, A.b, B.a, B.b);
+      if (d < minClear) { minClear = d; clearAt = { x: A.a.x, y: A.a.y }; }
+    }
+  }
+  if (crossings > 0) hard.push({ kind: 'kryssing', at: firstCross, value: crossings,
+    msg: `Kabelen krysser seg selv ${crossings} ${crossings === 1 ? 'sted' : 'steder'}.` });
+  if (minClear === Infinity || minClear > _searchR) minClear = null;
+  if (minSpacing > 0 && minClear != null && minClear < minSpacing - 0.01) hard.push({ kind: 'nærføring', at: clearAt, value: +minClear.toFixed(2),
+    msg: `Minste klaring mellom to kabeldeler er ${minClear.toFixed(1)} cm - produktet krever ${minSpacing} cm.` });
+
+  // ── BØY (radius < min_bend_radius)
+  // En knekk (retningsendring > 20 grader mellom to lange segmenter) har radius 0 - kabelen kan
+  // ikke lages slik. En jevn bue (samplet halvsirkel: ~7-11 grader per punkt) får lokal radius
+  // ut av buelengde/vinkelendring. Terskelen skiller rent mellom de to.
+  let minBendR = Infinity, bendAt = null, kinks = 0;
+  for (const pl of polys) for (let i = 1; i + 1 < pl.length; i++) {
+    const a = pl[i - 1], b = pl[i], c = pl[i + 1];
+    const L1 = _cblLen(a, b), L2 = _cblLen(b, c);
+    if (L1 < 1e-6 || L2 < 1e-6) continue;
+    const v1 = { x: (b.x - a.x) / L1, y: (b.y - a.y) / L1 }, v2 = { x: (c.x - b.x) / L2, y: (c.y - b.y) / L2 };
+    const dot = Math.max(-1, Math.min(1, v1.x * v2.x + v1.y * v2.y));
+    const turn = Math.acos(dot);
+    if (turn < 1e-4) continue;                       // rett fram
+    let R;
+    if (turn > 20 * Math.PI / 180) { R = 0; kinks++; }
+    else R = ((L1 + L2) / 2) / turn;
+    if (R < minBendR) { minBendR = R; bendAt = { x: b.x, y: b.y }; }
+  }
+  if (minBendR === Infinity) minBendR = null;
+  if (minBend > 0 && minBendR != null && minBendR < minBend - 0.01) hard.push({ kind: 'bøy', at: bendAt, value: +minBendR.toFixed(2),
+    msg: minBendR < 0.01
+      ? `Banen har ${kinks} skarp${kinks === 1 ? ' knekk' : 'e knekker'} (radius 0) - produktet krever ${minBend} cm bøyeradius.`
+      : `Minste bøyeradius er ${minBendR.toFixed(1)} cm - produktet krever ${minBend} cm.` });
+
+  // ── LENGDE (lagt senterlinje mot produktlengde, +/-tolPct)
+  let lenDevPct = null;
+  if (targetCm) {
+    lenDevPct = (laidCm - targetCm) / targetCm * 100;
+    if (Math.abs(lenDevPct) > tolPct) hard.push({ kind: 'lengde', at: null, value: +lenDevPct.toFixed(2),
+      msg: `Lagt lengde ${(laidCm / 100).toFixed(2)} m mot produktets ${(targetCm / 100).toFixed(2)} m - avvik ${lenDevPct > 0 ? '+' : ''}${lenDevPct.toFixed(1)} % (grense +/-${tolPct} %).` });
+  }
+
+  // ── CC (en global CC innenfor tillatt intervall)
+  const ccHint = cable.spacing_cm || null;
+  const par = _cblParallelRuns(segs, ccHint);
+  // CC måles mellom PARALLELLE LØP (spec §3) — ikke mellom vilkårlige kabeldeler. For runs-form
+  // er løpsrutenettet selve fasiten (`runs[].pos_cm`), og den brukes direkte: en koblingsbanes
+  // sveip-bein er parallelt med løpene og ligger ofte tett på et av dem, men er ikke et løp —
+  // tas det med, blir «CC» en blanding av CC og klaring, nettopp det spec §3 advarer mot.
+  // At koblingsbeinet ligger for nær et løp fanges av `nærføring` over, som er det riktige målet.
+  // For pathEls-form (skew) finnes ingen løpsliste, og da er parallell-sveipet eneste kilde.
+  let gapVals;
+  if (cable.runs && cable.runs.length > 1) {
+    const pos = cable.runs.filter(r => r.segments && r.segments.length).map(r => r.pos_cm).sort((a, b) => a - b);
+    gapVals = [];
+    for (let i = 0; i + 1 < pos.length; i++) { const g = pos[i + 1] - pos[i]; if (g > 0.01) gapVals.push(g); }
+    gapVals.sort((a, b) => a - b);
+  } else {
+    gapVals = par.gaps.map(g => g.gap).sort((a, b) => a - b);
+  }
+  const ccMin = gapVals.length ? gapVals[0] : null;
+  const ccMax = gapVals.length ? gapVals[gapVals.length - 1] : null;
+  const ccMed = gapVals.length ? gapVals[Math.floor(gapVals.length / 2)] : null;
+  const lim = _ccLimits(prod, cable.roomId);
+  const ccForLimit = ccMed != null ? ccMed : ccHint;
+  if (ccForLimit != null && (ccForLimit < lim.minSp - 0.01 || ccForLimit > lim.maxHard + 0.01)) {
+    hard.push({ kind: 'cc', at: null, value: +ccForLimit.toFixed(2),
+      msg: `Målt CC ${ccForLimit.toFixed(1)} cm er utenfor tillatt intervall ${lim.minSp}-${lim.maxHard} cm.` });
+  }
+
+  // ── BRUDD (hull > 1 cm mellom elementer, eller mer enn to frie ender)
+  const ends = [];
+  for (const pl of polys) ends.push({ p: pl[0] }, { p: pl[pl.length - 1] });
+  let openEnds = 0, worstGap = 0, gapAt = null;
+  for (let i = 0; i < ends.length; i++) {
+    let nearest = Infinity;
+    for (let j = 0; j < ends.length; j++) { if (i === j) continue; const d = _cblLen(ends[i].p, ends[j].p); if (d < nearest) nearest = d; }
+    if (nearest > 1) { openEnds++; if (nearest < Infinity && nearest > worstGap && nearest < 1e6) { worstGap = nearest; gapAt = ends[i].p; } }
+  }
+  if (polys.length > 1 || openEnds > 2) hard.push({ kind: 'brudd', at: gapAt, value: openEnds,
+    msg: `Banen er ikke sammenhengende: ${polys.length} atskilte deler, ${openEnds} frie ender (en hel kabel har 2).` });
+
+  // ── Dekning
+  const areas = roomAreas(room);
+  const nettoCm2 = areas.net;
+  const flat = segs.map(s => ({ x1: s.a.x, y1: s.a.y, x2: s.b.x, y2: s.b.y }));
+  const ccForCov = ccMed || ccHint || 10;
+  let coveragePct = null;
+  if (nettoCm2 > 0) {
+    const sig = 'chk:' + cable.roomId + ':' + segs.length + ':' + Math.round(laidCm) + ':' + Math.round(ccForCov * 10) + ':' + Math.round(nettoCm2);
+    coveragePct = Math.min(100, _cableCoveredCm2(room, flat, ccForCov, nettoCm2, sig) / nettoCm2 * 100);
+  }
+
+  // ── Myke mål
+  if (ccMed != null && gapVals.length) {
+    const bad = gapVals.filter(g => g < 0.8 * ccMed || g > 1.25 * ccMed);
+    if (bad.length) soft.push({ kind: 'cc_variasjon', at: null, value: +(ccMax / ccMin).toFixed(2),
+      msg: `CC varierer fra ${ccMin.toFixed(1)} til ${ccMax.toFixed(1)} cm (median ${ccMed.toFixed(1)}) — ${bad.length} av ${gapVals.length} naboavstander utenfor 0,8–1,25 × median.` });
+  }
+  if (par.offsets.length >= 2 && par.ang != null) {
+    // Kantasymmetri: avstand fra ytterste løp på hver side til rommets vegg, langs normalen.
+    const nx = -Math.sin(par.ang), ny = Math.cos(par.ang);
+    const wallOffs = room.points.map(p => p.x * nx + p.y * ny);
+    const wLo = Math.min(...wallOffs), wHi = Math.max(...wallOffs);
+    const dLo = par.offsets[0].o - wLo, dHi = wHi - par.offsets[par.offsets.length - 1].o;
+    const asym = Math.abs(dLo - dHi);
+    if (asym > 2) soft.push({ kind: 'kant_asymmetri', at: null, value: +asym.toFixed(2),
+      msg: `Kantavstanden er usymmetrisk: ${dLo.toFixed(1)} cm på en side, ${dHi.toFixed(1)} cm på den andre.` });
+  }
+  if (ccMed != null) {
+    // «Hopp»: en rett overgang lenger enn 1 x CC som verken er et løp eller en sving.
+    const laneOffs = par.offsets.map(l => l.o);
+    const nx = par.ang != null ? -Math.sin(par.ang) : 0, ny = par.ang != null ? Math.cos(par.ang) : 1;
+    let jumps = 0, worstJump = 0, jumpAt = null;
+    for (const s of segs) {
+      const L = _cblLen(s.a, s.b);
+      if (L <= ccMed) continue;
+      const oA = s.a.x * nx + s.a.y * ny, oB = s.b.x * nx + s.b.y * ny;
+      const onLane = laneOffs.some(o => Math.abs(o - oA) < 0.5 && Math.abs(o - oB) < 0.5);
+      if (onLane) continue;                       // dette ER et løp
+      jumps++; if (L > worstJump) { worstJump = L; jumpAt = s.a; }
+    }
+    if (jumps) soft.push({ kind: 'hopp', at: jumpAt, value: +worstJump.toFixed(1),
+      msg: `${jumps} rett${jumps === 1 ? ' overgang' : 'e overganger'} på tvers, lengste ${worstJump.toFixed(0)} cm (over 1 x CC = ${ccMed.toFixed(1)} cm).` });
+  }
+  if (coveragePct != null && coveragePct < 95) soft.push({ kind: 'dekning', at: null, value: +coveragePct.toFixed(1),
+    msg: `Dekning ${coveragePct.toFixed(0)} % av netto areal (${((1 - coveragePct / 100) * nettoCm2 / 10000).toFixed(2)} m² ligger kaldt).` });
+
+  const metrics = {
+    engine: cable._engine || ((cable.pathEls && cable.pathEls.length) ? 'pathEls' : 'runs'),
+    form: (cable.pathEls && cable.pathEls.length) ? 'pathEls' : 'runs',
+    laidCm: +laidCm.toFixed(1),
+    reportedCm: cable.totalLength_cm != null ? +cable.totalLength_cm.toFixed(1) : null,
+    targetCm,
+    lenDevPct: lenDevPct == null ? null : +lenDevPct.toFixed(2),
+    reportedDevPct: (targetCm && cable.totalLength_cm != null) ? +(((cable.totalLength_cm - targetCm) / targetCm) * 100).toFixed(2) : null,
+    ccMinCm: ccMin == null ? null : +ccMin.toFixed(2),
+    ccMedCm: ccMed == null ? null : +ccMed.toFixed(2),
+    ccMaxCm: ccMax == null ? null : +ccMax.toFixed(2),
+    ccFieldCm: ccHint == null ? null : +ccHint.toFixed(2),
+    minClearCm: minClear == null ? null : +minClear.toFixed(2),
+    minSpacingReqCm: minSpacing,
+    minBendCm: minBendR == null ? null : +minBendR.toFixed(2),
+    minBendReqCm: minBend,
+    kinks,
+    crossings,
+    openEnds,
+    polys: polys.length,
+    outsideLenCm: +outsideLen.toFixed(1),
+    worstOutsideCm: +worstOut.toFixed(2),
+    marginCm: legal.margin,
+    coveragePct: coveragePct == null ? null : +coveragePct.toFixed(1),
+    nRuns: (cable.runs || []).length,
+    nConnections: (cable.connections || []).length,
+    legalAreaApprox: !!legal.approx
+  };
+  if (S.ui && S.ui.debugCableEngine) {
+    console.log('[cable-check]', room && room.name, metrics.engine, hard.length ? 'FEIL' : 'ok',
+      { hard: hard.map(d => d.kind), soft: soft.map(d => d.kind), metrics });
+  }
+  return { ok: hard.length === 0, hard, soft, metrics, _polys: polys, _legal: legal };
+}
+
+// ─── Fixture-rom (spec §6) ──────────────────────────────────────────────────────────────────
+// Faste testrom i KODEN, aldri i skyen. `badHakk` er Kenneths eget bad, hentet som GEOMETRI
+// fra prosjektet «Ekebergveien 28» / rom «Bad» (punkter, ingen hindringer, ingen soner, ingen
+// kundedata). Alle andre er konstruerte. Alle bruker InFloor 17T (kantavstand 5 cm, minste
+// klaring 5 cm, bøyeradius 3,2 cm) så tallene er sammenlignbare på tvers av rommene.
+const _cableFixtures = {
+  rektangel: { name: 'Rektangel 400x300', klasse: 'rett', productId: 31,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}] },
+
+  lRom: { name: 'L-rom 400x300 - 150x150', klasse: 'rettvinklet uregelmessig', productId: 29,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:150},{x:250,y:150},{x:250,y:300},{x:0,y:300}] },
+
+  uRom: { name: 'U-rom 400x300, 120x180 midtsjakt', klasse: 'rettvinklet uregelmessig', productId: 29,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:260,y:300},{x:260,y:120},{x:140,y:120},{x:140,y:300},{x:0,y:300}] },
+
+  enHindring: { name: 'Rektangel med én hindring', klasse: 'hindring', productId: 31,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}],
+    hindrings: [[{x:150,y:110},{x:250,y:110},{x:250,y:190},{x:150,y:190}]] },
+
+  flereHindringer: { name: 'Rektangel med tre hindringer', klasse: 'hindring', productId: 30,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}],
+    hindrings: [[{x:60,y:60},{x:150,y:60},{x:150,y:130},{x:60,y:130}],
+                [{x:250,y:40},{x:340,y:40},{x:340,y:110},{x:250,y:110}],
+                [{x:170,y:200},{x:280,y:200},{x:280,y:265},{x:170,y:265}]] },
+
+  smalPassasje: { name: 'To rom bundet av 40 cm passasje', klasse: 'smal passasje', productId: 29,
+    points: [{x:0,y:0},{x:180,y:0},{x:180,y:130},{x:280,y:130},{x:280,y:0},{x:460,y:0},
+             {x:460,y:300},{x:280,y:300},{x:280,y:170},{x:180,y:170},{x:180,y:300},{x:0,y:300}] },
+
+  utsparing: { name: 'Rektangel med 100x12 utsparing i veggen', klasse: 'utsparing', productId: 31,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300},{x:0,y:206},{x:100,y:206},{x:100,y:194},{x:0,y:194}] },
+
+  asymmetriskeVegger: { name: 'Asymmetriske vegger (to trinn)', klasse: 'rettvinklet uregelmessig', productId: 29,
+    points: [{x:0,y:0},{x:420,y:0},{x:420,y:95},{x:360,y:95},{x:360,y:215},{x:420,y:215},
+             {x:420,y:300},{x:0,y:300},{x:0,y:215},{x:55,y:215},{x:55,y:95},{x:0,y:95}] },
+
+  kabelForLang: { name: 'Lite rom 200x150, 96 m kabel', klasse: 'grensetilfelle', productId: 31,
+    points: [{x:0,y:0},{x:200,y:0},{x:200,y:150},{x:0,y:150}] },
+
+  kabelForKort: { name: 'Rektangel 400x300, 10 m kabel', klasse: 'grensetilfelle', productId: 15,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}] },
+
+  boyUmulig: { name: 'Rektangel 400x250, 200 m kabel (CC under 2x bøyeradius)', klasse: 'grensetilfelle', productId: 38,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:250},{x:0,y:250}] },
+
+  umuligStartHjorne: { name: 'Rektangel med forbudt sone i bl-hjørnet', klasse: 'grensetilfelle', productId: 31,
+    points: [{x:0,y:0},{x:400,y:0},{x:400,y:300},{x:0,y:300}],
+    zones: [{ type: 'forbidden', points: [{x:0,y:220},{x:110,y:220},{x:110,y:300},{x:0,y:300}] }] },
+
+  skraa: { name: 'Rotert rektangel 380x260 (18 grader)', klasse: 'skrå - utenfor ny motor (spec §0.5)', productId: 29,
+    points: (() => { const a = 18 * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+      return [[0,0],[380,0],[380,260],[0,260]].map(([x,y]) => ({ x: +(x*c - y*s).toFixed(2), y: +(x*s + y*c).toFixed(2) })); })() },
+
+  badHakk: { name: 'Kenneths bad (Ekebergveien 28) - hakk, skrå vegger, trinn', klasse: 'referanse', productId: 24,
+    note: 'Geometri hentet fra prosjektets koordinater 13.10.2026. Horisontalt utlegg er referansen.',
+    points: [{x:677.3441806134307,y:-832.885907250416},{x:939.8811406779755,y:-832.885907250416},
+             {x:939.8811406779755,y:-911.695189703124},{x:977.2146001589126,y:-911.695189703124},
+             {x:977.2146001589126,y:-1044.785441649596},{x:874.6141654723125,y:-1044.785441649596},
+             {x:677.0521994970343,y:-1039.5663902737895},{x:677.0521994970343,y:-940.3028224146952},
+             {x:777.0418631707688,y:-940.3028224146952},{x:777.0418631707688,y:-928.2902504108553},
+             {x:678.3860035099954,y:-928.2902504108553}] }
+};
+
+// ─── Romgalleriet: kjører kaskaden OG hver motor for seg ────────────────────────────────────
+// Bygger en midlertidig scene i S for hver fixture, kjører, måler, og legger ALT tilbake.
+// Ingenting lagres; autosave røres ikke (ingen mutasjon markeres).
+function _cableGallerySnapshotState() {
+  return { rooms: S.rooms, cables: S.cables, hindrings: S.hindrings, zones: S.zones, strips: S.strips,
+           mats: S.mats, matPaths: S.matPaths, plates: S.plates, floors: S.floors, parts: S.parts,
+           groups: S.groups, floatingDims: S.floatingDims,
+           activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId,
+           vf: Object.assign({}, S.varmefolie), counters: Object.assign({}, S.counters) };
+}
+function _cableGalleryRestoreState(snap) {
+  S.rooms = snap.rooms; S.cables = snap.cables; S.hindrings = snap.hindrings; S.zones = snap.zones;
+  S.strips = snap.strips; S.mats = snap.mats; S.matPaths = snap.matPaths; S.plates = snap.plates;
+  S.floors = snap.floors; S.parts = snap.parts; S.groups = snap.groups; S.floatingDims = snap.floatingDims;
+  S.ui.activeFloorId = snap.activeFloorId; S.ui.activePartId = snap.activePartId;
+  S.varmefolie = snap.vf; S.counters = snap.counters;
+  if (typeof _cableCovCache !== 'undefined' && _cableCovCache.clear) _cableCovCache.clear();
+}
+function _cableGalleryBuildScene(fx) {
+  S.rooms = []; S.cables = []; S.hindrings = []; S.zones = []; S.strips = [];
+  S.mats = []; S.matPaths = []; S.plates = []; S.groups = []; S.floatingDims = [];
+  S.floors = [{ id: 1, name: 'P1' }]; S.ui.activeFloorId = 1;
+  S.parts = []; S.ui.activePartId = null;
+  S.counters = Object.assign({}, S.counters, { nextCableId: 1 });
+  const room = { id: 1, name: fx.name, points: fx.points.map(p => ({ x: p.x, y: p.y })),
+    area: compArea(fx.points), floorId: 1, partId: null, wallThicknessCm: 10, shape: 'polygon',
+    walls: [], dims: null, color: null, roomType: null, targetWm2: null };
+  S.rooms = [room];
+  let hid = 1;
+  for (const pts of (fx.hindrings || [])) S.hindrings.push({ id: hid++, roomId: 1, points: pts.map(p => ({ x: p.x, y: p.y })) });
+  let zid = 1;
+  for (const z of (fx.zones || [])) S.zones.push({ id: zid++, roomId: 1, type: z.type, points: z.points.map(p => ({ x: p.x, y: p.y })) });
+  if (typeof _cableCovCache !== 'undefined' && _cableCovCache.clear) _cableCovCache.clear();
+  return room;
+}
+// Kjør ÉN navngitt motor isolert. Returnerer et kabelobjekt i samme form kaskaden ville laget.
+function _cableGalleryRunEngine(which, roomId, prodId, dir, corner) {
+  const room = S.rooms.find(r => r.id === roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === prodId);
+  if (!room || !prod) return null;
+  try {
+    if (which === 'skew') {
+      const ang = dir ? _skAngleForDir(room.points, dir) : null;
+      const res = generateCableSkew(roomId, prodId, ang);
+      if (!res || !res.pathEls || !res.pathEls.length) return null;
+      return { id: 1, roomId, productId: prodId, _engine: 'skew', pathEls: res.pathEls, start: res.start,
+        end: res.end, angleDeg: res.angleDeg, direction: dir, spacing_cm: res.spacing_cm, cc_mm: res.cc_mm,
+        totalLength_cm: res.totalLength_cm, coverage: res.coverage, openLen: res.openLen, nCells: res.nCells,
+        runs: [], connections: [] };
+    }
+    if (which === 'boustrophedon') {
+      const res = generateCableBoustrophedon(roomId, prodId, dir, corner);
+      if (!res || !res.runs.length) return null;
+      return { id: 1, roomId, productId: prodId, _engine: 'boustrophedon', direction: res.direction,
+        spacing_cm: res.spacing_cm, startCorner: res.startCorner, runs: res.runs,
+        totalLength_cm: res.totalLength_cm, cells: res.cells, connections: [] };
+    }
+    if (which === 'v6') {
+      const res = generateCableV6(roomId, prodId, dir, corner);
+      if (!res || !res.runs.length) return null;
+      return { id: 1, roomId, productId: prodId, _engine: 'v6', direction: res.direction || dir,
+        spacing_cm: res.spacing_cm, startCorner: corner, runs: res.runs, totalLength_cm: res.totalLength_cm,
+        cells: res.cells, connections: res.connections || [] };
+    }
+    if (which === 'serpentine') {
+      const nettoM2 = roomAreas(room).net / 10000;
+      const minSp = (prod.min_spacing_mm || 50) / 10, maxSp = _ccSearchMaxCm(prod, room);
+      const sp = prod.cable_length_m
+        ? Math.max(minSp, Math.min(maxSp, (nettoM2 / prod.cable_length_m) * 100))
+        : Math.max(minSp, Math.min(maxSp, (prod.recommended_spacing_mm || 100) / 10));
+      const res = generateCableSerpentine(roomId, prodId, dir, sp, corner);
+      if (!res || !res.runs.length) return null;
+      return { id: 1, roomId, productId: prodId, _engine: 'serpentine', direction: dir, spacing_cm: sp,
+        startCorner: corner, runs: res.runs, totalLength_cm: res.totalLength_cm, connections: [] };
+    }
+    if (which === 'kaskade') {
+      return _autoFillCableImpl(roomId, prodId, { allowPartial: true });
+    }
+  } catch (e) { return { _error: e.message || String(e) }; }
+  return null;
+}
+
+const _CABLE_GALLERY_ENGINES = ['kaskade', 'skew', 'boustrophedon', 'v6', 'serpentine'];
+
+async function _cableGalleryRun(opts) {
+  opts = opts || {};
+  await _cblLoadClipper();
+  const keys = opts.only || Object.keys(_cableFixtures);
+  const snap = _cableGallerySnapshotState();
+  const quietToast = _showToast; if (!opts.loud) window._showToast = function () {};
+  const rows = [];
+  try {
+    for (const key of keys) {
+      const fx = _cableFixtures[key];
+      if (!fx) continue;
+      for (const dir of ['v', 'h']) {
+        for (const eng of _CABLE_GALLERY_ENGINES) {
+          const room = _cableGalleryBuildScene(fx);
+          S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: 'bl', wallMarginCm: null });
+          const prod = HEATING_PRODUCTS.find(p => p.id === fx.productId);
+          const cab = _cableGalleryRunEngine(eng, 1, fx.productId, dir, 'bl');
+          const base = { key, fixture: fx.name, klasse: fx.klasse, dir, engine: eng,
+                         product: prod ? prod.name : ('#' + fx.productId),
+                         nettoM2: +(roomAreas(room).net / 10000).toFixed(3) };
+          if (!cab) { rows.push(Object.assign(base, { status: 'ingen løsning', hard: [], soft: [], metrics: null })); continue; }
+          if (cab._error) { rows.push(Object.assign(base, { status: 'unntak: ' + cab._error, hard: [], soft: [], metrics: null })); continue; }
+          const chk = _cableGeometryCheck(cab, room, { lengthTolPct: opts.lengthTolPct });
+          rows.push(Object.assign(base, {
+            status: chk.ok ? 'ok' : 'feil',
+            hard: chk.hard.map(d => ({ kind: d.kind, value: d.value, msg: d.msg, at: d.at })),
+            soft: chk.soft.map(d => ({ kind: d.kind, value: d.value, msg: d.msg })),
+            metrics: chk.metrics,
+            _svg: _cableGallerySvg(room, cab, chk)
+          }));
+        }
+      }
+    }
+  } finally {
+    window._showToast = quietToast;
+    _cableGalleryRestoreState(snap);
+  }
+  return rows;
+}
+
+// SVG av ett utlegg: rom (grå), lovlig område (stiplet), hindringer/soner, senterlinjen,
+// og en rød ring på hvert harde defektpunkt.
+function _cableGallerySvg(room, cable, chk, W) {
+  W = W || 300;
+  const pts = room.points;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const grow = p => { if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; };
+  pts.forEach(grow);
+  for (const pl of (chk._polys || [])) pl.forEach(grow);
+  const pad = 12, w = maxX - minX || 1, h = maxY - minY || 1;
+  const sc = Math.min((W - 2 * pad) / w, (W * 0.8 - 2 * pad) / h);
+  const H = Math.round(h * sc + 2 * pad);
+  const X = x => +(pad + (x - minX) * sc).toFixed(1);
+  const Y = y => +(pad + (y - minY) * sc).toFixed(1);
+  const d = pl => pl.map((p, i) => (i ? 'L' : 'M') + X(p.x) + ' ' + Y(p.y)).join(' ');
+  const parts = [];
+  parts.push(`<path d="${d(pts)} Z" fill="#f4f4f5" stroke="#52525b" stroke-width="1.2"/>`);
+  for (const lp of ((chk._legal && chk._legal.paths) || []))
+    parts.push(`<path d="${d(lp)} Z" fill="none" stroke="#a1a1aa" stroke-width="0.8" stroke-dasharray="3 2"/>`);
+  for (const b of ((chk._legal && chk._legal.blockers) || []))
+    parts.push(`<path d="${d(b)} Z" fill="#fde68a" stroke="#d97706" stroke-width="0.8"/>`);
+  for (const pl of (chk._polys || []))
+    parts.push(`<path d="${d(pl)}" fill="none" stroke="#dc2626" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>`);
+  for (const df of (chk.hard || [])) if (df.at)
+    parts.push(`<circle cx="${X(df.at.x)}" cy="${Y(df.at.y)}" r="5" fill="none" stroke="#2563eb" stroke-width="1.6"/>`);
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${parts.join('')}</svg>`;
+}
+
+// Skriver docs/kabel/galleri.html. Returnerer HTML-strengen; laster den ned i nettleseren.
+function _cableGalleryExportHtml(rows, meta) {
+  meta = meta || {};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const num = (v, n) => v == null ? '–' : (typeof v === 'number' ? v.toFixed(n == null ? 1 : n) : v);
+  const byFixture = {};
+  for (const r of rows) { (byFixture[r.key] = byFixture[r.key] || []).push(r); }
+  const nOk = rows.filter(r => r.status === 'ok').length;
+  const nFail = rows.filter(r => r.status === 'feil').length;
+  const nNone = rows.length - nOk - nFail;
+  const kindCount = {};
+  for (const r of rows) for (const d of (r.hard || [])) kindCount[d.kind] = (kindCount[d.kind] || 0) + 1;
+
+  const head = `<!doctype html><html lang="nb"><head><meta charset="utf-8">
+<title>Romgalleri · kabelmotor</title>
+<style>
+ :root{--bg:#fff;--fg:#18181b;--mut:#71717a;--line:#e4e4e7;--ok:#15803d;--bad:#b91c1c;--warn:#a16207}
+ body{margin:0;padding:24px;font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--fg);background:var(--bg)}
+ h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:28px 0 8px;padding-top:12px;border-top:2px solid var(--line)}
+ .sub{color:var(--mut);margin:0 0 18px;max-width:70ch}
+ table{border-collapse:collapse;width:100%;font-size:12px;margin:8px 0 4px}
+ th,td{border:1px solid var(--line);padding:4px 6px;text-align:right;white-space:nowrap}
+ th{background:#fafafa;font-weight:600;text-align:right} th:first-child,td:first-child{text-align:left}
+ td.l,th.l{text-align:left;white-space:normal}
+ .ok{color:var(--ok);font-weight:600} .bad{color:var(--bad);font-weight:600} .none{color:var(--mut)}
+ .v{color:var(--bad);font-weight:600} .cards{display:flex;flex-wrap:wrap;gap:14px;margin:10px 0}
+ .card{border:1px solid var(--line);border-radius:6px;padding:8px;width:316px}
+ .card .t{font-size:11px;font-weight:600;margin-bottom:4px} .card .m{font-size:10px;color:var(--mut);line-height:1.45}
+ .kinds{font-size:11px;color:var(--bad)} .legend{font-size:11px;color:var(--mut);margin:6px 0 0}
+ .sum{display:flex;gap:18px;font-size:13px;margin:0 0 10px} .sum b{font-size:18px}
+</style></head><body>
+<h1>Romgalleri · kabelmotor (068, «før»)</h1>
+<p class="sub">Hver rad er <em>ett</em> utlegg: fixture-rom × retning × motor, målt med
+<code>_cableGeometryCheck</code> mot de harde kravene i <code>spec-kabelmotor.md</code> §1.
+Lengdetoleranse ±${meta.tolPct != null ? meta.tolPct : 1} %. Lovlig område er regnet med
+${meta.clipper === 'ready' ? 'clipper-lib@6.4.2 (ekte polygon-offset)' : '<strong>_offsetPolygon (tilnærmet — clipper lastet ikke)</strong>'}.
+Generert ${esc(meta.when || '')}. Tersklene er <strong>ikke</strong> justert for å gjøre galleriet grønt.</p>
+<div class="sum"><div>ok<br><b class="ok">${nOk}</b></div><div>feil<br><b class="bad">${nFail}</b></div>
+<div>ingen løsning<br><b class="none">${nNone}</b></div><div>totalt<br><b>${rows.length}</b></div></div>
+<p class="kinds">Harde defekter i alt: ${Object.keys(kindCount).length ? Object.entries(kindCount).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${esc(k)} ${v}`).join(' · ') : '(ingen)'}</p>
+<p class="legend">I tegningene: grå flate = rommet, stiplet = lovlig område (rom − kantavstand − hindringer),
+gul = hindring/forbudt sone, rød linje = kabelens senterlinje slik rendereren tegner den,
+blå ring = punktet et hardt krav brytes.</p>`;
+
+  const cols = [['lengde lagt (m)','laidCm'],['rapportert (m)','reportedCm'],['avvik %','lenDevPct'],
+                ['CC min','ccMinCm'],['CC med','ccMedCm'],['CC maks','ccMaxCm'],
+                ['min klaring','minClearCm'],['min bøy','minBendCm'],['knekker','kinks'],
+                ['kryss','crossings'],['frie ender','openEnds'],['deler','polys'],
+                ['utenfor (cm)','outsideLenCm'],['dekning %','coveragePct']];
+  const body = Object.keys(byFixture).map(key => {
+    const rs = byFixture[key], fx = _cableFixtures[key] || {};
+    const head2 = `<h2>${esc(rs[0].fixture)} <span style="font-weight:400;color:var(--mut)">· ${esc(rs[0].klasse)} · ${esc(rs[0].nettoM2)} m² netto · ${esc(rs[0].product)}</span></h2>`
+      + (fx.note ? `<p class="sub">${esc(fx.note)}</p>` : '');
+    const rowsHtml = rs.map(r => {
+      const m = r.metrics || {};
+      const cells = cols.map(([, k]) => {
+        let v = m[k];
+        if (k === 'laidCm' || k === 'reportedCm') v = v == null ? null : v / 100;
+        return `<td>${v == null ? '–' : num(v, (k === 'laidCm' || k === 'reportedCm') ? 2 : (k === 'kinks' || k === 'crossings' || k === 'openEnds' || k === 'polys') ? 0 : 1)}</td>`;
+      }).join('');
+      const st = r.status === 'ok' ? '<span class="ok">ok</span>' : r.status === 'feil' ? '<span class="bad">feil</span>' : `<span class="none">${esc(r.status)}</span>`;
+      const hk = (r.hard || []).map(d => `${esc(d.kind)}`).join(' ');
+      return `<tr><td>${esc(r.engine)}</td><td>${esc(r.dir)}</td><td>${st}</td><td class="l v">${hk || ''}</td>${cells}</tr>`;
+    }).join('');
+    const table = `<table><thead><tr><th class="l">motor</th><th>retn</th><th>status</th><th class="l">harde defekter</th>${cols.map(([t]) => `<th>${esc(t)}</th>`).join('')}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
+    const cards = `<div class="cards">${rs.filter(r => r._svg).map(r => `<div class="card"><div class="t">${esc(r.engine)} · ${esc(r.dir)} · ${r.status === 'ok' ? '<span class="ok">ok</span>' : '<span class="bad">' + esc(r.status) + '</span>'}</div>${r._svg}<div class="m">${(r.hard || []).map(d => '⚠ ' + esc(d.msg)).join('<br>') || 'Ingen harde brudd.'}${(r.soft || []).length ? '<br><span style="color:var(--warn)">' + r.soft.map(d => '· ' + esc(d.msg)).join('<br><span style="color:var(--warn)">· </span>') + '</span>' : ''}</div></div>`).join('')}</div>`;
+    return head2 + table + cards;
+  }).join('');
+
+  return head + body + '</body></html>';
+}
+
+// Én inngang: kjør galleriet og last ned HTML-en (kalles fra konsollen).
+async function _cableGalleryExport(opts) {
+  const rows = await _cableGalleryRun(opts);
+  const html = _cableGalleryExportHtml(rows, { tolPct: (opts && opts.lengthTolPct) || 1, clipper: _cblClipperState, when: new Date().toLocaleString('nb-NO') });
+  // Skriv rett til docs/kabel/galleri.html via dev-serverens skrive-endepunkt. Forhåndsvisnings-
+  // ruten blokkerer nedlastinger en side selv starter, så <a download> duger ikke her; den står
+  // igjen som reserve for en vanlig nettleser.
+  let wrote = null;
+  try {
+    const r = await fetch('/__write-galleri', { method: 'POST', headers: { 'Content-Type': 'text/html' }, body: html });
+    if (r.ok) wrote = await r.json();
+  } catch (e) { /* ingen dev-server — fall tilbake på nedlasting */ }
+  if (!wrote) {
+    try {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      a.download = 'galleri.html'; a.click(); URL.revokeObjectURL(a.href);
+    } catch (e) { /* konsollbruk uten DOM-nedlasting */ }
+  }
+  console.log('[galleri]', wrote ? ('skrevet til ' + wrote.path + ' (' + wrote.bytes + ' B)') : 'lastet ned');
+  console.table(rows.map(r => ({ rom: r.key, motor: r.engine, retn: r.dir, status: r.status,
+    harde: (r.hard || []).map(d => d.kind).join(','), lagt_m: r.metrics ? +(r.metrics.laidCm / 100).toFixed(2) : null,
+    avvik_pct: r.metrics ? r.metrics.lenDevPct : null, cc: r.metrics ? r.metrics.ccMedCm : null,
+    klaring: r.metrics ? r.metrics.minClearCm : null, dekning: r.metrics ? r.metrics.coveragePct : null })));
+  return { rows, html, wrote };
+}
+
 function _autoFillCableImpl(roomId, productId, opts) {
   opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);

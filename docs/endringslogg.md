@@ -4,6 +4,87 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 068: kabelmotor — geometrikontroll for harde krav, romgalleri, analyse — 2026-10-13
+
+Gren `kabelmotor` (worktree). Kenneth: «Jeg forstår ikke at kablene i bildet kan krysse
+hverandre, ha forskjellige CC-avstander og krysse vegger? Her er det brudd på minst tre
+harde regler.» Rom «Bad», 5,89 m², InFloor 17T 800W 47m.
+
+### STEG 0 (målt før kode)
+
+Badet ble funnet i skyen: **«Ekebergveien 28» → rom «Bad»**, 5,887 m². Geometri (11 punkter,
+ingen hindringer, ingen soner) kopiert inn som `_cableFixtures.badHakk`; prosjektet bare lest.
+
+| | Målt |
+|---|---|
+| Vertikalt (det ødelagte) | **V6** vinner. Skew prøves først og avvises: `openLen` 186,6 cm mot terskel 18,8 |
+| Horisontalt (det «perfekte») | **SKEW** vinner. CC 12,53 → 136 W/m² — nøyaktig Kenneths tall |
+| Hvorfor forskjellen | Hakket er 12 cm høyt. **Vertikalt** kutter det løpene → 3 celler. **Horisontalt** går hvert løp uavbrutt langs det → 1 celle |
+| v6/v, lagt vs. rapportert | 51,03 m tegnet, 46,99 m rapportert, 46,39 m i dekningen — **tre tall for samme kabel** |
+| v6/v, CC | 11,09 cm mellom de fleste løp, **22,18 cm** over en cellegrense |
+| v6/v, utenfor | 284 cm av banen utenfor lovlig område, verst 11,0 cm (gjennom hakket) |
+| skew/h, kantavstand | **0,83 cm** fra veggen der 5 cm kreves, over 213 cm — også i det «perfekte» utlegget |
+
+**Rotårsakene, med linje:**
+
+1. **Kabelen har ingen geometri i datamodellen.** `runs[]` er bare de rette løpene.
+   U-svinger og vegg-følge-linjer finnes bare i `_drawCableUTurns` (:32637, skjerm-
+   koordinater) og regnes om med *andre* formler i `_calcTotalCableLength` (bue = π·CC/2,
+   ikke den faktiske løpsavstanden) og `_cableWorldSegments` (hopper over vegg-følge-linjene
+   og `connections[]`). Derfor kunne ingen kontroll finnes, og derfor var feilen usynlig.
+2. **Hver celle sentrerer sitt eget rutenett** — `_v6SweepCell` :24702 `firstPos = pMin + sideM`.
+   Naboceller får ulik fase → CC over grensen blir hva som helst. Det er «halv CC».
+3. **Cellekoblingen kommer i TILLEGG til U-svingen.** `_v6ConnectCells` bygger `connections[]`,
+   men setter ikke `_chainBreaks`, så `_drawCableUTurns` tegner *også* halvsirkel + to rette
+   vegg-følge-linjer over samme cellegrense. To baner, åpne ender, kryssing.
+4. **Kantavstanden måles mot omsluttende rektangel, ikke polygonet** — `_skGenerateRotated`
+   :25418 (`bb.minX + margin`) og `_v6BuildHeatableArea` :24394. En skrå eller trappet vegg
+   ligger innenfor det rektangelet. Det er svingene «helt inntil den skrå veggen».
+5. **`_v6OptimizeLength` fase 3 tilordner lengden** (`totalLength_cm = targetLen_cm`) etter å ha
+   trimmet løpene — og `_tryFull(spacing, extraSweepMargin)` bruker aldri sitt andre argument,
+   så hele fase 2 er et søk som regner samme svar 25 ganger.
+
+### Bygget (leser bare — ingen motor og ikke kaskaden er rørt)
+
+- `_cableCenterlinePaths(cable)` — én ordnet senterlinje, tro mot rendereren, for begge former.
+- `_cableLegalRegion(roomId, productId)` — rom − kantavstand − hindringer − soner, ekte
+  polygon-offset med **clipper-lib@6.4.2** (spec §0.6), lastet lat fra CDN, fail-soft til
+  `_offsetPolygon` med `metrics.legalAreaApprox`.
+- `_cableGeometryCheck(cable, room)` → `{ ok, hard[], soft[], metrics }`. Harde: `utenfor`,
+  `kryssing`, `nærføring`, `bøy`, `lengde`, `cc`, `brudd`. Myke: `cc_variasjon`,
+  `kant_asymmetri`, `hopp`, `dekning`. Logger `[cable-check]` når `S.ui.debugCableEngine`.
+- `_cableFixtures` — 14 rom (spec §6), inkl. `badHakk`.
+- `_cableGalleryRun()` / `_cableGalleryExportHtml()` → `docs/kabel/galleri.html`, 140 rader
+  (14 rom × 2 retninger × kaskaden + 4 motorer), SVG med rød bane og blå ring på hvert brudd.
+- `serve-varmeplan.js`: `PORT` fra miljøet, og `POST /__write-galleri` (dev-server, skriver
+  nøyaktig den ene filen) — forhåndsvisningsruten blokkerer nedlastinger en side selv starter.
+
+### To målefeil funnet og rettet i kontrollen selv (ikke terskler)
+
+- Klaringssveipet hoppet over segmentpar «4 indekser fra hverandre». En U-sving tegnes som 24
+  punkter, så to prøver 4 fra hverandre i SAMME sving ligger 2,4 cm fra hverandre rent
+  geometrisk. Det ga `nærføring` i 117 av 140 utlegg — et rent rektangel med CC 12,4 inkludert.
+  Rettet til et fysisk vindu: banelengde mellom segmentene < π·CC/2 (én hel sving).
+- Første forsøk målte banelengden til segmentenes **midtpunkt**. Et 378 cm langt løp har
+  midtpunktet 189 cm fra sin egen skjøt, så to segmenter som deler endepunkt slapp gjennom og
+  ga klaring 0. Rettet til intervall-avstand (`s0`/`s1`).
+
+### Galleriet «før» — 14 ok, 113 feil, 13 ingen løsning av 140
+
+Harde brudd i alt: `lengde` 99 · `utenfor` 59 · `nærføring` 40 · `bøy` 34 · `brudd` 28 ·
+`kryssing` 21. Rene rektangler består (alle fem motorer, horisontalt). Alt med hakk, hindring
+eller passasje feiler. **Tersklene er ikke rørt for å gjøre galleriet grønt.**
+
+### Åpne spørsmål → `docs/kabel/prompter/SPØRSMÅL.md`
+
+Lengdetoleransen ±1 % (avgjør 99 av 140), om Kenneths horisontale referanse selv skal rettes,
+om `pathEls` (auto-bare) er greit, og om rettvinklede overganger skal regnes som hardt brudd.
+
+**STOPP** — 069 kjøres først når Kenneth har lest analysen og arkitekturforslaget
+(`docs/kabel/arkitektur.md`).
+
+---
+
 ## 066: «Nytt prosjekt» går rett inn — dialogen velger typen — 2026-10-13
 
 Kenneth: «ønsker å komme rett inn på prosjektet når jeg trykker Opprett prosjekt … Fjern

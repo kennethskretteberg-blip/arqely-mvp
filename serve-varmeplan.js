@@ -18,6 +18,25 @@ http.createServer((req, res) => {
     });
     return;
   }
+  // 068 (kabelmotor): skrive-endepunkt for romgalleriet. Nettleseren kan ikke laste ned filer
+  // i forhandsvisningsruten, og galleriet (docs/kabel/galleri.html) skal kunne regenereres med
+  // EN kommando i 069/070. Derfor: POST /__write-galleri skriver NOYAKTIG den ene filen, ingen
+  // annen sti er mulig. Dette er dev-serveren - den deployes ikke (vercel.json serverer index.html).
+  if (req.method === 'POST' && req.url === '/__write-galleri') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const target = path.join(__dirname, 'docs', 'kabel', 'galleri.html');
+      fs.mkdir(path.dirname(target), { recursive: true }, () => {
+        fs.writeFile(target, Buffer.concat(chunks), err => {
+          res.writeHead(err ? 500 : 200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify(err ? { ok: false, error: err.message } : { ok: true, bytes: Buffer.concat(chunks).length, path: 'docs/kabel/galleri.html' }));
+        });
+      });
+    });
+    return;
+  }
+
   const ext = path.extname(req.url).toLowerCase();
   if (ext && MIME[ext]) {
     const filePath = path.join(__dirname, decodeURIComponent(req.url));
