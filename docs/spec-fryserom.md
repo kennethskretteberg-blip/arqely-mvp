@@ -30,9 +30,9 @@ en bindende leverandørgodkjenning og to produsentveiledninger.
 | Effekt | 15–30 W/m², minst 15 | 10–15 W/m² | **15–30**, standard **25** |
 | c/c | maks **50 cm**, anbefalt 33 | 50–70 cm | **30–50 cm**, standard **40** |
 | Reserve | **påkrevd**, parallell, 2,5–5 cm | anbefalt | **påkrevd**, 2,5–5 cm |
-| Styring | termostat per kabel: hoved +5 °C, reserve +3 °C med alarm | føler i kabeldybde, midt mellom strenger, i rør | DEVI + Nexans' følerplassering |
+| Styring | termostat per kabel: hoved +5 °C, reserve +3 °C med alarm | føler i kabeldybde, midt mellom strenger, i rør | **appen sier ingenting** om termostater (Kenneth 13.10.2026); kun Nexans' følerplassering |
 | Kurs | egen kurs, eget vern og jordfeilvern per kabel | — | som DEVI |
-| Kontroll | P = Δt × U × 1,3 (U = λ / tykkelse) | — | beregnet tap skal ligge godt under installert |
+| Kontroll | P = Δt × U × 1,3 (U = λ / tykkelse) | — | **ikke medtatt i appen** (Kenneth 13.10.2026) — står her som referanse |
 
 ### Hvorfor Nexans' c/c 50–70 ikke brukes
 
@@ -55,23 +55,19 @@ dessuten fysisk uoppnåelig med en 10 W/m kabel innenfor 50 cm c/c (se under).
 | Reserveavstand 5 cm | `RESERVE_OFFSET_CM`, klemt til `min(…, cc/2)` |
 | Reserve påkrevd | `reserveCable` på romtypen; avvik varsles, blokkeres ikke |
 | Avvik (reserve av, feil produkt, knapp effekt) | `_fryseromAvvik` — én kilde for skjerm og PDF |
-| Varmetapskontroll | `_fryseromVarmetap` — P = Δt × U × 1,3 |
-| Montasje- og styringstekst | `_fryseromMontasjeLinjer` — én liste, skjerm og PDF |
-
-### Varmetapskontroll
-
-`U = λ / tykkelse`, `P = Δt × U × 1,3`. Standardene er DEVIs eget eksempel:
-−25 °C rom, +5 °C grunn, 200 mm isolasjon, λ 0,04 → U 0,20 W/m²K → **7,8 W/m²**.
-Rommet kan overstyre alle fire (`frysRomTempC`, `frysGrunnTempC`, `frysIsolasjonMm`, `frysLambda`),
-slik at et kjølerom på −5 °C regnes for seg. Beregningen påvirker **aldri** utlegget — den er en
-kontroll. ⚠ når installert ligger under `FRYSEROM.tapMarginFaktor` × beregnet tap.
+| Montasjetekst | `_fryseromMontasjeLinjer` — én liste, skjerm og PDF |
 
 ---
 
-## Åpne punkter
+## Avklart 13.10.2026 (Kenneth)
 
-- **Terskelen for varmetapskontrollen** står på 1,5 × beregnet tap. Foreslått, ikke bekreftet.
-- **Ekstra strenger langs yttervegger** (c/c 5–7,5 cm) og **varme ved søylefot** (DEVI): nevnt i
-  montasjeteksten? Foreslått av appen? Ikke avklart — appen gjør ingen av delene i dag.
-- **Termostater og alarmmodul i materiallista**: appen legger dem ikke inn. Hvilke artikler, og
-  skal de komme automatisk for fryserom?
+- **Varmetapskontrollen** (P = Δt × U × 1,3): **ikke medtatt.** Ble bygget og fjernet igjen.
+  Formelen står i tabellen over som referanse for den som prosjekterer — appen regner den ikke.
+- **Termostater:** appen skal **ikke nevne noe om termostater**. DEVIs krav (hoved +5 °C,
+  reserve +3 °C med alarm) er derfor ute av montasjeteksten, og ingen termostater eller
+  alarmmodul legges i materiallista.
+- **Ekstra strenger langs yttervegger** (c/c 5–7,5 cm) og **varme ved søylefot**: appen gjør
+  **ingen av delene** — verken forslag eller omtale.
+
+Det appen sier om montasje er dermed kabelavstand, kurs/vern, dybde og følerplassering — se
+`_fryseromMontasjeLinjer`.

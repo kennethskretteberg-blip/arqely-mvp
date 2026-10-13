@@ -60,14 +60,23 @@ produktadvarsel; reserve av gir påkrevd-advarsel. PDF-en verifisert ved å bytt
 - **`check(navn, false, betingelse, …)` feiler nettopp når koden er riktig.**
   `_kundelenkeRegressionTest` advarer mot akkurat dette; jeg gikk i den likevel.
 
-### SPØRSMÅL (ikke bygget)
+### SPØRSMÅL — besvart samme dag (067b)
 
-1. **Ekstra strenger langs yttervegger** (c/c 5–7,5 cm) og **varme ved søylefot** (DEVI) — skal
-   appen foreslå dette, eller holder det å nevne det i montasjeteksten? I dag: ingen av delene.
-2. **Termostater i materiallista** — skal to termostater + alarmmodul legges til automatisk for
-   fryserom, og hvilke artikler? I dag legges de ikke inn.
-3. **Terskelen for varmetapskontrollen** står på **1,5 ×** beregnet tap (`FRYSEROM.tapMarginFaktor`).
-   Mitt forslag, ikke bekreftet.
+Kenneth 13.10.2026: «1. ingen av delene. 2. ikke nevn noe om termostater. 3. ikke medta.»
+
+1. **Ekstra strenger langs yttervegger og varme ved søylefot:** appen gjør **ingen av delene** —
+   verken forslag eller omtale. Uendret (var aldri bygget).
+2. **Termostater:** fjernet. Montasjeteksten hadde linja «Egen termostat per kabel: hoved +5 °C,
+   reserve +3 °C med alarm (lys og lyd)» — den er ute. Ingen termostater i materiallista.
+3. **Varmetapskontrollen:** bygget og **fjernet igjen**. `_fryseromVarmetap`, varmetapsavviket,
+   skjermblokken og PDF-linjene er borte; `FRYSEROM`-konstantene for λ/tykkelse/faktor likeså.
+
+Montasjeteksten er dermed seks linjer: kabelavstand, kurs/vern/jordfeilvern, dybde og innstøping,
+følerplassering, godkjenningen og ansvarslinja. Formelen P = Δt × U × 1,3 står igjen i
+`docs/spec-fryserom.md` som referanse for den som prosjekterer — appen regner den ikke.
+
+To nye regresjonspåstander låser begge beslutningene: at `_fryseromVarmetap` ikke finnes, og at
+montasjeteksten ikke nevner termostat eller alarm.
 
 ---
 
