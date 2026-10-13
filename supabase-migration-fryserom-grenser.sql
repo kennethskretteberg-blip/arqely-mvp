@@ -67,11 +67,36 @@ update room_type_defaults
  where room_type_id = 'fryserom'
    and scope = 'org';
 
+-- 5. Globale 20 W/m2 skal gjelde -- org-raden arver.
+--
+-- Kenneth 13.10.2026: "20 skal gjelde, sett org target_wm2 til null".
+--
+-- SAMME ROTARSAK som reserve_cable i steg 4: target_wm2 ble opprettet som
+-- "INTEGER NOT NULL DEFAULT 100", sa et overstyringslag kan ikke si "arv", og enhver ny rad
+-- far 100 -- som deretter overstyrer global. Verifisert at ingen innsetting lener seg pa
+-- defaultet: alle tre stedene i index.html oppgir target_wm2 eksplisitt
+-- (_savePersonalWm2Override, _savePersonalModTypeOverride, admin-panelets opprettelse).
+alter table public.room_type_defaults
+  alter column target_wm2 drop not null,
+  alter column target_wm2 drop default;
+
+comment on column public.room_type_defaults.target_wm2 is
+  '064e: onsket flateeffekt for romtypen. null = arv fra laget under (global).';
+
+update room_type_defaults
+   set target_wm2 = null, updated_at = now()
+ where room_type_id = 'fryserom'
+   and scope = 'org';
+
+-- 6. Sluttkontroll -- forventet: org-raden har bare label/icon/sort_order igjen, alt annet arves.
+select scope, org_id, default_mod_type, reserve_cable, target_wm2, wm2_min, wm2_max,
+       cc_min_mm, cc_max_mm
+  from room_type_defaults
+ where room_type_id = 'fryserom'
+ order by scope;
+
 -- ---------------------------------------------------------------------------
--- FORTSATT APENT -- krever Kenneths avgjorelse:
---
--- Org-raden har target_wm2 = 25 mot globalt 20. 25 er innenfor 15-30, altsa fullt lovlig.
--- Hvilket tall er riktig for organisasjonen? Skal den arve globalt, kjor:
---
---   update room_type_defaults set target_wm2 = null, updated_at = now()
---    where room_type_id = 'fryserom' and scope = 'org';
+-- MERK (ikke rettet her): _savePersonalModTypeOverride lager en BRUKER-rad og kopierer
+-- target_wm2 fra romtypens naverende verdi. Endrer man bare varmetypen, fryses dermed dagens
+-- W/m2 inn som en personlig overstyring som overstyrer global for alltid. Samme lekkasjeklasse
+-- som NOT NULL-defaultene over. Egen oppgave.
