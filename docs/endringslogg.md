@@ -4,6 +4,70 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 073: Kundestatus kan lukkes fra prosjektinfo — 2026-10-14
+
+Kenneth: «Ofte svarer kunden meg på e-post at det ser greit ut. Da vil jeg gå inn på prosjektet
+og få bort statusen «Venter på mål».» Spec-kundelenke, ny **regel 12**.
+
+### STEG 0 (målt før endring)
+
+| | Målt |
+|---|---|
+| Fjerner `revoked` OG `applied` «⏳ Venter på mål» fra lista? | **Ja** — `_fetchKundeStatus` hentet bare `open`/`answered` |
+| Tillater CHECK-constrainten `applied` uten svar? | **Ja** — `check (status in ('open','answered','applied','expired','revoked'))` binder ikke `answer`. 028-panelet nås kun fra `answered`, og `_kundeLoggRunde` leser `k.answer \|\| {}` |
+| Hva ser kunden på en `applied` lenke? | `kundelenke_get` gir null → «Lenken er ikke lenger gyldig … utløpt eller trukket tilbake». Tydelig, men **feil grunn** — den var ferdigbehandlet |
+
+### Rettet
+
+- **Knapper i stedet for lenketekst** i prosjektinfo-boksen, i tre tilstander:
+  - åpen målforespørsel: **[✓ Kunden bekreftet]** · [Kopier] · [Trekk tilbake]
+  - mottatte mål: **[Gå gjennom]** · [Lukk uten endring]
+  - **åpen presentasjon: ny rad** «📄 Presentasjon sendt … · ingen svar ennå» med
+    **[✓ Kunden godkjente]** · [Kopier]
+- **Felles dialog** (kanal e-post/telefon/annet + merknad). `confirm`/`prompt` i «Avvis» er byttet
+  til samme dialog — handlingen er uendret.
+- **Egne logg-hendelser.** `bekreftet` og `lukket_uten_endring` leses som «Du lukket
+  forespørselen: kunden bekreftet på e-post («Ser greit ut»)» og «Du lukket uten å bruke målene».
+  «Trukket» er uendret. En manuelt lukket lenke får ikke lenger «Du innarbeidet målene» på toppen.
+- **060-gaten** i alle fem skrivende veier (de skriver til `kundelenker`, som servertriggeren
+  ikke dekker), og knappene er grå i skrivebeskyttet modus.
+- **Kundens side:** «Lenken er avsluttet — den er enten ferdigbehandlet, utløpt eller trukket
+  tilbake.»
+
+### Funn: brikken forsvant der den skulle bli stående
+
+Prompten ba om at «✓ Kunden godkjente» skulle gi «✓ Godkjent av kunde» i lista. Det var ikke
+mulig slik koden sto: `status:'applied'` filtrerte raden bort fra `_fetchKundeStatus`.
+`_fetchKundeStatus` henter nå også `applied` — men **bare rader med `approve_all_at`**, altså
+hele-prosjektet-godkjenninger. En lukket målforespørsel forsvinner fortsatt, som Kenneth ba om.
+
+⚠ **Synlig sideeffekt:** dette gjelder også en godkjenning kunden gjorde i appen og Kenneth
+siden behandlet. Den brikken ble borte før; nå blir den stående. Det er riktigere (044s egen
+formulering: «En godkjenning av hele prosjektet er grønn — den er et svar, ikke en oppgave»),
+men det er en endring i noe som virket.
+
+### To tekster endret
+
+«⏳ Kundelenke: åpen» → «⏳ Venter på mål» og «✓ Svar fra kunde» → «✓ Mål mottatt», altså de
+samme ordene som brikkene i prosjektlista og som Kenneth selv bruker. To påstander i
+`_kundelenkeRegressionTest` matchet de gamle tekstene ordrett og er oppdatert; fargekravet
+(grønn for svar, oransje for åpen) er uendret.
+
+### Måling: «Kopier lenke» fikk ikke plass
+
+Sidepanelet er 180 px (156 px innvendig). «Kopier lenke» (80 px) + «Trekk tilbake» (83 px) + 5 px
+mellomrom = 168 px, så de falt ned på hver sin linje og tre stablede knapper spiste boksen.
+Kortet til **«Kopier»** (etiketten som har stått der siden 028, med fullt navn i `title`) →
+51 + 83 + 5 = 139 px, begge på én linje.
+
+### Verifisering
+
+`_kundelenkeRegressionTest` utvidet med seksjon **S** (23 påstander, 307 → 330): stubbet `_db`
+måler hva hver vei faktisk skriver, at `bekreftet` ≠ `trukket`, at skrivebeskyttet ikke åpner
+dialogen, og at loggtekstene skiller seg. **21 batterier grønne.**
+
+---
+
 ## 066: «Nytt prosjekt» går rett inn — dialogen velger typen — 2026-10-13
 
 Kenneth: «ønsker å komme rett inn på prosjektet når jeg trykker Opprett prosjekt … Fjern

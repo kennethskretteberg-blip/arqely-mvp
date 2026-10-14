@@ -65,6 +65,21 @@ e-post, og innarbeider forslaget vegg for vegg / rom for rom i prosjektet.
     overskriver hverandre). Loggen er **intern** — kunden ser den aldri, og ingen anonym vei
     skriver til den.
 
+12. **En forespørsel kan lukkes manuelt når kunden har svart utenfor appen** (073, Kenneth
+    14.10.2026: «Ofte svarer kunden meg på e-post at det ser greit ut»). Det registreres som
+    **«bekreftet»**, ikke som «trukket», og vises slik i logg og oversikt.
+    - *Bekreftet* → `status: 'applied'` + `applied_at`, logg-hendelse `bekreftet` med `kanal`
+      (e-post/telefon/annet) og valgfri merknad. For en presentasjon settes i tillegg
+      `approve_all_at`/`approve_all_name`, så prosjektlista viser «✓ Godkjent av kunde» —
+      samme brikke som når kunden godkjenner i appen.
+    - *Lukket uten endring* (mottatte mål som ikke skal brukes) → `applied` + hendelsen
+      `lukket_uten_endring`. Ingen geometri endres.
+    - *Trukket* (`revoked`, hendelsen `trukket`) betyr fortsatt at lenken ble kalt tilbake, og
+      *avvist* at svaret var feil. De tre må kunne skilles i loggen — det er hele poenget med
+      egne hendelser.
+    - **Ingen e-post sendes til kunden når en forespørsel lukkes.** Lenken slutter å virke, som
+      ved enhver `applied`, og kunden ser «Lenken er avsluttet».
+
 ## Datamodell (Supabase, additiv)
 
 ```
