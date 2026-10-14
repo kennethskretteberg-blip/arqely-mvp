@@ -1,4 +1,4 @@
-# Kabelmotor 068–074d — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–074e — status, merge-sjekkliste og hva som ikke er løst
 
 Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
@@ -282,6 +282,13 @@ jevnt utlegg vinner over et med hull selv når det dekker mer.
 
 **Badet loddrett, 47 m:** 0 tomme baner, CC uendret 11,60, dekning 92,7 → 92,5 %.
 **Badet loddrett, 41 m:** 0 tomme baner, CC 13,18 → 13,81, dekning 91,0 → **94,9 %**.
+
+⚠ **074e: samme regel for alle kabellengder.** `_geoInteriorHoles` dømte hele banen under ett
+(«dekket > 40 % → brukt»), og var derfor blind for at 600 W brukte transittbanen BARE under
+stubben mens 700 W brukte den både over og under. Nå måles de udekkede BITENE av hver bane hver
+for seg. I tillegg: nabotrinn-søket prøver trinnet det alt står på (dN = 0), bisekterer
+trimmingen mot den HULLFRIE variantens egen lengde (`fastLenHullfri`), og stopper ikke på
+første treff. Badet loddrett er nå hullfritt for 500/600/700/800/900 W.
 
 ⚠ **074d: CC-valget er 016 sitt, men jevnhets-søket får ikke røre det.** Kenneth ba om at «CC
 aldri skal utenfor anbefalt område». En GLOBAL sperre går ikke: 016 bestemte bevisst at CC over

@@ -4,6 +4,66 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 074e: Kabelmotor — samme regel for alle kabellengder — 2026-10-14
+
+Kenneth, med to skjermbilder av samme bad: «700 W kabel blir best. Jeg skulle ønske at 600 W
+varmekabel la seg likt som 700 W. De burde ha samme regel?»
+
+Han hadde rett. De fulgte ikke samme regel.
+
+### Målt — og målingen min var blind for det
+
+| | 700 W (41 m) | 600 W (35 m) |
+|---|---|---|
+| Banen ved stubbens ende | brukt **over og under** (`−1031..−966` + `−938..−845`) | brukt **bare under** (`−938..−848`) |
+| Over stubben | ingen tom bane | **tom bane** mellom 773,7 og 804,2 |
+| Variant | kappet | skjøvet |
+
+`_geoInteriorHoles` dømte hele banen under ett: dekket et løp mer enn 40 % av det lovlige
+intervallet, var banen «brukt». Den nedre halvdelen alene var 48 % — så 600 W fikk **0 hull**
+selv om den øvre halvdelen sto tom med kabel på begge sider. Begge kablene målte 0, og
+poengsummen hadde ingen grunn til å foretrekke den jevne.
+
+Nå måles de **udekkede bitene av hver bane hver for seg**. En bit lengre enn én CC er et hull —
+men bare når det ligger kabel på begge sider av den i samme høyde.
+
+### Tre ting søket ikke gjorde
+
+1. **Prøvde aldri trinnet det alt sto på.** Nabotrinn-søket hoppet rett til N ± 1. Den hullfrie
+   600 W-løsningen lå på samme CC (15,27), bare med en annen trimming. Nå prøves dN = 0 først.
+2. **Bisekterte mot feil variant.** `fastLen` tar lengden nærmest målet UANSETT variant — og
+   det er ofte den holete. Målt: ved CC 15,27 gir den holete 35,00 m rått, den hullfrie 35,44.
+   Søket trimmet derfor 0 og fant aldri den jevne. Ny `fastLenHullfri` måler den hullfrie
+   varianten alene, og trimmingen bisekteres mot DEN (fasit: 1,0 cm → 35,00 m blank).
+3. **Stoppet på første treff.** dN = 0 ga 700 W et hullfritt utlegg på 92,5 %, mens nabotrinnet
+   ga 94,9 %. Et `break` kostet altså 2,4 prosentpoeng på kabelen Kenneth alt var fornøyd med.
+   Alle trinnene vurderes nå; det beste vinner.
+
+### Resultat — badet loddrett, alle fem kabelstørrelser
+
+| kabel | CC | lengde | dekning | tomme baner |
+|---|---|---|---|---|
+| 500 W 29 m | 19,34 | 29,00 m (0,00 %) | 90,6 % | **0** |
+| 600 W 35 m | 15,27 | 35,00 m (0,00 %) | 89,9 % | **0** |
+| 700 W 41 m | 13,81 | 41,00 m (0,00 %) | 94,9 % | **0** |
+| 800 W 47 m | 11,60 | 47,09 m (+0,19 %) | 92,5 % | **0** |
+| 900 W 54 m | 10,36 | 53,85 m (−0,27 %) | 94,0 % | **0** |
+
+Samme regel for alle. 500 W ble i tillegg bedre (87,1 → 90,6 %), og i galleriet steg
+`enHindring` loddrett 93,2 → 95,3 % og `utsparing` loddrett 95,1 → 97,8 %. Ingen rom ble dårligere.
+
+### Står igjen
+
+**Vannrett** har fortsatt én tom bane for 500, 600 og 700 W. Loddrett er retningen Kenneth bruker
+i badet, så det er den som er ryddet først — men regelen bør gjelde begge veier.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` **52 påstander**. **22 batterier grønne**, inkludert
+`_ccWarnRegressionTest` (016). Galleriet 24/30, samme seks umulige rom som før.
+
+---
+
 ## 074d: Kabelmotor — 074c på nytt, med vakt mot at utlegget blir dårligere — 2026-10-14
 
 074c ble rullet tilbake fordi Kenneth målte at det ble verre i hans eget bad (Rom 5, 5,70 m²).
