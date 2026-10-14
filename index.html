@@ -18529,10 +18529,23 @@ function _cablePreviewFooterHtml(roomId, familyName, categoryId, targetWm2) {
   const _ccw = _roomCcOverWarn(statRoom || room);
   const ccWarn = _ccw
     ? `<div style="font-size:11px;color:#f59e0b;line-height:1.35">${esc(_ccWarnText(_ccw.prod, _ccw.cc, true, _ccw.roomId))}</div>` : '';
+  // 074 · ÉN samlet statuslinje med VINNERENS egne tall. Erstatter nettleserdialogen fra
+  // kandidatsøket og de to toastene som sa forskjellige ting. `_cableStatusLines` er den ene
+  // kilden — panelet regner ingenting selv.
+  const _statCab = (room._cablePreviewIds || []).map(id => S.cables.find(c => c.id === id)).find(Boolean);
+  const _st074 = _statCab ? _cableStatusLines(_statCab, statRoom || room) : [];
+  // Valgt retning står fast i velgeren (punkt 4); panelet sier hva som faktisk er lagt.
+  const _valgtDir = (S.varmefolie && S.varmefolie.dirExplicit && S.varmefolie.direction)
+    ? `<div style="font-size:11px;color:var(--dim)">Retning: ${S.varmefolie.direction === 'v' ? 'loddrett' : 'vannrett'} (valgt)</div>` : '';
+  const _farge074 = n => n === 'feil' ? '#ef4444' : n === 'advarsel' ? '#f59e0b' : 'var(--dim)';
+  const status074 = _st074.filter(l => l.niva !== 'ok').map(l =>
+    `<div style="font-size:11px;color:${_farge074(l.niva)};line-height:1.35">${esc(l.tekst)}`
+    + (l.handling ? ` <button type="button" onclick="${l.handling.fn}" style="background:none;border:none;padding:0 0 0 4px;color:var(--accent);font-size:11px;text-decoration:underline;cursor:pointer">${esc(l.handling.tekst)}</button>` : '')
+    + `</div>`).join('');
   return `<div style="display:flex;flex-direction:column;gap:5px;background:rgba(34,211,238,0.12);border:1px solid var(--accent);border-radius:7px;padding:8px 9px;margin:6px 0">
     <div style="font-size:11px;color:var(--accent);font-weight:600">● Forhåndsvises — ${nTxt}${nameTxt}${zoneTxt ? ` <span style="color:var(--dim);font-weight:400">i ${esc(zoneTxt)}</span>` : ''}</div>
-    <div style="font-size:11px;color:var(--dim)">${st.cableWm2} W/m²${targetTxt} ${badge} · CC ${st.cableCcCm.toFixed(1)} cm · ${st.cableLenM.toFixed(1)} m kabel</div>
-    ${mismatch}${fallbackMsg}${ccWarn}
+    <div style="font-size:11px;color:var(--dim)">${st.cableWm2} W/m²${targetTxt} ${badge} <span style="color:var(--dim)">effekt</span> · CC ${st.cableCcCm.toFixed(1)} cm · ${st.cableLenM.toFixed(1)} m kabel</div>
+    ${_valgtDir}${mismatch}${fallbackMsg}${ccWarn}${status074}
     <button data-godkjenn class="floor-choice-btn" style="width:100%;margin-top:2px;padding:9px 0;background:var(--accent);color:#0d0e10;font-weight:700;font-size:13px;letter-spacing:.02em" onclick="_confirmCablePreviewAndFinish(${sq(familyName)},${categoryId})" title="Godkjenn utlegget og vis etasje-/romlista">✓ GODKJENN</button>
     <button class="floor-choice-btn" style="background:none;border:none;color:var(--dim);font-size:11px;padding:2px 0;text-decoration:underline;cursor:pointer" onclick="_cancelCablePreview(${sq(familyName)},${categoryId})">Angre forhåndsvisning</button>
   </div>`;
@@ -18809,6 +18822,9 @@ function _placeCableProduct(productId, familyName, categoryId) {
   });
   if (!ok) { console.warn('_placeCableProduct: could not generate cable layout'); return; }
   _ccWarnToast(roomId);   // 016
+  // 074: én toast, bygget av VINNERENS tall (samme kilde som panelet). Veien uten
+  // forhåndsvisning har ikke noe panel å skrive i.
+  _cableStatusToast(S.cables.filter(c => c.roomId === roomId).slice(-1)[0], S.rooms.find(r => r.id === roomId));
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -26447,6 +26463,106 @@ function _classifyCableRoom(room, roomId) {
   return rp.length > 4 ? 'L/T' : 'rektangel';
 }
 function _dumpCableEngineWins() { console.table(window._cableEngineWins); return window._cableEngineWins; }
+// ═══ 074 · ÉN BESKJED, ETTER AT VINNEREN ER VALGT ═══════════════════════════════════════════
+// Kenneths skjermbilde 14.10.2026 hadde TRE tall som ikke var enige: en nettleserdialog sa 25 %
+// udekket, en toast sa 10 %, og panelet sa «● ok». De kom fra tre forskjellige utlegg — to av
+// dem kandidater som tapte — og to forskjellige dekningsformler.
+//
+// Her er den ene kilden. Alt som vises til brukeren om et kabelutlegg bygges HER, av vinnerens
+// egne tall:
+//   · dekning  → `_geomMetrics.coveragePct` (068-definisjonen), aldri den gamle formelen
+//   · gyldighet → `_geomDefects` fra `_cableGeometryCheck`
+//   · retning  → `_dirFallback`, som sier hva brukeren VALGTE og hva som faktisk ble lagt
+//   · forslag  → `_betterProduct`, i samme serie og med riktig effekt
+// Returnerer linjer `{ niva: 'ok'|'advarsel'|'feil', tekst, handling? }` — panelet tegner dem,
+// toasten slår dem sammen. Ingen av dem regner selv.
+function _cableStatusLines(cable, room) {
+  const ut = [];
+  if (!cable) return ut;
+  const m = cable._geomMetrics || null;
+  const dekn = m && m.coveragePct != null ? m.coveragePct : null;
+  const nettoM2 = room ? roomAreas(room).net / 10000 : 0;
+
+  // 1) Retning: brukerens valg står, panelet forklarer hva som faktisk ble lagt.
+  const fb = cable._dirFallback;
+  if (fb) {
+    const valgt = fb.wanted === 'v' ? 'Loddrett' : 'Vannrett';
+    const lagt  = fb.used === 'v' ? 'loddrett' : 'vannrett';
+    ut.push({ niva: 'advarsel',
+      tekst: `${valgt} gir ikke et gyldig utlegg i dette rommet — vist ${lagt}.`,
+      handling: { tekst: `Prøv ${valgt.toLowerCase()} likevel`, fn: '_cableForceWantedDirection()' } });
+  }
+
+  // 2) Gyldighet.
+  if (cable._geomDefects && cable._geomDefects.length) {
+    ut.push({ niva: 'feil',
+      tekst: '⚠ Utlegget bryter regler: ' + cable._geomDefects.slice(0, 3).map(d => d.kind).join(' · ') });
+  }
+
+  // 3) Dekning — vinnerens eget tall, og bare når den faktisk er lav.
+  if (dekn != null && dekn < 95 && nettoM2 > 0) {
+    const kaldtM2 = Math.max(0, (1 - dekn / 100) * nettoM2);
+    ut.push({ niva: dekn < 85 ? 'feil' : 'advarsel',
+      tekst: `⚠ ${kaldtM2.toFixed(2)} m² (${(100 - dekn).toFixed(0)} %) uten kabel` });
+  }
+
+  // 4) Bedre produkt — samme serie, riktig effekt.
+  const bp = cable._betterProduct;
+  if (bp) {
+    ut.push({ niva: 'advarsel', tekst: `Bedre: ${bp.name}${bp.watt ? ' (' + bp.watt + ' W)' : ''}`,
+      handling: { tekst: 'Bytt', fn: `_cableSwapToBetter(${bp.id})` } });
+  }
+
+  if (!ut.length && dekn != null) ut.push({ niva: 'ok', tekst: `● ok · dekning ${dekn.toFixed(0)} %` });
+  return ut;
+}
+
+// Én linje, til en toast. Samme tall som panelet — det var hele poenget.
+function _cableStatusToast(cable, room) {
+  if (_cableStille()) return;                 // aldri fra inni et kandidatsøk
+  const linjer = _cableStatusLines(cable, room).filter(l => l.niva !== 'ok');
+  if (!linjer.length || typeof _showToast !== 'function') return;
+  _showToast(linjer.map(l => l.tekst).join(' — '), linjer.some(l => l.niva === 'feil') ? 'warn' : 'warn');
+}
+
+// «Prøv loddrett likevel»: legg beste kandidat i den retningen brukeren valgte, merket ⚠
+// (070-merkingen), uten nye dialoger.
+function _cableForceWantedDirection() {
+  const roomId = S.ui.selectedRoomId; if (!roomId) return;
+  const room = S.rooms.find(r => r.id === roomId); if (!room) return;
+  const cable = S.cables.find(c => c.roomId === roomId && c._dirFallback)
+             || S.cables.find(c => c.id === S.ui.selectedCableId && c.roomId === roomId);
+  if (!cable || !cable._dirFallback) return;
+  const dir = cable._dirFallback.wanted;
+  const { cands } = _cableCandidatesForDirection(roomId, cable.productId, { allowPartial: true }, dir, room);
+  const valgt = cands[0];
+  if (!valgt) { _showToast && _showToast('Fant ingen kandidat i den retningen i det hele tatt.', 'warn'); return; }
+  const fresh = valgt.cable;
+  fresh._geomOk = !!valgt.chk.ok;
+  fresh._geomEngine = valgt.source;
+  fresh._geomDefects = valgt.chk.ok ? null
+    : (valgt.chk.hard || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
+  fresh._geomMetrics = valgt.chk.metrics;
+  fresh._forcedDirection = true;
+  pushUndo();
+  S.cables = S.cables.filter(c => c.id !== cable.id);
+  fresh.id = cable.id;
+  S.cables.push(fresh);
+  S.ui.selectedCableId = fresh.id;
+  _cableViolationsDirty = true; _invalidateCableCache();
+  renderSidebar(); updateCtxBar(); render();
+  _cableStatusToast(fresh, room);
+}
+
+// «Bytt» til det foreslåtte produktet — samme vei som et vanlig produktklikk.
+function _cableSwapToBetter(productId) {
+  const roomId = S.ui.selectedRoomId; if (!roomId) return;
+  const room = S.rooms.find(r => r.id === roomId); if (!room) return;
+  const meta = room._cablePreviewMeta;
+  if (meta) _cablePreviewPlace(productId, meta.nCables || 1, meta.familyName, meta.categoryId);
+  else if (typeof _placeCableProduct === 'function') _placeCableProduct(productId, null, null);
+}
+
 function autoFillCable(roomId, productId) {
   const cable = _autoFillCableImpl(roomId, productId);
   if (cable) {
@@ -26563,6 +26679,18 @@ function _scoreCableCandidate(res, ep, ctx) {
 //    ubrukt. Navngi et produkt i samme familie (getProductFamily) i RIKTIG retning — lengre hvis
 //    arealet ikke dekkes, kortere hvis mesteparten av rullen aldri blir lagt — og la brukeren
 //    eksplisitt overstyre (confirm(), samme mønster _batchAction bruker for sine bekreftelser).
+// 074 · STILLE MÅLING. ⚠ Denne funksjonen kalles fra HVER GREN i den gamle kaskaden, og siden
+// 070 er den gamle kaskaden en KANDIDATGENERATOR — den kjøres én gang for valgt retning og én
+// gang til for den andre, og på nytt ved hvert produktklikk, hver retningsendring og hver
+// romflytting. Den spurte før `confirm(...)` midt oppe i dette (målt: stakken var
+// `confirm ← _finishCableAutoFill ← _autoFillCableLegacy ← _cableLegacyInDirection ←
+// _cableCandidatesForDirection`), og «Avbryt» ga `return null`, som utløste neste forsøk — og
+// en ny dialog. Tallene gjaldt dessuten en kandidat som TAPTE: Kenneths bad meldte 25 % udekket
+// fra den gamle motoren mens det vinnende utlegget hadde 91 % dekning målt av
+// `_cableGeometryCheck`.
+//
+// Nå: ingen dialog, ingen toast, ingen `return null`. Funksjonen MÅLER og MERKER kabelen; hvem
+// som sier noe til brukeren avgjøres ÉN gang, etter at vinneren er kåret (`_cableStatusLines`).
 function _finishCableAutoFill(cable, room, prod, opts) {
   if (!cable || !room) return cable;
   opts = opts || {};
@@ -26589,51 +26717,59 @@ function _finishCableAutoFill(cable, room, prod, opts) {
     lenShortfallPct = targetCm > 0 ? (lenShortfallCm / targetCm * 100) : 0;
   }
 
-  const areaBad = uncoveredM2 > 0.3 && uncoveredPct > 20;
-  const lenBad = lenShortfallCm > 200 && lenShortfallPct > 25;
-  if ((areaBad || lenBad) && prod && prod.cable_length_m) {
-    const family = getProductFamily(prod.id).filter(p => p.id !== prod.id && p.cable_length_m);
-    // Areal ikke dekket → trenger MER kabel. Mesteparten av rullen ubrukt → et MINDRE produkt holder.
-    const wantLonger = areaBad;
-    let suggestion;
-    if (wantLonger) {
-      const neededLenM = nettoM2 * 100 / ((prod.max_spacing_mm || 200) / 10);
-      suggestion = family.filter(p => p.cable_length_m >= neededLenM).sort((a, b) => a.cable_length_m - b.cable_length_m)[0] || null;
-    } else {
-      const neededLenM = nettoM2 * 100 / ((prod.min_spacing_mm || 50) / 10);
-      suggestion = family.filter(p => p.cable_length_m <= neededLenM).sort((a, b) => b.cable_length_m - a.cable_length_m)[0] || null;
-    }
-    const suggestionTxt = suggestion
-      ? ` ${suggestion.name} (${suggestion.cable_length_m} m) ville passet bedre.`
-      : ` Fant ikke et ${wantLonger ? 'lengre' : 'kortere'} produkt i samme familie.`;
-    const msg = areaBad
-      ? `${prod.name} (${prod.cable_length_m} m) dekker ikke dette rommet godt — ${uncoveredM2.toFixed(2)} m² (${uncoveredPct.toFixed(0)}%) ville ligget uten kabel.${suggestionTxt}`
-      : `${prod.name} (${prod.cable_length_m} m) er for lang for dette rommet — ${(lenShortfallCm / 100).toFixed(1)} m (${lenShortfallPct.toFixed(0)}%) av rullen ville aldri blitt lagt.${suggestionTxt}`;
-    const allowPartial = !!opts.allowPartial || (typeof confirm === 'function' && confirm(msg + '\n\nVil du likevel legge den ut slik?'));
-    if (!allowPartial) {
-      if (typeof _showToast === 'function') _showToast(msg, 'warn');
-      return null;
-    }
-    if (typeof _showToast === 'function') _showToast('Legger likevel — ' + msg, 'warn');
-    cable._coverageWarningM2 = Math.round(uncoveredM2 * 100) / 100;
-    cable._coverageWarningPct = Math.round(uncoveredPct * 10) / 10;
-    cable._lengthShortfallCm = Math.round(lenShortfallCm);
-    return cable;
-  }
+  const areaBad  = uncoveredM2 > 0.3 && uncoveredPct > 20;
+  const lenBad   = lenShortfallCm > 200 && lenShortfallPct > 25;
   const areaWarn = uncoveredM2 > 0.1 && uncoveredPct > 5;
-  const lenWarn = lenShortfallCm > 20 && lenShortfallPct > 2;
-  if (areaWarn || lenWarn) {
-    cable._coverageWarningM2 = Math.round(uncoveredM2 * 100) / 100;
+  const lenWarn  = lenShortfallCm > 20 && lenShortfallPct > 2;
+
+  if (areaBad || lenBad || areaWarn || lenWarn) {
+    // ⚠ Dette er den GAMLE dekningsformelen (Σ segmentlengde × CC mot netto). Den beholdes som
+    // kandidatens egen måling, men den vises ALDRI til brukeren — `_cableStatusLines` leser
+    // `_geomMetrics.coveragePct` (068-definisjonen) for alt som står i panelet. Feltene her er
+    // merking for den som måler kandidater, ikke en beskjed.
+    cable._coverageWarningM2  = Math.round(uncoveredM2 * 100) / 100;
     cable._coverageWarningPct = Math.round(uncoveredPct * 10) / 10;
-    cable._lengthShortfallCm = Math.round(lenShortfallCm);
-    if (typeof _showToast === 'function') {
-      const parts = [];
-      if (areaWarn) parts.push(`${cable._coverageWarningM2.toFixed(2)} m² (${cable._coverageWarningPct.toFixed(0)}%) av rommet ligger uten kabel`);
-      if (lenWarn) parts.push(`${(lenShortfallCm / 100).toFixed(1)} m av rullen ble ikke lagt`);
-      _showToast(parts.join(' — ') + ' — sjekk utlegget.', 'warn');
-    }
+    cable._lengthShortfallCm  = Math.round(lenShortfallCm);
+    cable._coverageSevere     = !!(areaBad || lenBad);
+    cable._betterProduct = _cableBetterProduct(room, prod, { wantLonger: areaBad || areaWarn });
   }
   return cable;
+}
+
+// 074 · Forslag om et bedre produkt — i RIKTIG serie og med RIKTIG effekt.
+// ⚠ FØR: `getProductFamily(prod.id)` + valg på lengde alene. `getProductFamily` blander 17T og
+// 10T (målt i 043, derfor finnes `_forslagKabelSerie`), og lengde alene tar ikke hensyn til
+// W/m. Resultatet i Kenneths bad var «InFloor 10T 300W 30m» foreslått i et rom som skal ha
+// 706 W — altså under halve effekten.
+//
+// NÅ: samme serie (samme `watt_per_m` og spenning) via `_forslagKabelSerie`, og kandidaten
+// hentes fra `selectCableByPower` for rommets ØNSKEDE W/m², så et forslag aldri gir vesentlig
+// lavere effekt enn ønsket.
+function _cableBetterProduct(room, prod, opts) {
+  if (!room || !prod || !prod.cable_length_m) return null;
+  opts = opts || {};
+  try {
+    const familie = (typeof getProductFamily === 'function' ? getProductFamily(prod.id) : []) || [];
+    const serie = (typeof _forslagKabelSerie === 'function' ? _forslagKabelSerie(familie, prod) : familie)
+      .filter(p => p.cable_length_m && p.watt_per_m === prod.watt_per_m
+                && (p.voltage == null || prod.voltage == null || p.voltage === prod.voltage));
+    if (!serie.length) return null;
+    const wm2 = (typeof _roomTargetWm2 === 'function' ? _roomTargetWm2(room.id) : null) || room.targetWm2;
+    if (!wm2) return null;
+    const valg = selectCableByPower(room.id, serie, wm2);
+    if (!valg) return null;
+    // Et forslag skal ALDRI gi vesentlig lavere effekt enn ønsket: velg blant de gyldige som
+    // treffer behovet, og foretrekk den nærmeste som ikke ligger under.
+    const kand = (valg.above && valg.above.length ? valg.above[0] : null) || valg.closest;
+    if (!kand || !kand.product || kand.product.id === prod.id) return null;
+    const p2 = kand.product;
+    // Vil vi ha MER kabel (dårlig dekning), skal forslaget faktisk være lengre — og omvendt.
+    if (opts.wantLonger && p2.cable_length_m <= prod.cable_length_m) return null;
+    if (!opts.wantLonger && p2.cable_length_m >= prod.cable_length_m) return null;
+    return { id: p2.id, name: p2.name, lengthM: p2.cable_length_m,
+             watt: Math.round((p2.watt_per_m || 0) * p2.cable_length_m),
+             wm2: Math.round(kand.wm2 || 0) };
+  } catch (e) { return null; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -27205,8 +27341,22 @@ const _cableFixtures = {
              {x:977.2146001589126,y:-1044.785441649596},{x:874.6141654723125,y:-1044.785441649596},
              {x:677.0521994970343,y:-1039.5663902737895},{x:677.0521994970343,y:-940.3028224146952},
              {x:777.0418631707688,y:-940.3028224146952},{x:777.0418631707688,y:-928.2902504108553},
-             {x:678.3860035099954,y:-928.2902504108553}] }
+             {x:678.3860035099954,y:-928.2902504108553}] },
+  // 074 (Kenneth 14.10.2026): SAMME rom, men med den kabelen han faktisk hadde valgt —
+  // InFloor 17T 700W 41m og 120 W/m². 072 testet bare 47 m, og 41 m er en annen CC og et annet
+  // celleoppsett. Her ble bugen meldt, så her skal den måles.
+  badHakk41: { name: 'Kenneths bad med 41 m kabel (074)', klasse: 'referanse', productId: 23,
+    targetWm2: 120, sammeGeometriSom: 'badHakk',
+    note: 'Samme geometri som badHakk, men InFloor 17T 700W 41m og 120 W/m² — oppsettet bugrapporten 074 kom fra.',
+    points: [] }
 };
+// ⚠ Punktene KAN IKKE kopieres inne i objektliteralet over: `const _cableFixtures = {...}` er
+// i TDZ mens initialiseringen kjører, så et oppslag på `_cableFixtures.badHakk` der kaster
+// «Cannot access before initialization». Kopieres her i stedet — én kilde, ingen drift.
+for (const [navn, fx] of Object.entries(_cableFixtures)) {
+  if (fx.sammeGeometriSom) fx.points = _cableFixtures[fx.sammeGeometriSom].points.map(p => ({ x: p.x, y: p.y }));
+  void navn;
+}
 
 // ─── Romgalleriet: kjører kaskaden OG hver motor for seg ────────────────────────────────────
 // Bygger en midlertidig scene i S for hver fixture, kjører, måler, og legger ALT tilbake.
@@ -27234,7 +27384,9 @@ function _cableGalleryBuildScene(fx) {
   S.counters = Object.assign({}, S.counters, { nextCableId: 1 });
   const room = { id: 1, name: fx.name, points: fx.points.map(p => ({ x: p.x, y: p.y })),
     area: compArea(fx.points), floorId: 1, partId: null, wallThicknessCm: 10, shape: 'polygon',
-    walls: [], dims: null, color: null, roomType: null, targetWm2: null };
+    // 074: fixturen kan sette ønsket flateeffekt — den styrer CC-grensene og produktforslaget,
+    // og badHakk41 finnes nettopp for å måle med Kenneths 120 W/m².
+    walls: [], dims: null, color: null, roomType: null, targetWm2: fx.targetWm2 != null ? fx.targetWm2 : null };
   S.rooms = [room];
   let hid = 1;
   for (const pts of (fx.hindrings || [])) S.hindrings.push({ id: hid++, roomId: 1, type: 'Hindring', points: pts.map(p => ({ x: p.x, y: p.y })) });
@@ -28566,6 +28718,20 @@ function _cableLegacyInDirection(roomId, productId, opts, dir) {
 // Bygg alle kandidater for én retning (ny motor + dagens kaskade), målt.
 function _cableCandidatesForDirection(roomId, productId, opts, dir, room) {
   const out = [];
+  _cableSearchDepth++;                       // 074: alt herfra og ned er STILLE
+  try {
+  return _cableCandidatesForDirectionImpl(roomId, productId, opts, dir, room, out);
+  } finally { _cableSearchDepth--; }
+}
+
+// 074 · DYBDETELLEREN er vakten, ikke en opts-flagg som kan glemmes i ett kallsted.
+// Alt som kjøres mens den er > 0 er kandidatmåling: ingen dialog, ingen toast, ingen endring av
+// `S.varmefolie` eller UI-tilstand. `_cableStille()` leses av `_showToast`-innpakningen under og
+// av mattemotoren (STEG 0.4), så en ny vei inn i søket ikke kan begynne å snakke igjen.
+let _cableSearchDepth = 0;
+function _cableStille() { return _cableSearchDepth > 0; }
+
+function _cableCandidatesForDirectionImpl(roomId, productId, opts, dir, room, out) {
   // Ny motor: returnerer enten et kabelobjekt eller et strukturert «ingen løsning» (spec §5).
   let geoNo = null;
   try {
@@ -28646,15 +28812,24 @@ function _autoFillCableImpl(roomId, productId, opts) {
   cable._geomEngine = chosen.source;
   cable._geomDefects = chosen.chk.ok ? null : (chosen.chk.hard || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
   cable._geomMetrics = chosen.chk.metrics;
+  // 074: fakta festes på kabelen; ingen beskjed herfra. Panelet (`_cableStatusLines`) sier ÉN
+  // ting, etter at vinneren er kåret, med vinnerens egne tall. Før sto det en toast her som
+  // druknet i confirm-dialogene fra kandidatsøket, og som ga Kenneth et retningsbytte han ikke
+  // rakk å lese.
   if (fallback) {
     cable._dirFallback = { wanted: fallback.wanted, used: fallback.used, reason: fallback.reason };
-    if (typeof _showToast === 'function') {
-      _showToast(`${fallback.wanted === 'v' ? 'Vertikal' : 'Horisontal'} gir ikke et gyldig utlegg i dette rommet — lagt ${fallback.used === 'v' ? 'vertikalt' : 'horisontalt'}.`, 'warn');
-    }
   }
   room._cableNoSolution = (!chosen.chk.ok && geoNo) ? geoNo : null;
-  if (!chosen.chk.ok && typeof _showToast === 'function' && !fallback) {
-    _showToast('⚠ Utlegget bryter regler: ' + (chosen.chk.hard || []).slice(0, 2).map(d => d.kind).join(' · ') + ' — se panelet.', 'warn');
+  // 074: forslaget regnes på VINNERENS dekning, ikke på en kandidat som tapte.
+  // ⚠ Målt: `_finishCableAutoFill` kjører bare inne i den GAMLE kaskaden, og dens formel leser
+  // `cable.coverage` — et felt ny motor ikke setter, så den ga alltid «100 % dekket» og aldri
+  // noe forslag for et geo-utlegg. Dekningen her er `_geomMetrics.coveragePct` (068).
+  {
+    const _dekn = chosen.chk.metrics && chosen.chk.metrics.coveragePct;
+    const _prod = HEATING_PRODUCTS.find(p => p.id === productId);
+    if (_dekn != null && _dekn < 92 && _prod) {
+      cable._betterProduct = _cableBetterProduct(room, _prod, { wantLonger: true });
+    }
   }
   if (S.ui && S.ui.debugCableEngine) {
     console.log('[cable-070]', room.name, 'vant:', chosen.source, chosen.chk.ok ? 'GYLDIG' : 'UGYLDIG',
@@ -30165,6 +30340,67 @@ async function _cableGeometryRegressionTest() {
       const cab = generateCableGeo(1, _cableFixtures.enHindring.productId, { direction: dir, startCorner: 'bl' });
       add('enHindring/' + dir + ': én kabel via transittløp', !!(cab && cab.ok !== false && (cab._geoTransits || 0) >= 1),
           'gyldig med transitt', (cab && cab.ok !== false) ? ((cab._geoTransits || 0) + ' transitter') : 'ingen løsning');
+    }
+
+    // ── 074 · KANDIDATSØKET ER STILLE ───────────────────────────────────────────────────
+    // ⚠ Bugen Kenneth meldte 14.10.2026: `confirm(...)` ble kalt fra `_finishCableAutoFill`
+    // INNE i kandidatsøket, én gang per kjøring — og panelet, toasten og dialogen viste tre
+    // forskjellige dekningstall fra tre forskjellige utlegg. Denne blokken låser at søket ikke
+    // kan begynne å snakke igjen.
+    {
+      const rom = _cableGalleryBuildScene(_cableFixtures.badHakk41 || _cableFixtures.badHakk);
+      rom.targetWm2 = 120;
+      S.ui.selectedRoomId = rom.id;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'br' });
+      const sett = [];
+      const eC = window.confirm, eA = window.alert, eP = window.prompt, eT = window._showToast;
+      window.confirm = () => { sett.push('confirm'); return false; };
+      window.alert   = () => { sett.push('alert'); };
+      window.prompt  = () => { sett.push('prompt'); return null; };
+      window._showToast = m => { sett.push('toast:' + String(m).slice(0, 40)); };
+      const vfFoer = { dir: S.varmefolie.direction, eks: S.varmefolie.dirExplicit };
+      let cab = null;
+      try { cab = autoFillCable(rom.id, 23); }
+      finally { window.confirm = eC; window.alert = eA; window.prompt = eP; window._showToast = eT; }
+      add('074 badHakk41: ingen nettleserdialog fra kandidatsøket', !sett.length, 'null dialoger/toasts',
+          sett.join(' | ') || 'null');
+      add('074 badHakk41: valgt retning er uendret etterpå',
+          S.varmefolie.direction === vfFoer.dir && S.varmefolie.dirExplicit === vfFoer.eks,
+          'v/eksplisitt', S.varmefolie.direction + '/' + S.varmefolie.dirExplicit);
+      add('074 badHakk41: loddrett gir et gyldig utlegg med 41 m', !!(cab && cab._geomOk),
+          'gyldig', cab ? (cab._geomOk ? 'gyldig' : 'UGYLDIG') : 'ingen kabel');
+      if (cab) {
+        const linjer = _cableStatusLines(cab, rom);
+        const dekn = cab._geomMetrics && cab._geomMetrics.coveragePct;
+        // ETT tall for dekning: panelets tekst må stemme med `_geomMetrics`, ikke med den
+        // gamle formelen (som meldte 25 % på en kandidat som tapte).
+        const kald = linjer.map(l => l.tekst).join(' ').match(/\((\d+) %\) uten kabel/);
+        add('074: dekningstallet i panelet er _geomMetrics', !kald || +kald[1] === Math.round(100 - dekn),
+            'samme som ' + Math.round(100 - dekn) + ' %', kald ? kald[1] + ' %' : '(ingen linje)');
+        // Forslaget skal være i SAMME serie og ikke gi lavere effekt.
+        const bp = cab._betterProduct;
+        const p0 = HEATING_PRODUCTS.find(p => p.id === 23);
+        add('074: forslaget er i samme serie (17T, ikke 10T)', !bp || /17T/.test(bp.name),
+            '17T', bp ? bp.name : '(ingen)');
+        add('074: forslaget gir ikke lavere effekt enn produktet', !bp || bp.watt >= p0.watt_per_m * p0.cable_length_m,
+            '>= ' + Math.round(p0.watt_per_m * p0.cable_length_m) + ' W', bp ? bp.watt + ' W' : '(ingen)');
+      }
+    }
+
+    // ── 074 · for kort kabel: forslaget skal være LENGRE, i samme serie ──────────────────
+    {
+      const fxK = _cableFixtures.kabelForKort;
+      const rom = _cableGalleryBuildScene(fxK);
+      S.ui.selectedRoomId = rom.id;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'h', dirExplicit: true, startCorner: 'bl' });
+      const p0 = HEATING_PRODUCTS.find(p => p.id === fxK.productId);
+      const cab = autoFillCable(rom.id, fxK.productId);
+      const bp = cab && cab._betterProduct;
+      add('074 kabelForKort: panelet foreslår en LENGRE kabel', !!(bp && bp.lengthM > p0.cable_length_m),
+          '> ' + p0.cable_length_m + ' m', bp ? bp.name + ' (' + bp.lengthM + ' m)' : '(intet forslag)');
+      add('074 kabelForKort: forslaget er i samme serie',
+          !bp || HEATING_PRODUCTS.find(p => p.id === bp.id).watt_per_m === p0.watt_per_m,
+          p0.watt_per_m + ' W/m', bp ? HEATING_PRODUCTS.find(p => p.id === bp.id).watt_per_m + ' W/m' : '–');
     }
 
     // ── 072 · kontrollen ved åpning merker, men endrer ALDRI ────────────────────────────

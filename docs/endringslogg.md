@@ -4,6 +4,76 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 074: Kabelmotor — stille kandidatsøk, én beskjed med vinnerens tall — 2026-10-14
+
+Gren `kabelmotor`, **ikke merget**. Bugrapport fra Kenneth 14.10.2026 med skjermbilde:
+«Jeg velger retning og innsetting, men den hopper tilbake og bytter visning av seg selv.
+Varselen kommer opp flere ganger, det hjelper ikke å trykke den bort.»
+
+### STEG 0 (målt før endring)
+
+Oppsett: badet, InFloor 17T 700W 41m, 120 W/m², start nedre høyre, loddrett valgt.
+
+| # | Målt |
+|---|---|
+| 0.1 | **Én `confirm` + én toast per kjøring**, stakk: `confirm ← _finishCableAutoFill ← _autoFillCableLegacy ← _cableLegacyInDirection ← _cableCandidatesForDirection`. Altså fra den GAMLE kaskadens kandidat i valgt retning. Gjentakelsen kommer av hvor mange ganger `autoFillCable` kjøres: hvert produktklikk, hver retningsendring (`_reapplyCableDirection`) og hver romflytting |
+| 0.2 | **Ja — loddrett med 41 m gir et gyldig utlegg** fra ny motor: geo, CC 13,18 cm, 41,03 m (+0,07 %), dekning 91 %, alle harde krav ok. Fallbacken slår ikke inn på denne geometrien. `badHakk41` er lagt i galleriet |
+| 0.3 | Retningsvelgeren leser `S.varmefolie.direction`, **ikke** kabelens `direction` (`_drawRwpDirection` → `_vfPickerLabel`). Et fallback skriver den ikke — `_cableLegacyInDirection` legger den tilbake i `finally`. Målt med en settere-vakt på feltet: **null skrivinger** gjennom hele kjøringen |
+| 0.4 | I kabelflyten finnes `confirm` bare på det ene stedet (:26612). De andre i fila ligger i rom-/hindring-/bakgrunnsveier som kandidatsøket ikke passerer |
+
+### De tre tallene som ikke var enige
+
+Kenneths skjermbilde hadde **25 %** (nettleserdialog), **10 %** (toast) og **● ok** (panelet).
+De kom fra tre forskjellige utlegg — to av dem kandidater som tapte — og to forskjellige
+dekningsformler. Vinneren hadde 91 % dekning målt av `_cableGeometryCheck`.
+
+### Rettet
+
+- **`_finishCableAutoFill` måler og merker, den snakker ikke.** Ingen `confirm`, ingen toast,
+  ingen `return null` på grunn av dekning.
+- **`_cableSearchDepth`** som vakt: alt som kjøres mens den er > 0 er kandidatmåling. En
+  dybdeteller, ikke et `opts`-flagg som kan glemmes i ett kallsted.
+- **`_cableStatusLines(cable, room)`** er den ene kilden til alt brukeren ser: dekning fra
+  `_geomMetrics.coveragePct`, gyldighet fra `_geomDefects`, retning fra `_dirFallback`, forslag
+  fra `_betterProduct`. Panelet tegner linjene, toasten slår dem sammen.
+- **`_cableBetterProduct`** — samme serie (`_forslagKabelSerie`) og riktig effekt
+  (`selectCableByPower` mot rommets ønskede W/m²). Badet: **17T 800W 47m (799 W)**, ikke
+  10T 300 W. Forslaget regnes nå på VINNERENS dekning: den gamle formelen leser `cable.coverage`,
+  et felt ny motor aldri setter, så et geo-utlegg fikk alltid «100 % dekket» og aldri noe forslag.
+- **Valgt retning står.** Panelet sier «Retning: loddrett (valgt)», og ved et fallback kommer
+  «Prøv loddrett likevel» som legger beste kandidat i valgt retning, merket ⚠, uten dialoger.
+- **Effekt-merket er merket som effekt** («129 W/m² ● ok effekt»), så det ikke leses som en dom
+  over dekningen rett under.
+
+### Målt etter
+
+Samme oppsett: **null nettleserdialoger, null toasts**. Ett gyldig loddrett utlegg.
+Retningsvelgeren uendret. Forhåndsvisning → Godkjenn kjører kaskaden **én** gang totalt
+(teller: 1 før, 1 etter — «Godkjenn» tar det som vises).
+
+Panelet:
+
+> ● Forhåndsvises — InFloor 17T 700W 41m
+> 129 W/m² ● ok effekt · CC 13,2 cm · 41,0 m kabel
+> Retning: loddrett (valgt)
+> ⚠ 0,53 m² (9 %) uten kabel
+> Bedre: InFloor 17T 800W 47m (799 W) · Bytt
+
+### Byggefelle
+
+`badHakk41` kopierte punktene fra `badHakk` inne i `const _cableFixtures = {...}`. Objektet er i
+TDZ mens initialiseringen kjører, så oppslaget kastet «Cannot access `_cableFixtures` before
+initialization» — og hele testbatteriet døde. Kopieringen skjer nå i en løkke rett etter
+literalen, via feltet `sammeGeometriSom`.
+
+### Verifisering
+
+Galleriet: 15 rom × 2 retninger = 30 rader, **24 gyldige / 6** (samme seks som etter 072;
+`badHakk41` består begge veier). `_cableGeometryRegressionTest` 36 → **44 påstander**.
+**22 batterier grønne.**
+
+---
+
 ## 071: kabelmotor — dokumentasjon og merge-sjekkliste — 2026-10-13
 
 `docs/kabel/STATUS.md`: hva motoren gjør (lag A–H) på én side, galleritabellen rom for rom før

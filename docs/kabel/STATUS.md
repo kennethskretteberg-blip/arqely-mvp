@@ -1,4 +1,4 @@
-# Kabelmotor 068–072 — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–074 — status, merge-sjekkliste og hva som ikke er løst
 
 Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
@@ -37,13 +37,15 @@ labelen, defektliste og forslag i panelet, egen linje på PDF-romsiden.
 
 ## 2. Galleriet, rom for rom
 
-28 rader = 14 fixture-rom × 2 retninger. «Før» = kaskaden slik den var ved `1519bb0`.
+30 rader = 15 fixture-rom × 2 retninger (`badHakk41` kom til i 074).
+«Før» = kaskaden slik den var ved `1519bb0`.
 
 | | består | bryter et hardt krav |
 |---|---|---|
 | **Før (068)** | 5 | 23 |
 | **Etter (070)** | 20 | 8 |
-| **Etter (072)** | **22** | **6** |
+| **Etter (072)** | 22 | 6 |
+| **Etter (074)** | **24** | **6** (av 30) |
 
 De to som kom til i 072 er **Kenneths bad loddrett** (var «ingen løsning» — fantes ingen lovlig
 én-kabel-bane) og **`enHindring` i begge retninger** (var ⚠ i begge). Begge løses av
@@ -68,7 +70,8 @@ asymmetriske vegger 93,9 → 96,1 %.
 | Bøyeradius umulig | ⚠ (§3c) | ⚠ (§3c) |
 | Umulig starthjørne | ok 99,0 % | ok 99,1 % |
 | Skrå (18°) | ok 97,4 % | ok 96,8 % |
-| **Kenneths bad** | **ok 92,7 %** (1 transitt) | ok 88,5 % |
+| **Kenneths bad** (47 m) | **ok 92,7 %** (1 transitt) | ok 88,5 % |
+| **Kenneths bad, 41 m** (074) | **ok 91,0 %** · +0,07 % · CC 13,18 | **ok 91,4 %** · +0,57 % · CC 13,45 |
 
 ⚠ **Én endring i et rom som alt var gyldig:** rent rektangel vannrett lå på boustrophedon og
 ligger nå på ny motor. Den er bedre på hvert eneste mål (CC 12,40 → 12,60 cm, dekning
@@ -202,6 +205,56 @@ Den kjører alle rom × begge retninger × kaskaden + fem motorer, skriver
 5. **`auto`-retningen på badet** velger fortsatt vannrett (lengdeavviket 0,00 % veier tyngre i
    poengsummen enn 4,2 prosentpoeng dekning). Loddrett får man ved å velge retningen selv.
    Skal poengsummen vekte dekning høyere når begge retninger er lovlige?
+
+---
+
+## 6b. 074 — bugen Kenneth meldte 14.10.2026
+
+> «Jeg velger retning og innsetting, men den hopper tilbake og bytter visning av seg selv.
+> Varselen kommer opp flere ganger, det hjelper ikke å trykke den bort.»
+
+### Hva som var galt, målt
+
+| # | Funn |
+|---|---|
+| 1 | `confirm(...)` ble kalt fra `_finishCableAutoFill` **inne i kandidatsøket**. Målt stakk: `confirm ← _finishCableAutoFill ← _autoFillCableLegacy ← _cableLegacyInDirection ← _cableCandidatesForDirection`. Én per kjøring — og `autoFillCable` kjøres på nytt ved hvert produktklikk, hver retningsendring (`_reapplyCableDirection`) og hver romflytting (mouseup-grenen som regenererer kabler). «Avbryt» ga `return null`, som utløste neste forsøk. |
+| 2 | **25 % gjaldt et utlegg Kenneth aldri så.** Tallet kom fra den GAMLE kaskadens kandidat med den gamle formelen (Σ segment × CC). Vinneren (ny motor) hadde **91 %** målt av `_cableGeometryCheck`. |
+| 3 | Produktforslaget brukte `getProductFamily` (blander 17T og 10T, målt i 043) og valgte på **lengde alene** → «InFloor 10T 300W 30m» i et rom som skal ha 706 W. |
+| 4 | Retningsbyttet ble meldt med en toast som druknet i dialogene. |
+
+### Hva som er rettet
+
+- **`_finishCableAutoFill` måler og merker — den snakker ikke.** Ingen `confirm`, ingen toast,
+  ingen `return null` på grunn av dekning.
+- **`_cableSearchDepth`** er vakten: alt som kjøres mens den er > 0 er kandidatmåling, og
+  `_cableStille()` leses av toast-veiene. En ny vei inn i søket kan ikke begynne å snakke igjen.
+- **`_cableStatusLines(cable, room)` er den ene kilden** til alt brukeren ser om et utlegg:
+  dekning fra `_geomMetrics.coveragePct` (068-definisjonen), gyldighet fra `_geomDefects`,
+  retning fra `_dirFallback`, forslag fra `_betterProduct`. Panelet tegner linjene, toasten slår
+  dem sammen — ingen av dem regner selv.
+- **`_cableBetterProduct`** henter forslaget fra samme serie (`_forslagKabelSerie`, samme
+  `watt_per_m` og spenning) og fra `selectCableByPower` for rommets ønskede W/m². Badet får nå
+  **InFloor 17T 800W 47m (799 W)**, ikke 10T 300 W.
+- **Valgt retning står.** `S.varmefolie.direction` skrives ikke av et fallback (målt: den var
+  faktisk aldri skrevet — `_cableLegacyInDirection` legger den tilbake i `finally`), og panelet
+  sier nå eksplisitt «Retning: loddrett (valgt)» med «Prøv loddrett likevel» når noe annet ble lagt.
+- **Effekt-merket er merket som effekt.** «129 W/m² ● ok» leste som en dom over hele utlegget;
+  det står nå «● ok effekt», så det ikke forveksles med dekningen rett under.
+
+### Målt etter
+
+Badet med **InFloor 17T 700W 41m, 120 W/m², start nedre høyre, loddrett valgt**:
+**null nettleserdialoger, null toasts**, ett gyldig loddrett utlegg (geo, CC 13,18 cm, 41,03 m,
++0,07 %, dekning 91 %), retningsvelgeren uendret. Panelet sier:
+
+> ● Forhåndsvises — InFloor 17T 700W 41m
+> 129 W/m² ● ok effekt · CC 13,2 cm · 41,0 m kabel
+> Retning: loddrett (valgt)
+> ⚠ 0,53 m² (9 %) uten kabel
+> Bedre: InFloor 17T 800W 47m (799 W) · **Bytt**
+
+**Loddrett med 41 m ER gyldig** (STEG 0.2) — fallbacken slår altså ikke inn på denne geometrien.
+Forhåndsvisning → Godkjenn kjører kaskaden **én** gang totalt (målt teller: 1 før, 1 etter).
 
 ---
 
