@@ -521,3 +521,62 @@ Før Kenneth ser noe som helst:
 Kenneths dom i nettleseren er sluttkontrollen, ikke måleinstrumentet. ⚠ Og `rom5`-fixturen er
 den LAGREDE geometrien — er rommet redigert på skjermen, måler fixturen noe annet. Spør om en
 fersk kopi når et skjermbilde og en måling er uenige.
+
+---
+
+## 12 · ⚠ ROTÅRSAKEN FUNNET: en LÅST CC hopper over hele den nye motoren
+
+Kenneth sendte skjermbildet jeg ba om i §11.1 — med verktøylinja synlig. Der står det
+**«149 mm 🔒»**. CC var altså låst til 14,9 cm. Det var den manglende opplysningen.
+
+### Reprodusert, med tall
+
+Rom 5, InFloor 17T 600W 35m, loddrett, 120 W/m²:
+
+| | motor | CC | utenfor | kryssinger | klaring | gyldig |
+|---|---|---|---|---|---|---|
+| uten lås | **geo** | 15,28 | 0 cm | 0 | 15,28 | **ja** |
+| **lås 14,9** | **v6** | 14,90 | **293,1 cm** | **34** | **0** | **nei** |
+
+Samme med 700 W: uten lås geo/13,20/gyldig, med lås v6/14,90/293 cm utenfor/34 kryssinger.
+Det er nøyaktig panelteksten hans: «utenfor · kryssing · nærføring».
+
+### Hvorfor
+
+`_autoFillCableImpl` har en tidlig retur:
+
+```js
+if (room._forcedSpacingCm != null || room._zoneId != null || S.ui.fillTargetZoneId != null) {
+  return _autoFillCableLegacy(roomId, productId, opts);
+}
+```
+
+Den er fra 070 og gjelder flerkabel-soner, der CC er bundet på tvers av soner og ny motor ikke
+kjenner bindingen. Men den fanger **også en vanlig CC-lås i verktøylinja**, og da kjøres hele
+utlegget på V6 — motoren 068 målte til å legge 293 cm utenfor rommet og krysse seg selv 34 ganger.
+
+### Dette forklarer hele serien
+
+- **Hvorfor 074d og 074e var identiske** på Rom 5: ingen av dem rører den gamle veien.
+- **Hvorfor fixturene alltid var grønne:** de har ingen CC-lås.
+- **Hvorfor det vekslet mellom Kenneths skjermbilder:** hengelåsen var på i noen av dem.
+- Og hvorfor tre runder med endringer i `generateCableGeo` ikke kunne hjelpe: **feilen var
+  aldri i den motoren.**
+
+### Bifunn: den tvungne veien merkes ikke
+
+Den tidlige returen skjer FØR `_geomOk`/`_geomDefects`/`_geomMetrics` settes. Et ugyldig utlegg
+fra den veien bærer altså ikke 070-merkingen videre — målt: `_geomOk` udefinert, `_geomDefects`
+tom, selv om kontrollen sier 293 cm utenfor.
+
+### Forslag (IKKE bygget — venter på Kenneth)
+
+En låst CC er ikke det samme som en sonebinding. `generateCableGeo` kan ta imot en gitt CC og
+hoppe over sitt eget CC-søk — resten av motoren (celler, transitt, kontroll) er uavhengig av
+hvordan CC ble bestemt. Da ville en CC-lås fått den nye motoren, og sonene kunne beholde den
+gamle veien til de er løst for seg.
+
+To spørsmål før det bygges:
+1. Skal en CC-lås i verktøylinja i det hele tatt kunne gi et utlegg som bryter harde krav, eller
+   skal motoren si «14,9 cm går ikke i dette rommet — nærmeste som går er 15,3»?
+2. Flerkabel-soner: skal de fortsatt kjøre den gamle veien?
