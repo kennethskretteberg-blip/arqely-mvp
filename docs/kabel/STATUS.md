@@ -1,4 +1,4 @@
-# Kabelmotor 068–074b — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–074d — status, merge-sjekkliste og hva som ikke er løst
 
 Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
@@ -280,10 +280,28 @@ Transitt-variantene prøves nå i denne rekkefølgen:
 Poengsummen straffer hull tungt (−40 × overskytende), tyngre enn dekningsleddet (30), så et
 jevnt utlegg vinner over et med hull selv når det dekker mer.
 
-**Badet, 47 m loddrett:** verste hull 2 × CC → **1 × CC**, CC uendret 11,60, dekning 92,7 → 92,5 %.
-`uRom` vannrett: verste hull 4 → 2 × CC.
+**Badet loddrett, 47 m:** 0 tomme baner, CC uendret 11,60, dekning 92,7 → 92,5 %.
+**Badet loddrett, 41 m:** 0 tomme baner, CC 13,18 → 13,81, dekning 91,0 → **94,9 %**.
 
-**Ikke løst:** `badHakk41` loddrett og `enHindring` loddrett har fortsatt 2 × CC — der er den
+⚠ **074d: CC-valget er 016 sitt, men jevnhets-søket får ikke røre det.** Kenneth ba om at «CC
+aldri skal utenfor anbefalt område». En GLOBAL sperre går ikke: 016 bestemte bevisst at CC over
+anbefalingen er en advarsel, ikke en sperre, fordi kabelens lengde styrer flateeffekten (36 m i
+10 m² trenger CC 27,8 for 60 W/m²; klemt til 20 blir det 85). Sperren ligger derfor på
+nabotrinn-søket alene, sammen med en dominans-vakt: et nabotrinn får bare overta når det er
+bedre eller likt på HVERT mål (gyldig · lengde · dekning · klaring · bøyeradius · utenfor · ⚠ CC).
+
+⚠ **Og ⚠-et på etiketten betyr ikke «CC utenfor anbefaling»** — det tennes også av
+`_geomDefects`. I Kenneths bugrapport betydde det at utleggene BRØT EN HARD REGEL. Det var den
+ekte skaden i 074c, og dominans-vakten er svaret på den.
+
+⚠ **074c rettet selve målingen.** Avstandsmålingen fra 074b slo ut på kantsonen mellom løpenes
+ender og stubben, og rapporterte «9 × CC» for et utlegg der hver naboavstand var 13,8 cm — den
+straffet altså det jevneste utlegget hardest. Riktig måling er BANEBRUK (`_geoInteriorHoles`):
+en bane som står helt tom med brukte naboer på begge sider er et hull; ligger den ytterst, er
+det stripen inntil veggen. CC er dessuten TRINN, ikke en skala — den jevne løsningen for 41 m lå
+på nabotrinnet, og søket prøver nå N ± 1 og N ± 2 når vinneren har et hull.
+
+**Ikke løst:** `enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane — der er den
 skjøvede varianten ikke gyldig, og den eneste jevne løsningen krever en annen CC. Målt på 47 m
 ville det kostet **6 prosentpoeng dekning** (92,7 → 86,7 %). Det er en annen avveining enn den
 Kenneth beskrev, og er derfor ikke tatt av motoren — se §6 åpen beslutning 6.

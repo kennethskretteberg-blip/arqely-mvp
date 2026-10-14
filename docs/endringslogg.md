@@ -4,6 +4,134 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 074d: Kabelmotor — 074c på nytt, med vakt mot at utlegget blir dårligere — 2026-10-14
+
+074c ble rullet tilbake fordi Kenneth målte at det ble verre i hans eget bad (Rom 5, 5,70 m²).
+«Prøv på nytt, men CC må aldri utenfor anbefalt område.»
+
+### ⚠ To ting jeg hadde feil om, begge rettet av måling
+
+**1. ⚠-et på etiketten betyr ikke «CC utenfor anbefaling».** Kenneths to utlegg viste «⚠ CC
+14,9» og «⚠ CC 10,1». Jeg antok at CC lå utenfor området. Målt i koden (`:35138`):
+
+```js
+_info.push(((_ccOverWarn(prod, ccCm) || (cable._geomDefects && cable._geomDefects.length))
+            ? '⚠ ' : '') + 'CC ' + ccCm.toFixed(1) + ' cm');
+```
+
+Romtypen «Bad» har hverken `ccMinCm` eller `ccMaxCm`, og produktets anbefaling er 20 cm — så
+14,9 og 10,1 er godt INNENFOR. Trekanten kom fra `_geomDefects`: **utleggene brøt en hard
+regel.** Det er alvorligere enn en CC utenfor anbefaling, og det var den ekte skaden i 074c.
+
+**2. En GLOBAL CC-sperre går ikke — den bryter 016.** Første forsøk var å søke i det anbefalte
+vinduet først. Det fikk fem påstander i `_ccWarnRegressionTest` til å falle. 016 bestemte
+bevisst at CC over anbefalingen er en ADVARSEL, ikke en sperre, fordi **kabelens lengde styrer
+flateeffekten**: 36 m i 10 m² TRENGER CC 27,8 cm for å gi de ønskede 60 W/m². Klemmes CC til
+20, blir det 85 W/m² — testen sier det rett ut: «var 85 før 016».
+
+### Rettet
+
+Sperren er lagt **der den hører hjemme**, ikke globalt: på nabotrinn-søket som 074c innførte —
+det eneste som flytter CC for utseendets skyld. Motorens primære CC-valg (lengden bestemmer) er
+uendret.
+
+Et nabotrinn får bare overta når det er **bedre eller likt på hvert mål** — samme dominans-regel
+070 bruker når ny motor tar over for den gamle:
+
+```
+gyldig · lengde innenfor ±1 % · dekning ikke dårligere · klaring ikke dårligere
+       · bøyeradius ikke dårligere · ikke mer utenfor · ingen ⚠ CC
+```
+
+Uten den vakten byttet søket geometri på en poengsum brukeren ikke ser. Det var nettopp det som
+skjedde i 074c.
+
+### Målt på alle 15 fixture-rom
+
+| | |
+|---|---|
+| Rom som får ⚠ (brudd på hard regel) | **de samme seks som før** — flereHindringer ×2, kabelForLang ×2, boyUmulig ×2 |
+| Rom med ⚠ CC | kun `kabelForKort` (48,7 cm — en 3 m kabel i et stort rom; 016-oppførsel, uendret) |
+| Badet 47 m loddrett | 0 hull · CC 11,60 · dekning 92,5 % |
+| Badet 41 m loddrett | 0 hull · CC 13,81 · dekning **94,9 %** (var 91,0) |
+
+Ingen rom ble dårligere, og ingen rom fikk et merke det ikke hadde før. Det er sjekken som
+manglet i 074c.
+
+### Står igjen
+
+`enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane — syntetiske testrom.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` **52 påstander**. **22 batterier grønne**, inkludert
+`_ccWarnRegressionTest` (016). Galleriet 24/30.
+
+---
+
+## 074c: Kabelmotor — hullmålingen var feil, og den straffet det jevneste utlegget — 2026-10-14
+
+Kenneth sendte to skjermbilder av SAMME rom: 47 m «perfekt», 41 m ikke.
+
+### To ekte hull i 41 m-utlegget
+
+Målt løp for løp:
+
+| bane | hvor det er kabel |
+|---|---|
+| 774,4 | over OG under stubben |
+| **787,6** | **bare under** — øvre del tom |
+| **800,8** | **bare over** — nedre del tom |
+| 813,9 | over og under |
+
+To tomme halvbaner ved siden av hverandre, forskjøvet — det er den hvite stripen som ser ut
+til å gå gjennom hele rommet i bildet.
+
+### ⚠ Målingen fra 074b var feil
+
+Jeg målte avstanden mellom løpene på sju høyder. Den slo ut på **kantsonen**: i høyden mellom
+løpenes ender og veggstubben finnes det nesten ingen løp, og den tomme stripen der er marginen,
+ikke et hull. Målt på 41 m rapporterte den **«9 × CC»** for et utlegg der hver eneste
+naboavstand var 13,8 cm — og poengsummen straffet dermed det JEVNESTE utlegget hardest.
+
+**Riktig måling er ikke avstand, men banebruk** (`_geoInteriorHoles`): rutenettet vet hvilke
+baner som finnes og hvor langt hver av dem er lovlig. En bane som står helt tom er et hull — og
+bare når det ligger brukte baner på BEGGE sider. Ligger den ytterst, er den tomme stripen inntil
+veggen, og det er nettopp prisen Kenneth sa han ville betale.
+
+### CC er trinn, ikke en skala
+
+Den jevne løsningen for 41 m lå på **nabotrinnet**: CC 13,81 i stedet for 13,18. Søket valgte
+13,18 fordi lengden traff **1 cm** nærmere — og tok med det et hull og 4 prosentpoeng dårligere
+dekning. Søket prøver nå nabotrinnene (N ± 1, N ± 2) når vinneren har et hull.
+
+Bevisst begrenset til noen få trinn: et fritt søk over hele stigen fant jevne løsninger som
+krevde mye mindre CC og kostet 6 prosentpoeng dekning (målt på 47 m: 92,7 → 86,7 %). Det er en
+annen avveining enn «dra kabelen litt inn fra veggen», og skal ikke tas av motoren.
+
+### Resultat — badet loddrett
+
+| | 41 m før | 41 m etter | 47 m |
+|---|---|---|---|
+| Tomme baner i feltet | **2** | **0** | 0 |
+| CC | 13,18 cm | 13,81 cm | 11,60 cm |
+| Lengde | 41,03 m (+0,07 %) | 41,04 m (+0,09 %) | 47,09 m (+0,19 %) |
+| Dekning | 91,0 % | **94,9 %** | 92,5 % |
+
+41 m ble altså både jevnere OG bedre dekket — nabotrinnet var bedre på begge deler.
+
+### Står igjen
+
+`enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane. Det er syntetiske
+testrom, ikke Kenneths bad.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 48 → **52 påstander** (begge badene låst: null tomme baner,
+dekning ≥ 92 %). **22 batterier grønne.** Galleriet 24/30.
+
+---
+
 ## 074b: Kabelmotor — jevn avstand går foran dekning — 2026-10-14
 
 Kenneth, med skjermbilde og grønn ramme rundt feltet over veggstubben:
