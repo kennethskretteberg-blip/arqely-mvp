@@ -1,4 +1,4 @@
-# Kabelmotor 068–074d — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–076 — status, merge-sjekkliste og hva som ikke er løst
 
 Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
@@ -452,3 +452,72 @@ blind som de tre foregående.
    et hardt krav). Skal et utlegg kunne være 2 % kort hvis det blir jevnt?
 3. **Rom 5 som fixture** — kan jeg få koordinatene (f.eks. prosjekt-JSON for rommet)? Uten dem
    kan jeg ikke etterprøve det du faktisk ser.
+
+---
+
+## 11 · 076 — Rom 5 er fasiten, CC er låst, og beste tilstand er merket
+
+### 11.1 Hvilken commit ga fasiten (STEG 0.2)
+
+Rom 5, InFloor 17T 700W 41m, loddrett, start øverst til høyre:
+
+| commit | CC | lengde | gyldig | kryss/knekk | ⚠ |
+|---|---|---|---|---|---|
+| `30ea330` 074d | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+| `c6d198c` 074e | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+
+⚠ **De er identiske.** Alle fire kabellengder og begge retninger ga bit for bit samme resultat
+på de to versjonene. Forskjellen Kenneth så i nettleseren lå altså IKKE i `generateCableGeo`.
+
+Jeg klarte heller ikke å reprodusere ⚠-et fra den LAGREDE Rom 5-geometrien: gjennom hele
+kaskaden (`_autoFillCableImpl`), alle fire starthjørner, begge retninger og auto — alt gyldig,
+ingen defekter, ingen CC-advarsel, på begge versjoner. Den mest sannsynlige forklaringen er at
+rommet på skjermen var redigert og ikke identisk med det lagrede (Rom 5 har ingen lagret kabel).
+**Dette står åpent** — se 11.5.
+
+Tag satt på den eldste av de to, altså den med færrest bevegelige deler:
+`kabelmotor-fasit-rom5` → `30ea330`.
+
+### 11.2 Veien videre ble bygget PÅ tagen, ikke ved tilbakerulling
+
+`git diff e7a37b2 30ea330 -- index.html` var tom — koden i HEAD var allerede 074d (074e ble
+rullet tilbake i `e7a37b2` på Kenneths ord). 076 er derfor bygget rett oppå, uten ny revert.
+
+### 11.3 CC er låst
+
+Nabotrinn-søket — det eneste som flyttet CC for utseendets skyld — er **fjernet**
+(`generateCableGeo`, lengdesøket). CC regnes av lengden og netto areal som 016 bestemte, og
+klemmes til grensene. Hullstraffen i `_geoScore` står: en jevn variant vinner fortsatt over en
+holete **på samme CC**, men kan ikke lenger kjøpe jevnhet ved å flytte CC.
+`fastLenHullfri` er borte. Dominans-vakten fra 070/074d står.
+
+**Prisen, målt:** `badHakk41` mister sin hullfrie løsning. Ved CC 13,18 er kappet-varianten den
+eneste uten hull, og den lander på 42,23 m = +3,01 % — utenfor ±1 %. Rommet beholder derfor
+én tom bane (91,0 % dekning mot 94,9 % med trinnsøket). `rom5` og `badHakk` er hullfrie.
+
+### 11.4 Rom 5 som fast regresjon
+
+`_cableFixtures.rom5` — ekte geometri hentet lesende fra «Ekebergveien 28 (kopi)» / «Rom 5»,
+5,698 m² netto, ti punkter, ingen hindringer/soner/kundedata. Veggmålene stemmer med Kenneths:
+V1 260 · V2 75 · V3 39 · V4 129 · V5 300 · V6 99 · stubbe 100/13/98 · V10 93.
+
+`_cableGeometryRegressionTest` låser nå: gyldig · CC 13,2 ± 0,2 · én sammenhengende bane ·
+ett transittløp · ingen tom bane midt i en celle · start i valgt hjørne · 0 kryss / 0 knekk.
+De andre lengdene og vannrett: gyldige, eller en BEGRUNNET «ingen løsning».
+Galleriet viser Rom 5 øverst, med tegning · fasit bygget og kontrollert · motoren.
+
+**Rom 5 i galleriet:** loddrett ok 93,4 % CC 13,20 · vannrett ok 93,4 % CC 12,93.
+500 W og 800 W loddrett gir «ingen løsning» (begrunnet: fire soner); begge går vannrett.
+
+### 11.5 Fremgangsmåte for hver videre runde — ufravikelig
+
+Før Kenneth ser noe som helst:
+
+1. Kjør galleriet med **rom5 + badHakk + badHakk41**, alle lengder, begge retninger.
+2. Sammenlign rom for rom mot `kabelmotor-fasit-rom5` (`git show kabelmotor-fasit-rom5:index.html`
+   kan serveres som en egen side og måles med samme probe).
+3. **Avvis endringen** hvis ett eneste av dem blir dårligere på noe mål.
+
+Kenneths dom i nettleseren er sluttkontrollen, ikke måleinstrumentet. ⚠ Og `rom5`-fixturen er
+den LAGREDE geometrien — er rommet redigert på skjermen, måler fixturen noe annet. Spør om en
+fersk kopi når et skjermbilde og en måling er uenige.

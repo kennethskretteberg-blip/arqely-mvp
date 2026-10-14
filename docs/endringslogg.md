@@ -4,6 +4,58 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 076: Kabelmotor — Rom 5 som fasit og fast regresjon, CC låst, beste tilstand merket — 2026-10-14
+
+Etter sparring: Kenneth svarte på de tre spørsmålene i STATUS §10.6. CC skal ikke flyttes for
+jevnhetens skyld, lengden er fortsatt hard (±1 %), og Rom 5 blir fast testrom.
+
+### STEG 0.2 — hvilken commit gir fasiten
+
+Rom 5, InFloor 17T 700W 41m, loddrett, start øverst til høyre:
+
+| commit | CC | lengde | gyldig | kryss/knekk | ⚠ |
+|---|---|---|---|---|---|
+| `30ea330` 074d | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+| `c6d198c` 074e | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+
+⚠ **Identiske.** Alle fire kabellengder og begge retninger ga bit for bit samme resultat.
+Forskjellen Kenneth så lå altså ikke i `generateCableGeo`. Jeg klarte heller ikke å reprodusere
+⚠-et fra den LAGREDE geometrien: hele kaskaden, fire starthjørner, begge retninger og auto —
+alt gyldig på begge versjoner. Mest sannsynlig var rommet på skjermen redigert og ulikt det
+lagrede (Rom 5 har ingen lagret kabel). **Står åpent.**
+
+Tag: `kabelmotor-fasit-rom5` → `30ea330` (den eldste av de to, færrest bevegelige deler).
+HEAD-koden var allerede 074d, så 076 er bygget rett oppå — ingen ny revert.
+
+### Rettet
+
+- **CC er låst.** Nabotrinn-søket — det eneste som flyttet CC for utseendets skyld — er fjernet,
+  sammen med `fastLenHullfri`. CC regnes av lengden og netto areal som 016 bestemte.
+  Hullstraffen står: en jevn variant vinner over en holete **på samme CC**. Dominans-vakten står.
+- **Rom 5 er fast fixture** med den ekte geometrien (hentet lesende, 5,698 m², ti punkter, ingen
+  kundedata). Veggmålene stemmer med Kenneths oppgitte: V1 260 · V2 75 · V3 39 · V4 129 ·
+  V5 300 · V6 99 · stubbe 100/13/98 · V10 93.
+- **Galleriet** viser Rom 5 **øverst**, med tegning · fasit bygget og kontrollert · motoren.
+- **Fasit-byggeren rettet:** den tok den FØRSTE transitt-varianten som lot seg rute, mens motoren
+  tar den best scorende. På Rom 5 ga det 39,57 m (−3,48 %, lengdebrudd) — kolonnen påsto altså at
+  Kenneths egen fasit var ugyldig. Nå velges varianten som treffer produktlengden best: 40,97 m,
+  identisk med motoren.
+
+### Prisen for låst CC, målt
+
+`badHakk41` mister sin hullfrie løsning. Ved CC 13,18 er kappet-varianten den eneste uten hull,
+og den lander på 42,23 m = **+3,01 %** — utenfor ±1 %. Rommet beholder derfor én tom bane
+(91,0 % dekning mot 94,9 % med trinnsøket). Påstanden i regresjonstesten er endret fra «0 hull»
+til «høyst 1 hull for badHakk41», med målingen i koden. `rom5` og `badHakk` er hullfrie.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 52 → **70 påstander** (18 nye for Rom 5 og CC-låsen).
+**22 batterier grønne.** Galleriet: 16 rom × 2 retninger, **26 gyldige / 6** — samme seks
+umulige som før. Rom 5: loddrett ok 93,4 % CC 13,20 · vannrett ok 93,4 % CC 12,93.
+
+---
+
 ## 074d: Kabelmotor — 074c på nytt, med vakt mot at utlegget blir dårligere — 2026-10-14
 
 074c ble rullet tilbake fordi Kenneth målte at det ble verre i hans eget bad (Rom 5, 5,70 m²).
