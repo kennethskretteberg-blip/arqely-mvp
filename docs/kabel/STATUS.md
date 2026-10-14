@@ -378,3 +378,84 @@ stemmer ikke lenger for `generateCableGeo`. Endringen er gjort på Kenneths eksp
 ⚠ **Målt, mot forventning:** like-lengde-regelen var *ikke* der dekningen forsvant. Den klippet
 bare 0,1 % vannrett og 0,7 % loddrett i badet. De manglende prosentpoengene lå i kantstripen
 (§8) og i lengdetrimmingen (§3g).
+
+---
+
+## 10 · Status 14.10.2026 — hva som virket, hva som ikke virket, og hvorfor
+
+Skrevet på Kenneths bestilling: «gi meg heller en status på hva som gjorde at det funket veldig
+bra i sta.» Underlag for sparring før neste runde.
+
+### 10.1 Tidslinje med Kenneths egne dommer
+
+| commit | hva den gjorde | Kenneths dom |
+|---|---|---|
+| `884fc74` 072 | transittløp — én reservert bane forbi veggstubben | — |
+| `5463546` 074 | stille kandidatsøk, én beskjed, riktig produktforslag | — |
+| `baa6e37` 074b | hullet flyttet ut til veggen (**ved uendret CC**) | «47 m er perfekt» |
+| `9f60af9` 074c | finere hullmåling + **fritt søk over CC-stigen** | **«nå ble det dårligere»** |
+| `cad5ee0` | tilbakerulling av 074c | — |
+| `30ea330` 074d | 074c på nytt, + dominans-vakt, + CC-sperre på trinnsøket | **«mye bedre»** ← beste kjente |
+| `c6d198c` 074e | hullmåling per bane-BIT + bredere trinnsøk | **«like dårlig igjen»** |
+
+**Beste kjente tilstand er `30ea330` (074d).**
+
+### 10.2 Mønsteret: å flytte CC ødelegger, å flytte BANER gjør det ikke
+
+Dette er den ene linja som forklarer alle tre rundene.
+
+| type endring | hva den rører | resultat |
+|---|---|---|
+| **Baneeierskap** (072 transitt, 074b skjøvet/kappet) | hvilken celle som eier hvilken bane. **CC uendret.** | Virket hver gang. «47 m perfekt». |
+| **CC-flytting** (074c og 074e sitt trinnsøk) | hvilket trinn på CC-stigen utlegget legges på | Ødela hver gang, i Kenneths rom. |
+
+CC er ikke en fri knapp. Den henger sammen med **lengden** (produktet skal brukes opp, ±1 %),
+**flateeffekten** (016: 36 m i 10 m² TRENGER CC 27,8 for 60 W/m²) og **celleinndelingen** (et
+nytt CC gir et nytt rutenett, nye celler, en ny rute). Når søket flytter CC for utseendets
+skyld, rives alle tre.
+
+### 10.3 Hva ⚠ på etiketten faktisk betyr
+
+Jeg tok feil om dette én gang, og det kostet en runde. Etiketten (`:35138`):
+
+```js
+(_ccOverWarn(prod, ccCm) || cable._geomDefects.length) ? '⚠ ' : ''
+```
+
+Romtypen «Bad» har hverken nedre eller øvre CC-grense, og produktets anbefaling er 20 cm. Når
+Kenneth ser «⚠ CC 14,9» betyr det derfor **ikke** at CC er utenfor anbefalingen — det betyr at
+utlegget **bryter en hard regel** (utenfor lovlig område, kryssing, bøy, nærføring, lengde).
+«Krysser vegger» i 074e er nøyaktig det.
+
+### 10.4 ⚠ Den egentlige svakheten: jeg tester mot feil rom
+
+Alle tre rundene er målt mot `badHakk` / `badHakk41` — badet i **Ekebergveien 28**, 5,887 m²,
+rekonstruert fra prosjektets koordinater i 072.
+
+Kenneths skjermbilder er fra et **annet** bad: **Rom 5, 5,70 m²**, V1 260 · V2 75 · V3 39 ·
+V4 129 · V5 300 · V8 13 · V9 100 · V10 93. Annen bredde, annen stubbe, annet trinn.
+
+Målt på fixturene etter 074e: **null rom krysser vegger, null rom er ugyldige.** Samme kode gir
+et ugyldig utlegg i Kenneths rom. Jeg har altså tre ganger på rad erklært noe som «grønt» på et
+grunnlag som ikke dekker tilfellet det skulle løse.
+
+**Dette er blokkeringen, ikke geometrien.** Uten Rom 5 som fixture er hver neste runde like
+blind som de tre foregående.
+
+### 10.5 Det som står igjen, teknisk
+
+- **Vannrett** har fortsatt tomme baner for 500/600/700 W (loddrett er ryddet).
+- `flereHindringer` trenger seks transittkorridorer; taket er to. «2 kabler» er riktig svar der.
+- `kabelForLang` og `boyUmulig` er fysisk umulige og merkes.
+- CLAUDE.md sin låste like-lengde-regel må oppdateres ved merge (begrenset i 072).
+- Rent rektangel vannrett byttet motor i 072 (geo dominerer på hvert mål) — må godkjennes.
+
+### 10.6 Spørsmål til sparringen
+
+1. **Skal CC i det hele tatt få flyttes for jevnhetens skyld?** Alternativet: lås CC til
+   lengde/effekt, og la jevnheten bare avgjøres av baneeierskapet (det som alltid har virket).
+   Prisen er at noen rom beholder én tom bane.
+2. **Hva er riktig når jevn avstand og full kabellengde slåss?** I dag vinner lengden (±1 % er
+   et hardt krav). Skal et utlegg kunne være 2 % kort hvis det blir jevnt?
+3. **Rom 5 som fixture** — kan jeg få koordinatene (f.eks. prosjekt-JSON for rommet)? Uten dem
+   kan jeg ikke etterprøve det du faktisk ser.
