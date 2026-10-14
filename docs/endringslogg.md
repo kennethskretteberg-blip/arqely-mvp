@@ -4,6 +4,69 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 074c: Kabelmotor — hullmålingen var feil, og den straffet det jevneste utlegget — 2026-10-14
+
+Kenneth sendte to skjermbilder av SAMME rom: 47 m «perfekt», 41 m ikke.
+
+### To ekte hull i 41 m-utlegget
+
+Målt løp for løp:
+
+| bane | hvor det er kabel |
+|---|---|
+| 774,4 | over OG under stubben |
+| **787,6** | **bare under** — øvre del tom |
+| **800,8** | **bare over** — nedre del tom |
+| 813,9 | over og under |
+
+To tomme halvbaner ved siden av hverandre, forskjøvet — det er den hvite stripen som ser ut
+til å gå gjennom hele rommet i bildet.
+
+### ⚠ Målingen fra 074b var feil
+
+Jeg målte avstanden mellom løpene på sju høyder. Den slo ut på **kantsonen**: i høyden mellom
+løpenes ender og veggstubben finnes det nesten ingen løp, og den tomme stripen der er marginen,
+ikke et hull. Målt på 41 m rapporterte den **«9 × CC»** for et utlegg der hver eneste
+naboavstand var 13,8 cm — og poengsummen straffet dermed det JEVNESTE utlegget hardest.
+
+**Riktig måling er ikke avstand, men banebruk** (`_geoInteriorHoles`): rutenettet vet hvilke
+baner som finnes og hvor langt hver av dem er lovlig. En bane som står helt tom er et hull — og
+bare når det ligger brukte baner på BEGGE sider. Ligger den ytterst, er den tomme stripen inntil
+veggen, og det er nettopp prisen Kenneth sa han ville betale.
+
+### CC er trinn, ikke en skala
+
+Den jevne løsningen for 41 m lå på **nabotrinnet**: CC 13,81 i stedet for 13,18. Søket valgte
+13,18 fordi lengden traff **1 cm** nærmere — og tok med det et hull og 4 prosentpoeng dårligere
+dekning. Søket prøver nå nabotrinnene (N ± 1, N ± 2) når vinneren har et hull.
+
+Bevisst begrenset til noen få trinn: et fritt søk over hele stigen fant jevne løsninger som
+krevde mye mindre CC og kostet 6 prosentpoeng dekning (målt på 47 m: 92,7 → 86,7 %). Det er en
+annen avveining enn «dra kabelen litt inn fra veggen», og skal ikke tas av motoren.
+
+### Resultat — badet loddrett
+
+| | 41 m før | 41 m etter | 47 m |
+|---|---|---|---|
+| Tomme baner i feltet | **2** | **0** | 0 |
+| CC | 13,18 cm | 13,81 cm | 11,60 cm |
+| Lengde | 41,03 m (+0,07 %) | 41,04 m (+0,09 %) | 47,09 m (+0,19 %) |
+| Dekning | 91,0 % | **94,9 %** | 92,5 % |
+
+41 m ble altså både jevnere OG bedre dekket — nabotrinnet var bedre på begge deler.
+
+### Står igjen
+
+`enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane. Det er syntetiske
+testrom, ikke Kenneths bad.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 48 → **52 påstander** (begge badene låst: null tomme baner,
+dekning ≥ 92 %). **22 batterier grønne.** Galleriet 24/30.
+
+---
+
 ## 074b: Kabelmotor — jevn avstand går foran dekning — 2026-10-14
 
 Kenneth, med skjermbilde og grønn ramme rundt feltet over veggstubben:
