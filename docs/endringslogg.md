@@ -4,6 +4,65 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 074b: Kabelmotor — jevn avstand går foran dekning — 2026-10-14
+
+Kenneth, med skjermbilde og grønn ramme rundt feltet over veggstubben:
+«Jeg ønsker at kabelutlegget skyves slik at cc blir jevn, og heller at vi får et udekket område
+inntil veggen. **Det er alltid viktigere å få en jevn avstand mellom kabelløpene enn å dekke helt
+ut mot veggene — heller dra inn kabel fra vegg for å få jevnest mulig utlegg.**»
+
+### Målt
+
+Alle 25 naboavstander i utlegget var 11,6 cm — så en global CC-måling sa «helt jevnt». Men målt
+**per bånd**, i høyden y = −1000 (over stubben):
+
+```
+… 763,3 · 774,9 · [23,2 cm] · 798,1 · 809,7 …
+```
+
+Hullet er transittbanen. Den brukes bare *under* stubben, så over stubben sto den tom — et hull
+på nøyaktig 2 × CC midt i feltet. Det var den hvite stripen i den grønne rammen.
+
+### Rettet
+
+- **`_geoWorstBandGap`** måler avstanden PER BÅND, ikke globalt, og teller bare mellomrom der
+  det faktisk er gulv (midtpunktet må ligge i lovlig område — et stort mellomrom over en
+  hindring eller et hakk er ikke en feil).
+- **Ny transitt-variant: cellen skyves én bane.** Den gir fra seg sitt ytterste løp (det mot
+  veggen) og overtar den tomme transittbanen. CC er uendret — løpene ligger fortsatt på det
+  globale rutenettet, bare ett hakk bortenfor — og hullet flyttes fra midten av feltet ut mot
+  veggen. Prøves FØRST, før de to gamle variantene.
+- **Hull straffes i poengsummen** (`−40 × overskytende`), tungt nok til å slå 30-poengs-
+  dekningsleddet: et jevnt utlegg skal vinne over et med hull selv når det dekker mer.
+- **Lengdesøket måler alle variantene** og følger den som kan treffe lengden. Før fulgte det
+  den første, og meldte «ingen løsning» for en retning som hadde en helt gyldig løsning.
+
+### Resultat — badet, 47 m loddrett
+
+| | før | etter |
+|---|---|---|
+| Verste hull i feltet | **2 × CC** (23,2 cm) | **1 × CC** |
+| CC | 11,60 cm | 11,60 cm (uendret) |
+| Lengde | 47,24 m (+0,51 %) | 47,09 m (+0,19 %) |
+| Dekning | 92,7 % | **92,5 %** |
+
+Prisen for jevnheten er 0,2 prosentpoeng dekning — en smal kald stripe inn mot veggen, nøyaktig
+slik Kenneth beskrev. `uRom` vannrett ble også bedre (verste hull 4 → 2 × CC).
+
+### Det som står igjen
+
+`badHakk41` loddrett og `enHindring` loddrett har fortsatt et hull på 2 × CC: der er den skjøvede
+varianten ikke gyldig (paritet/overgangskjede), og den eneste jevne løsningen krever en annen CC
+— målt på 47 m ville det kostet 6 prosentpoeng dekning (92,7 → 86,7 %). **Det er en helt annen
+avveining enn «dra kabelen litt inn fra veggen», så den er ikke tatt av motoren.** Kenneth må si
+om han vil ha den.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 44 → **48 påstander**. **22 batterier grønne.**
+
+---
+
 ## 074: Kabelmotor — stille kandidatsøk, én beskjed med vinnerens tall — 2026-10-14
 
 Gren `kabelmotor`, **ikke merget**. Bugrapport fra Kenneth 14.10.2026 med skjermbilde:

@@ -1,4 +1,4 @@
-# Kabelmotor 068–074 — status, merge-sjekkliste og hva som ikke er løst
+# Kabelmotor 068–074b — status, merge-sjekkliste og hva som ikke er løst
 
 Gren `kabelmotor`. `main` er urørt.
 Galleriet: `docs/kabel/galleri.html` · Arkitektur: `docs/kabel/arkitektur.md` ·
@@ -202,6 +202,8 @@ Den kjører alle rom × begge retninger × kaskaden + fem motorer, skriver
    som alt var gyldig. Godkjennes?
 3. **Dra-redigering** (Kenneths beslutning 3: uavklart). Ingenting bygget. Spørsmålet står.
 4. **`flereHindringer`** (§3a) beholder «2 kabler» som forslag. Godtas det?
+6. **Jevnhet som koster CC** (§6c): to rom har fortsatt et hull på 2 × CC. Den jevne løsningen
+   der krever en mindre CC og koster ~6 prosentpoeng dekning. Skal motoren ta den prisen?
 5. **`auto`-retningen på badet** velger fortsatt vannrett (lengdeavviket 0,00 % veier tyngre i
    poengsummen enn 4,2 prosentpoeng dekning). Loddrett får man ved å velge retningen selv.
    Skal poengsummen vekte dekning høyere når begge retninger er lovlige?
@@ -255,6 +257,36 @@ Badet med **InFloor 17T 700W 41m, 120 W/m², start nedre høyre, loddrett valgt*
 
 **Loddrett med 41 m ER gyldig** (STEG 0.2) — fallbacken slår altså ikke inn på denne geometrien.
 Forhåndsvisning → Godkjenn kjører kaskaden **én** gang totalt (målt teller: 1 før, 1 etter).
+
+---
+
+## 6c. 074b — jevn avstand går foran dekning
+
+Kenneths regel, 14.10.2026: **«Det er alltid viktigere å få en jevn avstand mellom kabelløpene
+enn å dekke helt ut mot veggene — heller dra inn kabel fra vegg for å få jevnest mulig utlegg.»**
+
+⚠ Dette måles **per bånd**, ikke globalt. Transittbanen brukes bare på den ene siden av
+hindringen, så en global CC-måling sa «helt jevnt» mens båndet over stubben hadde et hull på
+2 × CC. `_geoWorstBandGap` sampler sju høyder, og teller bare mellomrom der midtpunktet ligger i
+lovlig område — et stort mellomrom over en hindring er ikke en feil.
+
+Transitt-variantene prøves nå i denne rekkefølgen:
+
+1. **skjøvet** — cellen gir fra seg sitt ytterste løp (mot veggen) og overtar den tomme
+   transittbanen. CC uendret, hullet flyttes ut til veggen. *Dette er Kenneths regel.*
+2. **kappet** — banen beholdes av eieren, kappet til A-siden.
+3. **fjernet** — den opprinnelige 072-varianten, med en overgang på 2 CC.
+
+Poengsummen straffer hull tungt (−40 × overskytende), tyngre enn dekningsleddet (30), så et
+jevnt utlegg vinner over et med hull selv når det dekker mer.
+
+**Badet, 47 m loddrett:** verste hull 2 × CC → **1 × CC**, CC uendret 11,60, dekning 92,7 → 92,5 %.
+`uRom` vannrett: verste hull 4 → 2 × CC.
+
+**Ikke løst:** `badHakk41` loddrett og `enHindring` loddrett har fortsatt 2 × CC — der er den
+skjøvede varianten ikke gyldig, og den eneste jevne løsningen krever en annen CC. Målt på 47 m
+ville det kostet **6 prosentpoeng dekning** (92,7 → 86,7 %). Det er en annen avveining enn den
+Kenneth beskrev, og er derfor ikke tatt av motoren — se §6 åpen beslutning 6.
 
 ---
 
