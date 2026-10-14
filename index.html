@@ -28430,38 +28430,26 @@ function _geoInteriorHoles(pts, dir, grid) {
       runs.push({ p: a[perpKey], lo: Math.min(a[sweepKey], b[sweepKey]), hi: Math.max(a[sweepKey], b[sweepKey]) });
   }
   if (!runs.length) return 0;
-  // ⚠ 074e (Kenneth 14.10.2026: «600 W burde legges likt som 700 W — de burde ha samme regel?»).
-  // FØRSTE VERSJON DØMTE HELE BANEN UNDER ETT: dekket et løp mer enn 40 % av det lovlige
-  // intervallet, var banen «brukt». Det skjulte den ene forskjellen mellom de to kablene:
-  //   700 W: banen ved stubbens ende brukes BÅDE over og under  (−1031..−966 + −938..−845)
-  //   600 W: samme bane brukes BARE under                        (−938..−848)
-  // Den øvre halvdelen sto tom med kabel på begge sider — et ekte hull — men den nedre halvdelen
-  // alene var 48 % av intervallet, så målingen sa «brukt». Begge utleggene fikk 0 hull, og
-  // poengsummen hadde ingen grunn til å foretrekke den jevne.
-  //
-  // Nå måles de UDEKKEDE BITENE av hver bane hver for seg. En bit lengre enn én CC er et hull —
-  // men bare når det ligger kabel på BEGGE sider av den, i samme høyde. Ligger det kabel på bare
-  // én side, er biten en kantsone (eller stripen inntil veggen, som Kenneth godtar).
-  const paaBane = ln => runs.filter(r => Math.abs(r.p - ln.pos) <= cc * 0.3)
-    .map(r => [Math.max(r.lo, ln.lo), Math.min(r.hi, ln.hi)])
-    .filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
-  // Dekker en NABOBANE dette sveipe-intervallet, på den gitte siden?
-  const naboDekker = (pos, lo, hi, side) => grid.lanes.some(o => {
-    if (side < 0 ? !(o.pos < pos - cc * 0.3) : !(o.pos > pos + cc * 0.3)) return false;
-    if (Math.abs(o.pos - pos) > cc * 2.5) return false;
-    return paaBane(o).some(([a, b]) => Math.min(b, hi) - Math.max(a, lo) > cc);
-  });
-  let hull = 0;
-  for (const ln of grid.lanes) {
-    const brukt = paaBane(ln);
-    // De udekkede bitene av denne banen.
-    const tomme = [];
-    let p0 = ln.lo;
-    for (const [a, b] of brukt) { if (a - p0 > cc) tomme.push([p0, a]); p0 = Math.max(p0, b); }
-    if (ln.hi - p0 > cc) tomme.push([p0, ln.hi]);
-    for (const [lo, hi] of tomme) {
-      if (naboDekker(ln.pos, lo, hi, -1) && naboDekker(ln.pos, lo, hi, 1)) { hull++; break; }
+  // Er dette lovlige intervallet på denne banen tatt i bruk? Et løp som dekker mindre enn
+  // 40 % av intervallet teller ikke — da står mesteparten av banen tom.
+  const brukt = ln => {
+    let dekket = 0;
+    for (const r of runs) {
+      if (Math.abs(r.p - ln.pos) > cc * 0.3) continue;
+      dekket += Math.max(0, Math.min(r.hi, ln.hi) - Math.max(r.lo, ln.lo));
     }
+    return dekket > (ln.hi - ln.lo) * 0.4;
+  };
+  const status = grid.lanes.map(ln => ({ ln, brukt: brukt(ln) }));
+  let hull = 0;
+  for (const s of status) {
+    if (s.brukt) continue;
+    // Brukt nabo på hver side, med overlappende sveipeområde? Da ligger hullet INNE i feltet.
+    const naboBrukt = side => status.some(o => o.brukt
+      && (side < 0 ? o.ln.pos < s.ln.pos - cc * 0.3 : o.ln.pos > s.ln.pos + cc * 0.3)
+      && Math.abs(o.ln.pos - s.ln.pos) < cc * 2.5
+      && Math.min(o.ln.hi, s.ln.hi) - Math.max(o.ln.lo, s.ln.lo) > cc);
+    if (naboBrukt(-1) && naboBrukt(1)) hull++;
   }
   return hull;
 }
@@ -28575,26 +28563,6 @@ function generateCableGeo(roomId, productId, opts) {
       }
     }
     return best;
-  };
-
-  // 074e: lengden til den HULLFRIE varianten alene. `fastLen` over tar den som ligger nærmest
-  // mållengden uansett — og det er ofte den holete. Målt på badet med 600 W: ved CC 15,27 gir
-  // den holete varianten 35,00 m rått, mens den hullfrie gir 35,44 og må trimmes 44 cm. Søket
-  // bisekterte da mot den holete, landet på trim 0, og fant aldri den jevne.
-  const fastLenHullfri = (dir, cc, extraSweep) => {
-    for (const grid of gridsFor(dir, cc, extraSweep)) {
-      for (const order of _geoRouteOrders(grid.cells, 8)) {
-        const plan = _geoPlanTraversals(grid, order);
-        if (!plan) continue;
-        const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
-        if (!pts || pts.length < 2) continue;
-        if (_geoInteriorHoles(pts, dir, grid) > 0) break;   // denne varianten har hull
-        let len = 0;
-        for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-        return len;
-      }
-    }
-    return null;
   };
 
   // Ett forsøk: bygg rutenett, rut, bygg senterlinje, kontrollér. Returnerer {cable, chk} eller null.
@@ -28728,62 +28696,12 @@ function generateCableGeo(roomId, productId, opts) {
         }
         const _W = (_pHi - _pLo) - 0.1;
         const N0 = Math.max(2, Math.round(_W / (bestR.cable.spacing_cm || bestCc)) + 1);
-        // ⚠ dN = 0 FØRST: den hullfrie løsningen ligger ofte på trinnet søket alt står på, bare
-        // med en annen trimming. Målt på badet med 600 W: CC 15,27 er riktig trinn, men den
-        // hullfrie varianten der er 35,44 m rå og må trimmes 44 cm. Hoppet søket rett til
-        // nabotrinnene, fant det den aldri.
-        let hullfriBest = null;
-        for (const dN of [0, -1, 1, -2, 2]) {
+        for (const dN of [-1, 1, -2, 2]) {
           const N = N0 + dN;
           if (N < 3) continue;
           const cc2 = _W / (N - 1);
           if (cc2 < ccLo - _GEO_EPS || cc2 > ccHi + _GEO_EPS) continue;
-          // ⚠ 074e: nabotrinnet må prøves TRIMMET, ikke bare rått. Målt på badet med 600 W
-          // (35 m): det eneste hullfrie trinnet er CC 15,27, som rått gir 35,44 m — altså
-          // +1,25 %, akkurat utenfor ±1 %. Trimmet 44 cm ned treffer den 35,00 m blank.
-          // Uten dette fant søket aldri løsningen, og 600 W ble liggende med et hull mens
-          // 700 W i samme rom var jevn. Det var nettopp forskjellen Kenneth så.
-          let ex2 = 0;
-          const m0 = measure(cc2, 0);
-          if (m0 && targetCm && m0.len > targetCm) {
-            let exLo = 0, exHi = Math.max(5, cc2 * 3), gotDiff = Math.abs(m0.len - targetCm);
-            for (let it = 0; it < 12; it++) {
-              const ex = (exLo + exHi) / 2;
-              const mm = measure(cc2, ex);
-              if (!mm) { exHi = ex; continue; }
-              const d = mm.len - targetCm;
-              if (Math.abs(d) < gotDiff) { gotDiff = Math.abs(d); ex2 = ex; }
-              if (d > 0) exLo = ex; else exHi = ex;
-            }
-          }
-          // På det trinnet vi alt står på sveipes trimmingen bredere: `measure` er et snitt over
-          // variantene, så bisekssjonen over kan lande på en lengde som passer den HOLETE
-          // varianten. Et lite sveip finner den trimmingen som gjør den hullfrie gyldig.
-          // Bisekter på den HULLFRIE variantens egen lengde, ikke på snittet over variantene.
-          let exHullfri = null;
-          if (targetCm) {
-            const l0 = fastLenHullfri(dir, cc2, 0);
-            if (l0 != null && l0 > targetCm) {
-              let a = 0, b = Math.max(5, cc2 * 2), best = 0, bestD = Math.abs(l0 - targetCm);
-              for (let it = 0; it < 14; it++) {
-                const e = (a + b) / 2;
-                const l = fastLenHullfri(dir, cc2, e);
-                if (l == null) { b = e; continue; }
-                const d = l - targetCm;
-                if (Math.abs(d) < bestD) { bestD = Math.abs(d); exHullfri = e; }
-                if (d > 0) a = e; else b = e;
-              }
-              void best;
-            } else if (l0 != null) exHullfri = 0;
-          }
-          const exKand = dN === 0
-            ? [exHullfri, ex2, 0, cc2 * 0.12, cc2 * 0.25].filter(e => e != null)
-            : [exHullfri, ex2].filter(e => e != null);
-          let r = null;
-          for (const ex of exKand) {
-            const kand = attempt(dir, cc2, ex);
-            if (kand && !(kand.cable._geoHoles > 0)) { r = kand; break; }
-          }
+          const r = attempt(dir, cc2, 0);
           if (!r || r.cable._geoHoles > 0) continue;
           // ⚠ 074d: et nabotrinn får BARE overta når det er bedre eller likt på HVERT mål —
           // samme dominans-regel som 070 bruker når ny motor tar over for den gamle.
@@ -28798,14 +28716,8 @@ function generateCableGeo(roomId, productId, opts) {
             && (b.minBendCm || 0) >= (a.minBendCm || 0) - 0.01
             && (b.outsideLenCm || 0) <= (a.outsideLenCm || 0) + 0.01
             && !_ccOverWarn(prod, r.cable.spacing_cm, roomId);
-          // ⚠ 074e: IKKE bryt ut på første hullfrie treff. Trinnet vi står på (dN = 0) prøves
-          // først, og det har ofte en hullfri løsning — men et nabotrinn kan ha en BEDRE.
-          // Målt: med 700 W ga dN = 0 et hullfritt utlegg på 92,5 % dekning, mens nabotrinnet
-          // ga 94,9 %. Et «break» her kostet altså 2,4 prosentpoeng på den kabelen Kenneth
-          // allerede var fornøyd med. Alle trinnene vurderes, det beste vinner.
-          if (ikkeDaarligere && (!hullfriBest || r.score > hullfriBest.score)) hullfriBest = r;
+          if (ikkeDaarligere) { bestR = r; break; }
         }
-        if (hullfriBest) bestR = hullfriBest;
       }
     }
     diag.push({ dir, cc: bestCc == null ? null : +bestCc.toFixed(2), ex: +bestEx.toFixed(2),
