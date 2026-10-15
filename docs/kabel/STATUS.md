@@ -721,7 +721,47 @@ Galleriet er ikke regenerert — det `await`-er biblioteket selv og har derfor u
 HH:MM»» brukte «30 timer siden», som før kl. 06 lander i forgårs. Den var rød av klokka, ikke av
 koden. Bygger nå i går eksplisitt (kl. 12 lokalt).
 
-**Fortsatt ikke rettet** (eget funn, tilbudt): GODKJENN lagrer ikke.
-`_confirmCablePreviewAndFinish` → `_confirmCablePreview` + `finishRoomWorkflow` kaller aldri
-`_scheduleAutoSave()`, så utlegget lever bare i nettleserminnet mens indikatoren viser et gammelt
-«lagret»-tidspunkt.
+---
+
+## §16 · 078 — «GODKJENN lagrer ikke» var feil. Indikatoren løy.
+
+Jeg tilbød en fiks for at GODKJENN ikke lagret. **Den feilen finnes ikke, og målingen viste det
+med en gang.** Diagnosen var en grep etter `_scheduleAutoSave` i bekreftelsesveien — ikke en
+måling av kodestien. `pushUndo` kaller `_scheduleAutoSave()` på siste linje, og `_cablePreviewPlace`
+kaller `pushUndo`. Målt på den ekte veien:
+
+| steg | planlagte lagringer |
+|---|---|
+| `_cablePreviewPlace` | **1** |
+| `_confirmCablePreview` | 0 (trenger ikke) |
+| `finishRoomWorkflow` | 0 (trenger ikke) |
+
+Den ene grenen i `pushUndo` som hopper over planleggingen (`_undoSuppress > 0`) er også tett:
+alle fem undertrykkelsene kaller `pushUndo()` **før** de skrur den på.
+
+**Men symptomet Kenneth opplevde var ekte, og årsaken lå i indikatoren.** Målt: etter GODKJENN er
+`_projectDirty === true`, mens lagre-indikatoren er **byte-identisk** med før endringen —
+«Lagret 05:54:47», grønn prikk. Den hadde ingen tilstand for «ikke lagret ennå»; de fem den kjente
+var `saving`, `saved`, `offline`, `error`, `readonly`. I vinduet mellom en endring og at
+autolagringen fyrer (≥ 5 s, lenger hvis man fortsetter å jobbe) påsto den at alt var lagret.
+Derfor trykket han Lagre manuelt — indikatoren ga ham ingen grunn til å tro noe annet.
+
+**Fiksen** er en sjette tilstand, satt i `_scheduleAutoSave` — funnelen alle 50 mutasjonsveiene
+går gjennom, ikke på 50 kallsteder, samme arkitektur som 030 og 060 §3 bruker:
+
+| tilstand | prikk | tekst | tittel |
+|---|---|---|---|
+| `saved` | grønn, fylt | 05:56:52 | Lagret 05:56:52 |
+| `dirty` | grå, **åpen ring** | 05:56:52 | Ulagrede endringer – sist lagret 05:56:52. Lagres automatisk. |
+| `saving` | oransje, fylt | — | Lagrer… |
+
+Dempet og åpen, ikke rød: autolagringen tar det om fem sekunder, så dette er en opplysning, ikke
+en feil. Tidspunktet står igjen fordi «sist lagret 05:56» er nyttig. Kontrast regnet (panelet var
+skjult, så ikke sett): `#9097a8` på `#1b1d21` ≈ 5,8:1.
+
+Fem nye påstander i `_prosjektlaasRegressionTest`, som alt eier regelen «indikatoren lyver ikke»:
+skitten ≠ lagret, teksten sier «Ulagrede endringer», tidspunktet beholdes, kundemodus rører den
+ikke (030), og skrivebeskyttet vinner over skitten (060 §3).
+
+**Lærdom, samme som §15:** jeg skrev en grep som om den var en måling. Begge gangene i samme
+serie. STEG 0 er ikke å lese koden — det er å kjøre den.

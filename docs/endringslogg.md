@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 078 — lagre-indikatoren lyver ikke om ulagrede endringer (15.10.2026, gren `kabelmotor`)
+
+Indikatoren hadde fem tilstander — `saving`, `saved`, `offline`, `error`, `readonly` — men ingen
+for «ikke lagret ennå». Målt: etter GODKJENN er `_projectDirty` `true` mens indikatoren er
+byte-identisk med før endringen, grønn prikk og «Lagret 05:54:47». I vinduet mellom en endring og
+at autolagringen fyrer (≥ 5 s) påsto den at alt var lagret.
+
+- Ny tilstand `dirty`: åpen grå ring, tittel «Ulagrede endringer – sist lagret HH:MM:SS. Lagres
+  automatisk.» Dempet, ikke rød — autolagringen tar det om fem sekunder.
+- Settes i `_scheduleAutoSave`, funnelen alle 50 mutasjonsveiene går gjennom, etter gatene: i
+  kundemodus røres indikatoren ikke (030), og skrivebeskyttet eier sin egen tilstand (060 §3).
+- Fem nye påstander i `_prosjektlaasRegressionTest`.
+
+⚠ Rettelse: jeg meldte dette som «GODKJENN lagrer ikke». **Den feilen finnes ikke** — `pushUndo`
+kaller `_scheduleAutoSave()`, og utlegget planlegges for lagring i det det legges. Diagnosen var
+en grep, ikke en måling. Se STATUS §16.
+
 ## 077 — kabelutlegget ventet ikke på polygonbiblioteket (15.10.2026, gren `kabelmotor`)
 
 Rotårsaken bak de ugyldige utleggene i Rom 5. `clipper-lib` ble lastet LAT, og utleggsveien
