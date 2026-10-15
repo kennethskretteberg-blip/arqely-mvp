@@ -4043,6 +4043,10 @@ _paintStaticIcons();
 // floatingDims   | NEI                | NEI (rotårsaken) — samme hull  | NEI — manglet i
 //                |                    | i klikk-hittest og             | _buildSaveData/
 //                |                    | _hitDimLine også                | _restoreProject
+// floatingDims   | Nei — partId       | Ja, på partId (087): et fritt  | Ja (087) — partId
+//  m/ partId     |                    | mål i trapp-delen har ingen    | beholdes, floorId
+//                |                    | etasje, kun delen              | gjettes ikke
+// stair.dims     | Nei (via trappa)   | Ja (via trappas partId, 087)   | Ja — del av stairs
 // documentation  | Nei (roomId-nøkkel)| N/A — tegnes ikke, kun aksessert| Ja
 //                |                    | via et allerede etasje-låst rom|
 // bgs/bgLayers   | Ja (floorId-nøkkel)| Ja (fikset i bb627f6)          | bgs: delvis. bgLayers:
@@ -4805,6 +4809,10 @@ function getWorldPos(e) {
   // dim: shift = free length only, angle always snaps per chips
   if (S.ui.drawMode === 'dim') {
     let p = s2w(sx, sy);
+    // 087: i trapp-delen snapper målet til trappens hjørner og trinnkanter (plan OG side) —
+    // som innendørs snapper mot romhjørner/vegger. Hjørne vinner over kant.
+    const stSnap = _activeModuleType() === 'stair' ? _stairDimSnap(p) : null;
+    if (stSnap) return stSnap;
     if (S.snap.grid && !S.shiftHeld) p = gridSnap(p.x, p.y);
     const ref = S.drawing.rectStart;
     if (ref) p = angleSnapAlways(p.x, p.y, ref);
@@ -5037,6 +5045,9 @@ const _floorlessWarned = new Set();
 function _onActiveFloor(obj) {
   if (!obj) return false;
   if (obj.roomId != null) return _roomIdOnActiveFloor(obj.roomId);
+  // 087: et objekt som hører til en DEL (trapp-delen har ingen etasjer) er synlig når delen er
+  // aktiv — aldri gjettet inn på en etasje. Frie mål tegnet i trapp-delen bærer partId, ikke floorId.
+  if (obj.partId != null) return obj.partId === S.ui.activePartId;
   if (obj.floorId != null) {
     const af = _effectiveActiveFloorId();
     return af == null || obj.floorId === af;
@@ -34603,6 +34614,58 @@ function hitStair(wx, wy) {
   return null;
 }
 
+// 087: snap for mållinjer i trapp-delen — trappens hjørner (prioritert) og trinnkanter, i både
+// plan (hver flates rektangel) og sidevisning (profilen, forskjøvet som i drawStairs ved 'both').
+// Radius 14 px, uttrykt i cm ved gjeldende zoom. null = ingen snap innen radius.
+function _stairDimSnap(p) {
+  const radiusCm = 14 / Math.max(0.0001, S.view.zoom * BASE_SCALE);
+  const pid = S.ui.activePartId;
+  let bestPt = null, bestD = Infinity, bestIsCorner = false;
+  const consider = (x, y, isCorner) => {
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d > radiusCm) return;
+    if ((isCorner && !bestIsCorner) || (isCorner === bestIsCorner && d < bestD)) { bestPt = { x, y }; bestD = d; bestIsCorner = isCorner; }
+  };
+  const edge = (x1, y1, x2, y2) => {   // nærmeste punkt på en kant
+    const dx = x2 - x1, dy = y2 - y1, L2 = dx * dx + dy * dy; if (L2 < 1e-6) return;
+    const t = Math.max(0, Math.min(1, ((p.x - x1) * dx + (p.y - y1) * dy) / L2));
+    consider(x1 + t * dx, y1 + t * dy, false);
+  };
+  for (const st of (S.stairs || [])) {
+    if (pid && st.partId && st.partId !== pid) continue;
+    const surfs = st.surfaces || [];
+    if (!surfs.length) continue;
+    const ox = st.x_cm, oy = st.y_cm;
+    if (st.viewMode !== 'side') {
+      for (const sf of surfs) {
+        const x0 = ox + sf.x_cm, y0 = oy + sf.y_cm, x1 = x0 + sf.w_cm, y1 = y0 + sf.d_cm;
+        consider(x0, y0, true); consider(x1, y0, true); consider(x0, y1, true); consider(x1, y1, true);
+        edge(x0, y0, x1, y0); edge(x0, y1, x1, y1); edge(x0, y0, x0, y1); edge(x1, y0, x1, y1);
+      }
+    }
+    if (st.viewMode === 'side' || st.viewMode === 'both') {
+      const sx0 = st.viewMode === 'both' ? ox + _stairPlanBounds(st).w + 20 : ox;   // samme forskyvning som drawStairs
+      let totalH = 0;
+      for (const sf of surfs) if (sf.type !== 'landing') totalH += (sf.stepHeight_cm || st.step_height_cm || 17);
+      const firstStepH = (surfs[0].type !== 'landing' ? surfs[0].stepHeight_cm : null) || st.step_height_cm || 17;
+      const pts = [];
+      let cx = 0, cumulH = 0;
+      for (const sf of surfs) {
+        const yTop = totalH - cumulH;
+        pts.push({ x: cx, y: yTop }); cx += sf.d_cm; pts.push({ x: cx, y: yTop });
+        if (sf.type !== 'landing') { const sh = sf.stepHeight_cm || st.step_height_cm || 17; cumulH += sh; pts.push({ x: cx, y: totalH - cumulH }); }
+      }
+      pts.push({ x: cx, y: totalH + firstStepH }); pts.push({ x: 0, y: totalH + firstStepH });
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        consider(sx0 + a.x, oy + a.y, true);
+        edge(sx0 + a.x, oy + a.y, sx0 + b.x, oy + b.y);
+      }
+    }
+  }
+  return bestPt;
+}
+
 function selectStair(id) {
   S.ui.selectedBg=null;
   S.ui.selectedStairId = id;
@@ -42042,12 +42105,40 @@ function hitAnnotGizmo(sx,sy) {
 }
 
 // ─── USER DIM LINES ───────────────────────────────────────────
+// 087 (Kenneth 15.10.2026: «målefunksjon slik som for innendørs — i dag blir målet borte»): ÉN
+// kilde for brukerens mållinjer, uansett hvor de bor — room.dims (rom på aktiv etasje),
+// S.floatingDims (etasje via floorId ELLER del via partId, jf. _onActiveFloor) og stair.dims
+// (festet til en trapp i aktiv del, punkter RELATIVT til stair.x_cm/y_cm så målet følger trappen).
+// Tegning, treff, valg, gizmo, avstandsdrag og sletting går alle gjennom disse to, så en ny
+// mål-eier aldri igjen kan mangle i ett av stedene (det var nøyaktig hullet frie mål satt i:
+// gizmo/avstandsdrag fant bare room.dims).
+function _findUserDim(id) {
+  if (id == null) return null;
+  for (const r of S.rooms) { const d = (r.dims || []).find(x => x.id === id); if (d) return { dim: d, room: r, stair: null }; }
+  const f = (S.floatingDims || []).find(x => x.id === id); if (f) return { dim: f, room: null, stair: null };
+  for (const st of (S.stairs || [])) { const d = (st.dims || []).find(x => x.id === id); if (d) return { dim: d, room: null, stair: st }; }
+  return null;
+}
+// Mål i VERDENS-cm (trappemål flyttes med trappens posisjon). Returnerer et lesbart proxy-objekt
+// med samme id/offset — skriv aldri p1/p2 tilbake via dette; offset skrives via _findUserDim.
+function _dimWorld(dim, stair) {
+  if (!stair) return dim;
+  return { id: dim.id, offset: dim.offset, p1: { x: stair.x_cm + dim.p1.x, y: stair.y_cm + dim.p1.y }, p2: { x: stair.x_cm + dim.p2.x, y: stair.y_cm + dim.p2.y } };
+}
+function _collectVisibleDims() {
+  const out = [];
+  for (const room of S.rooms) { if (_roomOnActiveFloor(room) && room.dims && room.dims.length) for (const d of room.dims) out.push(d); }
+  if (S.floatingDims && S.floatingDims.length) for (const d of S.floatingDims) if (_onActiveFloor(d)) out.push(d);
+  const pid = S.ui.activePartId;
+  for (const st of (S.stairs || [])) {
+    if (pid && st.partId && st.partId !== pid) continue;   // samme filter som drawStairs
+    for (const d of (st.dims || [])) out.push(_dimWorld(d, st));
+  }
+  return out;
+}
+
 function drawUserDimLines() {
-  let _dims=[];
-  for (const room of S.rooms) { if (_roomOnActiveFloor(room) && room.dims && room.dims.length) _dims=_dims.concat(room.dims); }
-  // Floating dims (not tied to any room — used to verify bg-calibration). STEG 1 (etasje-
-  // vanntett): filtrert på floorId nå, samme _onActiveFloor alt annet tegnet går gjennom.
-  if (S.floatingDims && S.floatingDims.length) _dims = _dims.concat(S.floatingDims.filter(_onActiveFloor));
+  const _dims = _collectVisibleDims();
   if(!_dims.length) return;
   const TICK=7, OVERHANG=6;
   ctx.save();
@@ -42652,7 +42743,8 @@ function drawHindringWallArrows() {
 // ─── DIM LINE MOVE GIZMO ──────────────────────────────────────
 function _dimGizmoCenter() {
   if (S.ui.selectedDimId===null) return null;
-  let dim=null; for(const r of S.rooms){dim=(r.dims||[]).find(d=>d.id===S.ui.selectedDimId);if(dim)break;} if(!dim) return null;
+  const _f=_findUserDim(S.ui.selectedDimId); if(!_f) return null;
+  const dim=_dimWorld(_f.dim,_f.stair);   // 087: også frie og trappefestede mål får gizmo
   const off=dim.offset||0;
   const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
   const wLen=Math.hypot(wdx,wdy); if(wLen<1) return null;
@@ -51392,7 +51484,7 @@ function pushUndo() {
     matPaths:  (S.matPaths||[]).map(mp=>({...mp, start: mp.start ? {...mp.start} : mp.start, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates:    S.plates.map(p=>({...p})),
     aluboard:  (S.aluboard||[]).map(a=>({...a})),
-    stairs:    S.stairs.map(s=>({...s, surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
+    stairs:    S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
     // F4a (Kenneth 17.09.2026): fri folie — egen liste, egen id-teller (nextFoilFreeId).
     foilFree:  (S.foilFree||[]).map(f=>({...f})),
     // ⚠ 046: planveggene MÅ være her. Målt i live-test: uten dette var Ctrl+Z en stille no-op
@@ -51516,8 +51608,7 @@ function undo() {
     S.ui.selectedStripIds = new Set([...S.ui.selectedStripIds].filter(id => validIds.has(id)));
   }
   if (S.ui.selectedDimId !== null) {
-    const dimFound = S.rooms.some(r => (r.dims||[]).some(d => d.id === S.ui.selectedDimId));
-    if (!dimFound) S.ui.selectedDimId = null;
+    if (!_findUserDim(S.ui.selectedDimId)) S.ui.selectedDimId = null;   // 087
   }
   if (S.ui.selectedStairId !== null && !S.stairs.find(s => s.id === S.ui.selectedStairId)) {
     S.ui.selectedStairId = null;
@@ -52204,7 +52295,20 @@ canvas.addEventListener('mousedown', e=>{
     if (S.drawing.dimPending) {
       const _cr=currentRoom();
       const dimObj={id:S.drawing.dimPending.id,p1:{...S.drawing.dimPending.p1},p2:{...S.drawing.dimPending.p2},offset:S.drawing.dimPending.offset};
-      if (_cr) {
+      // 087: i trapp-delen lagres et mål ALDRI i room.dims (STEG 0: et fritt mål fikk floorId null i
+      // et prosjekt uten etasjer og ble aldri tegnet). Trapp valgt → festet til trappa (relative
+      // punkter, følger flytting, slettes med den). Ellers fritt mål med partId = delen.
+      const _dimStair = _activeModuleType() === 'stair' ? S.stairs.find(s => s.id === S.ui.selectedStairId) : null;
+      if (_activeModuleType() === 'stair') {
+        pushUndo();
+        if (_dimStair) {
+          if (!_dimStair.dims) _dimStair.dims = [];
+          _dimStair.dims.push({ ...dimObj, p1: { x: dimObj.p1.x - _dimStair.x_cm, y: dimObj.p1.y - _dimStair.y_cm }, p2: { x: dimObj.p2.x - _dimStair.x_cm, y: dimObj.p2.y - _dimStair.y_cm } });
+        } else {
+          if (!S.floatingDims) S.floatingDims = [];
+          S.floatingDims.push({ ...dimObj, partId: S.ui.activePartId });
+        }
+      } else if (_cr) {
         _cr.dims.push({...dimObj, roomId: S.ui.selectedRoomId});
       } else {
         // No room selected — used after bg-calibrate to verify the scale.
@@ -53306,10 +53410,7 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
     // ── Dim line click — select (keep selectedRoomId so room stays visible) ──
-    const _allDims=[]; for(const r of S.rooms){if(_roomOnActiveFloor(r) && r.dims) for(const d of r.dims) _allDims.push(d);}
-    // Floating dims (not tied to a room — used for bg-calibration check). STEG 1 (etasje-
-    // vanntett): en målelinje på en annen etasje skal aldri kunne klikk-velges her heller.
-    if (S.floatingDims) for (const d of S.floatingDims) if (_onActiveFloor(d)) _allDims.push(d);
+    const _allDims=_collectVisibleDims();   // 087: rom + frie + trappefestede, samme som tegningen
     for (const dim of _allDims) {
       const off=dim.offset||0;
       const wdx=dim.p2.x-dim.p1.x, wdy=dim.p2.y-dim.p1.y;
@@ -53325,7 +53426,10 @@ canvas.addEventListener('mousedown', e=>{
         // Do NOT clear selectedRoomId — room drawing must stay visible
         S.ui.selectedWallId=null;
         S.ui.selectedHindringId=null; S.ui.selectedVertexIdx=null;
-        updateWip(); updateCtxBar(); return;
+        // 087: Delete-tasten sjekker trapp FØR mål — et valgt mål må ikke la trappa stå valgt,
+        // ellers sletter Delete trappa i stedet for målet.
+        S.ui.selectedStairId=null;
+        updateWip(); updateCtxBar(); render(); return;
       }
     }
 
@@ -53720,7 +53824,7 @@ canvas.addEventListener('mousemove', e=>{
     return;
   }
   if (_dimOffDragging) {
-    const dim=(currentRoom()?.dims||[]).find(d=>d.id===_dimOffId);
+    const dim=_findUserDim(_dimOffId)?.dim;   // 087: rom, frie og trappefestede
     if (dim) {
       const sc=S.view.zoom*BASE_SCALE;
       const dsx=(e.clientX-_dimOffOrigStart.x)/sc;
@@ -55567,14 +55671,8 @@ function _toggleMatDimSnap(roomId) {
 // Mirrors the click-selection logic in canvas mousedown. Returns the dim id
 // or null. Tolerance ~8 px on the dim line and ~6 px on the extension lines.
 function _hitDimLine(wx, wy, sx, sy) {
-  const _all = [];
-  for (const r of S.rooms) {
-    if (!_roomOnActiveFloor(r) || !r.dims) continue;
-    for (const d of r.dims) _all.push(d);
-  }
-  // STEG 1 (etasje-vanntett): samme filter som click-select over — en målelinje på en annen
-  // etasje skal aldri kunne treffes av hittest, selv om den er usynlig.
-  if (S.floatingDims) for (const d of S.floatingDims) if (_onActiveFloor(d)) _all.push(d);
+  // 087: samme kilde som tegningen (rom + frie + trappefestede) — se _collectVisibleDims.
+  const _all = _collectVisibleDims();
   for (const dim of _all) {
     const off = dim.offset || 0;
     const wdx = dim.p2.x - dim.p1.x, wdy = dim.p2.y - dim.p1.y;
@@ -55618,6 +55716,13 @@ function deleteDim(dimId) {
     const before = S.floatingDims.length;
     S.floatingDims = S.floatingDims.filter(d => d.id !== dimId);
     if (S.floatingDims.length !== before) found = true;
+  }
+  // 087: mål festet til en trapp
+  if (!found) for (const st of (S.stairs || [])) {
+    if (!st.dims) continue;
+    const before = st.dims.length;
+    st.dims = st.dims.filter(d => d.id !== dimId);
+    if (st.dims.length !== before) { found = true; break; }
   }
   if (!found) {
     // Nothing to delete — drop the undo entry we just pushed
@@ -55944,6 +56049,7 @@ function _ctxBarItems() {
   }
 
   // Stair module: only show stair-specific ctxbar
+  const dimOn = ui.drawMode === 'dim';   // 087: flyttet opp — trapp-blokka under bruker den også
   if (moduleType === 'stair') {
     if (ui.selectedStairId) {
       // Let the existing stair ctxbar code below handle it (falls through)
@@ -55954,7 +56060,8 @@ function _ctxBarItems() {
         <button class="snap-chip" onclick="S.ui.stairPlaceMode=false;S.ui.stairPlaceParams=null;updateCtxBar();render()">✕ Avbryt</button>`;
     } else {
       return `<span class="ctxbar-lbl" style="color:var(--dim)">🪜 Trapp-modul</span>
-        <button class="snap-chip" onclick="showAddStairModal()">＋ Legg til trapp</button>`;
+        <button class="snap-chip" onclick="showAddStairModal()">＋ Legg til trapp</button>
+        <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje (D)"><span class="snap-dot"></span>Mållinje</button>`;
     }
   }
 
@@ -55972,7 +56079,6 @@ function _ctxBarItems() {
   }
 
   const room = S.rooms.find(r => r.id === ui.selectedRoomId);
-  const dimOn = ui.drawMode === 'dim';
 
   // Seed mode — override all other context
   if (ui.seedMode) {
@@ -56126,6 +56232,7 @@ function _ctxBarItems() {
       return `<span class="ctxbar-lbl">\u{1FA9C} Trapp</span>
         <span style="font-size:12px;color:var(--dim);padding:0 4px">${esc(stair.name)} \u2014 ${cableInfo}</span>
         <button class="snap-chip" onclick="_toggleStairView()" title="Bytt visning">\u{1F441} ${viewLabel}</button>
+        <button class="snap-chip${dimOn?' on':''}" id="chip-dim-tool" onclick="startDimMode()" title="Tegn mållinje (D) — festes til trappa"><span class="snap-dot"></span>Mållinje</button>
         <button class="snap-chip" onclick="deleteStair(${ui.selectedStairId})" title="Slett trapp">\u{1F5D1} Slett</button>`;
     }
   }
@@ -56290,9 +56397,7 @@ function _ctxBarItems() {
 
   // Dimension line selected — primær handling: Slett (frittstående hjelpe-målelinjer)
   if (ui.selectedDimId != null) {
-    let _dim = null;
-    for (const r of S.rooms) { const d=(r.dims||[]).find(x=>x.id===ui.selectedDimId); if (d) { _dim=d; break; } }
-    if (!_dim && S.floatingDims) _dim = S.floatingDims.find(x=>x.id===ui.selectedDimId);
+    const _dim = _findUserDim(ui.selectedDimId)?.dim;   // 087: også trappefestede
     if (_dim) {
       const lenCm = Math.round(Math.hypot(_dim.p2.x-_dim.p1.x, _dim.p2.y-_dim.p1.y));
       return `<span class="ctxbar-lbl">${IC('ruler',14)} Mållinje</span>
@@ -60665,7 +60770,7 @@ function _buildSaveData() {
     matPaths : (S.matPaths||[]).map(mp=>({...mp, start:{...mp.start}, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates   : S.plates.map(p=>({...p})),
     aluboard : (S.aluboard||[]).map(a=>({...a})),
-    stairs   : S.stairs.map(s=>({...s, segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
+    stairs   : S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
     // F4a (Kenneth 17.09.2026): fri folie — egen objekttype, ingen nestede arrays å klone.
     foilFree : (S.foilFree||[]).map(f=>({...f})),
     // STEG 2 (etasje-vanntett, Kenneth 19.08.2026): begge manglet helt fra før (STEG 0-funn) —
@@ -60965,9 +61070,10 @@ function _restoreProject(data) {
   // prosjekt kan ha dims uten floorId (fra FØR STEG 1 ga dem en ved opprettelse) — migrer dem til
   // FØRSTE etasje i stedet for å la dem forsvinne stille. De er tegnet av brukeren; de skal bli.
   const _firstFloorId = S.floors.length ? S.floors[0].id : null;
-  S.floatingDims = (data.floatingDims || []).map(d => ({
-    ...d, floorId: d.floorId != null ? +d.floorId : _firstFloorId,
-  }));
+  S.floatingDims = (data.floatingDims || []).map(d => (
+    // 087: et fritt mål fra trapp-delen bærer partId og skal IKKE gjettes inn på første etasje.
+    d.partId != null ? { ...d, floorId: undefined } : { ...d, floorId: d.floorId != null ? +d.floorId : _firstFloorId }
+  ));
   S.counters  = data.counters  || S.counters;
   // STEG 3 (etasje-vanntett): manglet fra før (samme mangel som de andre under) — ble ikke et
   // problem før nå, siden ingenting tidligere opprettet etasjer UNDER selve innlastingen (den nye

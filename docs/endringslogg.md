@@ -4,6 +4,51 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 087: Trapp — mållinje (D) virker i trappmodulen og blir stående — 2026-10-15
+
+Kenneth: «Ønsker å kunne bruke målefunksjon (distanse) slik som for innendørs — i dag blir målet
+borte fra tegningen.»
+
+### STEG 0 (målt på Frydenbø, lesende — prosjekt med bare trapp-del, ingen etasjer)
+
+| | Målt |
+|---|---|
+| Hvor havnet målet? | `S.floatingDims` med **`floorId: null`** (`_effectiveActiveFloorId()` gir null når det ikke finnes etasjer) |
+| Hvorfor usynlig? | `_onActiveFloor` krever roomId eller floorId; objektet hadde ingen → «vises aldri» (dev-varselet i konsollen bekreftet det). **Årsak 2.** |
+| Årsak 1 (rom valgt)? | `_enterPart` nullstiller `selectedRoomId`, og `selectStair` gjør det samme — kan bare skje hvis man går rett fra rom til D uten å bytte del. Gatet uansett nå |
+| Årsak 3 (klikk velger trappa)? | **Nei.** Mål-modus håndteres før trappeklikket i mousedown; ingen drag startet |
+| Bare-trapp-prosjekt | Virket ikke (samme feil) |
+| Lagring | `stairs` og `floatingDims` lagres/leses; men `_restoreProject` **gjettet første etasje** på et fritt mål uten floorId |
+| Bifunn | Frie mål hadde **ingen gizmo og kunne ikke flyttes** (`_dimGizmoCenter` og avstandsdraget søkte bare `room.dims`) — gjaldt også innendørs etter kalibrering |
+
+### Gjort
+
+- **Én kilde for brukerens mål:** `_findUserDim(id)`, `_dimWorld(dim, stair)` og
+  `_collectVisibleDims()` (rom på aktiv etasje + frie mål via `_onActiveFloor` + `stair.dims` for
+  trapper i aktiv del). Tegning, treff, klikkvalg, gizmo, avstandsdrag, Delete, ctxbar og
+  angre-gyldighet går gjennom dem.
+- **Trapp-delen:** trapp valgt → `stair.dims[]` med punkter relativt til `x_cm/y_cm` (følger
+  flytting, slettes med trappa). Ingen trapp valgt → fritt mål med `partId`, aldri gjettet
+  `floorId`. `_onActiveFloor`: `partId` ⇒ synlig når delen er aktiv (ny rad i revisjonstabellen).
+- **Snapping:** `_stairDimSnap` — hjørner (prioritert) og kanter på hver flate i plan, og profilen i
+  sidevisning (samme forskyvning som `drawStairs`). Shift gir fri lengde som før.
+- **Knapp «Mållinje»** i trapp-ctxbar både uten og med valgt trapp.
+- **Delete-sikkerhet:** å klikke et mål avvelger trappa (Delete sjekker trapp før mål).
+- Lagring/angre: `stair.dims` dypkopieres i `pushUndo` og `_buildSaveData`; `_restoreProject` lar
+  frie mål med `partId` beholde den.
+- Rører ikke mål som alt ligger «gjemt» (lesende telling under).
+
+### Verifisert (33 sjekker, syntetisk på Frydenbø-kopi + midlertidig innendørs-del)
+
+Trapp valgt/ikke valgt, rom valgt innendørs først, klikkvalg + gizmo + drag + Delete (sletter målet,
+ikke trappa), snap til hjørne/kant/sideprofil, lagre → gjenopprett, slett trappa, innendørs uendret,
+bare-trapp-prosjekt. `_stairRegressionTest` (084) fortsatt grønn.
+
+### Lesende telling av «gjemte» mål (180 prosjekter)
+
+5 mål i rom med begge punkter > 2 m utenfor rommets boks (Knut Arne og Bente: 1, Fossilveien 18: 4)
+og 1 fritt mål uten gyldig etasje (prosjektet «Trapp»). Ikke rørt.
+
 ## 086: Trapp — Raster-knappen også i trappmodulen — 2026-10-15
 
 Kenneth: «Ønsker å kunne skru av visning for raster.» (i trappmodulen)
