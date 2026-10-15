@@ -33760,6 +33760,140 @@ function drawStairs() {
 // blir «6,0653...» ett sted og riktig et annet. cm, maks én desimal.
 function _stairDimRound(v) { return Math.round(v * 10) / 10; }
 
+// 085 (Kenneth 15.10.2026: «trappen er målsatt, begge visninger»): trappens EGEN geometri som
+// mållinjer — bredde, inntrinn, opptrinn, repos og totaler — regnet ÉN gang for både skjerm og
+// utskrift, så de aldri blir uenige. Kabelmålene (kantavstand/CC, _drawSurfDepthDims m.fl.) er
+// urørt og ligger til høyre/over; disse ligger til venstre/under.
+//   view 'plan': x = bredde, y = dybde — samme ramme som stair.surfaces (relativt stair.x_cm/y_cm).
+//   view 'side': x = dybdeposisjon, y = høyde i _drawStairSide sin SPEILEDE ramme (y vokser
+//                nedover; trinn 1 ligger ved y = totalH, bakken ved totalH + første opptrinn).
+//   range: [fraFlate, tilFlate] for bånd i utskrift (STEG 6) — totalene gjelder da båndet.
+// Returnerer [{ a:{x,y}, b:{x,y}, label, side:'left'|'bottom', level:1|2, atY? }] — level 1 er
+// den indre kjeden (hvert inntrinn/opptrinn, like naboer slått sammen «8 × 32 = 256»), level 2 den
+// ytre totalen. Tegnes av _drawStairGeoDims.
+function _stairGeometryDims(stair, view, range) {
+  const surfs = stair.surfaces || [];
+  if (!surfs.length) return [];
+  const rFrom = range ? range[0] : 0, rTo = range ? Math.min(range[1], surfs.length - 1) : surfs.length - 1;
+  const R = _stairDimRound;
+  const dims = [];
+  const runLabel = (n, v) => n > 1 ? `${n} × ${R(v)} = ${R(n * v)}` : `${R(v)}`;
+  // Like TRINN på rad slås sammen; et repos står alltid for seg (det er sitt eget mål).
+  const collapse = items => {
+    const out = [];
+    for (const it of items) {
+      const last = out[out.length - 1];
+      if (last && it.kind === 'tread' && last.kind === 'tread' && Math.abs(last.v - it.v) < 0.05) { last.n++; last.to = it.to; }
+      else out.push({ ...it, n: 1 });
+    }
+    return out;
+  };
+  if (view === 'plan') {
+    const idx = []; for (let i = rFrom; i <= rTo; i++) idx.push(i);
+    idx.sort((a, b) => surfs[a].y_cm - surfs[b].y_cm);   // byggeretning kan snu y — kjeden følger dybden
+    const minX = Math.min(...idx.map(i => surfs[i].x_cm));
+    const minY = Math.min(...idx.map(i => surfs[i].y_cm));
+    const maxY = Math.max(...idx.map(i => surfs[i].y_cm + surfs[i].d_cm));
+    // Indre dybdekjede (venstre, nivå 1): hvert inntrinn og hvert repos.
+    const depthItems = idx.map(i => ({ kind: surfs[i].type === 'landing' ? 'landing' : 'tread', v: surfs[i].d_cm, from: surfs[i].y_cm, to: surfs[i].y_cm + surfs[i].d_cm }));
+    const depthGroups = collapse(depthItems);
+    for (const g of depthGroups) dims.push({ a: { x: minX, y: g.from }, b: { x: minX, y: g.to }, label: runLabel(g.n, g.v), side: 'left', level: 1 });
+    // Total lengde i plan (venstre, nivå 2) — bare når den indre kjeden har mer enn ett ledd
+    // («8 × 32 = 256» sier allerede totalen når hele trappa er én serie).
+    if (depthGroups.length > 1) dims.push({ a: { x: minX, y: minY }, b: { x: minX, y: maxY }, label: R(maxY - minY) + '', side: 'left', level: 2 });
+    // Bredde (under, nivå 1): én per sammenhengende serie med lik bredde — varierer bredden, får
+    // hver serie sitt eget mål ved seriens nedre kant.
+    const groups = [];
+    let g = null;
+    for (const i of idx) {
+      const s = surfs[i], w = s.w_cm || stair.width_cm || 120;
+      if (g && Math.abs(g.w - w) < 0.05 && Math.abs(g.x - s.x_cm) < 0.05) g.to = Math.max(g.to, s.y_cm + s.d_cm);
+      else { g = { w, x: s.x_cm, to: s.y_cm + s.d_cm }; groups.push(g); }
+    }
+    for (const gr of groups) dims.push({ a: { x: gr.x, y: gr.to }, b: { x: gr.x + gr.w, y: gr.to }, label: R(gr.w) + '', side: 'bottom', level: 1, atY: gr.to });
+  } else {
+    // Samme profil-aritmetikk som _drawStairSide (speilet høyde) — regnet på nytt her, ikke lest
+    // derfra, fordi utskriften (_stairDrawSideToCanvas) ikke har tilgang til skjermfunksjonens lokale.
+    let totalH = 0;
+    for (const s of surfs) if (s.type !== 'landing') totalH += (s.stepHeight_cm || stair.step_height_cm || 17);
+    const firstStepH = (surfs[0].type !== 'landing' ? surfs[0].stepHeight_cm : null) || stair.step_height_cm || 17;
+    const ground = totalH + firstStepH;
+    let cx = 0, cumulH = 0, xFrom = null, xTo = 0;
+    const depthItems = [], riserItems = [];
+    // Opptrinn-kjeden følger tegningen: bakken → trinn 1, så ett opptrinn OVER hvert trinn (det
+    // siste leder opp til etasjen/reposet over). 8 trinn tegnes altså med 9 opptrinn — det er
+    // fysisk riktig for en trapp mellom to plan, og tallet skal stemme med det som tegnes.
+    if (rFrom === 0 && surfs[0].type !== 'landing') riserItems.push({ kind: 'tread', v: firstStepH, from: ground, to: totalH });
+    for (let i = 0; i < surfs.length; i++) {
+      const s = surfs[i], yTop = totalH - cumulH, inR = i >= rFrom && i <= rTo;
+      if (inR) {
+        if (xFrom == null) xFrom = cx;
+        xTo = cx + s.d_cm;
+        depthItems.push({ kind: s.type === 'landing' ? 'landing' : 'tread', v: s.d_cm, from: cx, to: cx + s.d_cm });
+      }
+      if (s.type !== 'landing') {
+        const sh = s.stepHeight_cm || stair.step_height_cm || 17;
+        if (inR) riserItems.push({ kind: 'tread', v: sh, from: yTop, to: yTop - sh });
+        cumulH += sh;
+      }
+      cx += s.d_cm;
+    }
+    if (xFrom == null) return dims;
+    // Inntrinn-kjede langs bunnen (nivå 1) + total lengde (nivå 2).
+    const depthGroups = collapse(depthItems);
+    for (const g of depthGroups) dims.push({ a: { x: g.from, y: ground }, b: { x: g.to, y: ground }, label: runLabel(g.n, g.v), side: 'bottom', level: 1 });
+    if (depthGroups.length > 1) dims.push({ a: { x: xFrom, y: ground }, b: { x: xTo, y: ground }, label: R(xTo - xFrom) + '', side: 'bottom', level: 2 });
+    // Opptrinn-kjede langs venstre (nivå 1) + total høyde (nivå 2).
+    if (riserItems.length) {
+      const riserGroups = collapse(riserItems);
+      for (const g of riserGroups) dims.push({ a: { x: xFrom, y: g.from }, b: { x: xFrom, y: g.to }, label: runLabel(g.n, g.v), side: 'left', level: 1 });
+      const yLo = Math.max(...riserItems.map(r => r.from)), yHi = Math.min(...riserItems.map(r => r.to));
+      if (riserGroups.length > 1) dims.push({ a: { x: xFrom, y: yLo }, b: { x: xFrom, y: yHi }, label: R(yLo - yHi) + '', side: 'left', level: 2 });
+    }
+  }
+  return dims;
+}
+
+// 085: tegner målene fra _stairGeometryDims. `P(x,y)` oversetter trapp-lokale cm til piksler (w2s på
+// skjerm, tx/ty i utskrift) — samme tegnekode for begge. Avstand ut fra trappa = baseCm + (level-1)
+// × levelCm, i cm, så den skalerer med tegningen. Grå stil (kabelmålene er blå), tikk i endene,
+// korte hjelpelinjer fra geometrien, tall midt på (rotert langs venstre kjede).
+function _drawStairGeoDims(c, dims, P, o) {
+  if (!dims || !dims.length) return;
+  c.save();
+  c.strokeStyle = o.color; c.fillStyle = o.color; c.lineWidth = o.lineWidth || 0.8; c.font = o.font; c.setLineDash([]);
+  const t = o.tick || 3;
+  for (const d of dims) {
+    const off = o.baseCm + (d.level - 1) * o.levelCm;
+    let a, b;
+    if (d.side === 'left') { a = P(d.a.x - off, d.a.y); b = P(d.b.x - off, d.b.y); }
+    else { const y = (d.atY != null ? d.atY : Math.max(d.a.y, d.b.y)) + off; a = P(d.a.x, y); b = P(d.b.x, y); }
+    const ea = P(d.a.x, d.a.y), eb = P(d.b.x, d.b.y);
+    c.globalAlpha = 0.35;
+    c.beginPath(); c.moveTo(ea.x, ea.y); c.lineTo(a.x, a.y); c.moveTo(eb.x, eb.y); c.lineTo(b.x, b.y); c.stroke();
+    c.globalAlpha = 1;
+    c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+    c.beginPath();
+    if (d.side === 'left') { c.moveTo(a.x - t, a.y); c.lineTo(a.x + t, a.y); c.moveTo(b.x - t, b.y); c.lineTo(b.x + t, b.y); }
+    else { c.moveTo(a.x, a.y - t); c.lineTo(a.x, a.y + t); c.moveTo(b.x, b.y - t); c.lineTo(b.x, b.y + t); }
+    c.stroke();
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    if (Math.hypot(b.x - a.x, b.y - a.y) < (o.minSpanPx || 8)) continue;   // for trangt for et tall
+    if (d.side === 'left') {
+      c.save(); c.translate(mx - 2, my); c.rotate(-Math.PI / 2);
+      c.textAlign = 'center'; c.textBaseline = 'bottom'; c.fillText(d.label, 0, 0);
+      c.restore();
+    } else {
+      c.textAlign = 'center'; c.textBaseline = 'top'; c.fillText(d.label, mx, my + 2);
+    }
+  }
+  c.restore();
+}
+// Skjerm-stil for trappens geometrimål (delt av plan og side).
+function _stairGeoDimScreenOpts() {
+  return { baseCm: 6, levelCm: 12, color: _lc('#555', '#aaa'), font: `${Math.max(7, 9 * S.view.zoom)}px sans-serif`, tick: 3 };
+}
+
 function _drawStairPlan(stair) {
   const isSel = S.ui.selectedStairId === stair.id;
   const isHov = !isSel && _hoveredStairId === stair.id;
@@ -34223,6 +34357,13 @@ function _drawStairPlan(stair) {
     }
   }
 
+  // 085: trappens egne mål (bredde/inntrinn/repos/total) til venstre og under når trappen er valgt.
+  // STEG 0: det finnes ingen global «vis mål»-bryter for rom (room.dimSnap er per rom og styrer
+  // auto-målene), så «valgt» er bryteren her — kabelmålene vises alltid, som før.
+  if (isSel && S.view.zoom > 0.2) {
+    _drawStairGeoDims(ctx, _stairGeometryDims(stair, 'plan'), (x, y) => w2s(ox + x, oy + y), _stairGeoDimScreenOpts());
+  }
+
   // Stair label
   if (S.view.zoom > 0.12 && stair.name) {
     const bounds = _stairBounds(stair);
@@ -34370,6 +34511,11 @@ function _drawStairSide(stair) {
       }
     }
     ctx.setLineDash([]);
+  }
+
+  // 085: opptrinn-kjede + total høyde (venstre), inntrinn-kjede + total lengde (under) når valgt.
+  if (isSel && S.view.zoom > 0.2) {
+    _drawStairGeoDims(ctx, _stairGeometryDims(stair, 'side'), (x, y) => w2s(ox + x, oy + y), _stairGeoDimScreenOpts());
   }
 
   // Label
@@ -61410,7 +61556,8 @@ function _showExportDialog() {
         ${hasStairs ? `<div class="exp-group">
           <div class="exp-group-title">Trapper</div>
           <label class="exp-check"><input type="checkbox" id="exp-stairs-all" checked onchange="document.querySelectorAll('.exp-stair-cb').forEach(c=>c.checked=this.checked)"> Alle trapper (${stairs.length})</label>
-          ${stairs.map(s => `<div class="exp-check sub"><input type="checkbox" class="exp-stair-cb" value="${s.id}" checked title="Hak av for utskrift"><span onclick="_expPreviewStair(${s.id})" style="flex:1;cursor:pointer" title="Klikk navnet for forhåndsvisning">${_esc(s.name||'Trapp')}</span></div>`).join('')}
+          ${stairs.map(s => `<div class="exp-check sub"><input type="checkbox" class="exp-stair-cb" value="${s.id}" checked title="Hak av for utskrift"><span onclick="_expPreviewStair(${s.id})" style="flex:1;cursor:pointer" title="Klikk navnet for forhåndsvisning">${_esc(s.name||'Trapp')}</span></div>
+          <div class="exp-check sub" style="padding-left:28px"><input type="checkbox" class="exp-stair-side-cb" value="${s.id}" checked title="Ta med sidevisningen (profil med opptrinn/inntrinn) etter planen"><span style="flex:1;font-size:11px;color:var(--muted)">Sidevisning</span></div>`).join('')}
         </div>` : ''}
         <div class="exp-group">
           ${hasRooms ? `<div class="exp-check"><input type="checkbox" id="exp-roomtable" checked title="Hak av for utskrift"><span onclick="_expPreviewSection('roomtable')" style="flex:1;cursor:pointer" title="Klikk for forhåndsvisning">Romoversikt</span></div>` : ''}
@@ -61672,6 +61819,7 @@ function _runExportPDF() {
     summary: document.getElementById('exp-summary')?.checked,
     rooms: [...document.querySelectorAll('.exp-room-cb:checked')].map(c => +c.value),
     stairs: [...document.querySelectorAll('.exp-stair-cb:checked')].map(c => +c.value),
+    stairSide: [...document.querySelectorAll('.exp-stair-side-cb:checked')].map(c => +c.value),   // 085
     roomTable: document.getElementById('exp-roomtable')?.checked,
     stairTable: document.getElementById('exp-stairtable')?.checked,
     materialList: document.getElementById('exp-matlist')?.checked,
@@ -62725,6 +62873,28 @@ async function exportPDF(opts) {
       doc.circle(M + 5 + _startLblW + 7, y - 1.3, 1.4, 'F');
       doc.text('Slutt kabel', M + 5 + _startLblW + 11, y);
       y += 6;
+    }
+
+    // 085 (Kenneth 15.10.2026): sidevisningen ETTER planen, FØR detaljutsnittene — med trappens egne
+    // mål (opptrinn/inntrinn/totaler). Valgfri per trapp i eksportdialogen (på som standard); kallere
+    // uten stairSide-opsjon (gamle standard-opts) får den med.
+    if (!Array.isArray(opts.stairSide) || opts.stairSide.includes(stair.id)) {
+      let _sideImgs = [];
+      try { _sideImgs = _renderStairSidePrintImages(stair); } catch(e) { _sideImgs = []; }
+      if (_sideImgs.length) {
+        const _maxSideH = pageH_s - 2 * M;
+        const _fit = img => { let w = pw_s, h = pw_s / img.aspect; if (h > _maxSideH) { w = _maxSideH * img.aspect; h = _maxSideH; } return { w, h }; };
+        _checkPageS(Math.min(_fit(_sideImgs[0]).h, 60) + 10);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(20, 60, 130);
+        doc.text('Sidevisning', M, y); y += 4.5;
+        for (const img of _sideImgs) {
+          const f = _fit(img);
+          _checkPageS(f.h + 4);
+          doc.addImage(img.dataUrl, 'PNG', M + (pw_s - f.w) / 2, y, f.w, f.h);
+          y += f.h + 4;
+        }
+        y += 2;
+      }
     }
 
     // DEL C (spec-trapp-detaljutsnitt.md, 11.09.2026): ett forstørret detaljutsnitt per geometrisk
@@ -63931,11 +64101,14 @@ function _stairDrawToCanvas(stair, opts) {
   // bredden etter at _stairRotateCanvas90 har snudd bildet — selve pikseltettheten (px/cm) er lik
   // uansett rotasjon, kun hvilken led som telles som "bredde" ved dimensjonering av print-boksen.
   const PRINT_W_IN = 7.09, PRINT_MAX_H_IN = 10.51, TARGET_DPI = 150, MAX_PIXELS = 1400000, padCm = 4;
-  const printW_cm = (opts.rotated ? sH : sW) + padCm * 2;
-  const printH_cm = (opts.rotated ? sW : sH) + padCm * 2;
+  // 085: trappens egne mål (opts.geoDims) ligger til VENSTRE og UNDER — de trenger egen plass der
+  // (to nivåer à 12 cm + tall), ikke bare de 4 cm kabelmålene over/til høyre klarer seg med.
+  const padL = opts.geoDims ? 26 : padCm, padB = opts.geoDims ? 26 : padCm;
+  const totalW_cm = sW + padL + padCm, totalH_cm = sH + padCm + padB;
+  const printW_cm = opts.rotated ? totalH_cm : totalW_cm;
+  const printH_cm = opts.rotated ? totalW_cm : totalH_cm;
   const printAspect = printW_cm / printH_cm;
   const printW_in = Math.min(PRINT_W_IN, PRINT_MAX_H_IN * printAspect);
-  const totalW_cm = sW + padCm * 2, totalH_cm = sH + padCm * 2;
   let pxPerCm = (printW_in * TARGET_DPI) / printW_cm;
   let offW = Math.round(totalW_cm * pxPerCm), offH = Math.round(totalH_cm * pxPerCm);
   if (offW * offH > MAX_PIXELS) {
@@ -63950,7 +64123,7 @@ function _stairDrawToCanvas(stair, opts) {
   c.fillRect(0, 0, offW, offH);
 
   const scale = pxPerCm;
-  const ox = padCm * scale, oy = padCm * scale;
+  const ox = padL * scale, oy = padCm * scale;
   const tx = wx => ox + (wx - minX) * scale;
   const ty = wy => oy + (wy - minY) * scale;
 
@@ -64238,13 +64411,173 @@ function _stairDrawToCanvas(stair, opts) {
     }
   }
 
+  // 085: trappens egne mål (bredde/inntrinn/repos/total) i plan-bildet — kun for utskriften og
+  // eksport-forhåndsvisningen (opts.geoDims), ikke for detaljutsnittene (én flate, ville bare
+  // gjentatt kabelmålenes bredde).
+  if (opts.geoDims) {
+    _drawStairGeoDims(c, _stairGeometryDims(stair, 'plan', [rFrom, rTo]), (x, y) => ({ x: tx(x), y: ty(y) }),
+      { baseCm: 9, levelCm: 13, color: '#555555', font: Math.max(10, Math.round(scale * 3)) + 'px sans-serif', tick: Math.max(2, scale * 0.6) });
+  }
+
   return offCanvas;
+}
+
+// 085: sidevisningen som utskriftsbilde — samme profil som _drawStairSide (speilet høyde, trinn 1
+// nederst til venstre), kabelstrenger som korte streker ved sin egen dybdeposisjon (Regel 9),
+// opptrinn-forbindelser, start-/sluttprikker og trappens egne mål (_stairGeometryDims 'side').
+// Off-screen med samme 150 dpi-prinsipp som _stairDrawToCanvas. opts.surfaceRange = bånd.
+function _stairDrawSideToCanvas(stair, opts) {
+  opts = opts || {};
+  const surfs = stair.surfaces || [];
+  const offCanvas = document.createElement('canvas');
+  if (!surfs.length) { offCanvas.width = 160; offCanvas.height = 100; const c0 = offCanvas.getContext('2d'); c0.fillStyle = '#fff'; c0.fillRect(0, 0, 160, 100); return offCanvas; }
+  const range = opts.surfaceRange || [0, surfs.length - 1];
+  const rFrom = range[0], rTo = range[1];
+
+  // Profilkoordinater — identisk aritmetikk med _drawStairSide.
+  let totalH = 0;
+  for (const surf of surfs) if (surf.type !== 'landing') totalH += (surf.stepHeight_cm || stair.step_height_cm || 17);
+  const firstStepH = (surfs[0].type !== 'landing' ? surfs[0].stepHeight_cm : null) || stair.step_height_cm || 17;
+  const ground = totalH + firstStepH;
+  const coords = [];   // per flate: xStart, yTop, depth, stepH
+  let cx = 0, cumulH = 0;
+  for (const surf of surfs) {
+    const yTop = totalH - cumulH;
+    const sh = surf.type !== 'landing' ? (surf.stepHeight_cm || stair.step_height_cm || 17) : 0;
+    coords.push({ xStart: cx, yTop, depth: surf.d_cm, stepH: sh });
+    cx += surf.d_cm;
+    if (surf.type !== 'landing') cumulH += sh;
+  }
+  const xFrom = coords[rFrom].xStart, xTo = coords[rTo].xStart + coords[rTo].depth;
+  let yMin = Infinity;
+  for (let i = rFrom; i <= rTo; i++) yMin = Math.min(yMin, coords[i].yTop - coords[i].stepH);
+  const sW = xTo - xFrom, sH = ground - yMin;
+
+  const PRINT_W_IN = 7.09, PRINT_MAX_H_IN = 10.51, TARGET_DPI = 150, MAX_PIXELS = 1400000, padCm = 4;
+  const padL = 26, padB = 26;
+  const totalW_cm = sW + padL + padCm, totalH_cm = sH + padCm + padB;
+  const printW_in = Math.min(PRINT_W_IN, PRINT_MAX_H_IN * (totalW_cm / totalH_cm));
+  let pxPerCm = (printW_in * TARGET_DPI) / totalW_cm;
+  let offW = Math.round(totalW_cm * pxPerCm), offH = Math.round(totalH_cm * pxPerCm);
+  if (offW * offH > MAX_PIXELS) { const s = Math.sqrt(MAX_PIXELS / (offW * offH)); pxPerCm *= s; offW = Math.round(totalW_cm * pxPerCm); offH = Math.round(totalH_cm * pxPerCm); }
+  offW = Math.max(offW, 160); offH = Math.max(offH, 100);
+  offCanvas.width = offW; offCanvas.height = offH;
+  const c = offCanvas.getContext('2d');
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, offW, offH);
+  const scale = pxPerCm;
+  const tx = x => padL * scale + (x - xFrom) * scale;
+  const ty = y => padCm * scale + (y - yMin) * scale;
+
+  // Profil for båndet: trinnflater + opptrinn, lukket langs bakken.
+  const pts = [];
+  for (let i = rFrom; i <= rTo; i++) {
+    const sc = coords[i], isLanding = surfs[i].type === 'landing';
+    pts.push({ x: sc.xStart, y: sc.yTop });
+    pts.push({ x: sc.xStart + sc.depth, y: sc.yTop });
+    if (!isLanding) pts.push({ x: sc.xStart + sc.depth, y: sc.yTop - sc.stepH });
+  }
+  pts.push({ x: xTo, y: ground }); pts.push({ x: xFrom, y: ground });
+  c.beginPath();
+  pts.forEach((p, i) => { const px = tx(p.x), py = ty(p.y); if (i === 0) c.moveTo(px, py); else c.lineTo(px, py); });
+  c.closePath();
+  c.fillStyle = 'rgba(180,180,180,0.25)'; c.fill();
+  c.strokeStyle = '#666666'; c.lineWidth = Math.max(1, scale * 0.25); c.stroke();
+
+  // Trinnummer/Repos-etikett på hver flate (samme tekst som planen).
+  c.fillStyle = '#777777'; c.font = Math.max(9, Math.round(scale * 2.4)) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  let landingNum = 0;
+  for (let i = 0; i <= rTo; i++) {
+    if (surfs[i].type === 'landing') landingNum++;
+    if (i < rFrom) continue;
+    const sc = coords[i];
+    const label = surfs[i].type === 'landing' ? 'Repos ' + landingNum : '' + ((surfs[i].stepIdx != null ? surfs[i].stepIdx : surfs[i].index) + 1);
+    if (sc.depth * scale > 12) c.fillText(label, tx(sc.xStart + sc.depth / 2), ty(sc.yTop) + 3);
+  }
+
+  // Kabel (Regel 9: streng-posisjon fra motoren) + opptrinn-forbindelser + start/slutt.
+  const COLORS = ['#e06030', '#3080e0', '#30b050'];
+  const hasMulti = (stair.cables || []).length > 1;
+  if (stair.runs && stair.runs.length) {
+    c.lineCap = 'round'; c.lineWidth = Math.max(1.5, scale * 0.5);
+    const runsBySurf = {};
+    for (const r of stair.runs) (runsBySurf[r.surfaceIdx] = runsBySurf[r.surfaceIdx] || []).push(r);
+    for (const [si, surfRuns] of Object.entries(runsBySurf)) {
+      if (+si < rFrom || +si > rTo) continue;
+      const sc = coords[+si];
+      const tickHalf = Math.max(1.5, Math.min(sc.depth * 0.12, 5));
+      for (const run of surfRuns) {
+        const tx0 = Math.max(sc.xStart, sc.xStart + run.pos_cm - tickHalf);
+        const tx1 = Math.min(sc.xStart + sc.depth, sc.xStart + run.pos_cm + tickHalf);
+        const totalCm = run.segments.reduce((s, g) => s + (g.end_cm - g.start_cm), 0) || 1;
+        let acc = 0;
+        for (const seg of run.segments) {
+          const f0 = acc / totalCm, f1 = (acc + (seg.end_cm - seg.start_cm)) / totalCm;
+          acc += (seg.end_cm - seg.start_cm);
+          c.strokeStyle = hasMulti ? (COLORS[seg.cableIdx] || '#e06030') : '#e06030';
+          c.beginPath(); c.moveTo(tx(tx0 + (tx1 - tx0) * f0), ty(sc.yTop)); c.lineTo(tx(tx0 + (tx1 - tx0) * f1), ty(sc.yTop)); c.stroke();
+        }
+      }
+    }
+    c.setLineDash([Math.max(2, scale * 0.6), Math.max(2, scale * 0.6)]);
+    for (let i = rFrom; i < Math.min(rTo, coords.length - 2) + 1; i++) {
+      const conn = (stair.connections || []).find(k => k.fromSurf === i);
+      if (!conn || i + 1 > rTo) continue;
+      const sc = coords[i], scNext = coords[i + 1];
+      const dropX = sc.xStart + sc.depth;
+      const segs = conn.segments || [{ len_cm: conn.length_cm, cableIdx: conn.cableIdx }];
+      let tAcc = 0;
+      for (const seg of segs) {
+        const t0 = tAcc, t1 = tAcc + (conn.length_cm > 0 ? seg.len_cm / conn.length_cm : 1);
+        tAcc = t1;
+        c.strokeStyle = hasMulti ? (COLORS[seg.cableIdx] || '#e06030') : '#e06030';
+        c.beginPath(); c.moveTo(tx(dropX), ty(sc.yTop + (scNext.yTop - sc.yTop) * t0)); c.lineTo(tx(dropX), ty(sc.yTop + (scNext.yTop - sc.yTop) * t1)); c.stroke();
+      }
+    }
+    c.setLineDash([]);
+    // Start-/sluttprikk per kabel: første/siste segment i kabelens egen reiserekkefølge (som planen).
+    const endpoints = {};
+    const seen = new Set(), order = [];
+    for (const r of stair.runs) if (!seen.has(r.surfaceIdx)) { seen.add(r.surfaceIdx); order.push(r.surfaceIdx); }
+    for (const si of order) for (const run of (runsBySurf[si] || [])) {
+      const segsT = run.isGoingRight ? run.segments : [...run.segments].reverse();
+      for (const seg of segsT) {
+        const pt = { x: coords[si].xStart + run.pos_cm, y: coords[si].yTop, si };
+        if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: pt, end: pt }; else endpoints[seg.cableIdx].end = pt;
+      }
+    }
+    const markerR = Math.max(3, scale * 0.5);
+    for (let ci = 0; ci < Math.max(1, (stair.cables || []).length); ci++) {
+      const ep = endpoints[ci]; if (!ep) continue;
+      if (ep.start.si >= rFrom && ep.start.si <= rTo) { c.fillStyle = '#22cc44'; c.beginPath(); c.arc(tx(ep.start.x), ty(ep.start.y), markerR, 0, Math.PI * 2); c.fill(); }
+      if (ep.end.si >= rFrom && ep.end.si <= rTo) { c.fillStyle = '#ee3322'; c.beginPath(); c.arc(tx(ep.end.x), ty(ep.end.y), markerR, 0, Math.PI * 2); c.fill(); }
+    }
+  }
+
+  _drawStairGeoDims(c, _stairGeometryDims(stair, 'side', [rFrom, rTo]), (x, y) => ({ x: tx(x), y: ty(y) }),
+    { baseCm: 9, levelCm: 13, color: '#555555', font: Math.max(10, Math.round(scale * 3)) + 'px sans-serif', tick: Math.max(2, scale * 0.6) });
+  return offCanvas;
+}
+
+// 085: sidevisningen til PDF — 1–3 bånd langs lengderetningen (samme terskler som planen), aldri
+// rotert (profilen er liggende av natur). Returnerer [{dataUrl, aspect, kind:'side'}].
+function _renderStairSidePrintImages(stair) {
+  const surfs = stair.surfaces || [];
+  if (!surfs.length) return [];
+  let totalD = 0, totalH = 0;
+  for (const s of surfs) { totalD += s.d_cm; if (s.type !== 'landing') totalH += (s.stepHeight_cm || stair.step_height_cm || 17); }
+  const ratio = totalD / Math.max(totalH + 17, 1);
+  const nBands = ratio > 8 ? 3 : ratio > 4 ? 2 : 1;
+  return _stairSurfaceBands(surfs, nBands).map(range => {
+    const cv = _stairDrawSideToCanvas(stair, { surfaceRange: range });
+    return { dataUrl: cv.toDataURL('image/png'), aspect: cv.width / cv.height, rotated: false, kind: 'side' };
+  });
 }
 
 // Enkelt forhåndsvisningsbilde (eksport-forhåndsvisning i appen, _expPreviewStair) — hele trappa,
 // urotert, ikke delt i bånd (ingen sideinndeling å ta hensyn til der, kun ett <img>).
 function _renderStairToImage(stair) {
-  return _stairDrawToCanvas(stair).toDataURL('image/png');
+  return _stairDrawToCanvas(stair, { geoDims: true }).toDataURL('image/png');   // 085: som utskriften
 }
 
 // STEG 6: roterer et ferdig tegnet lerret 90° (enkel bitmap-rotasjon av det FERDIGE bildet — rører
@@ -64317,7 +64650,7 @@ function _renderStairPrintImages(stair) {
     for (let i = range[0]; i <= range[1]; i++) { bandMinY = Math.min(bandMinY, surfs[i].y_cm); bandMaxY = Math.max(bandMaxY, surfs[i].y_cm + surfs[i].d_cm); }
     const bandSH = bandMaxY - bandMinY;
     const rotated = bandSH > sW * 1.3;
-    let canvas = _stairDrawToCanvas(stair, { surfaceRange: range, rotated });
+    let canvas = _stairDrawToCanvas(stair, { surfaceRange: range, rotated, geoDims: true });   // 085: trappens egne mål
     if (rotated) canvas = _stairRotateCanvas90(canvas);
     // PLASS (spec-trapp-utskrift-feil.md, 11.09.2026): kalleren (exportPDF) trenger å vite om NOEN
     // av båndene ble rotert til liggende, for å kunne velge liggende SIDE for denne trappen — et

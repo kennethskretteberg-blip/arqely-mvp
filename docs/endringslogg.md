@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 085: Trapp — sidevisning i PDF, trappen målsatt i plan og side — 2026-10-15
+
+Kenneth: «Trapp utendørs: jeg ønsker at sidevisning av trapp kommer med i eksport-PDF og at trappen
+er målsatt, begge visninger.»
+
+### STEG 0
+
+| | Målt |
+|---|---|
+| Bryter for rom-målkjeder | **Finnes ikke globalt.** `toggleSnap('dims')` slår `room.dimSnap` per rom (auto-målene på veggene). Trappens kabelmål tegnes alltid (DEL B fjernet «valgt»-kravet i 2026-09). Geometrimålene tegnes derfor **når trappen er valgt** |
+| `stepHeight_cm` på flater | Settes av `_generateStairSurfaces` fra segmentet; `_migrateStairToSegments` fyller `step_height_cm \|\| 17` for gamle trapper. Fallback som i `_drawStairSide` beholdt |
+| PDF Frydenbø før | Én plan-side (0,94 aspekt, urotert) med kabelmål. Ingen sidevisning, ingen mål på selve trappen (`085-before-plan.png` i økta) |
+
+### Gjort
+
+- **`_stairGeometryDims(stair, view, range)`** — én kilde for trappens egne mål, i trapp-cm, brukt
+  av skjerm og utskrift. Plan: inntrinn-kjede (like trinn slått sammen «8 × 32 = 256», repos for seg)
+  og total lengde til venstre, bredde per serie under. Side: opptrinn-kjede og total høyde til
+  venstre, inntrinn-kjede og total lengde under. Totalen vises bare når den indre kjeden har mer
+  enn ett ledd. **Opptrinn-kjeden følger tegningen: 8 trinn → «9 × 16 = 144»** (bakken → trinn 1,
+  og ett opptrinn over hvert trinn, det siste opp til planet over). Se SPØRSMÅL.
+- **`_drawStairGeoDims`** tegner dem grått (kabelmålene er blå), tikk i endene, tall midt på
+  (rotert langs venstre kjede), utenfor trappen — geometri venstre/under, kabel høyre/over.
+- **Skjerm:** `_drawStairPlan` og `_drawStairSide` tegner dem når trappen er valgt (zoom > 0,2).
+- **PDF:** ny `_stairDrawSideToCanvas` (profil, kabelstreker ved sin dybdeposisjon, opptrinn-
+  forbindelser, start/slutt-prikker, trinnummer, mål) og `_renderStairSidePrintImages` (1–3 bånd
+  langs lengden, samme terskler som planen, aldri rotert). Plasseres **etter planen, før
+  detaljutsnittene** med overskrift «Sidevisning». Plan-bildet får geometrimålene i tillegg
+  (`opts.geoDims`, mer plass til venstre/under); detaljutsnittene er uendret.
+- **Eksportdialog:** underavkrysning «Sidevisning» per trapp (på som standard, `opts.stairSide`).
+  Kallere uten opsjonen får sidevisningen med.
+
+### Verifisert
+
+- Frydenbø (8 × 32 × 16, 240 cm): PDF side 2 = plan med «8 × 32 = 256» / «240» + kabelmål, side 3 =
+  «Sidevisning» med «9 × 16 = 144» / «8 × 32 = 256», deretter «Trinn 1–8 (typisk)». Avhuket
+  «Sidevisning» → ingen sidevisning, resten uendret.
+- Syntetisk 31-trinns trapp med to repos (150 cm): sidevisningen deles i bånd, repos målt for seg.
+
 ## 084: Trapp — alltid et én-kabel-forslag; brukerens kantavstand er gulv — 2026-10-15
 
 Kenneth: «Jeg ønsker at det alltid kommer opp et forslag med 1 stk kabel så lenge beregnet
