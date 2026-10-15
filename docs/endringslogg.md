@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 086: Trapp — Raster-knappen også i trappmodulen — 2026-10-15
+
+Kenneth: «Ønsker å kunne skru av visning for raster.» (i trappmodulen)
+
+### STEG 0
+
+| | Målt |
+|---|---|
+| Eneste grunn til at knappen manglet? | **Ja.** `updateTopbarForModule` skjuler alt med `data-modules` som ikke nevner modulen; Raster lå i gruppa `indoor snow` sammen med Snap/Bygg/90°/45° |
+| Eget raster i trappmodulen? | **Nei.** `drawStairs`/`_drawStairPlan`/`_drawStairSide` tegner ingen hjelpelinjer; rasteret kommer kun fra `render()` → `drawGrid()` gatet på `S.ui.showGrid` |
+| Lagres `showGrid`? | **Nei** — ikke i `_savePrefs` (den lagrer `snap`), ikke i prosjektet. Økt-innstilling; PDF-eksporten slår den av/på selv rundt rendringen (urørt) |
+
+### Gjort
+
+- Raster-knappen flyttet til egen gruppe `data-modules="indoor stair snow"`. Snap/Bygg/90°/45°
+  står igjen i `indoor snow`.
+- `updateTopbarForModule` setter knappens `on`-tilstand fra `S.ui.showGrid` ved modulbytte, så én
+  felles innstilling vises riktig i alle moduler (SPØRSMÅL 4: felles, ikke per modul).
+- Ingen ny hurtigtast.
+
+### Verifisert (Frydenbø, lesende)
+
+Trapp: knapp synlig, Snap-gruppa skjult. Klikk → `showGrid=false`, knappen grå, tomt lerretsområde
+går fra 65 farger til 1 (rasteret borte). Bytt til innendørs → knappen viser «av», Snap-gruppa
+tilbake. Liste: ingen knapp.
+
 ## 085: Trapp — sidevisning i PDF, trappen målsatt i plan og side — 2026-10-15
 
 Kenneth: «Trapp utendørs: jeg ønsker at sidevisning av trapp kommer med i eksport-PDF og at trappen
