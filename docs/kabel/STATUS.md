@@ -992,3 +992,44 @@ for 13,2 og 2 prosentpoeng dekning. Koden ligger der (`_geoParityVariants` + `_p
 som mangler er å slippe runden ned CC-stigen igjen. **Venter på Kenneth.**
 
 22/22 batterier grønne, 1019 påstander, suiten 19,5 s.
+
+---
+
+## §21 · Trenger vi de gamle motorene? (målt 15.10.2026)
+
+Kenneths spørsmål. Målt over alle 16 fixturer × begge retninger = 32 utlegg:
+
+| motor | vinner | av disse gyldige |
+|---|---|---|
+| **geo** | 24 | **24** |
+| **skew** | 2 | 2 — begge er `skraa` (rotert rom 18°), som geo ikke håndterer |
+| **v6** | 6 | **0 — alle seks ugyldige** |
+
+De seks v6-seirene er `boyUmulig` (CC under 2 × bøyeradius — umulig per konstruksjon),
+`kabelForLang` (96 m i et 200×150-rom) og `flereHindringer` (tre hindringer, kjent hull).
+v6 vinner altså bare der INGEN motor har et gyldig svar, og tegner da noe som ser plausibelt ut
+i stedet for å si «ingen løsning». Det er nøyaktig feilmodusen bak Rom 5-hendelsen i §14.
+
+**Anbefaling (ikke bygget, venter på beslutning):** behold `skew` — den dekker roterte rom geo
+ikke tar. Ta `v6`/boustrophedon/serpentine ut av konkurransen, eller la dem aldri vinne over
+`_geoNoSolution`, som allerede gir grunn, konflikter og forslag. De tre fixturene over ville da
+gi et ærlig «ingen løsning» i stedet for et ugyldig utlegg.
+
+## §22 · «Nedre venstre» loddrett er strukturelt umulig i Rom 5
+
+Enumerert, ikke sluttet: loddrett gir nøyaktig fire endepar, og to er gyldige —
+
+```
+(695,−917) ↔ (972,−1028)        (708,−848) ↔ (972,−1028)
+```
+
+Ingen ende ligger ved (677, −1040). Nærmeste er 124 cm unna. Grunnen er at det nedre venstre
+feltets frie ende er **brukt opp av transitten**: den må gå under utstikkeren for å nå det øvre
+venstre feltet, som er en blindvei. Kabelens frie ender havner derfor i det øvre feltet eller på
+høyre side.
+
+Startbanen (x = 695) har to løp — det øvre (−917 → −848) og det nedre (−1028 → −966). Den nedre
+enden ligger 22 cm fra hjørnet, men der svinger kabelen videre; den er ikke fri.
+
+**Vannrett klarer det derimot:** `bl` gir start (695, −1035) — **18 cm fra hjørnet**, 41,00 m,
+0 hull. Vil man ha starten nede til venstre i dette rommet, er vannrett veien.
