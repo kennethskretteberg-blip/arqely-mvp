@@ -4,6 +4,56 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 084: Trapp — alltid et én-kabel-forslag; brukerens kantavstand er gulv — 2026-10-15
+
+Kenneth: «Jeg ønsker at det alltid kommer opp et forslag med 1 stk kabel så lenge beregnet
+lengdebehov er mindre enn den lengste kabelen i katalogen … en kabel som er nærmest, gjerne
+kortere, og så trekke inn avstand fra kant helt til kabellengden treffer godt.» Spec Regel 19.
+
+### STEG 0 (målt på Frydenbø · Trapp 1, 8 trinn à 32 × 16 cm, 240 cm bred, InSnow 30T 230V)
+
+| | Målt |
+|---|---|
+| Lagret `edgeMargin_cm` | **12,5** — ikke Kenneths egen verdi, men marginen fra 70 m-kabelen han alt har valgt (produkt 147) |
+| Strenger / behov ved gulv 12,5 | 32 strenger (8 × 4) · 69,92 m |
+| Vinner med gulv 12,5 | **20 + 49,7 m ved 12,8 cm** — skrallen bekreftet: gulvet krøp 12,5 → 12,8 |
+| Behov ved gulv 5 | 74,72 m |
+| Vinner med gulv 5 | 25 + 49,7 m ved 5,0 cm (sum 74,7, 2 cm for kort) |
+| Én kabel (70 m) ved gulv 5 | lå i lista med **12,4 cm** margin, men tapte på «minst marginøkning» — nøyaktig det Kenneth beskrev |
+| 3/3-varianten | ga samme strengantall (4) og samme kandidater; A og B var to kopier av samme kabelsett |
+| W/m² ved større sidemargin | **uendret** (321 W/m², CC 9,3) — Regel 16 regner av CC, ikke areal |
+| Varmet bredde ved 12,4 cm | 215,2 av 240 cm (90 %) |
+
+### Rettet
+
+- **`_stairSolveExactCableSet` returnerer nå også `single`**: lengste katalogkabel ≤ behovet ved
+  gulvet, med sidemarginen løst (samme lineære formel, mm-snapping, Regel 15). Egen grense:
+  varmet bredde ≥ 75 % av smaleste flate (`STAIR_SINGLE_MAX_MARGIN_FRAC = 0,125`); over
+  gulv + 15 cm får den gult merke, ikke avslag. Dagens `best`-sortering og returfelt er uendret.
+  Bare i det frie søket — Regel 18 (N like kabler) og soner (`maxCables:1`) er urørt.
+- **Forslag A = én kabel (Anbefalt), B = flerkabelsettet** fra samme margin-variant når det er et
+  annet sett; ellers B fra 3/3-varianten som før. Finnes ingen én-kabel-løsning: som før, pluss en
+  grå linje med grunnen («1 kabel: … ville gitt 34 cm kantavstand (under 75 % varmet bredde)» eller
+  «behovet (128 m) er lengre enn lengste kabel (139,9 m)»).
+- **Nytt felt `stair.edgeMarginMin_cm`** = det brukeren taster i «Avstand sider».
+  `_stairFloorMargin(stair)` er gulvet løseren bruker. Et forslag skriver fortsatt bare
+  `edgeMargin_cm` (utlegget). Eldre trapper: gulvet settes til dagens `edgeMargin_cm` ved innlasting
+  (Frydenbø får 12,5 — Kenneth må sette den ned selv én gang). Innstillingspanelet viser
+  «(din: 5)» ved siden av «Avstand sider» når utlegget ligger lenger inn enn gulvet.
+- Én-kabel-kortet: «1 × InSnow 30T 2100W 70m · Kantavstand 12,4 cm (din: 5 cm) · Varmet bredde
+  215,2 av 240 cm (90 %)». `_scoreStairProposal` trekker ikke lenger for justert margin på dette
+  kortet.
+- Ny `_stairRegressionTest()` (24 sjekker, syntetisk InSnow-katalog): Frydenbø-trappen, ny runde
+  etter Velg (gulvet står), smal trapp (grå linje 75 %), lang trapp (lengre enn lengste), 3 like
+  kabler (uendret), kantavstand-setter skriver begge felt. Soner verifisert manuelt (3-sone-trapp
+  løses per sone som før).
+
+### Avklart underveis
+
+- Test 5 i prompten («3 like kabler» på Trapp 1) går ikke opp: 3 × 20 m krever +23 cm margin,
+  over +15-taket. Det var slik før 084 også — testen bruker en 24-trinns trapp (3 × 70 m).
+- Trapp-spec-en er ikke kopiert inn i `docs/` (Regel 19 står i Cowork-spec-en).
+
 ## 073: Kundestatus kan lukkes fra prosjektinfo — 2026-10-14
 
 Kenneth: «Ofte svarer kunden meg på e-post at det ser greit ut. Da vil jeg gå inn på prosjektet
