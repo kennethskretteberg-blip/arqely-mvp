@@ -27021,9 +27021,15 @@ function _cableLegalRegion(roomId, productId) {
   }
   const toC = pts => pts.map(p => ({ X: Math.round(p.x * _CBL_SC), Y: Math.round(p.y * _CBL_SC) }));
   const fromC = p => p.map(q => ({ x: q.X / _CBL_SC, y: q.Y / _CBL_SC }));
+  // 079c: RUNDE hjørner, ikke gjæring. ⚠ MÅLT på Rom 5: ved et innstikkende hjørne (stubbenesen)
+  // strekker en gjæring seg delta/sin(θ/2) fra hjørnepunktet — 7,07 cm for et rett hjørne med
+  // 5 cm margin. Transittens sving rundt nesen lå 5,36 cm fra hjørnet, altså lovlig etter
+  // produktets krav, men ble underkjent med «1,1 cm utenfor». Kantavstand er en AVSTAND til
+  // veggen, ikke en gjæring, og `jtRound` gir nøyaktig det. Endringen kan bare GJØRE området
+  // større (en gjæring dekker alltid buen), så ingen tidligere godkjent bane blir ugyldig.
   const off = (pts, delta) => {
     const co = new ClipperLib.ClipperOffset(2, 0.25 * _CBL_SC);
-    co.AddPath(toC(pts), ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+    co.AddPath(toC(pts), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
     const sol = new ClipperLib.Paths();
     co.Execute(sol, delta * _CBL_SC);
     return sol;
@@ -28192,7 +28198,7 @@ function _geoFindTransits(grid, legal) {
 // Bygg ETT rutenett-variant der transitten er reservert: bane T tas ut av eieren sin, cellen på
 // A-siden kappes én CC over tverrløpet, og transitt-beskrivelsen henges på rutenettet.
 // Returnerer null når tverrløpet ikke får plass lovlig.
-function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA) {
+function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA, kappetTilA) {
   const cc = grid.cc;
   const A = grid.cells.find(c => c.id === cand.aId);
   const B = grid.cells.find(c => c.id === cand.bId);
@@ -28215,6 +28221,49 @@ function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA) {
   const capA = cl - 1.5 * cc;
   let lanesA = A.lanes.map(l => ({ ...l, hi: Math.min(l.hi, capA) }));
   if (lanesA.some(l => l.hi - l.lo < cc * 0.5)) return null;   // kappingen spiser opp cellen
+  // ─── 079 · A-SIDEN AV TRANSITTBANEN EIES AV A, IKKE AV NABOCELLEN ──────────────────────
+  // Kenneth 15.10.2026: «kabelstrengen som går vannrett langs utstikkeren må fortsette litt
+  // lenger inn i rommet, slik at løpet som skal gå loddrett flukter med løpet ovenfor.»
+  //
+  // ⚠ MÅLT på Kenneths eget Rom 5 (STATUS §17): i KAPPET-varianten blir bane T liggende igjen
+  // INNE i eierens serpentin, kappet til A-siden. U-svingen ut av en kappet bane må ligge på
+  // det kappede nivået — og da dras naboen ned med. Rutenettet ga 804,2 full høyde
+  // (−1027→−849); rutingen ga den 58 cm, og båndet over stubben fikk et hull på 2 × CC.
+  // Hullet oppstår altså i RUTINGEN, ikke i celledelingen.
+  //
+  // Her flyttes eierskapet i stedet: bane T tas HELT ut av naboen (som `fjernBane`), og
+  // A-siden legges til celle A. Da er naboen uklippet og sammenhengende, A er sammenhengende
+  // helt bort til transitten, og B-siden av banen er klatringen. Ingen av båndene får hull.
+  // Forutsetningen er at banen ligger ett hakk fra A sin ytterkant — ellers er det et sprang,
+  // ikke en forlengelse.
+  if (kappetTilA) {
+    if (!fjernBane || skyvA) return null;                      // bare den rene fjerningen kan eies av A
+    const tPos = cand.laneT.pos;
+    const naer = Math.min(Math.abs(tPos - A.perpMin), Math.abs(tPos - A.perpMax));
+    if (Math.abs(naer - cc) > cc * 0.3) return null;           // ikke nabo til A sin ytterkant
+    const ny = { ...cand.laneT, id: 'A' + cand.laneT.id, hi: Math.min(cand.laneT.hi, capA) };
+    if (ny.hi - ny.lo < cc * 0.5) return null;
+    lanesA = lanesA.concat([ny]).sort((a, b) => a.pos - b.pos);
+    // ─── 079b · YTTERSTE LØP SKAL FLUKTE MED DET OVER HINDRINGEN ────────────────────────
+    // Kenneth 15.10.2026: «siste løp mot yttervegg under utstikker skal flukte med siste
+    // løpet mot yttervegg over utstikker.»
+    //
+    // Dette er ikke bare et utseende — det er det som får utlegget til å gå opp. ⚠ MÅLT:
+    // med transittbanen lagt til fikk A et PARTALL av baner (8). Boustrophedon gir da inn- og
+    // utgang i SAMME ende, og siden A må gå ut oppe (til tverrløpet), må den komme inn oppe —
+    // og overgangsløpet fra nabocellen kappes ned til A sitt kappede nivå. Det var hullet,
+    // bare flyttet én bane. Med ett løp mindre (oddetall) kan A komme inn NEDE og gå ut oppe,
+    // og nabocellen beholder full høyde.
+    //
+    // Prisen er en bredere kald stripe mot ytterveggen. Det er Kenneths uttrykte prioritet:
+    // «det er alltid viktigere å få en jevn avstand mellom kabelløpene enn å dekke helt ut mot
+    // veggene» (074b).
+    const tHoyre = cand.laneT.pos > A.perpMax;
+    const ytre = B.lanes.reduce((m, l) => (tHoyre ? l.pos < m.pos : l.pos > m.pos) ? l : m, B.lanes[0]);
+    const flukt = lanesA.filter(l => tHoyre ? l.pos > ytre.pos - cc * 0.3 : l.pos < ytre.pos + cc * 0.3);
+    if (flukt.length < 2) return null;                         // flukten spiser opp cellen
+    lanesA = flukt;
+  }
   // ─── 074b · SKYV CELLEN ÉN BANE, SÅ HULLET HAVNER INNTIL VEGGEN ─────────────────────────
   // Kenneth 14.10.2026, med skjermbilde: «jeg ønsker at kabelutlegget … skyves til venstre slik
   // at cc blir jevn, og heller at vi får et udekket område inntil veggen. Det er alltid
@@ -28272,6 +28321,8 @@ function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA) {
         // reserve: kappingen endrer cellens siste løp, og i noen rom (målt: badet med 47 m)
         // lukkes da ikke overgangskjeden i det hele tatt. Søket prøver KAPPET først — det er
         // den jevne — og faller tilbake på fjerning bare når kappet ikke gir en lovlig bane.
+        // 079: `kappetTilA` kommer hit som `fjernBane` — banen forsvinner fra eieren, og
+        // A-siden er allerede lagt til celle A over. Eieren står da uklippet igjen.
         const lanes = c.lanes
           .map(l => l.id !== cand.laneT.id ? l : (fjernBane ? null : { ...l, hi: Math.min(l.hi, capA) }))
           .filter(l => l && l.hi - l.lo > cc * 0.5);
@@ -28291,7 +28342,7 @@ function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA) {
     // der fortsatt, og overgangen skal være en helt vanlig U-sving på én CC.
     // Er cellen skjøvet, møtes den og nabocellen igjen med ÉN CC — da trengs ingen bred overgang.
     laneGap: (fjernBane && !skyvA) ? 2 : (grid.laneGap || 1),
-    transitKappet: !fjernBane, transitSkjovet: !!skyvA });
+    transitKappet: !fjernBane, transitSkjovet: !!skyvA, transitAEid: !!kappetTilA });
 }
 
 // Ett nivå om gangen. `flereHindringer` deler seg i TI celler og trenger mer enn én korridor,
@@ -28304,8 +28355,10 @@ function _geoTransitVariants(grid, legal, maxV, depth) {
     // 074b: KAPPET bane først (jevn CC), så fjernet bane (reserve, se `_geoTransitVariant`).
     // Rekkefølge: SKJØVET først (jevn CC, hullet ved veggen — Kenneths regel), så kappet, så
     // den rene fjerningen som reserve.
-    for (const [fjern, skyv] of [[true, true], [false, false], [true, false]]) {
-      const v = _geoTransitVariant(grid, legal, cand, fjern, skyv);
+    // 079: A-EID kappet bane er den fjerde. Se `_geoTransitVariant` for hvorfor den finnes.
+    for (const [fjern, skyv, tilA] of [[true, true, false], [false, false, false],
+                                       [true, false, false], [true, false, true]]) {
+      const v = _geoTransitVariant(grid, legal, cand, fjern, skyv, tilA);
       if (v) out.push(v);
     }
     if (out.length >= lim) break;
@@ -28534,38 +28587,67 @@ function _geoCornerPoint(room, corner) {
 // Målt på badet med 41 m fant den de to ekte hullene: bane 787,6 står tom OVER stubben, og
 // bane 800,8 står tom UNDER den.
 function _geoInteriorHoles(pts, dir, grid) {
-  if (!pts || pts.length < 4 || !grid || !grid.lanes) return 0;
+  // ─── 079e · MÅLES PÅ BANEN, IKKE PÅ RUTENETTET ────────────────────────────────────────
+  // ⚠ MÅLT på Rom 5 15.10.2026: den forrige utgaven leste `grid.lanes`, og den lista
+  // oppdateres IKKE når en transittvariant fjerner en bane fra en celle (`_geoTransitVariant`
+  // gjør `Object.assign({}, grid, {cells, …})` — `lanes` følger med urørt). Resultatet var en
+  // blind flekk: bane 783,5 var tom i det NEDRE båndet, men i bruk i det ØVRE, og målingen
+  // meldte «0 hull» for et utlegg med 29 cm mellom to naboløp nede.
+  //
+  // Nå måles det eneste Kenneth faktisk har bedt om: er avstanden mellom to NABOLØP SOM LIGGER
+  // I SAMME BÅND større enn én CC? Rutenettet spørres ikke; senterlinja er fasiten.
+  if (!pts || pts.length < 4) return 0;
   const perpKey = dir === 'v' ? 'x' : 'y';
   const sweepKey = dir === 'v' ? 'y' : 'x';
-  const cc = grid.cc;
-  // Alle rette løp, gruppert på posisjon.
+  const cc = (grid && grid.cc) || 0;
+  if (!(cc > 0)) return 0;
   const runs = [];
   for (let i = 0; i + 1 < pts.length; i++) {
     const a = pts[i], b = pts[i + 1];
     if (Math.abs(a[perpKey] - b[perpKey]) < 0.05 && Math.abs(a[sweepKey] - b[sweepKey]) > cc * 0.5)
       runs.push({ p: a[perpKey], lo: Math.min(a[sweepKey], b[sweepKey]), hi: Math.max(a[sweepKey], b[sweepKey]) });
   }
-  if (!runs.length) return 0;
-  // Er dette lovlige intervallet på denne banen tatt i bruk? Et løp som dekker mindre enn
-  // 40 % av intervallet teller ikke — da står mesteparten av banen tom.
-  const brukt = ln => {
-    let dekket = 0;
-    for (const r of runs) {
-      if (Math.abs(r.p - ln.pos) > cc * 0.3) continue;
-      dekket += Math.max(0, Math.min(r.hi, ln.hi) - Math.max(r.lo, ln.lo));
-    }
-    return dekket > (ln.hi - ln.lo) * 0.4;
+  if (runs.length < 3) return 0;
+  // Samle løp som ligger på samme posisjon (de kan være delt i to av en hindring).
+  runs.sort((a, b) => a.p - b.p);
+  const kol = [];
+  for (const r of runs) {
+    const siste = kol[kol.length - 1];
+    if (siste && Math.abs(r.p - siste.p) < cc * 0.3) siste.iv.push({ lo: r.lo, hi: r.hi });
+    else kol.push({ p: r.p, iv: [{ lo: r.lo, hi: r.hi }] });
+  }
+  // Hullet har TO former, og begge må telles:
+  //
+  //  (1) SPRANG — to nabokolonner mer enn 1,5 CC fra hverandre, med overlappende sveip (altså
+  //      samme bånd). Er det ikke overlapp, er avstanden en cellegrense, ikke et hull.
+  //
+  //  (2) TOMT BÅND — kolonnen finnes, men dekker ikke det båndet BEGGE naboene dekker.
+  //      ⚠ Det var denne som manglet. På Rom 5 har 804,2 et løp i det nedre båndet, så et rent
+  //      avstandsmål ser ingenting — men i det ØVRE båndet, der 788,9 og 819,4 begge går, er
+  //      den tom. Det er de 30,5 cm Kenneth så på gulvet.
+  const dekning = (k, lo, hi) => {
+    let d = 0;
+    for (const a of k.iv) d += Math.max(0, Math.min(a.hi, hi) - Math.max(a.lo, lo));
+    return d;
   };
-  const status = grid.lanes.map(ln => ({ ln, brukt: brukt(ln) }));
   let hull = 0;
-  for (const s of status) {
-    if (s.brukt) continue;
-    // Brukt nabo på hver side, med overlappende sveipeområde? Da ligger hullet INNE i feltet.
-    const naboBrukt = side => status.some(o => o.brukt
-      && (side < 0 ? o.ln.pos < s.ln.pos - cc * 0.3 : o.ln.pos > s.ln.pos + cc * 0.3)
-      && Math.abs(o.ln.pos - s.ln.pos) < cc * 2.5
-      && Math.min(o.ln.hi, s.ln.hi) - Math.max(o.ln.lo, s.ln.lo) > cc);
-    if (naboBrukt(-1) && naboBrukt(1)) hull++;
+  for (let i = 0; i + 1 < kol.length; i++) {
+    const d = kol[i + 1].p - kol[i].p;
+    if (d <= cc * 1.5) continue;
+    let overlapp = 0;
+    for (const a of kol[i].iv) for (const b of kol[i + 1].iv)
+      overlapp = Math.max(overlapp, Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo));
+    if (overlapp > cc) hull += Math.max(1, Math.round(d / cc) - 1);
+  }
+  for (let i = 1; i + 1 < kol.length; i++) {
+    if (kol[i].p - kol[i - 1].p > cc * 1.5 || kol[i + 1].p - kol[i].p > cc * 1.5) continue;
+    let verst = 0;
+    for (const a of kol[i - 1].iv) for (const b of kol[i + 1].iv) {
+      const lo = Math.max(a.lo, b.lo), hi = Math.min(a.hi, b.hi);
+      if (hi - lo <= cc) continue;                      // for smalt til å være et bånd
+      if (dekning(kol[i], lo, hi) < (hi - lo) * 0.5) verst = Math.max(verst, hi - lo);
+    }
+    if (verst > 0) hull++;
   }
   return hull;
 }
@@ -28676,6 +28758,28 @@ function generateCableGeo(roomId, productId, opts) {
         if (best == null) best = len;
         else if (targetCm && Math.abs(len - targetCm) < Math.abs(best - targetCm)) best = len;
         break;                                  // én rute per rutenett holder for en lengdemåling
+      }
+    }
+    return best;
+  };
+
+  // 079d: lengden til den JEVNE varianten. ⚠ MÅLT: `fastLen` over er variantblind — den
+  // returnerer lengden nærmest målet uansett hvem som eier den. På Rom 5 ved CC 14,52 traff
+  // den HOLETE varianten 35,00 m etter trimming, mens den jevne lå på 35,98 m. Trimmingen ble
+  // altså styrt av nøyaktig den kandidaten vi prøver å komme oss bort fra.
+  const jevnLen = (dir, cc, extraSweep) => {
+    let best = null;
+    for (const grid of gridsFor(dir, cc, extraSweep, true)) {
+      for (const order of _geoRouteOrders(grid.cells, 8)) {
+        const plan = _geoPlanTraversals(grid, order);
+        if (!plan) continue;
+        const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
+        if (!pts || pts.length < 2) continue;
+        if (_geoInteriorHoles(pts, dir, grid) > 0) continue;   // holete → ikke denne gangen
+        let len = 0;
+        for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        if (best == null || (targetCm && Math.abs(len - targetCm) < Math.abs(best - targetCm))) best = len;
+        break;                                  // én jevn rute per rutenett holder for en måling
       }
     }
     return best;
@@ -28794,6 +28898,46 @@ function generateCableGeo(roomId, productId, opts) {
         if (bestR && Math.abs(bestR.chk.metrics.lenDevPct || 0) <= tolPct
             && !(bestR.cable._geoHoles > 0)) break;
       }
+      // ─── 079d · FOR LANG KABEL → TETTERE CC OG FLERE LØP ─────────────────────────────
+      // Kenneth 15.10.2026: «Dersom kabel blir litt for kort, så justeres dette med at alle løp
+      // reduseres litt på lengde. Dersom kabel er for lang, justeres dette med tettere cc og
+      // flere løp.»
+      //
+      // ⚠ Dette er IKKE nabotrinn-søket 076 fjernet, selv om det ligner. Det søkte etter
+      // JEVNHET ved å flytte CC, og ble rullet tilbake tre ganger. Her er jevnheten allerede
+      // avgjort av baneeierskapet (079/079b), og det eneste som gjenstår er at det jevne
+      // utlegget bruker MINDRE kabel enn produktet har — målt på Rom 5: 34,37 m av 35,00 m.
+      // Da er tettere CC den eneste fysisk riktige utveien: alternativet er 63 cm kabel til
+      // overs, og en varmekabel kan ikke kappes.
+      //
+      // Kjører BARE når vinneren har et hull. Er utlegget alt jevnt, gjøres ingenting — og da
+      // står 076-regelen under uendret.
+      if (bestR && bestR.cable._geoHoles > 0 && targetCm) {
+        const ccStart = bestR.cable.spacing_cm || bestCc;
+        let fant = null;
+        for (let s = 1; s <= 10 && !fant; s++) {
+          const cc = ccStart - (ccStart - ccLo) * s / 10;
+          if (cc < ccLo - _GEO_EPS) break;
+          const len = jevnLen(dir, cc, 0);
+          if (len == null || len < targetCm) continue;    // må være FOR LANG for å kunne trimmes
+          // Vendepunktene trekkes symmetrisk inn — «alle løp reduseres litt på lengde».
+          let exLo = 0, exHi = Math.max(5, cc * 3), gotEx = 0, gotDiff = Math.abs(len - targetCm);
+          for (let it = 0; it < 18; it++) {
+            const ex = (exLo + exHi) / 2;
+            const m2 = jevnLen(dir, cc, ex);
+            if (m2 == null) { exHi = ex; continue; }
+            const d = m2 - targetCm;
+            if (Math.abs(d) < gotDiff) { gotDiff = Math.abs(d); gotEx = ex; }
+            if (d > 0) exLo = ex; else exHi = ex;
+            if (Math.abs(exHi - exLo) < 1e-3) break;
+          }
+          const r = attempt(dir, cc, gotEx);
+          if (r && !(r.cable._geoHoles > 0)
+              && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct) fant = r;
+        }
+        if (fant) bestR = fant;
+      }
+
       // ─── 076 · CC FLYTTES ALDRI FOR JEVNHETENS SKYLD ─────────────────────────────────
       // Kenneth 14.10.2026, etter sparring: «CC skal ikke flyttes for jevnhetens skyld.
       // CC = netto areal / kabellengde (016-regelen), innenfor produktets/romtypens grenser.
@@ -30826,27 +30970,37 @@ async function _cableGeometryRegressionTest() {
       // Målt som BANEBRUK, ikke som avstand: en bane som står helt tom med brukte naboer på
       // begge sider er et hull. Ligger den ytterst, er det stripen inntil veggen — se
       // `_geoInteriorHoles`.
-      // ⚠ 076 ENDRET denne påstanden, med måling. Da CC-flyttingen ble fjernet (Kenneths
-      // beslutning: «CC skal ikke flyttes for jevnhetens skyld»), mistet `badHakk41` sin
-      // hullfrie løsning: ved CC 13,18 er kappet-varianten den eneste uten hull, og den lander
-      // på 42,23 m = +3,01 % — utenfor ±1 %. Skjøvet og fjernet er begge gyldige, begge med
-      // ett hull. Det er prisen beslutningen tar, og den skal stå her, ikke skjules.
-      // `badHakk` (47 m) og `rom5` (41 m) er fortsatt hullfrie og låst som det.
-      const maksHull = key === 'badHakk41' ? 1 : 0;
+      // ⚠ 076 ENDRET denne påstanden: da CC-flyttingen ble fjernet, mistet `badHakk41` sin
+      // hullfrie løsning og påstanden ble myket opp til «høyst 1 hull».
+      // ⚠ 079 STRAMMER DEN TILBAKE. Kenneths regel 15.10.2026 — «dersom kabel er for lang,
+      // justeres dette med tettere cc og flere løp» — gir motoren veien tilbake, og badHakk41
+      // er målt hullfri igjen: CC 12,61 og 41,00 m, altså eksakt produktlengde (var +0,07 %).
+      // Ingen fixture har lenger lov til å ha et hull.
+      const maksHull = 0;
       add('074b ' + navn + ': høyst ' + maksHull + ' tom bane inne i feltet',
           (cab._geoHoles || 0) <= maksHull, '<= ' + maksHull, (cab._geoHoles || 0) + ' hull');
       const c2 = _cableGeometryCheck(cab, rom);
       add('074b ' + navn + ': fortsatt gyldig og innenfor lengden', c2.ok, 'alle harde krav ok',
           c2.ok ? 'ok' : (c2.hard || []).map(d => d.kind).join('+'));
       // Prisen Kenneth godtok er en kald stripe inntil veggen — ikke et dekningsras.
-      // Prisen Kenneth godtok er en smal kald stripe inntil veggen — ikke et dekningsras.
-      // ⚠ 076: gulvet er senket fra 92 til 88 %. Nabotrinn-søket som hentet badHakk41 opp til
-      // 94,9 % er fjernet (CC flyttes ikke lenger for jevnhetens skyld, Kenneths beslutning
-      // 14.10.2026), og rommet er tilbake på 91,0 %. Terskelen er satt under det MÅLTE nivået
-      // for begge badene, så den fanger en ekte forverring uten å låse et tall motoren ikke
-      // lenger sikter på.
-      add('074b ' + navn + ': dekningen holder seg (>= 88 %)', (c2.metrics.coveragePct || 0) >= 88,
-          '>= 88 %', (c2.metrics.coveragePct || 0) + ' %');
+      // ⚠ 076: gulvet ble senket fra 92 til 88 % da nabotrinn-søket ble fjernet.
+      // ⚠ 079: senket igjen, til 85 %, og dette er en BEVISST handel — målt før/etter:
+      //
+      //        rom5 600W   91,5 % · hull 1  →  89,1 % · hull 0 · 35,00 m (var −0,32 %)
+      //        badHakk41   91,0 % · hull 1  →  86,7 % · hull 0 · 41,00 m (var +0,07 %)
+      //        rom5 700W   93,4 % · hull 0  →  uendret
+      //
+      // Begge rommene ga fra seg dekning og fikk jevn CC OG eksakt produktlengde tilbake.
+      // Det er Kenneths uttrykte prioritering, ordrett: «det er alltid viktigere å få en jevn
+      // avstand mellom kabelløpene enn å dekke helt ut mot veggene» (14.10.2026), og
+      // «dersom kabel er for lang, justeres dette med tettere cc og flere løp» (15.10.2026).
+      // Terskelen ligger under det målte nivået for begge badene, så den fanger fortsatt en
+      // ekte forverring.
+      add('074b ' + navn + ': dekningen holder seg (>= 85 %)', (c2.metrics.coveragePct || 0) >= 85,
+          '>= 85 %', (c2.metrics.coveragePct || 0) + ' %');
+      // 079: jevnheten er det som ble kjøpt — den skal være målbar, ikke bare påstått.
+      add('079 ' + navn + ': utlegget er jevnt (ingen hull)', !(cab && cab._geoHoles > 0),
+          '0 hull', cab ? String(cab._geoHoles) : '?');
     }
 
     // ── 074 · for kort kabel: forslaget skal være LENGRE, i samme serie ──────────────────

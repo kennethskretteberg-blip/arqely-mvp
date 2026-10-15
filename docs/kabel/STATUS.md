@@ -765,3 +765,81 @@ ikke (030), og skrivebeskyttet vinner over skitten (060 §3).
 
 **Lærdom, samme som §15:** jeg skrev en grep som om den var en måling. Begge gangene i samme
 serie. STEG 0 er ikke å lese koden — det er å kjøre den.
+
+---
+
+## §17 · 079 — jevn CC over hele gulvet (15.10.2026)
+
+Kenneths regel, ordrett 15.10.2026:
+
+> «Kabelstrengen som går vannrett langs utstikkeren må fortsette litt lenger inn i rommet, slik
+> at løpet som skal gå loddrett flukter med løpet ovenfor. Da skal siste løp mot yttervegg under
+> utstikker flukte med siste løpet mot yttervegg over utstikker. Dersom kabel blir litt for kort,
+> justeres dette med at alle løp reduseres litt på lengde. Dersom kabel er for lang, justeres
+> dette med tettere cc og flere løp.»
+
+### Hva som faktisk var galt (målt, ikke antatt)
+
+Fixturet `rom5` ble først verifisert **bit-identisk** med Kenneths live-rom i Supabase, og det
+lagrede utlegget ble lest ut og målt. Banene i det var:
+
+```
+ØVRE:  697,2 … 788,9   [804,2 TOM]   819,4 … 972,3
+NEDRE: 681,9 … 972,3   (alle 20 baner)
+```
+
+Hullet oppstår **i rutingen, ikke i celledelingen.** Rutenettet ga 804,2 full høyde
+(−1027→−849). Transitten kapper bane 788,9 ned til A-siden men lar den ligge igjen *inne i*
+nabocellens serpentin, og U-svingen ut av en kappet bane må ligge på det kappede nivået — da
+dras naboen 804,2 ned til 58 cm. Det var de 30,5 cm Kenneth så.
+
+Og forslaget hans var forbudt av én linje i `_geoFindTransits`:
+`if (Math.abs(nearB.pos - t.pos) > cc * 1.25) continue;` — klatrebanen måtte ligge inntil
+ytterste bane over hindringen, så 804,2 ble aldri vurdert.
+
+### Fire endringer
+
+1. **079 · A-eid transittbane** (ny fjerde variant ved siden av skjøvet/kappet/fjernet).
+   A-siden av transittbanen gis til celle A i stedet for å bli liggende i nabocellen. Nabocellen
+   står da uklippet.
+2. **079b · ytterste løp flukter.** A gir fra seg sitt ytterste løp slik at det flukter med
+   cellen over hindringen. ⚠ Dette er ikke kosmetikk: med transittbanen lagt til fikk A et
+   **partall** baner (8), og boustrophedon gir da inn- og utgang i samme ende — hullet flyttet
+   seg bare én bane. Med oddetall kan A komme inn nede og gå ut oppe. Kenneths to instruksjoner
+   viste seg å være én og samme løsning.
+3. **079c · `jtRound` i `_cableLegalRegion`.** Ved et innstikkende hjørne strekker en gjæring seg
+   `delta/sin(θ/2)` fra hjørnepunktet — 7,07 cm for et rett hjørne med 5 cm margin. Transittens
+   sving lå 5,36 cm fra stubbenesen, lovlig etter produktkravet, men ble underkjent med «1,1 cm
+   utenfor». Det ugyldiggjorde **hele CC-trinnet** for alle varianter. Kantavstand er en avstand,
+   ikke en gjæring. Endringen kan bare gjøre området større.
+4. **079d · for lang kabel → tettere CC og flere løp.** Kjører bare når vinneren har et hull.
+   ⚠ Dette er ikke nabotrinn-søket 076 fjernet: der ble CC flyttet for å *lete etter* jevnhet, og
+   det ble rullet tilbake tre ganger. Her er jevnheten allerede avgjort av baneeierskapet, og det
+   eneste som gjenstår er at det jevne utlegget bruker mindre kabel enn produktet har.
+
+### To målefeil funnet underveis
+
+**`_geoInteriorHoles` leste `grid.lanes`,** som ikke oppdateres når en transittvariant fjerner en
+bane (`Object.assign({}, grid, {cells, …})` lar `lanes` følge med urørt). Blind flekk: en bane
+tom i det nedre båndet men i bruk i det øvre meldte «0 hull». Målingen leser nå senterlinja, og
+teller to former for hull: sprang over 1,5 CC mellom naboløp i samme bånd, **og** en kolonne som
+ikke dekker det båndet begge naboene dekker. Den siste manglet helt.
+
+**Min egen instrumentering løy.** Jeg satte taggen i `_geoPlanTraversals`, og den siste sjekken
+`_autoFillCableImpl` kjører på vinneren arvet forrige tagg. Jeg leste «A-EID GYLDIG» for tall som
+kom fra `kappet`, og var i ferd med å melde en seier som ikke fantes. Tellingen per steg
+(bygget / plan / sjekk / scoret) avslørte det.
+
+### Målt resultat
+
+| fixture | før | etter |
+|---|---|---|
+| rom5 600W | CC 15,28 · 34,89 m (−0,32 %) · dekning 91,5 % · **1 hull** | CC 14,52 · **35,00 m (0,00 %)** · 89,1 % · **0 hull** |
+| rom5 700W | CC 13,20 · 40,97 m (−0,07 %) · 93,4 % · 0 hull | **uendret** |
+| badHakk 41 m | CC 13,18 · 41,03 m (+0,07 %) · 91,0 % · **1 hull** | CC 12,61 · **41,00 m (0,00 %)** · 86,7 % · **0 hull** |
+
+Begge rommene ga fra seg dekning og fikk jevn CC **og** eksakt produktlengde tilbake. Dekningsgulvet
+i regresjonen er senket 88 → 85 %, og innrømmelsen «badHakk41 får ha ett hull» (076) er fjernet:
+ingen fixture har lenger lov til å ha hull. 22/22 batterier grønne, 996 påstander.
+
+Motoren bruker 338 ms mot 173 ms på rom5 600W — 079d kjører bare når vinneren har hull.

@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 079 — jevn CC over hele gulvet (15.10.2026, gren `kabelmotor`)
+
+Kenneths regel: ytterste løp under utstikkeren skal flukte med det over, den vannrette strengen
+langs utstikkeren skal fortsette lenger inn i rommet, og lengden justeres med trimming hvis
+kabelen er for kort og med tettere CC hvis den er for lang.
+
+Hullet på 2 × CC i Rom 5 oppsto i RUTINGEN, ikke i celledelingen: transitten lot den kappede
+banen ligge igjen inne i nabocellens serpentin, og U-svingen ut av den dro naboen ned fra
+179 til 58 cm.
+
+- Ny fjerde transittvariant: A-siden av transittbanen eies av cellen under hindringen.
+- Ytterste løp flukter — og det er paritet, ikke kosmetikk: med partall baner må inn- og utgang
+  ligge i samme ende, og hullet flytter seg bare.
+- `jtRound` i `_cableLegalRegion`: kantavstand er en avstand, ikke en gjæring. Et rett
+  innstikkende hjørne ga 7,07 cm forbudt sone mot kravet på 5.
+- For lang kabel → tettere CC og flere løp, men bare når vinneren har hull.
+- `_geoInteriorHoles` leser nå senterlinja i stedet for et rutenett som ikke oppdateres, og
+  fanger også en kolonne som er tom i ett bånd men brukt i et annet.
+
+Rom 5 600W: 34,89 m / 1 hull → 35,00 m eksakt / 0 hull, jevn CC 14,5 over hele gulvet.
+700W uendret. Prisen er dekning: 91,5 → 89,1 % (rom5) og 91,0 → 86,7 % (badHakk).
+22/22 batterier grønne (996 påstander).
+
 ## 078 — lagre-indikatoren lyver ikke om ulagrede endringer (15.10.2026, gren `kabelmotor`)
 
 Indikatoren hadde fem tilstander — `saving`, `saved`, `offline`, `error`, `readonly` — men ingen
