@@ -945,3 +945,50 @@ alene med et ugyldig utlegg. Står fra før på lista over ting som må løses f
 | badHakk41 | CC 12,6 · 41,00 m (0,00 %) · 0 hull · gap 12,7/12,7 · 86,7 % |
 
 22/22 batterier grønne, 1008 påstander.
+
+---
+
+## §20 · 082 — ett løp mindre, og hva det faktisk koster
+
+Kenneth 15.10.2026: *«ta ett løp mindre i øvre felt.»*
+
+### Mekanismen virker
+
+Paritetsvarianten er bygget (`_geoParityVariants`): ytterste bane fjernes fra én celle, aldri en
+inne i cellen. Det flipper pariteten, og dermed hvilken ende kabelen kommer ut i. **Målt at den
+når hjørnet for alle tre produktene på Rom 5: 26 / 33 / 25 cm, hullfritt.**
+
+### Men prisen er høyere enn den så ut
+
+Med fritt søk nedover CC-stigen brøt runden to låste påstander:
+
+| | før | med fritt paritetssøk |
+|---|---|---|
+| Rom 5 700W | CC **13,2** (Kenneths fasit) · 93,4 % | CC 12,6 · 91,4 % |
+| badHakk loddrett | 92,5 % dekning | 89,7 % |
+| regresjonssuiten | 14 s | **over 100 s** |
+
+Runden kjøpte altså hjørnet ved å forringe utlegg Kenneth allerede har godkjent — og 076 låser
+nettopp CC 13,2 som fasit for Rom 5.
+
+### Hva som står i koden nå
+
+Paritetsrunden kjører **bare på vinnerens egen CC**, ett forsøk, og aksepterer bare når
+resultatet er hullfritt, like nær lengden, og ikke har lavere dekning. Da:
+
+| produkt (Rom 5, loddrett, «øvre venstre») | start | utlegg |
+|---|---|---|
+| InFloor 17T 600W 35m | **26 cm fra hjørnet** | CC 14,52 · 35,00 m · 0 hull · 89,1 % |
+| InFloor 17T 700W 41m | 83 cm | CC 13,20 · 40,97 m · 0 hull · 93,4 % (fasit, urørt) |
+| InFloor 10T 600W 60m | 83 cm | CC 8,80 · 60,00 m · 0 hull · 91,8 % |
+
+Panelet oppgir avstanden: *«Start: 83 cm fra oppe til venstre — nærmere er ikke mulig med dette
+utlegget.»*
+
+### Beslutningen som gjenstår
+
+For 700W og 10T er valget: **hjørnet, eller fasiten.** 33 cm fra hjørnet koster CC 12,6 i stedet
+for 13,2 og 2 prosentpoeng dekning. Koden ligger der (`_geoParityVariants` + `_parityOn`); det
+som mangler er å slippe runden ned CC-stigen igjen. **Venter på Kenneth.**
+
+22/22 batterier grønne, 1019 påstander, suiten 19,5 s.

@@ -28373,6 +28373,40 @@ function _geoTransitVariant(grid, legal, cand, fjernBane, skyvA, kappetTilA) {
 // Ett nivå om gangen. `flereHindringer` deler seg i TI celler og trenger mer enn én korridor,
 // så variantene bygges også oppå hverandre (dybde 2) — men aldri dypere: hver reservert bane
 // koster en kald stripe, og søket skal ikke kunne eksplodere.
+// ─── 082 · ETT LØP MINDRE FLIPPER PARITETEN ─────────────────────────────────────────────────
+// Kenneth 15.10.2026: «ta ett løp mindre i øvre felt.»
+//
+// Boustrophedon: har en celle et PARTALL baner, kommer kabelen ut i samme ende den kom inn.
+// Det er derfor loddrett utlegg på Rom 5 startet 83 cm nede på veggen selv med «øvre venstre»
+// valgt — det øvre feltet har 6 baner, kabelen kommer inn nedenfra via transitten, og da MÅ
+// den ut nede. Ett løp mindre gir oddetall, og utgangen flipper til den andre enden.
+//
+// Prisen er en bredere kald stripe. Varianten konkurrerer derfor på vanlig poengsum, og den
+// bygges bare i paritetsrunden (se `_parityOn`) — altså først når vinneren faktisk bommer på
+// det valgte hjørnet. Ytterste bane fjernes, aldri en inne i cellen: da ville det blitt et hull.
+function _geoParityVariants(grid, maks) {
+  const out = [];
+  if (!grid || !grid.cells) return out;
+  for (const c of grid.cells) {
+    if (!c.lanes || c.lanes.length < 3) continue;        // under tre blir cellen meningsløs
+    for (const side of [0, 1]) {
+      const lanes = side ? c.lanes.slice(0, -1) : c.lanes.slice(1);
+      const celler = grid.cells.map(x => x.id !== c.id ? x : Object.assign({}, x, {
+        lanes, n: lanes.length, iMin: lanes[0].i, iMax: lanes[lanes.length - 1].i,
+        perpMin: lanes[0].pos, perpMax: lanes[lanes.length - 1].pos,
+        lo: Math.min(...lanes.map(l => l.lo)), hi: Math.max(...lanes.map(l => l.hi))
+      }));
+      for (const x of celler) {
+        const org = grid.cells.find(y => y.id === x.id);
+        if (org && org.adj) x.adj = org.adj.slice();
+      }
+      out.push(Object.assign({}, grid, { cells: celler, _parityDrop: c.id + ':' + side }));
+      if (out.length >= (maks || 8)) return out;
+    }
+  }
+  return out;
+}
+
 function _geoTransitVariants(grid, legal, maxV, depth) {
   const lim = maxV || 4;
   const out = [];
@@ -28688,7 +28722,13 @@ function _geoScore(chk, ctx) {
   // kvadranttest kunne to kandidater 68 cm fra hverandre få nøyaktig samme poeng. Nå trekker
   // leddet mot det hjørnet brukeren faktisk pekte på — også langs sveipeaksen, som er det
   // vannrette utlegg manglet helt (opp/ned ble aldri hørt på).
-  s += 4 * (1 - (ctx.cornerDist == null ? 1 : ctx.cornerDist));
+  // 082: i paritetsrunden er hjørnet HELE poenget — da må leddet veie tyngre enn dekning,
+  // ellers returnerer runden samme kandidat som før. ⚠ Men det må veie LETTERE enn hullstraffen
+  // (25): med 40 vant en kandidat med perfekt hjørne OG hull, aksepttesten forkastet den som
+  // holete, og runden endte opp med ingenting. 20 slår dekningsleddet (30 poeng fordelt over
+  // hele skalaen) og taper mot et hull. Vakten mot å kjøpe hjørnet for dyrt ligger på
+  // ETTERSIDEN (dekningsvakten i paritetsrunden), ikke her.
+  s += (ctx.parity ? 20 : 4) * (1 - (ctx.cornerDist == null ? 1 : ctx.cornerDist));
   s -= Math.max(0, ctx.nCells - 1) * 1.5;                                    // færrest overganger
   // 074b: et hull på mer enn 1,25 × CC inne i feltet er en TUNG straff — jevn avstand går foran
   // dekning (Kenneths regel). Vekten er satt slik at den slår ut 30-poengs-dekningsleddet over:
@@ -28763,10 +28803,17 @@ function generateCableGeo(roomId, productId, opts) {
   // kontrollen: `attempt` under er den som faktisk kan gi et godkjent utlegg.
   // 072: rutenettet prøves FØRST uten transitt. Færrest transitter vinner når alt annet er
   // likt — en reservert bane koster alltid en kald stripe bak hindringen.
+  // 082: slås på bare i paritetsrunden nederst — ellers ville hvert eneste utlegg betalt for
+  // et søk som bare trengs når starten bommer på hjørnet.
+  let _parityOn = false;
   const gridsFor = (dir, cc, extraSweep, maxOrders) => {
     const base = _geoBuildGrid(legal, dir, cc, extraSweep || 0, ccLo, ccHi);
     if (!base) return [];
-    return [base].concat(_geoTransitVariants(base, legal, maxOrders ? 6 : 3, maxOrders ? 2 : 1));
+    const ut = [base].concat(_geoTransitVariants(base, legal, maxOrders ? 6 : 3, maxOrders ? 2 : 1));
+    if (!_parityOn) return ut;
+    const ekstra = [];
+    for (const g of ut) { ekstra.push(..._geoParityVariants(g, 4)); if (ekstra.length >= 10) break; }
+    return ut.concat(ekstra);
   };
   // ⚠ 074b: søket må måle den varianten som FAKTISK kan treffe lengden. Før returnerte den
   // første ruten i det første rutenettet — altså den KAPPEDE transitt-varianten — og da ble
@@ -28836,7 +28883,7 @@ function generateCableGeo(roomId, productId, opts) {
         // Færrest transitter vinner når alt annet er likt (lag D).
         // 080: MÅLT hjørne, ikke det ønskede. Før sto `corner: wantCorner` her, og da var
         // sammenligningen i `_geoScore` alltid sann — et dødt ledd.
-        const sc = _geoScore(chk, { dir, wantDir, wantCorner,
+        const sc = _geoScore(chk, { dir, wantDir, wantCorner, parity: _parityOn,
                                     cornerDist: _geoCornerDist(cable.start, room, wantCorner),
                                     nCells: grid.cells.length, hull })
                  - 0.5 * ((grid.transits || []).length);   // ren avgjørelse ved likt, ikke straff
@@ -28990,6 +29037,37 @@ function generateCableGeo(roomId, productId, opts) {
     diag.push({ dir, cc: bestCc == null ? null : +bestCc.toFixed(2), ex: +bestEx.toFixed(2),
                 sokDiffCm: bestDiff === Infinity ? null : +bestDiff.toFixed(1), godkjent: !!bestR });
     if (bestR && bestR.score > winnerScore) { winnerScore = bestR.score; winner = bestR; }
+  }
+
+  // ─── 082 · PARITETSRUNDEN: ETT LØP MINDRE FOR Å TREFFE HJØRNET ────────────────────────────
+  // Kenneth 15.10.2026: «ta ett løp mindre i øvre felt.»
+  //
+  // Boustrophedon: har en celle et PARTALL baner, kommer kabelen ut i samme ende den kom inn.
+  // Det er derfor loddrett utlegg startet 83 cm nede på veggen med «øvre venstre» valgt.
+  // Ett løp mindre gir oddetall, og utgangen flipper.
+  //
+  // ⚠ KJØRER BARE PÅ VINNERENS EGEN CC, og det er en målt beslutning. Først lette runden
+  // nedover hele CC-stigen med trimming. Den fant flere hjørner — men:
+  //   · Rom 5 mistet Kenneths egen fasit-CC (13,2 → 12,62),
+  //   · badHakk falt fra 92 til 89,7 % dekning,
+  //   · regresjonssuiten gikk fra 14 s til over 100 s.
+  // Runden kjøpte altså hjørnet ved å forringe utlegg Kenneth har godkjent, og betalte i fart.
+  // Her flyttes bare STARTEN: samme CC, samme lengde, og bare hvis dekningen ikke faller.
+  // Hjelper det ikke, står starten der den står og panelet oppgir avstanden i cm.
+  if (winner && winner.cable._startCornerOffCm > 40) {
+    const off = winner.cable._startCornerOffCm;
+    _parityOn = true;
+    try {
+      const r = attempt(winner.cable.direction, winner.cable.spacing_cm, winner.cable._extraSweep || 0);
+      const deknFor = winner.chk.metrics.coveragePct || 0;
+      const avvikFor = Math.abs(winner.chk.metrics.lenDevPct || 0);
+      if (r && !(r.cable._geoHoles > 0)
+          && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct
+          && Math.abs(r.chk.metrics.lenDevPct || 0) <= avvikFor + 0.1
+          && (r.chk.metrics.coveragePct || 0) >= deknFor - 0.1
+          && r.cable._startCornerOffCm != null
+          && r.cable._startCornerOffCm <= off - 30) { winner = r; winnerScore = r.score; }
+    } finally { _parityOn = false; }
   }
 
   if (winner) {
@@ -31041,6 +31119,48 @@ async function _cableGeometryRegressionTest() {
             lj.filter(l => /^Start: /.test(l.tekst)).every(l => l.niva === 'ok'),
             'niva ok', lj.filter(l => /^Start: /.test(l.tekst)).map(l => l.niva).join());
       }
+    }
+
+    // ── 082 · ETT LØP MINDRE FLYTTER STARTEN TIL HJØRNET ────────────────────────────────
+    // Kenneth 15.10.2026: «ta ett løp mindre i øvre felt.» Paritetsrunden gjør det — men BARE
+    // når resultatet fortsatt er hullfritt, innenfor lengden og ikke koster mer enn 3
+    // prosentpoeng dekning. ⚠ Uten dekningsvakten godtok den 8 prosentpoeng for en
+    // hjørnegevinst som uansett ikke ble god (målt: 89,3 → 81,2 %).
+    {
+      const p10 = (HEATING_PRODUCTS.find(p => /10T 600W 60m/.test(p.name || '')) || {}).id;
+      for (const [navn, pid] of [['600W', 22], ['700W', 23], ['10T 600W', p10]]) {
+        if (!pid) continue;
+        _cableGalleryBuildScene(_cableFixtures.rom5);
+        S.ui.selectedRoomId = 1;
+        S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'tl', wallMarginCm: 2.5 });
+        const k = _autoFillCableImpl(1, pid, { allowPartial: true });
+        const ok = !!(k && k.ok !== false);
+        // ⚠ BARE 600W skal nå hjørnet, og det er en MÅLT beslutning, ikke en forglemmelse.
+        // Paritetsrunden kan nå hjørnet for alle tre (målt: 26 / 33 / 25 cm) — men for 700W og
+        // 10T krever det at CC flyttes bort fra Kenneths fasit (13,2 → 12,6) og koster 2-2,3
+        // prosentpoeng dekning. Runden kjører derfor bare på vinnerens EGEN CC og avviser alt
+        // som gjør utlegget dårligere. Panelet oppgir avstanden i stedet. Venter på Kenneths
+        // beslutning om prisen er verdt det.
+        if (navn === '600W') add('082 ' + navn + ': starten når øvre venstre hjørne',
+            ok && k._startCornerOffCm <= 40,
+            '<= 40 cm fra hjørnet', ok ? k._startCornerOffCm + ' cm' : 'ingen løsning');
+        if (!ok) continue;
+        add('082 ' + navn + ': avstanden til hjørnet er oppgitt', k._startCornerOffCm != null,
+            '_startCornerOffCm satt', String(k._startCornerOffCm));
+        add('082 ' + navn + ': …uten å lage hull', !(k._geoHoles > 0), '0 hull', String(k._geoHoles));
+        const c3 = _cableGeometryCheck(k, S.rooms[0], { lengthTolPct: 1 });
+        add('082 ' + navn + ': …og fortsatt gyldig innenfor lengden', c3.ok,
+            'alle harde krav ok', c3.ok ? 'ok' : (c3.hard || []).map(d => d.kind).join('+'));
+      }
+      // Standardvalget må IKKE bli dårligere av at runden leter forgjeves.
+      _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
+      const kbl = _autoFillCableImpl(1, 22, { allowPartial: true });
+      const cbl = kbl && kbl.ok !== false ? _cableGeometryCheck(kbl, S.rooms[0], { lengthTolPct: 1 }) : null;
+      add('082: nedre venstre er uendret god', !!cbl && cbl.ok && !(kbl._geoHoles > 0)
+          && (cbl.metrics.coveragePct || 0) >= 88,
+          'gyldig, 0 hull, dekning >= 88 %',
+          cbl ? ((cbl.metrics.coveragePct || 0).toFixed(1) + ' % · ' + kbl._geoHoles + ' hull') : 'ingen løsning');
     }
 
     // ── 077 · UTEN POLYGONBIBLIOTEKET SKAL DET IKKE TAPES STUMT ─────────────────────────

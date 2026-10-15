@@ -4,6 +4,21 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 082 — ett løp mindre flytter starten til hjørnet (15.10.2026, gren `kabelmotor`)
+
+Ny paritetsvariant: ytterste bane fjernes fra én celle, aldri en inne i cellen. Det flipper
+pariteten og dermed hvilken ende kabelen kommer ut i — som er det som låste starten 83 cm nede
+på veggen med «øvre venstre» valgt.
+
+Mekanismen når hjørnet for alle tre produktene på Rom 5 (26/33/25 cm, hullfritt). ⚠ Men med
+fritt søk nedover CC-stigen brøt den Kenneths egen fasit (Rom 5 CC 13,2 → 12,6), senket badHakk
+fra 92,5 til 89,7 % dekning, og gjorde regresjonssuiten 7× tregere. Runden kjører derfor bare på
+vinnerens EGEN CC og aksepterer bare når utlegget ikke blir dårligere på noe mål.
+
+Resultat: 600W treffer hjørnet (26 cm). 700W og 10T står på 83 cm med fasiten urørt, og panelet
+oppgir avstanden. Valget mellom hjørnet og fasiten gjenstår — se STATUS §20.
+22/22 batterier grønne (1019 påstander).
+
 ## 081 — hjørnevelgeren hører på opp/ned (15.10.2026, gren `kabelmotor`)
 
 080 gjorde hjørneleddet levende, men det var fortsatt binært på KVADRANT. Målt: en start 21 cm
