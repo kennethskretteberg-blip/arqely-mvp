@@ -603,3 +603,77 @@ Kenneths panel sa «Retning: loddrett (valgt)» med loddrette løp og CC 14,9.
 Rom 5 (det har ingen lagret kabel, så det er aldri godkjent). Det som ville avgjøre det:
 Kenneth trykker GODKJENN og lagrer, og sier fra — da kan rommet OG kabelen leses ut som de
 faktisk var, i stedet for å gjettes.
+
+---
+
+## 14 · ✅ ROTÅRSAKEN, MÅLT PÅ KENNETHS EGET LAGREDE UTLEGG
+
+Kenneth godkjente og lagret kabelen i Rom 5 15.10.2026 03:33 UTC. Da kunne den leses ut, og
+spørsmålet som sto åpent i §13.4 er nå besvart.
+
+### Den lagrede kabelen
+
+| felt | verdi |
+|---|---|
+| motor | **`v6`** — den gamle motoren, ikke `geo` |
+| CC | 14,949 cm (= «149 mm» i verktøylinja) |
+| form | 20 `runs`, 2 `connections`, **0 `pathEls`** |
+| `_geomOk` | **false** |
+| `_geomDefects` | **utenfor · kryssing · nærføring · lengde · brudd** |
+
+Rommet er bit for bit identisk med `rom5`-fixturen (samme ti punkter), ingen soner, ingen
+hindringer, ingen tvungen CC. Den nye motoren deltok altså ikke i konkurransen — V6 vant fordi
+den var alene.
+
+### Hvorfor: clipper-lib var ikke lastet
+
+`_cableLegalRegion` trenger clipper-lib for ekte polygon-offset. Biblioteket lastes **lat fra et
+CDN** (`_cblLoadClipper`, 068), og er det ikke lastet, faller funksjonen tilbake på
+`_offsetPolygon` — hjørnevis offset, som kommentaren selv sier er «mindre riktig i konkave
+hjørner». Rom 5 har en konkav veggstubbe.
+
+Målt på fixturen, samme rom og samme innstillinger:
+
+| | motor | CC | gyldig | defekter |
+|---|---|---|---|---|
+| `_cblClipperReady() === false` | **v6** | 14,14 | **nei** | utenfor · kryssing · nærføring · lengde · brudd |
+| clipper lastet | **geo** | 15,28 | **ja** | ingen |
+
+Den øverste raden er Kenneths utlegg.
+
+### ⚠ Ingen venter på lastingen før kabel legges
+
+`_cblLoadClipper()` kalles bare **tre** steder:
+
+| sted | hva |
+|---|---|
+| `_cableGalleryRun` | galleriet |
+| `_cableGeometryRegressionTest` | testbatteriet |
+| `_geomSjekkLagredeUtlegg` | 072-kontrollen ved prosjektåpning |
+
+**Ingen av dem er utleggsveien.** `_autoFillCableImpl` er synkron og sjekker aldri om
+biblioteket er klart — den bare kjører. Første auto-utlegg i en økt treffer derfor et
+`_cblClipperState === 'idle'` med mindre prosjektåpningen rakk å laste det først.
+
+Det forklarer alt som har vært uforklart:
+
+- **hvorfor det vekslet mellom Kenneths skjermbilder** — et kappløp mot CDN-et,
+- **hvorfor alle mine målinger var grønne** — jeg `await _cblLoadClipper()` alltid først,
+- **hvorfor 074d og 074e var identiske** — ingen av dem rører dette,
+- **hvorfor det så ut som en geometrifeil** — utlegget KOM fra en motor 068 allerede hadde målt
+  til å krysse seg selv.
+
+Tilbakefallet er dessuten **stumt**: `_cableLegalRegion` setter `approx: true`, men ingenting
+leser det, og brukeren får ingen beskjed.
+
+### Forslag (IKKE bygget — venter på Kenneth)
+
+1. **Forhåndslast ved oppstart.** Ett `_cblLoadClipper()` i oppstarten fjerner kappløpet i
+   praksis.
+2. **Ikke tap stumt.** `_autoFillCableImpl` bør vite at området er tilnærmet: enten utsette
+   utlegget til biblioteket er klart, eller merke kabelen slik 070 merker alt annet.
+3. **Egen fixture-variant** i galleriet som kjører med clipper slått av, så dette ikke kan
+   komme tilbake uoppdaget.
+
+⚠ Dette er en **gren-feil**, ikke i drift: hele clipper/geo-maskineriet kom i 068, og `main`
+står på 073 (bygget på 1519bb0, før 068).
