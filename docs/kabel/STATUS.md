@@ -1515,7 +1515,7 @@ begge svingvegger · stripe 5,1 cm · dekning 98,4 % · 0 hull · start 12 cm.
 `br` gikk fra 517 ms til 283 ms, fordi hjørnerunden ikke lenger trengs.
 1450W 84m er uendret (N = 32, CC 12,51).
 
-### ⚠ REGRESJON — 076-fasiten røk
+### ⚠ «REGRESJONEN» PÅ 076-FASITEN VAR INGEN REGRESJON — se §32 nedenfor
 
 | Rom 5 / 700W / loddrett / `tr` | før 090 | etter 090 |
 |---|---|---|
@@ -1547,3 +1547,36 @@ ikke stopper på det første hjørnetreffet.
 den nådde poengsummen. Ikke en paritetsvariant.
 
 ⚠ Suitetiden er ikke målt i denne runden. Enkeltutlegg tar 0,06–1,8 s.
+
+---
+
+## §32 · 090b — «regresjonen» var fasiten målt på et rom som ikke finnes
+
+Jeg meldte i §31 at 090 brøt 076-fasiten (Rom 5 / 700W / loddrett / `tr`: CC 13,20 → 11,62).
+**Det var feil**, og jeg bommet to ganger til før jeg målte det ordentlig:
+
+1. **Første hypotese:** avbruddet i `tries`-løkka stoppet på første hjørnetreff. Jeg fjernet det.
+   Resultatet var uendret CC 11,62, og alt ble 3–7× tregere. Rullet tilbake.
+2. **Andre hypotese:** veggrunden (089b) byttet vinner. Nøytralisert `_cableWallStripe` →
+   fortsatt CC 11,62. Avkreftet.
+3. **Avgjørende test:** slo av 090s ekstra varianter (`hopp > 0` → null). **Fortsatt CC 11,62.**
+   090 var altså ikke årsaken i det hele tatt.
+
+Da sto bare én endring igjen: **089 hentet `_cableFixtures.rom5` på nytt fra skyen.** Målt side
+om side på samme kode:
+
+| geometri | CC | lengde | dekning | stripe | start |
+|---|---|---|---|---|---|
+| gammelt fixture (før 089) | **13,20** | 40,97 m (−0,07 %) | **93,4 %** | 16,7 | 13 cm |
+| Kenneths rom i dag | 11,62 | 41,00 m (0,00 %) | 84,3 % | 16,5 | 19 cm |
+
+**076-fasiten «CC 13,2» ble registrert på et rom som ikke finnes lenger.** Kenneth endret Rom 5
+etter 13.10 (venstre vegg 678,8 → 677,4, hjørnet ved stubben 678,1 → 676,7). Fasiten må settes
+på nytt på den ekte geometrien, eller forkastes.
+
+⚠ **Men ett spørsmål står igjen, og det er ikke besvart:** at ~2 cm veggendring flytter dekningen
+fra 93,4 % til 84,3 % er mye. Om det er reelt (rommet er genuint vanskeligere) eller et tegn på
+noe annet, er **ikke målt**. Det bør være neste sak.
+
+**Ytelse:** 090s fire varianter koster lite — Rom 5 / `tr` tar 655 ms med og 624 ms uten.
+De 4,3 s jeg målte i §31 kom fra det fjernede avbruddet, ikke fra 090.

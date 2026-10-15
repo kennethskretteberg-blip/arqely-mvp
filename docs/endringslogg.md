@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 090b — «regresjonen» på 076-fasiten var ingen regresjon (15.10.2026, gren `kabelmotor`)
+
+Jeg meldte at 090 brøt 076-fasiten (Rom 5 / 700W / loddrett / `tr`: CC 13,20 → 11,62). Feil.
+To hypoteser ble avkreftet ved måling (avbruddet i `tries`-løkka; veggrunden fra 089b), og den
+avgjørende testen — å slå av 090s ekstra varianter — ga fortsatt CC 11,62.
+
+Årsaken er at **089 hentet rom5-fixturet på nytt fra skyen**. Målt side om side på samme kode:
+gammel geometri gir CC 13,20 og 93,4 % dekning, Kenneths faktiske rom gir CC 11,62 og 84,3 %.
+Fasiten var registrert på et rom som ikke finnes lenger og må settes på nytt.
+
+⚠ Åpent: at ~2 cm veggendring koster 9 prosentpoeng dekning er mye, og om det er reelt er ikke
+målt. 090s fire varianter koster lite (655 ms mot 624 ms).
+
 ## 090 — den speilede slyngen manglet (15.10.2026, gren `kabelmotor`)
 
 Kenneth: «Hvorfor legger 1650W-kabelen seg ikke lenger ut mot veggene?» Målt på et nytt fixture
