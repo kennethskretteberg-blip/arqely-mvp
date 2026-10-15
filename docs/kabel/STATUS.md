@@ -1099,3 +1099,42 @@ Verste tilfelle er Rom 5 vannrett `tr` (skjermbildet): hjørnet treffes på 30 c
 faller fra ~91 % til **73,9 %** og CC fra 12,93 til 10,20. Lengden er fortsatt eksakt (41,00 m,
 0,00 %) og utlegget hullfritt. Panelet sier «⚠ 1,49 m² (26 %) uten kabel» og foreslår et lengre
 produkt. Det er regelen Kenneth ba om — men tallet bør han se før dette merges.
+
+---
+
+## §24 · To funn fra Kenneths kontroll 15.10.2026
+
+### 1. «Innsett øverst venstre, kabel starter nederst venstre» — gammel kode i nettleseren
+
+Målt på 083 (commit e13d2b9), Rom 5 / 600W / loddrett / `tl`:
+start **(696, −853) = 24 cm** fra hjørnepunktet (678,8, −836,1). Starten ligger der velgeren
+peker. Kenneths skjermbilde mangler dessuten ⚠-linja 083 legger inn — begge deler stemmer med
+at nettleseren kjører kode fra før 083. **Hard reload.**
+
+⚠ Skjermbildet viser også V9 = **100 cm** og 5,71 m², mens fixturet har 98 cm og 5,70 m².
+Rommet er altså endret i skyen etter at bit-identiteten ble verifisert i §17. Fixturet bør
+hentes på nytt før neste runde.
+
+### 2. Det udekkede feltet øverst til venstre — det er plass til ETT løp til, ikke to
+
+| | |
+|---|---|
+| venstre vegg over stubben | x = 678,8 |
+| første øvre løp | x = 696,4 → gap **17,6 cm** |
+| gap mot trinnet på andre siden | 9,9 cm |
+| brukbar bredde mellom marginene | 249,8 cm |
+| 17 løp ved CC 14,52 | 232,3 cm |
+| **18 løp** | **246,8 cm — får plass, 3 cm til overs** |
+
+Det 18. løpet ville ligget på x = 681,9 = **3,1 cm fra veggen** (krav 5). Men skyves hele
+rutenettet 1,9 cm til høyre, lander det på 683,8 = nøyaktig 5 cm, og ytterste løp flyttes fra
+928,7 til 930,6 — fortsatt 8 cm fra trinnet. **Lovlig.**
+
+**Rotårsak:** banerutenettet fases GLOBALT for hele rommet (300,4 cm), ikke per felt. Nedre felt
+har vegg på 676,9 og øvre på 678,8 — 1,9 cm forskjell — og fasen passer det nedre. To løp får
+ikke plass uansett: 2 × 14,52 = 29 cm mot 17,6 cm tilgjengelig.
+
+**Forslag til neste runde (ikke bygget):** la rutenettets FASE (ikke CC) optimaliseres slik at
+flest mulig baner får plass i hvert felt, med CC uendret. Det bevarer jevn CC (079) og den
+globale avstanden (lag D) — det er bare startpunktet for banerekka som flyttes. ⚠ Må måles mot
+alle fixturer: en faseforskyvning som gir ett løp mer i ett felt kan koste et løp i et annet.
