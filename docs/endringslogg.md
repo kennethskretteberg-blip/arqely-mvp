@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 090 — den speilede slyngen manglet (15.10.2026, gren `kabelmotor`)
+
+Kenneth: «Hvorfor legger 1650W-kabelen seg ikke lenger ut mot veggene?» Målt på et nytt fixture
+`rekt398` (398 × 271): for hjørnet `br` ga motoren 43 løp ved CC 9,02, svingene 26 cm inn fra
+veggen og dekning 80 %. For `tl` og `tr` ga den 36 løp ved CC 11,08 — det riktige.
+
+Mekanismen: for 36 løp (partall) ender kabelen med begge endene i samme ende av rommet.
+`_geoPlanTraversals` gjorde dybde-først og returnerte første lovlige kjede, så varianten med
+begge ender NEDERST ble aldri bygget. `br` bommet derfor med 261 cm, og hjørnerunden kjøpte
+hjørnet med 43 løp. `_geoPlanTraversals(grid, order, hopp)` kan nå hente de speilede variantene,
+og `attempt` prøver fire.
+
+Etter: alle fire hjørner gir N = 36 · CC 11,08 · 96,06 m (+0,06 %) · sving 5 cm fra veggen ·
+dekning 98,4 % · 0 hull · start 12 cm. 1450W uendret.
+
+⚠ REGRESJON: 076-fasiten (Rom 5 / 700W / loddrett / `tr`) gikk fra CC 13,20 / 93,4 % til
+CC 11,62 / 84,3 %. Lengdesøkets avbruddsbetingelse stopper nå på det første hjørnetreffet.
+Ikke undersøkt videre — se STATUS §31.
+
 ## 089b — veggrunden: varianten Kenneth tegnet finnes, og den koster ingenting (15.10.2026, gren `kabelmotor`)
 
 Kenneths topologi (6 baner i øvre felt, de to ekstra løpene langs V6) genereres allerede av

@@ -1470,3 +1470,80 @@ ikke undersøkt videre.
 eller rettere: det gjaldt bare de kandidatene som ble scoret. Den hullfrie varianten fantes, men
 nådde aldri poengsummen fordi den ble avvist på lengde før den kom dit. Konklusjonen var riktig om
 datagrunnlaget og feil om virkeligheten.
+
+---
+
+## §31 · 090 — den speilede slyngen manglet. Hjørnerunden kjøpte hjørnet med 43 løp.
+
+### STEG 0 — hvem valgte 44 løp, og hvorfor
+
+Nytt fixture `rekt398` (398 × 271, loddrette løp). 1650W 96m, per hjørne, **før**:
+
+| hjørne | N | CC | sving fra vegg | dekning | start-avstand |
+|---|---|---|---|---|---|
+| tl | 36 | 11,08 | 5,0 cm | 98,4 % | 12 cm |
+| tr | 36 | 11,08 | 5,0 cm | 98,4 % | 12 cm |
+| bl | 36 | 11,08 | 5,0 cm | 98,4 % | **261 cm** |
+| **br** | **43** | **9,02** | **26,3 cm** | **80,0 %** | 31 cm ← Kenneths bilde |
+
+Coworks regnestykke stemmer: 36 løp ved CC 11,08 gir 96,06 m (+0,06 %) uten noen innkorting.
+Motoren **finner** det — for tre av fire hjørner.
+
+**Mekanismen (STEG 0.4, og svaret er ja — varianten manglet):** for N = 36, et PARTALL, ender
+kabelen med begge endene i samme ende av rommet. Loggen for `br`:
+
+```
+N=36 · 96,06 m (+0,06 %) · start (393,−260) slutt (5,−260)  → begge ØVERST · off 261 · GYLDIG
+N=36 · 93,33 m (−2,78 %) · start (393,−11)  slutt (16,−260) → avvist paa lengde
+```
+
+Varianten med **begge ender nederst** — samme lengde, samme CC — ble aldri bygget.
+`_geoCellTraversals` lager fire traverseringer, men `_geoPlanTraversals` gjorde dybde-først og
+returnerte **første** lovlige kjede. For et rom med én celle ble det alltid den samme.
+
+Siden `br` da bommet med 261 cm, startet hjørnerunden (083) og lette nedover CC-stigen til den
+fant et ODDETALL løp med en ende nede: 43 løp ved CC 9,02. Hjørnerunden har ingen dekningsvakt,
+så svingene ble trukket 26 cm inn og dekningen falt til 80 %.
+
+### Rettet
+
+`_geoPlanTraversals(grid, order, hopp)` kan nå hente den 2., 3., … lovlige kjeden, og `attempt`
+prøver fire. Å speile slyngen er gratis: samme lengde, samme CC, samme jevnhet.
+
+**Etter — alle fire hjørner likt:** N = 36 · CC 11,08 · 96,06 m (+0,06 %) · sving 5,0 cm fra
+begge svingvegger · stripe 5,1 cm · dekning 98,4 % · 0 hull · start 12 cm.
+`br` gikk fra 517 ms til 283 ms, fordi hjørnerunden ikke lenger trengs.
+1450W 84m er uendret (N = 32, CC 12,51).
+
+### ⚠ REGRESJON — 076-fasiten røk
+
+| Rom 5 / 700W / loddrett / `tr` | før 090 | etter 090 |
+|---|---|---|
+| CC | **13,20** (fasit) | 11,62 |
+| dekning | **93,4 %** | 84,3 % |
+| start | 13 cm | 19 cm |
+
+CC 13,2-kandidaten **scores ikke lenger i det hele tatt**. Årsaken er en kjedereaksjon, ikke
+poengsummen: med flere varianter finner `attempt` et hjørnetreff tidligere, og `tries`-løkka i
+lengdesøket bryter av (`if (bestR && |dev| <= tol && !hull) break;`) før CC-trinnet 13,2 prøves.
+
+Dette er IKKE undersøkt videre — økten var på slutten, og jeg ville ikke starte en
+justeringsrunde til på tampen. Mest sannsynlige fiks: avbruddsbetingelsen må også kreve at
+R-VEGG er oppfylt og at dekningen ikke er vesentlig dårligere enn beste kjente, slik at søket
+ikke stopper på det første hjørnetreffet.
+
+### Øvrige fixturer (loddrett, `bl`) — alle gyldige, 0 hull, start ≤ 40 cm
+
+| | CC | stripe | dekning |
+|---|---|---|---|
+| rom5 600W | 14,53 | 19,4 | 88,7 % |
+| rom5 10T | 6,46 | 17,8 | 67,3 % |
+| badHakk | 11,60 | 16,7 | 92,5 % |
+| lRom | 11,82 | 16,9 | 96,2 % |
+| enHindring | 10,26 | 5,1 | 89,0 % |
+| rektangel | 12,18 | 5,1 | 97,9 % |
+
+⚠ STEG 0.5 (hullet i Rom 5) ble besvart i §30: varianten fantes, men ble avvist på lengde før
+den nådde poengsummen. Ikke en paritetsvariant.
+
+⚠ Suitetiden er ikke målt i denne runden. Enkeltutlegg tar 0,06–1,8 s.
