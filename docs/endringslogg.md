@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 088 — hjørnene var speilvendt (15.10.2026, gren `kabelmotor`)
+
+`w2s` gir `y = (wy − panY)·sc + h/2`, så større world-y ligger lenger NED på skjermen. «Topp» er
+altså MINST y. De fire hjørnehjelperne i geo-motoren hadde motsatt regel — og kommentaren påsto
+at det var «samme konvensjon som `_uTurnIsHigh`», noe det ikke var. Målt på Rom 5: toppveggen V5
+(300 cm) har y = −1040,1, bunnveggen V1 (261 cm) har y = −836,1.
+
+Alt jeg har meldt om hjørner fra 080 til 083 var speilvendt av denne ene antakelsen. Kenneth så
+riktig hele tiden; min konklusjon om «gammel kode i nettleseren» (STATUS §24.1) var feil.
+
+- Én felles `_cornerTarget(room, corner)` med skjermens akse; de fire hjelperne bruker den.
+- Ny test som binder hjørnet til `w2s`: hjørnepunktet og starten skal ligge i riktig halvdel av
+  SKJERMEN, ikke bare nær et tall. Det var testen som manglet — batteriene målte riktige tall mot
+  feil hjørne og var grønne hele tiden.
+- Byggstempel på localhost: `/__build.json` + statuslinja + grå linje på geo-kabler i panelet.
+
+Treff på valgt hjørne: 43 (før 083) → 68 (speilvendt) → **71 av 128**.
+076-fasiten er løst: Rom 5 / 700W / loddrett / `tr` gir CC 13,2 loddrett med start 13 cm fra
+hjørnet — R-START og fasiten gjelder samtidig. ⚠ Suitetiden er fortsatt over kravet (§26).
+
 ## 083b — hitCable krasjet på hvert museklikk (15.10.2026, gren `kabelmotor`)
 
 732 uncaught TypeError i Kenneths konsoll: `hitCable` kjente bare skew-motorens baneformer

@@ -1,4 +1,5 @@
 const http = require('http');
+const START_ISO = new Date().toISOString();
 const fs = require('fs');
 const path = require('path');
 
@@ -34,6 +35,18 @@ http.createServer((req, res) => {
         });
       });
     });
+    return;
+  }
+
+  // 088: byggstempel. Kenneth og jeg brukte tre runder paa aa lete etter en feil som viste seg
+  // aa vaere «ser du paa ny eller gammel kode?». Dette gjoer det til et blikk i statuslinja.
+  if (req.url === '/__build.json') {
+    const { execSync } = require('child_process');
+    const g = (c) => { try { return execSync(c, { cwd: __dirname }).toString().trim(); } catch (e) { return '?'; } };
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ branch: g('git rev-parse --abbrev-ref HEAD'),
+                             hash: g('git rev-parse --short HEAD'),
+                             started: START_ISO }));
     return;
   }
 

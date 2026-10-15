@@ -848,6 +848,9 @@ Motoren bruker 338 ms mot 173 ms på rom5 600W — 079d kjører bare når vinner
 
 ## §18 · 080 — hjørnevelgeren betyr noe (15.10.2026)
 
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
+
 Kenneth, etter at utlegget ble godkjent: *«Det eneste som ikke stemmer er start kabel ifht
 velgeren øverst til venstre i menyen hvor man setter innsetningspunkt og retning.»*
 
@@ -892,6 +895,9 @@ aldri et stumt avvik.
 ---
 
 ## §19 · 081 — opp/ned i hjørnevelgeren, og hindringer målt
+
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
 
 Kenneth 15.10.2026: *«Hjørnevelgeren funker fortsatt ikke helt. Spesielt på de vannrette
 utleggene, den tar ikke høyde for om jeg setter start opp eller nede, kun venstre eller høyre.
@@ -950,6 +956,9 @@ alene med et ugyldig utlegg. Står fra før på lista over ting som må løses f
 
 ## §20 · 082 — ett løp mindre, og hva det faktisk koster
 
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
+
 Kenneth 15.10.2026: *«ta ett løp mindre i øvre felt.»*
 
 ### Mekanismen virker
@@ -997,6 +1006,9 @@ som mangler er å slippe runden ned CC-stigen igjen. **Venter på Kenneth.**
 
 ## §21 · Trenger vi de gamle motorene? (målt 15.10.2026)
 
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
+
 Kenneths spørsmål. Målt over alle 16 fixturer × begge retninger = 32 utlegg:
 
 | motor | vinner | av disse gyldige |
@@ -1016,6 +1028,9 @@ ikke tar. Ta `v6`/boustrophedon/serpentine ut av konkurransen, eller la dem aldr
 gi et ærlig «ingen løsning» i stedet for et ugyldig utlegg.
 
 ## §22 · «Nedre venstre» loddrett er strukturelt umulig i Rom 5
+
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
 
 Enumerert, ikke sluttet: loddrett gir nøyaktig fire endepar, og to er gyldige —
 
@@ -1037,6 +1052,9 @@ enden ligger 22 cm fra hjørnet, men der svinger kabelen videre; den er ikke fri
 ---
 
 ## §23 · 083 — R-START: start i valgt hjørne. DELVIS FERDIG, to åpne punkter.
+
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
 
 ### STEG 0.1 — hvorfor S lå nede til venstre i skjermbildet
 
@@ -1103,6 +1121,9 @@ produkt. Det er regelen Kenneth ba om — men tallet bør han se før dette merg
 ---
 
 ## §24 · To funn fra Kenneths kontroll 15.10.2026
+
+> ⚠ **Målt med speilvendt y-akse — se §26.** Tallene er riktige, men hjørnene de
+> er målt mot er byttet om: «øvre» var i virkeligheten nedre. Historikken står urørt.
 
 ### 1. «Innsett øverst venstre, kabel starter nederst venstre» — gammel kode i nettleseren
 
@@ -1171,3 +1192,80 @@ virker». Kenneth kunne ikke engang velge kabelen for å kjøre diagnosen jeg ba
 Dette forklarer også hvorfor S/E-merkene så feil ut: jeg sammenlignet piksler i skjermbilder mot
 data, og kom til at merkene var byttet om. Det var en gjetning jeg ikke kunne måle. Den står
 fortsatt uavklart — men nå kan kabelen velges, så den lar seg endelig sjekke.
+
+---
+
+## §26 · 088 — hjørnene var SPEILVENDT. Rotårsaken bak alt fra 080 til 083.
+
+### STEG 0 — bekreftet før noe ble endret
+
+`w2s` (:4662) er `y = (wy − panY)·sc + h/2`. Større world-y ligger altså lenger **NED**.
+Målt på Rom 5, world-y mot skjerm-y side om side:
+
+| world-y | skjerm-y | kant | på skjermen |
+|---|---|---|---|
+| **−1040,1** | **−1485** | 300 cm (**V5**) | **ØVERST** |
+| −836,1 | −1179 | 260 cm (**V1**) | **NEDERST** |
+
+«Topp» er **minst** y. De fire hjørnehjelperne i geo-motoren hadde motsatt regel, og
+kommentaren min påsto til og med at det var «samme konvensjon som `_uTurnIsHigh`» — det var
+feil; de gamle motorene hadde riktig akse hele tiden.
+
+Rettet: `_cornerTarget` (ny, felles), `_cableCornerPoint`, `_geoCornerPoint`, `_geoCornerDist`,
+`_geoCornerOf`. Panelets hjørnetekster leser samme funksjon og ble riktige av seg selv.
+
+### Hva det betyr for det jeg har meldt tidligere
+
+* **§24.1 «gammel kode i nettleseren» var FEIL.** Kenneth så riktig: han valgte øvre venstre og
+  fikk nedre venstre. Min måling «24 cm fra hjørnepunktet (678,8, −836,1)» var riktig regnet mot
+  **nedre** venstre. Konklusjonen om hard reload var min feil, ikke hans.
+* **§23 ÅPENT 2 er LØST.** Rom 5 / 700W / loddrett / `tr` gir nå **CC 13,2 · loddrett ·
+  start 13 cm fra hjørnet · 0 hull · dekning 93,4 %**. 076-fasiten og R-START gjelder samtidig,
+  uten unntak. Det var aldri en motsigelse — det var en speilvending.
+* **§22** («nedre venstre loddrett strukturelt umulig») gjaldt i virkeligheten **øvre** venstre.
+* **§19/§20** (83 cm, paritet i «øvre» felt) er speilet på samme måte.
+
+### 128 kombinasjoner
+
+| | før 083 | 083 (speilvendt) | **088** |
+|---|---|---|---|
+| treffer hjørnet (≤ 40 cm) | 43 | 68 | **71** |
+| bommer | 61 | 36 | **33** |
+| ingen løsning | 24 | 24 | 24 |
+
+### Rom 5, loddrett
+
+| produkt · hjørne | start-avstand | retning | CC | dekning | hull |
+|---|---|---|---|---|---|
+| 600W · tl | 13 cm | vannrett (byttet) | 14,91 | 90,2 % | 0 |
+| 600W · tr | 28 cm | loddrett | 11,61 | **71,3 %** | 0 |
+| 600W · bl | 24 cm | loddrett | 14,52 | 89,1 % | 0 |
+| 600W · br | **97 cm** | loddrett | 14,52 | 89,1 % | 0 |
+| 700W · tl | 18 cm | vannrett (byttet) | 12,93 | 93,4 % | 0 |
+| **700W · tr (fasit)** | **13 cm** | **loddrett** | **13,20** | **93,4 %** | **0** |
+| 700W · bl | 24 cm | loddrett | 11,61 | 84,3 % | 0 |
+| 700W · br | **195 cm** | loddrett | 13,20 | 93,4 % | 0 |
+
+Skjermbildets tilfelle (600W / loddrett / tl) har nå **90,2 % dekning mot 89,1 % før 083** og
+0 hull — de tomme banene øverst til venstre er borte, og dekningen er bedre enn før.
+
+### ⚠ Fortsatt åpent
+
+* **Suitetiden.** `_cableGeometryRegressionTest` alene bruker **over 4 minutter**; kravet er 40 s
+  for hele suiten. Hjørnerunden er fortsatt et nytt CC-søk etter hovedsøket (§23 ÅPENT 1).
+  Etter instruks er omskrivingen av lengdesøket IKKE påbegynt. 8 av 128 utlegg tar over 1,5 s,
+  verste 3,5 s.
+* **33 bommer.** Mønsteret er nå tydelig: `kabelForKort` (8) er 10 m kabel i et stort rom —
+  utlegget dekker bare et hjørne uansett. `skraa` (4) er skew-motoren, som ikke har hjørnesøk.
+  `asymmetriskeVegger` (4) bommer på alle fire. Resten er enkelttilfeller der ruten ikke har
+  noen ende i nærheten av hjørnet.
+* **600W · tr koster dekning** (71,3 %). R-START vinner over dekning etter spec §0.9, men
+  tallet bør Kenneth se.
+
+### Byggstempel (088)
+
+`serve-varmeplan.js` svarer på `/__build.json` med gren, commit og starttid, og statuslinja viser
+`kabelmotor @ e3d42f2 · startet 11:05` — **kun på localhost**. Kabelpanelet viser dessuten én grå
+linje på geo-kabler: `geo · ønsket øvre venstre · start 18 cm fra hjørnet`. Da avgjør et
+skjermbilde om utlegget er nytt eller lagret fra før. Det var nettopp dét spørsmålet som kostet
+oss tre runder 15.10.
