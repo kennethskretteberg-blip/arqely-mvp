@@ -4,6 +4,729 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 088b — valgt retning er hard (15.10.2026, gren `kabelmotor`)
+
+083 lot R-START rangere foran retningen, så motoren byttet til vannrett når loddrett ikke kunne
+starte i hjørnet. Kenneth meldte det to ganger som at «retningsvelgeren virker ikke».
+
+Målt på Rom 5 «øvre venstre»: loddrett kommer 188 cm (600W) og 124 cm (700W) fra hjørnet,
+vannrett 13 og 18 cm. Byttet var ikke en feil — det var feil rangering. Kenneths egne ord var at
+starten må vinne over DEKNING; han sa aldri over RETNING.
+
+Ny rekkefølge (spec §0.9): harde krav → valgt retning → R-START → jevn CC → dekning → fasit-CC.
+Den andre retningen måles fortsatt, men tilbys i panelet med tall i stedet for å byttes til:
+«⚠ Loddrett kan ikke starte oppe til venstre — nærmeste er 188 cm. [Vis vannrett i stedet
+(start 13 cm)]». 076-fasiten er urørt.
+
+## 088 — hjørnene var speilvendt (15.10.2026, gren `kabelmotor`)
+
+`w2s` gir `y = (wy − panY)·sc + h/2`, så større world-y ligger lenger NED på skjermen. «Topp» er
+altså MINST y. De fire hjørnehjelperne i geo-motoren hadde motsatt regel — og kommentaren påsto
+at det var «samme konvensjon som `_uTurnIsHigh`», noe det ikke var. Målt på Rom 5: toppveggen V5
+(300 cm) har y = −1040,1, bunnveggen V1 (261 cm) har y = −836,1.
+
+Alt jeg har meldt om hjørner fra 080 til 083 var speilvendt av denne ene antakelsen. Kenneth så
+riktig hele tiden; min konklusjon om «gammel kode i nettleseren» (STATUS §24.1) var feil.
+
+- Én felles `_cornerTarget(room, corner)` med skjermens akse; de fire hjelperne bruker den.
+- Ny test som binder hjørnet til `w2s`: hjørnepunktet og starten skal ligge i riktig halvdel av
+  SKJERMEN, ikke bare nær et tall. Det var testen som manglet — batteriene målte riktige tall mot
+  feil hjørne og var grønne hele tiden.
+- Byggstempel på localhost: `/__build.json` + statuslinja + grå linje på geo-kabler i panelet.
+
+Treff på valgt hjørne: 43 (før 083) → 68 (speilvendt) → **71 av 128**.
+076-fasiten er løst: Rom 5 / 700W / loddrett / `tr` gir CC 13,2 loddrett med start 13 cm fra
+hjørnet — R-START og fasiten gjelder samtidig. ⚠ Suitetiden er fortsatt over kravet (§26).
+
+## 083b — hitCable krasjet på hvert museklikk (15.10.2026, gren `kabelmotor`)
+
+732 uncaught TypeError i Kenneths konsoll: `hitCable` kjente bare skew-motorens baneformer
+(`kind:'run'` med a/b, ellers from/to), mens geo sender `{kind:'uturn', pts:[…]}`. `a` var
+undefined og `a.x` kastet. Kastet skjer i canvas-mousedown, så hele klikk-kaskaden døde —
+verken kabel, rom eller vegg lot seg velge på lerretet.
+
+Feilen har ligget der siden 068 og var usynlig i alle 22 batteriene, fordi ingen av dem klikker
+på lerretet. Fiksen bruker samme trygge uttrekk som resten av koden og hopper over elementer
+uten brukbar geometri. Fire nye påstander, inkludert et element med ukjent `kind`.
+
+## 083 — R-START: kabelen starter i valgt hjørne (15.10.2026, gren `kabelmotor`) — DELVIS
+
+Ny låst regel (spec §0.9): kabelens tilkoblingsende ligger ≤ 40 cm fra det hjørnet
+retningsvelgeren peker på, og regelen slår dekning, fasit-CC og om nødvendig valgt retning.
+
+- v6 ut av motorkonkurransen, skew beholdt (målt: v6 vant 6 ganger, alle seks ugyldige).
+- Én hjørnedefinisjon for alle motorer; hjørnet er et FILTER på kaskadenivå, ikke et poeng.
+- Hjørnerunde ned CC-stigen med paritetsvarianter; dekningsvakten fra 082 fjernet.
+- Retningsfallback + panellinjer (⚠ når hjørnet er umulig, med avstand og grunn).
+
+Treff på valgt hjørne: 43 → 68 av 128 kombinasjoner.
+
+⚠ TO ÅPNE PUNKTER, se STATUS §23: regresjonssuiten er 177 s mot kravet 40 s (hjørnerunden må inn
+i hovedsøket, ikke etter det), og R-START kan ikke gjelde samtidig som 076-fasiten for Rom 5
+loddrett `tr` — loddrett kan ikke starte oppe til høyre i det rommet. Begge trenger Kenneths svar.
+
+## 082 — ett løp mindre flytter starten til hjørnet (15.10.2026, gren `kabelmotor`)
+
+Ny paritetsvariant: ytterste bane fjernes fra én celle, aldri en inne i cellen. Det flipper
+pariteten og dermed hvilken ende kabelen kommer ut i — som er det som låste starten 83 cm nede
+på veggen med «øvre venstre» valgt.
+
+Mekanismen når hjørnet for alle tre produktene på Rom 5 (26/33/25 cm, hullfritt). ⚠ Men med
+fritt søk nedover CC-stigen brøt den Kenneths egen fasit (Rom 5 CC 13,2 → 12,6), senket badHakk
+fra 92,5 til 89,7 % dekning, og gjorde regresjonssuiten 7× tregere. Runden kjører derfor bare på
+vinnerens EGEN CC og aksepterer bare når utlegget ikke blir dårligere på noe mål.
+
+Resultat: 600W treffer hjørnet (26 cm). 700W og 10T står på 83 cm med fasiten urørt, og panelet
+oppgir avstanden. Valget mellom hjørnet og fasiten gjenstår — se STATUS §20.
+22/22 batterier grønne (1019 påstander).
+
+## 081 — hjørnevelgeren hører på opp/ned (15.10.2026, gren `kabelmotor`)
+
+080 gjorde hjørneleddet levende, men det var fortsatt binært på KVADRANT. Målt: en start 21 cm
+over rommets midtlinje ble regnet som «øvre», og poengleddet så ingen forskjell på den og et
+punkt 68 cm høyere oppe. Derfor hørte vannrette utlegg bare på venstre/høyre.
+
+- Leddet er nå gradert på avstand til valgt hjørne, så sveipeaksen teller med.
+  Rom 5 vannrett: `tl` → y = −841, `bl` → y = −1035 (rommet er −836 … −1040).
+- Loddrett er låst av paritet: det øvre feltet har 6 baner, og med partall må kabelen ut i samme
+  ende den kom inn. Panelet oppgir avstanden: «Start: 83 cm fra oppe til venstre — nærmere er
+  ikke mulig med dette utlegget.»
+
+Hindringer, målt: én hindring gir 96,00 m eksakt, 0 hull, 0 kryssinger, 0 utenfor — motoren
+legger seg rundt den som rundt en veggstubbe. Tre hindringer er fortsatt ugyldig (10 celler
+trenger 6 transittkorridorer, taket er 2). Utleggene ellers uendret.
+22/22 batterier grønne (1008 påstander).
+
+## 080 — hjørnevelgeren betyr noe (15.10.2026, gren `kabelmotor`)
+
+Innsetningspunkt-velgeren var død i geo-motoren: alle fire hjørnevalg ga identisk start.
+`_geoMakeCable` bar `startCorner` videre som en etikett uten å orientere banen, og `_geoScore`
+fikk `corner: wantCorner` inn — sammenligningen var alltid sann.
+
+- Banen orienteres nå etter valget (en varmekabel har ingen egen retning, så å snu punktlista
+  er gratis), og poengleddet måler det faktiske hjørnet.
+- Rutens to ender er gitt av geometrien. Finnes ikke det valgte hjørnet — på Rom 5 ender ingen
+  rute nede til venstre, fordi det er der transitten går ut — sier panelet fra:
+  «Start: oppe til venstre — nede til venstre er ikke mulig i dette rommet.» Nivå `ok`, så den
+  ikke toaster på hvert utlegg.
+
+Utleggene er ellers uendret: 600W 35,00 m / 0 hull, 700W 40,97 m / 0 hull, 10T 60,00 m / 0 hull,
+alle med jevn CC. 22/22 batterier grønne (1003 påstander).
+
+## 079 — jevn CC over hele gulvet (15.10.2026, gren `kabelmotor`)
+
+Kenneths regel: ytterste løp under utstikkeren skal flukte med det over, den vannrette strengen
+langs utstikkeren skal fortsette lenger inn i rommet, og lengden justeres med trimming hvis
+kabelen er for kort og med tettere CC hvis den er for lang.
+
+Hullet på 2 × CC i Rom 5 oppsto i RUTINGEN, ikke i celledelingen: transitten lot den kappede
+banen ligge igjen inne i nabocellens serpentin, og U-svingen ut av den dro naboen ned fra
+179 til 58 cm.
+
+- Ny fjerde transittvariant: A-siden av transittbanen eies av cellen under hindringen.
+- Ytterste løp flukter — og det er paritet, ikke kosmetikk: med partall baner må inn- og utgang
+  ligge i samme ende, og hullet flytter seg bare.
+- `jtRound` i `_cableLegalRegion`: kantavstand er en avstand, ikke en gjæring. Et rett
+  innstikkende hjørne ga 7,07 cm forbudt sone mot kravet på 5.
+- For lang kabel → tettere CC og flere løp, men bare når vinneren har hull.
+- `_geoInteriorHoles` leser nå senterlinja i stedet for et rutenett som ikke oppdateres, og
+  fanger også en kolonne som er tom i ett bånd men brukt i et annet.
+
+Rom 5 600W: 34,89 m / 1 hull → 35,00 m eksakt / 0 hull, jevn CC 14,5 over hele gulvet.
+700W uendret. Prisen er dekning: 91,5 → 89,1 % (rom5) og 91,0 → 86,7 % (badHakk).
+22/22 batterier grønne (996 påstander).
+
+## 078 — lagre-indikatoren lyver ikke om ulagrede endringer (15.10.2026, gren `kabelmotor`)
+
+Indikatoren hadde fem tilstander — `saving`, `saved`, `offline`, `error`, `readonly` — men ingen
+for «ikke lagret ennå». Målt: etter GODKJENN er `_projectDirty` `true` mens indikatoren er
+byte-identisk med før endringen, grønn prikk og «Lagret 05:54:47». I vinduet mellom en endring og
+at autolagringen fyrer (≥ 5 s) påsto den at alt var lagret.
+
+- Ny tilstand `dirty`: åpen grå ring, tittel «Ulagrede endringer – sist lagret HH:MM:SS. Lagres
+  automatisk.» Dempet, ikke rød — autolagringen tar det om fem sekunder.
+- Settes i `_scheduleAutoSave`, funnelen alle 50 mutasjonsveiene går gjennom, etter gatene: i
+  kundemodus røres indikatoren ikke (030), og skrivebeskyttet eier sin egen tilstand (060 §3).
+- Fem nye påstander i `_prosjektlaasRegressionTest`.
+
+⚠ Rettelse: jeg meldte dette som «GODKJENN lagrer ikke». **Den feilen finnes ikke** — `pushUndo`
+kaller `_scheduleAutoSave()`, og utlegget planlegges for lagring i det det legges. Diagnosen var
+en grep, ikke en måling. Se STATUS §16.
+
+## 077 — kabelutlegget ventet ikke på polygonbiblioteket (15.10.2026, gren `kabelmotor`)
+
+Rotårsaken bak de ugyldige utleggene i Rom 5. `clipper-lib` ble lastet LAT, og utleggsveien
+ventet ikke på den: tapte man kappløpet mot CDN-et, regnet `_cableLegalRegion` det lovlige
+området hjørnevis, ny motor fant ingen gyldig kandidat, og den gamle V6-motoren vant alene med
+20 løp som krysset seg selv. Målt: **v6 / CC 14,14 / ugyldig** uten biblioteket mot
+**geo / CC 15,28 / gyldig** med.
+
+- Biblioteket forhåndslastes ved oppstart (ferdig 114 ms etter navigasjonsstart).
+- `_cablePreviewPlace` venter på biblioteket — men bare når det ikke er klart, fordi sone-testen
+  og «Fyll rom automatisk» leser tilstand synkront rett etter kallet.
+- Et tilnærmet utlegg merkes (`_geomApprox`) og sier det i panelet, i stedet for å tape stumt.
+- Seks nye påstander kjører Rom 5 med clipper slått av, så dette ikke kan komme tilbake uoppdaget.
+- Sidefiks: tidspåstanden i `_prosjektlaasRegressionTest` var rød av klokka før kl. 06.
+
+Ingen terskel og ingen motor er endret. 22 av 22 regresjonsbatterier grønne.
+
+## 076: Kabelmotor — Rom 5 som fasit og fast regresjon, CC låst, beste tilstand merket — 2026-10-14
+
+Etter sparring: Kenneth svarte på de tre spørsmålene i STATUS §10.6. CC skal ikke flyttes for
+jevnhetens skyld, lengden er fortsatt hard (±1 %), og Rom 5 blir fast testrom.
+
+### STEG 0.2 — hvilken commit gir fasiten
+
+Rom 5, InFloor 17T 700W 41m, loddrett, start øverst til høyre:
+
+| commit | CC | lengde | gyldig | kryss/knekk | ⚠ |
+|---|---|---|---|---|---|
+| `30ea330` 074d | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+| `c6d198c` 074e | **13,20** | 40,97 m (−0,07 %) | ja | 0 / 0 | nei |
+
+⚠ **Identiske.** Alle fire kabellengder og begge retninger ga bit for bit samme resultat.
+Forskjellen Kenneth så lå altså ikke i `generateCableGeo`. Jeg klarte heller ikke å reprodusere
+⚠-et fra den LAGREDE geometrien: hele kaskaden, fire starthjørner, begge retninger og auto —
+alt gyldig på begge versjoner. Mest sannsynlig var rommet på skjermen redigert og ulikt det
+lagrede (Rom 5 har ingen lagret kabel). **Står åpent.**
+
+Tag: `kabelmotor-fasit-rom5` → `30ea330` (den eldste av de to, færrest bevegelige deler).
+HEAD-koden var allerede 074d, så 076 er bygget rett oppå — ingen ny revert.
+
+### Rettet
+
+- **CC er låst.** Nabotrinn-søket — det eneste som flyttet CC for utseendets skyld — er fjernet,
+  sammen med `fastLenHullfri`. CC regnes av lengden og netto areal som 016 bestemte.
+  Hullstraffen står: en jevn variant vinner over en holete **på samme CC**. Dominans-vakten står.
+- **Rom 5 er fast fixture** med den ekte geometrien (hentet lesende, 5,698 m², ti punkter, ingen
+  kundedata). Veggmålene stemmer med Kenneths oppgitte: V1 260 · V2 75 · V3 39 · V4 129 ·
+  V5 300 · V6 99 · stubbe 100/13/98 · V10 93.
+- **Galleriet** viser Rom 5 **øverst**, med tegning · fasit bygget og kontrollert · motoren.
+- **Fasit-byggeren rettet:** den tok den FØRSTE transitt-varianten som lot seg rute, mens motoren
+  tar den best scorende. På Rom 5 ga det 39,57 m (−3,48 %, lengdebrudd) — kolonnen påsto altså at
+  Kenneths egen fasit var ugyldig. Nå velges varianten som treffer produktlengden best: 40,97 m,
+  identisk med motoren.
+
+### Prisen for låst CC, målt
+
+`badHakk41` mister sin hullfrie løsning. Ved CC 13,18 er kappet-varianten den eneste uten hull,
+og den lander på 42,23 m = **+3,01 %** — utenfor ±1 %. Rommet beholder derfor én tom bane
+(91,0 % dekning mot 94,9 % med trinnsøket). Påstanden i regresjonstesten er endret fra «0 hull»
+til «høyst 1 hull for badHakk41», med målingen i koden. `rom5` og `badHakk` er hullfrie.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 52 → **70 påstander** (18 nye for Rom 5 og CC-låsen).
+**22 batterier grønne.** Galleriet: 16 rom × 2 retninger, **26 gyldige / 6** — samme seks
+umulige som før. Rom 5: loddrett ok 93,4 % CC 13,20 · vannrett ok 93,4 % CC 12,93.
+
+---
+
+## 074d: Kabelmotor — 074c på nytt, med vakt mot at utlegget blir dårligere — 2026-10-14
+
+074c ble rullet tilbake fordi Kenneth målte at det ble verre i hans eget bad (Rom 5, 5,70 m²).
+«Prøv på nytt, men CC må aldri utenfor anbefalt område.»
+
+### ⚠ To ting jeg hadde feil om, begge rettet av måling
+
+**1. ⚠-et på etiketten betyr ikke «CC utenfor anbefaling».** Kenneths to utlegg viste «⚠ CC
+14,9» og «⚠ CC 10,1». Jeg antok at CC lå utenfor området. Målt i koden (`:35138`):
+
+```js
+_info.push(((_ccOverWarn(prod, ccCm) || (cable._geomDefects && cable._geomDefects.length))
+            ? '⚠ ' : '') + 'CC ' + ccCm.toFixed(1) + ' cm');
+```
+
+Romtypen «Bad» har hverken `ccMinCm` eller `ccMaxCm`, og produktets anbefaling er 20 cm — så
+14,9 og 10,1 er godt INNENFOR. Trekanten kom fra `_geomDefects`: **utleggene brøt en hard
+regel.** Det er alvorligere enn en CC utenfor anbefaling, og det var den ekte skaden i 074c.
+
+**2. En GLOBAL CC-sperre går ikke — den bryter 016.** Første forsøk var å søke i det anbefalte
+vinduet først. Det fikk fem påstander i `_ccWarnRegressionTest` til å falle. 016 bestemte
+bevisst at CC over anbefalingen er en ADVARSEL, ikke en sperre, fordi **kabelens lengde styrer
+flateeffekten**: 36 m i 10 m² TRENGER CC 27,8 cm for å gi de ønskede 60 W/m². Klemmes CC til
+20, blir det 85 W/m² — testen sier det rett ut: «var 85 før 016».
+
+### Rettet
+
+Sperren er lagt **der den hører hjemme**, ikke globalt: på nabotrinn-søket som 074c innførte —
+det eneste som flytter CC for utseendets skyld. Motorens primære CC-valg (lengden bestemmer) er
+uendret.
+
+Et nabotrinn får bare overta når det er **bedre eller likt på hvert mål** — samme dominans-regel
+070 bruker når ny motor tar over for den gamle:
+
+```
+gyldig · lengde innenfor ±1 % · dekning ikke dårligere · klaring ikke dårligere
+       · bøyeradius ikke dårligere · ikke mer utenfor · ingen ⚠ CC
+```
+
+Uten den vakten byttet søket geometri på en poengsum brukeren ikke ser. Det var nettopp det som
+skjedde i 074c.
+
+### Målt på alle 15 fixture-rom
+
+| | |
+|---|---|
+| Rom som får ⚠ (brudd på hard regel) | **de samme seks som før** — flereHindringer ×2, kabelForLang ×2, boyUmulig ×2 |
+| Rom med ⚠ CC | kun `kabelForKort` (48,7 cm — en 3 m kabel i et stort rom; 016-oppførsel, uendret) |
+| Badet 47 m loddrett | 0 hull · CC 11,60 · dekning 92,5 % |
+| Badet 41 m loddrett | 0 hull · CC 13,81 · dekning **94,9 %** (var 91,0) |
+
+Ingen rom ble dårligere, og ingen rom fikk et merke det ikke hadde før. Det er sjekken som
+manglet i 074c.
+
+### Står igjen
+
+`enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane — syntetiske testrom.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` **52 påstander**. **22 batterier grønne**, inkludert
+`_ccWarnRegressionTest` (016). Galleriet 24/30.
+
+---
+
+## 074c: Kabelmotor — hullmålingen var feil, og den straffet det jevneste utlegget — 2026-10-14
+
+Kenneth sendte to skjermbilder av SAMME rom: 47 m «perfekt», 41 m ikke.
+
+### To ekte hull i 41 m-utlegget
+
+Målt løp for løp:
+
+| bane | hvor det er kabel |
+|---|---|
+| 774,4 | over OG under stubben |
+| **787,6** | **bare under** — øvre del tom |
+| **800,8** | **bare over** — nedre del tom |
+| 813,9 | over og under |
+
+To tomme halvbaner ved siden av hverandre, forskjøvet — det er den hvite stripen som ser ut
+til å gå gjennom hele rommet i bildet.
+
+### ⚠ Målingen fra 074b var feil
+
+Jeg målte avstanden mellom løpene på sju høyder. Den slo ut på **kantsonen**: i høyden mellom
+løpenes ender og veggstubben finnes det nesten ingen løp, og den tomme stripen der er marginen,
+ikke et hull. Målt på 41 m rapporterte den **«9 × CC»** for et utlegg der hver eneste
+naboavstand var 13,8 cm — og poengsummen straffet dermed det JEVNESTE utlegget hardest.
+
+**Riktig måling er ikke avstand, men banebruk** (`_geoInteriorHoles`): rutenettet vet hvilke
+baner som finnes og hvor langt hver av dem er lovlig. En bane som står helt tom er et hull — og
+bare når det ligger brukte baner på BEGGE sider. Ligger den ytterst, er den tomme stripen inntil
+veggen, og det er nettopp prisen Kenneth sa han ville betale.
+
+### CC er trinn, ikke en skala
+
+Den jevne løsningen for 41 m lå på **nabotrinnet**: CC 13,81 i stedet for 13,18. Søket valgte
+13,18 fordi lengden traff **1 cm** nærmere — og tok med det et hull og 4 prosentpoeng dårligere
+dekning. Søket prøver nå nabotrinnene (N ± 1, N ± 2) når vinneren har et hull.
+
+Bevisst begrenset til noen få trinn: et fritt søk over hele stigen fant jevne løsninger som
+krevde mye mindre CC og kostet 6 prosentpoeng dekning (målt på 47 m: 92,7 → 86,7 %). Det er en
+annen avveining enn «dra kabelen litt inn fra veggen», og skal ikke tas av motoren.
+
+### Resultat — badet loddrett
+
+| | 41 m før | 41 m etter | 47 m |
+|---|---|---|---|
+| Tomme baner i feltet | **2** | **0** | 0 |
+| CC | 13,18 cm | 13,81 cm | 11,60 cm |
+| Lengde | 41,03 m (+0,07 %) | 41,04 m (+0,09 %) | 47,09 m (+0,19 %) |
+| Dekning | 91,0 % | **94,9 %** | 92,5 % |
+
+41 m ble altså både jevnere OG bedre dekket — nabotrinnet var bedre på begge deler.
+
+### Står igjen
+
+`enHindring` loddrett og `uRom` begge veier har fortsatt én tom bane. Det er syntetiske
+testrom, ikke Kenneths bad.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 48 → **52 påstander** (begge badene låst: null tomme baner,
+dekning ≥ 92 %). **22 batterier grønne.** Galleriet 24/30.
+
+---
+
+## 074b: Kabelmotor — jevn avstand går foran dekning — 2026-10-14
+
+Kenneth, med skjermbilde og grønn ramme rundt feltet over veggstubben:
+«Jeg ønsker at kabelutlegget skyves slik at cc blir jevn, og heller at vi får et udekket område
+inntil veggen. **Det er alltid viktigere å få en jevn avstand mellom kabelløpene enn å dekke helt
+ut mot veggene — heller dra inn kabel fra vegg for å få jevnest mulig utlegg.**»
+
+### Målt
+
+Alle 25 naboavstander i utlegget var 11,6 cm — så en global CC-måling sa «helt jevnt». Men målt
+**per bånd**, i høyden y = −1000 (over stubben):
+
+```
+… 763,3 · 774,9 · [23,2 cm] · 798,1 · 809,7 …
+```
+
+Hullet er transittbanen. Den brukes bare *under* stubben, så over stubben sto den tom — et hull
+på nøyaktig 2 × CC midt i feltet. Det var den hvite stripen i den grønne rammen.
+
+### Rettet
+
+- **`_geoWorstBandGap`** måler avstanden PER BÅND, ikke globalt, og teller bare mellomrom der
+  det faktisk er gulv (midtpunktet må ligge i lovlig område — et stort mellomrom over en
+  hindring eller et hakk er ikke en feil).
+- **Ny transitt-variant: cellen skyves én bane.** Den gir fra seg sitt ytterste løp (det mot
+  veggen) og overtar den tomme transittbanen. CC er uendret — løpene ligger fortsatt på det
+  globale rutenettet, bare ett hakk bortenfor — og hullet flyttes fra midten av feltet ut mot
+  veggen. Prøves FØRST, før de to gamle variantene.
+- **Hull straffes i poengsummen** (`−40 × overskytende`), tungt nok til å slå 30-poengs-
+  dekningsleddet: et jevnt utlegg skal vinne over et med hull selv når det dekker mer.
+- **Lengdesøket måler alle variantene** og følger den som kan treffe lengden. Før fulgte det
+  den første, og meldte «ingen løsning» for en retning som hadde en helt gyldig løsning.
+
+### Resultat — badet, 47 m loddrett
+
+| | før | etter |
+|---|---|---|
+| Verste hull i feltet | **2 × CC** (23,2 cm) | **1 × CC** |
+| CC | 11,60 cm | 11,60 cm (uendret) |
+| Lengde | 47,24 m (+0,51 %) | 47,09 m (+0,19 %) |
+| Dekning | 92,7 % | **92,5 %** |
+
+Prisen for jevnheten er 0,2 prosentpoeng dekning — en smal kald stripe inn mot veggen, nøyaktig
+slik Kenneth beskrev. `uRom` vannrett ble også bedre (verste hull 4 → 2 × CC).
+
+### Det som står igjen
+
+`badHakk41` loddrett og `enHindring` loddrett har fortsatt et hull på 2 × CC: der er den skjøvede
+varianten ikke gyldig (paritet/overgangskjede), og den eneste jevne løsningen krever en annen CC
+— målt på 47 m ville det kostet 6 prosentpoeng dekning (92,7 → 86,7 %). **Det er en helt annen
+avveining enn «dra kabelen litt inn fra veggen», så den er ikke tatt av motoren.** Kenneth må si
+om han vil ha den.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` 44 → **48 påstander**. **22 batterier grønne.**
+
+---
+
+## 074: Kabelmotor — stille kandidatsøk, én beskjed med vinnerens tall — 2026-10-14
+
+Gren `kabelmotor`, **ikke merget**. Bugrapport fra Kenneth 14.10.2026 med skjermbilde:
+«Jeg velger retning og innsetting, men den hopper tilbake og bytter visning av seg selv.
+Varselen kommer opp flere ganger, det hjelper ikke å trykke den bort.»
+
+### STEG 0 (målt før endring)
+
+Oppsett: badet, InFloor 17T 700W 41m, 120 W/m², start nedre høyre, loddrett valgt.
+
+| # | Målt |
+|---|---|
+| 0.1 | **Én `confirm` + én toast per kjøring**, stakk: `confirm ← _finishCableAutoFill ← _autoFillCableLegacy ← _cableLegacyInDirection ← _cableCandidatesForDirection`. Altså fra den GAMLE kaskadens kandidat i valgt retning. Gjentakelsen kommer av hvor mange ganger `autoFillCable` kjøres: hvert produktklikk, hver retningsendring (`_reapplyCableDirection`) og hver romflytting |
+| 0.2 | **Ja — loddrett med 41 m gir et gyldig utlegg** fra ny motor: geo, CC 13,18 cm, 41,03 m (+0,07 %), dekning 91 %, alle harde krav ok. Fallbacken slår ikke inn på denne geometrien. `badHakk41` er lagt i galleriet |
+| 0.3 | Retningsvelgeren leser `S.varmefolie.direction`, **ikke** kabelens `direction` (`_drawRwpDirection` → `_vfPickerLabel`). Et fallback skriver den ikke — `_cableLegacyInDirection` legger den tilbake i `finally`. Målt med en settere-vakt på feltet: **null skrivinger** gjennom hele kjøringen |
+| 0.4 | I kabelflyten finnes `confirm` bare på det ene stedet (:26612). De andre i fila ligger i rom-/hindring-/bakgrunnsveier som kandidatsøket ikke passerer |
+
+### De tre tallene som ikke var enige
+
+Kenneths skjermbilde hadde **25 %** (nettleserdialog), **10 %** (toast) og **● ok** (panelet).
+De kom fra tre forskjellige utlegg — to av dem kandidater som tapte — og to forskjellige
+dekningsformler. Vinneren hadde 91 % dekning målt av `_cableGeometryCheck`.
+
+### Rettet
+
+- **`_finishCableAutoFill` måler og merker, den snakker ikke.** Ingen `confirm`, ingen toast,
+  ingen `return null` på grunn av dekning.
+- **`_cableSearchDepth`** som vakt: alt som kjøres mens den er > 0 er kandidatmåling. En
+  dybdeteller, ikke et `opts`-flagg som kan glemmes i ett kallsted.
+- **`_cableStatusLines(cable, room)`** er den ene kilden til alt brukeren ser: dekning fra
+  `_geomMetrics.coveragePct`, gyldighet fra `_geomDefects`, retning fra `_dirFallback`, forslag
+  fra `_betterProduct`. Panelet tegner linjene, toasten slår dem sammen.
+- **`_cableBetterProduct`** — samme serie (`_forslagKabelSerie`) og riktig effekt
+  (`selectCableByPower` mot rommets ønskede W/m²). Badet: **17T 800W 47m (799 W)**, ikke
+  10T 300 W. Forslaget regnes nå på VINNERENS dekning: den gamle formelen leser `cable.coverage`,
+  et felt ny motor aldri setter, så et geo-utlegg fikk alltid «100 % dekket» og aldri noe forslag.
+- **Valgt retning står.** Panelet sier «Retning: loddrett (valgt)», og ved et fallback kommer
+  «Prøv loddrett likevel» som legger beste kandidat i valgt retning, merket ⚠, uten dialoger.
+- **Effekt-merket er merket som effekt** («129 W/m² ● ok effekt»), så det ikke leses som en dom
+  over dekningen rett under.
+
+### Målt etter
+
+Samme oppsett: **null nettleserdialoger, null toasts**. Ett gyldig loddrett utlegg.
+Retningsvelgeren uendret. Forhåndsvisning → Godkjenn kjører kaskaden **én** gang totalt
+(teller: 1 før, 1 etter — «Godkjenn» tar det som vises).
+
+Panelet:
+
+> ● Forhåndsvises — InFloor 17T 700W 41m
+> 129 W/m² ● ok effekt · CC 13,2 cm · 41,0 m kabel
+> Retning: loddrett (valgt)
+> ⚠ 0,53 m² (9 %) uten kabel
+> Bedre: InFloor 17T 800W 47m (799 W) · Bytt
+
+### Byggefelle
+
+`badHakk41` kopierte punktene fra `badHakk` inne i `const _cableFixtures = {...}`. Objektet er i
+TDZ mens initialiseringen kjører, så oppslaget kastet «Cannot access `_cableFixtures` before
+initialization» — og hele testbatteriet døde. Kopieringen skjer nå i en løkke rett etter
+literalen, via feltet `sammeGeometriSom`.
+
+### Verifisering
+
+Galleriet: 15 rom × 2 retninger = 30 rader, **24 gyldige / 6** (samme seks som etter 072;
+`badHakk41` består begge veier). `_cableGeometryRegressionTest` 36 → **44 påstander**.
+**22 batterier grønne.**
+
+---
+
+## 071: kabelmotor — dokumentasjon og merge-sjekkliste — 2026-10-13
+
+`docs/kabel/STATUS.md`: hva motoren gjør (lag A–H) på én side, galleritabellen rom for rom før
+(068) og etter (070), **hva den ikke løser** med årsak og hva brukeren får se, hvordan et nytt
+testrom legges til, og den utfylte merge-sjekklista.
+
+`main` hadde ingen nye commits — ingen rebase nødvendig.
+
+Sjekklista er oppfylt på seks av sju punkter; det sjuende er Kenneths «merge».
+Dataformat-punktet er verifisert på tre ekte prosjekter, åpnet **lesende**, med begge lagrede
+former: «Vidsynveien 175» (1 kabel, `runs`), «Vålerengahjemmet» (4 kabler, `runs`, 15 rom) og
+«Kiwi Søvik» (16 kabler, `pathEls`). Alle gir romstatistikk og tegnet romside uten feil.
+
+**Ett hull dokumentert, ikke tettet:** kontrollen kjører ved auto-utlegg, ikke ved åpning av et
+prosjekt. Utlegg lagret før denne serien står umerket til kabelen legges på nytt. Å merke alle
+gamle prosjekter ved åpning er en stor endring og bør være Kenneths valg (STATUS §3f).
+
+---
+
+## 070: kabelmotor — geometrikontroll i kaskaden, ⚠ for ugyldige utlegg, debug-visning — 2026-10-13
+
+Gren `kabelmotor`. Etter 070 kan appen **aldri** vise et utlegg som bryter et hardt krav uten at
+det står merket.
+
+### Galleriet, kaskaden gjennom tre runder (28 rom × retning)
+
+| | består | bryter et hardt krav | merket for brukeren |
+|---|---|---|---|
+| før 068 | 5 | 23 | **0 — alle stille** |
+| etter 070 | **20** | 8 | **8 — alle merket** |
+
+De 8 som står igjen er de geometrisk harde: hindring midt i rommet (4), kabel for lang for
+rommet (2), bøyeradius umulig ved lovlig CC (2). Alle har nå årsak og forslag.
+
+### Hvordan ny motor tar over — konkurranse, ikke hviteliste
+
+Prompten foreslo en liste over romklasser. I stedet kjøres **begge** veier (ny `generateCableGeo`
+og dagens kaskade), begge måles med `_cableGeometryCheck`, og en **dominans-test** avgjør:
+
+- dagens ugyldig, ny gyldig → ny tar over
+- ny ugyldig, dagens gyldig → dagens beholdes
+- begge gyldige → ny tar over BARE om den ikke er dårligere på noe mål (dekning, lengdeavvik)
+- begge ugyldige → færrest harde brudd
+
+Det oppfyller merge-kriterium §8.2 («ingen rom dårligere, på hvert mål») direkte, i stedet for å
+stole på at hvitelista er riktig. Målt før/etter på alle 28: **15 bedre, 5 uendret, 0 dårligere**,
+og ingen rom der begge var gyldige tapte dekning. Et rent rektangel vannrett beholder dagens
+boustrophedon (98,8 % dekning mot ny motors 97,1 %); badet vannrett bytter til ny motor (dagens
+har 203 cm utenfor lovlig område, ny har 0).
+
+### Annen retning — aldri stille
+
+Valgt retning uten gyldig utlegg, mens den andre har ett → den gyldige legges, og det **sies**:
+toast + rad i sidepanelet + knapp «Prøv vertikal likevel» (`_cableForceDirection`, legger ut i
+valgt retning merket ⚠). Målt: badet med eksplisitt **vertikal** gir `v→h` og et gyldig utlegg.
+Badet på **auto** gir gyldig utlegg uten ⚠.
+
+### ⚠-visning og debug-visning
+
+- `cable._geomDefects` (med posisjon) → rød stiplet romkontur + røde ringer på lerretet,
+  «⚠» foran CC i labelen, defektliste + forslag + knapper i sidepanelet.
+- PDF-romsiden får linja «Utlegget er ikke kontrollert — se app (…)». Eksport blokkeres aldri.
+- Debug-visning (spec §7) i debug-overlayet (⌘⇧D) → «Kabelgeometri»: lovlig område, senterlinje,
+  start/slutt, CC, klaring, bøyeradius, lagt lengde mot produktlengde. Av som standard, og
+  **aldri med i PDF** (verifisert: romsiden er pikselidentisk med debug på og av).
+
+### Soner holdes utenfor — en målt regresjon som ble fanget
+
+`_buildNCableZones` tvinger felles CC i alle soner av et område (lik W/m² over sømmen).
+`generateCableGeo` søker sin egen CC og kjente ikke bindingen — første forsøk ga 20,67 cm i én
+sone og 20,6 i nabosonen (`_cableZoneRegressionTest`). Soner, `_zoneId` og `_forcedSpacingCm`
+kjører derfor uendret på dagens kaskade til ny motor kan ta imot en bundet CC.
+
+### To feil funnet underveis
+
+1. **`pathEls`-kontrakten var brutt ett sted.** Label-sentreringen i `drawCables` antok at hvert
+   ikke-`run`-element har `from`/`to`; ny motor leverer hele banen som ett `pts`-element, og da
+   krasjet tegningen (`_soneRegressionTest`). Alle tre formene (`a`/`b`, `pts`, `from`/`to`)
+   håndteres nå, i samme rekkefølge som `_cableWorldSegments`. Alle andre `pathEls`-lesere
+   (`_offsetCableClone`, `_reserveClipToRoom`, `_drawCableSkewPath`, `_cableRunNormal`) var
+   allerede riktige — gjennomgått.
+2. **Sidefunn:** en hindring uten `label` OG uten `type` tegnet teksten «undefined» på tegningen
+   og i PDF (`ctx.fillText(h.label||h.type,…)`). Nå `|| 'Hindring'`.
+
+### Én gammel test endret — med begrunnelse, ikke stille
+
+`_cableSkewRegressionTest` D («akseparallelt rom bruker IKKE skew, uendret motor») på et
+600×300-rom med 30 m kabel: dagens boustrophedon la **36,3 m av en 30 m kabel** (+20,98 %) — mer
+kabel enn produktet har. Kontrollen avviser det; ny motor legger 30,00 m (avvik 0,00 %).
+Testens navn og hensikt står; det som er løsnet er kravet om `runs`-form, siden ny motor leverer
+`pathEls`. Begrunnelsen står i koden ved testen.
+
+Nytt batteri `_cableGeometryRegressionTest` (24 påstander): var gyldig før → må være gyldig nå,
+dekning ikke dårligere, ugyldig utlegg MÅ være merket, ingen stille retningsbytte, og rektangel
+vannrett bit-identisk med før. Alle 22 batterier grønne.
+
+---
+
+## 069: kabelmotor — generateCableGeo, ny motor isolert bak bryter — 2026-10-13
+
+Gren `kabelmotor`. Kenneth sa ja til 068s arkitekturforslag. Ny motor
+`generateCableGeo(roomId, productId, opts)` ved siden av de fire gamle; **ikke** i kaskaden
+(det er 070). Bryter `S.ui.cableGeoEngine`, av som standard. Galleriet fikk `geo` som egen
+kolonne (168 rader nå).
+
+### Resultat, målt
+
+| | Kaskaden i dag | `generateCableGeo` |
+|---|---|---|
+| består alle harde krav | 5 av 28 | **13 av 28** |
+| bryter et hardt krav | **23 av 28** | **0 av 28** |
+| ærlig «ingen løsning» (spec §5) | 0 | 15 |
+
+Den viktigste egenskapen er den siste raden: motoren leverer **aldri** et ulovlig utlegg.
+Ytelse: median 13 ms per rom, maks 83 ms (mål: godt under 500 ms).
+
+**Kenneths bad vannrett: 47,00 m, avvik 0,00 %, CC 11,22, 0 kryssinger, 0 knekker, 0 cm utenfor
+lovlig område, minste klaring 11,22 cm.** Referansen (skew) hadde 203 cm utenfor og −2,03 %.
+
+### Fire ting STEG 0-modellen ikke forutså
+
+1. **Akseparallellhet må måles i grader.** Badets vegger bøyer 5,2 cm over 197 cm = 1,5°. En
+   cm-terskel kastet badet ut sammen med et ekte 18°-rotert rom. Grensen er nå 5°.
+2. **En celle må også deles ved TRINN i grensen**, ikke bare ved kritiske punkter. Uten det
+   havner badets smale bånd (190 cm forbi hakket) i samme celle som den brede delen (250 cm),
+   og like-lengde-utjevningen klipper hele rommet ned til 190 — målt 22,4 m der 46 m skulle vært.
+   Terskel: ett trinn større enn én CC.
+3. **Lengden er en SAGTANN i CC.** N er et heltall: på 400×300 med 96 m gir N=32 → 94,9 m og
+   N=33 → 97,8 m. 96,00 m finnes ikke for noen CC. Søket holder nå også den nærmeste
+   FOR LANGE kandidaten, siden bare den kan trimmes ned med inntrukne vendepunkter. Etter
+   fiksen: 96,00 m, avvik 0,00 %.
+4. **Celleovergangen må være en U-sving, ikke en L-formet omvei.** Første forsøk rutet
+   ortogonalt fra celle til celle; det beinet går tvers over løpenes ender og ga kryssing,
+   klaring 0 og skarpe knekker i hvert eneste flercelle-rom.
+
+### Hva den ikke løser — og hvorfor det er riktig
+
+Hindring midt i rommet (`enHindring`, `flereHindringer`, badet LODDRETT): cellene ligger som
+`0 < {1,2} < 3` langs tverraksen. En bane innom alle fire må ut i en endekolonne og tilbake,
+og tilbaketuren har ingen lovlig korridor. **Geometrisk kjensgjerning, ikke en kodemangel** —
+V6 «løste» det ved å tegne tvers over, som er feilen 068 målte.
+`_geoTrySplitTwo` PRØVER todelingen før den foreslås: begge gruppene rutes for seg, og bare når
+begge gir lovlig bane foreslås to kabler, med målte lengder og produkt i riktig størrelse
+(`enHindring` loddrett: 39,2 m + 39,2 m).
+
+### Åpent til 070/071
+
+- **Dekning er litt lavere enn kaskaden i noen rom** (badet vannrett 88,3 % mot skews 96,5 %;
+  rektangel vannrett 97,1 % mot 98,8 %) — prisen for like lange løp i hver celle. Merge-kriterium
+  §8.2 («ikke dårligere på hvert mål») må Kenneth ta stilling til.
+- `kabelForKort` godtas med CC 48,6 og 44 % dekning — lovlig etter `_ccLimits.maxHard` (50), men
+  ikke et godt utlegg. Hører hjemme i romtypens CC-grenser.
+- Transittkorridor for hindringsrom er mulig senere (som `leadRun` for flerkabel), men koster
+  dekning og bør være et bevisst valg.
+
+Alle 21 regresjonsbatterier grønne.
+
+---
+
+## 068: kabelmotor — geometrikontroll for harde krav, romgalleri, analyse — 2026-10-13
+
+Gren `kabelmotor` (worktree). Kenneth: «Jeg forstår ikke at kablene i bildet kan krysse
+hverandre, ha forskjellige CC-avstander og krysse vegger? Her er det brudd på minst tre
+harde regler.» Rom «Bad», 5,89 m², InFloor 17T 800W 47m.
+
+### STEG 0 (målt før kode)
+
+Badet ble funnet i skyen: **«Ekebergveien 28» → rom «Bad»**, 5,887 m². Geometri (11 punkter,
+ingen hindringer, ingen soner) kopiert inn som `_cableFixtures.badHakk`; prosjektet bare lest.
+
+| | Målt |
+|---|---|
+| Vertikalt (det ødelagte) | **V6** vinner. Skew prøves først og avvises: `openLen` 186,6 cm mot terskel 18,8 |
+| Horisontalt (det «perfekte») | **SKEW** vinner. CC 12,53 → 136 W/m² — nøyaktig Kenneths tall |
+| Hvorfor forskjellen | Hakket er 12 cm høyt. **Vertikalt** kutter det løpene → 3 celler. **Horisontalt** går hvert løp uavbrutt langs det → 1 celle |
+| v6/v, lagt vs. rapportert | 51,03 m tegnet, 46,99 m rapportert, 46,39 m i dekningen — **tre tall for samme kabel** |
+| v6/v, CC | 11,09 cm mellom de fleste løp, **22,18 cm** over en cellegrense |
+| v6/v, utenfor | 284 cm av banen utenfor lovlig område, verst 11,0 cm (gjennom hakket) |
+| skew/h, kantavstand | **0,83 cm** fra veggen der 5 cm kreves, over 213 cm — også i det «perfekte» utlegget |
+
+**Rotårsakene, med linje:**
+
+1. **Kabelen har ingen geometri i datamodellen.** `runs[]` er bare de rette løpene.
+   U-svinger og vegg-følge-linjer finnes bare i `_drawCableUTurns` (:32637, skjerm-
+   koordinater) og regnes om med *andre* formler i `_calcTotalCableLength` (bue = π·CC/2,
+   ikke den faktiske løpsavstanden) og `_cableWorldSegments` (hopper over vegg-følge-linjene
+   og `connections[]`). Derfor kunne ingen kontroll finnes, og derfor var feilen usynlig.
+2. **Hver celle sentrerer sitt eget rutenett** — `_v6SweepCell` :24702 `firstPos = pMin + sideM`.
+   Naboceller får ulik fase → CC over grensen blir hva som helst. Det er «halv CC».
+3. **Cellekoblingen kommer i TILLEGG til U-svingen.** `_v6ConnectCells` bygger `connections[]`,
+   men setter ikke `_chainBreaks`, så `_drawCableUTurns` tegner *også* halvsirkel + to rette
+   vegg-følge-linjer over samme cellegrense. To baner, åpne ender, kryssing.
+4. **Kantavstanden måles mot omsluttende rektangel, ikke polygonet** — `_skGenerateRotated`
+   :25418 (`bb.minX + margin`) og `_v6BuildHeatableArea` :24394. En skrå eller trappet vegg
+   ligger innenfor det rektangelet. Det er svingene «helt inntil den skrå veggen».
+5. **`_v6OptimizeLength` fase 3 tilordner lengden** (`totalLength_cm = targetLen_cm`) etter å ha
+   trimmet løpene — og `_tryFull(spacing, extraSweepMargin)` bruker aldri sitt andre argument,
+   så hele fase 2 er et søk som regner samme svar 25 ganger.
+
+### Bygget (leser bare — ingen motor og ikke kaskaden er rørt)
+
+- `_cableCenterlinePaths(cable)` — én ordnet senterlinje, tro mot rendereren, for begge former.
+- `_cableLegalRegion(roomId, productId)` — rom − kantavstand − hindringer − soner, ekte
+  polygon-offset med **clipper-lib@6.4.2** (spec §0.6), lastet lat fra CDN, fail-soft til
+  `_offsetPolygon` med `metrics.legalAreaApprox`.
+- `_cableGeometryCheck(cable, room)` → `{ ok, hard[], soft[], metrics }`. Harde: `utenfor`,
+  `kryssing`, `nærføring`, `bøy`, `lengde`, `cc`, `brudd`. Myke: `cc_variasjon`,
+  `kant_asymmetri`, `hopp`, `dekning`. Logger `[cable-check]` når `S.ui.debugCableEngine`.
+- `_cableFixtures` — 14 rom (spec §6), inkl. `badHakk`.
+- `_cableGalleryRun()` / `_cableGalleryExportHtml()` → `docs/kabel/galleri.html`, 140 rader
+  (14 rom × 2 retninger × kaskaden + 4 motorer), SVG med rød bane og blå ring på hvert brudd.
+- `serve-varmeplan.js`: `PORT` fra miljøet, og `POST /__write-galleri` (dev-server, skriver
+  nøyaktig den ene filen) — forhåndsvisningsruten blokkerer nedlastinger en side selv starter.
+
+### To målefeil funnet og rettet i kontrollen selv (ikke terskler)
+
+- Klaringssveipet hoppet over segmentpar «4 indekser fra hverandre». En U-sving tegnes som 24
+  punkter, så to prøver 4 fra hverandre i SAMME sving ligger 2,4 cm fra hverandre rent
+  geometrisk. Det ga `nærføring` i 117 av 140 utlegg — et rent rektangel med CC 12,4 inkludert.
+  Rettet til et fysisk vindu: banelengde mellom segmentene < π·CC/2 (én hel sving).
+- Første forsøk målte banelengden til segmentenes **midtpunkt**. Et 378 cm langt løp har
+  midtpunktet 189 cm fra sin egen skjøt, så to segmenter som deler endepunkt slapp gjennom og
+  ga klaring 0. Rettet til intervall-avstand (`s0`/`s1`).
+
+### Galleriet «før» — 14 ok, 113 feil, 13 ingen løsning av 140
+
+Harde brudd i alt: `lengde` 99 · `utenfor` 59 · `nærføring` 40 · `bøy` 34 · `brudd` 28 ·
+`kryssing` 21. Rene rektangler består (alle fem motorer, horisontalt). Alt med hakk, hindring
+eller passasje feiler. **Tersklene er ikke rørt for å gjøre galleriet grønt.**
+
+### Åpne spørsmål → `docs/kabel/prompter/SPØRSMÅL.md`
+
+Lengdetoleransen ±1 % (avgjør 99 av 140), om Kenneths horisontale referanse selv skal rettes,
+om `pathEls` (auto-bare) er greit, og om rettvinklede overganger skal regnes som hardt brudd.
+
+**STOPP** — 069 kjøres først når Kenneth har lest analysen og arkitekturforslaget
+(`docs/kabel/arkitektur.md`).
+
+---
+
+## 072: Kabelmotor — transittløp, løp som følger veggene, Kenneths fasit — 2026-10-13
+
+Gren `kabelmotor`, **ikke merget**. Kenneths håndtegnede fasit for badet
+(`docs/kabel/fasit/*.png`) er oppgaven; spec `docs/kabel/spec-kabelmotor.md`, status
+`docs/kabel/STATUS.md`.
+
+---
+
 ## 087: Trapp — mållinje (D) virker i trappmodulen og blir stående — 2026-10-15
 
 Kenneth: «Ønsker å kunne bruke målefunksjon (distanse) slik som for innendørs — i dag blir målet
@@ -225,6 +948,85 @@ Kortet til **«Kopier»** (etiketten som har stått der siden 028, med fullt nav
 `_kundelenkeRegressionTest` utvidet med seksjon **S** (23 påstander, 307 → 330): stubbet `_db`
 måler hva hver vei faktisk skriver, at `bekreftet` ≠ `trukket`, at skrivebeskyttet ikke åpner
 dialogen, og at loggtekstene skiller seg. **21 batterier grønne.**
+
+---
+
+| badHakk loddrett | **«ingen løsning»** — 4 soner, ingen lovlig kjede |
+| badHakk vannrett | gyldig, 47,00 m, 0,00 %, dekning **88,3 %** |
+| Hvorfor like lange løp? | `_geoBuildGrid` klippet hvert løp til cellens felles `[max(lo), min(hi)]` — CLAUDE.md «Equal-length runs (LOCKED)» |
+| Hva den regelen faktisk kostet | **0,1 %** vannrett, 0,7 % loddrett. Ikke der dekningen forsvant. |
+
+### Rotårsaken til «ingen løsning»
+
+Veggstubben deler de ni venstre løpene i to celler som ligger på **nøyaktig samme
+løpsposisjoner**, bare stablet oppå hverandre. En U-sving kobler to naboløp ved siden av
+hverandre — ikke to biter av samme løp. `_geoHandoff` svarte «samme løpsposisjon», og hele
+retningen falt. Det var ikke en geometrisk kjensgjerning, slik 071 antok; det var en manglende
+korridor.
+
+### Rettet
+
+- **Transittløp (lag D).** Én bane reserveres i det globale rutenettet: tverrløp langs
+  hindringens kant (én CC fra nærmeste sving, kantavstand til veggen) · sving rundt enden ·
+  nedløp i banen. Ikke et hopp, og ingen dispensasjon fra kontrollen. Søket prøver alltid uten
+  transitt først. Inntil to per utlegg.
+- **Løp som følger veggene.** Like-lengde-regelen er BEGRENSET til paret som møtes i en U-sving,
+  ikke hele cellen. Trinn-splitten står — uten den blir svingen en lang diagonal.
+- **Rutenettet når helt ut til kanten (lag C).** `N` er heltalls-knappen og `cc = W/(N−1)`, så
+  ytterste løp ligger PÅ det lovlige områdets grense i stedet for opptil en halv CC inne i det.
+- **Kabelen bærer rutenettets faktiske CC.** `spacing_cm` var kallerens ØNSKE; kontrollen brukte
+  det som dekningsradius og målte 10,93 der løpene lå 11,21 fra hverandre.
+- **Kontroll av lagrede utlegg ved åpning.** `_geomSjekkLagredeUtlegg()` fra `_restoreProject`
+  (det ene punktet alle lastinger går gjennom). Merker bare — endrer aldri geometri, markerer
+  aldri prosjektet som endret, utløser aldri autolagring. Banner når noe er merket.
+- **Galleriet** viser badet i tre kolonner: Kenneths tegning · fasiten bygget og kontrollert ·
+  motoren.
+
+### Resultat
+
+| | før 072 | etter |
+|---|---|---|
+| Galleriet (kaskaden) | 20 ok / 8 feil | **22 ok / 6 feil** |
+| badHakk loddrett | ingen løsning | **47,24 m, +0,51 %, CC 11,60, dekning 92,7 %, 1 transitt** |
+| badHakk vannrett | 88,3 % | 88,5 % |
+| `enHindring` v/h | ⚠ begge | **ok 94,2 % / 91,8 %**, én kabel via transitt |
+
+### Fasiten, bygget og kontrollert
+
+**Loddrett består** — og er numerisk identisk med det motoren legger.
+**Vannrett faller på lengden alene:** formen rommer 48,83 m (+3,9 %) der produktet har 47,00.
+Alt annet er rent (0 utenfor, 0 kryssinger, dekning 92,1 %). Nærmeste lovlige variant er samme
+form med vendepunktene trukket symmetrisk inn — det er nøyaktig det motoren gjør, og det koster
+3,6 prosentpoeng dekning.
+
+### Dekningsmålet ≥ 93 % er ikke oppnåelig vannrett
+
+Dekning har et aritmetisk tak: en slynge med lengde L og avstand CC dekker høyst `L × CC`. Med
+47,00 m i 5,887 m² kreves CC ≥ 11,65 cm for 93 %. Vannrett kan rutenettet bare tilby 11,21 (19
+løp) eller 11,87 (18 løp), og 18 løp gir 44,31 m — 5,7 % for kort. Kenneths egen vannrette fasit
+lander på 92,1 %, med 3,9 % for mye kabel. Loddrett når 92,7 % mot et tak på 93,1 %.
+
+### To funn utover oppgaven
+
+- **Rent rektangel vannrett bytter motor.** Kant-rutenettet gjorde ny motor dominerende også der:
+  CC 12,40 → 12,60, dekning 98,8 → 99,5 %, lengdeavvik −0,94 → −0,91 %, klaring og bøyeradius
+  begge opp. Påstanden i regresjonstesten er endret fra «identisk utlegg som før» til «identisk
+  ELLER bedre på hvert mål». **Må godkjennes før merge.**
+- **CLAUDE.md må oppdateres ved merge.** «Equal-length runs (LOCKED)» stemmer ikke lenger for
+  `generateCableGeo`. Endringen er gjort på Kenneths eksplisitte beslutning 2.
+
+### Målefelle
+
+Tegningene ble lest med **pikselprobe**, ikke anslått: kartlegg cyan romkontur → to
+referansepunkter → skala 3,988 px/cm, og les rødt per rad. Det var slik det ble bekreftet at
+Kenneths loddrette fasit har to CC mellom løpene over stubben (778 og 801, med bane ~790 tom) —
+altså at han selv ofrer en bane til transitten. Et øyemål på det nedskalerte bildet hadde ikke
+skilt 1 CC fra 2 CC.
+
+### Verifisering
+
+`_cableGeometryRegressionTest` utvidet 24 → **36 påstander**. **22 batterier grønne.**
+Galleriet regenerert: 170 rader.
 
 ---
 

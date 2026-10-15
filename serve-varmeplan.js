@@ -1,9 +1,10 @@
 const http = require('http');
+const START_ISO = new Date().toISOString();
 const fs = require('fs');
 const path = require('path');
 
 const FILE = path.join(__dirname, 'index.html');
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 
 const MIME = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.css': 'text/css' };
 const DEV_AUTH_FILE = path.join(__dirname, '.dev-auth.json');
@@ -18,6 +19,37 @@ http.createServer((req, res) => {
     });
     return;
   }
+  // 068 (kabelmotor): skrive-endepunkt for romgalleriet. Nettleseren kan ikke laste ned filer
+  // i forhandsvisningsruten, og galleriet (docs/kabel/galleri.html) skal kunne regenereres med
+  // EN kommando i 069/070. Derfor: POST /__write-galleri skriver NOYAKTIG den ene filen, ingen
+  // annen sti er mulig. Dette er dev-serveren - den deployes ikke (vercel.json serverer index.html).
+  if (req.method === 'POST' && req.url === '/__write-galleri') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const target = path.join(__dirname, 'docs', 'kabel', 'galleri.html');
+      fs.mkdir(path.dirname(target), { recursive: true }, () => {
+        fs.writeFile(target, Buffer.concat(chunks), err => {
+          res.writeHead(err ? 500 : 200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+          res.end(JSON.stringify(err ? { ok: false, error: err.message } : { ok: true, bytes: Buffer.concat(chunks).length, path: 'docs/kabel/galleri.html' }));
+        });
+      });
+    });
+    return;
+  }
+
+  // 088: byggstempel. Kenneth og jeg brukte tre runder paa aa lete etter en feil som viste seg
+  // aa vaere «ser du paa ny eller gammel kode?». Dette gjoer det til et blikk i statuslinja.
+  if (req.url === '/__build.json') {
+    const { execSync } = require('child_process');
+    const g = (c) => { try { return execSync(c, { cwd: __dirname }).toString().trim(); } catch (e) { return '?'; } };
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ branch: g('git rev-parse --abbrev-ref HEAD'),
+                             hash: g('git rev-parse --short HEAD'),
+                             started: START_ISO }));
+    return;
+  }
+
   const ext = path.extname(req.url).toLowerCase();
   if (ext && MIME[ext]) {
     const filePath = path.join(__dirname, decodeURIComponent(req.url));
