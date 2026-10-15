@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 083 — R-START: kabelen starter i valgt hjørne (15.10.2026, gren `kabelmotor`) — DELVIS
+
+Ny låst regel (spec §0.9): kabelens tilkoblingsende ligger ≤ 40 cm fra det hjørnet
+retningsvelgeren peker på, og regelen slår dekning, fasit-CC og om nødvendig valgt retning.
+
+- v6 ut av motorkonkurransen, skew beholdt (målt: v6 vant 6 ganger, alle seks ugyldige).
+- Én hjørnedefinisjon for alle motorer; hjørnet er et FILTER på kaskadenivå, ikke et poeng.
+- Hjørnerunde ned CC-stigen med paritetsvarianter; dekningsvakten fra 082 fjernet.
+- Retningsfallback + panellinjer (⚠ når hjørnet er umulig, med avstand og grunn).
+
+Treff på valgt hjørne: 43 → 68 av 128 kombinasjoner.
+
+⚠ TO ÅPNE PUNKTER, se STATUS §23: regresjonssuiten er 177 s mot kravet 40 s (hjørnerunden må inn
+i hovedsøket, ikke etter det), og R-START kan ikke gjelde samtidig som 076-fasiten for Rom 5
+loddrett `tr` — loddrett kan ikke starte oppe til høyre i det rommet. Begge trenger Kenneths svar.
+
 ## 082 — ett løp mindre flytter starten til hjørnet (15.10.2026, gren `kabelmotor`)
 
 Ny paritetsvariant: ytterste bane fjernes fra én celle, aldri en inne i cellen. Det flipper

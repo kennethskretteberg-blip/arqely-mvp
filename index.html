@@ -26590,23 +26590,30 @@ function _cableStatusLines(cable, room) {
   // ⚠ Nivå `ok`, ikke `advarsel`: ingenting er galt med utlegget, og `_cableStatusToast` siler
   // bort `ok` — dette er en opplysning i panelet, ikke en toast på hvert eneste utlegg.
   // Lagt til ETTER ok-linja over, så «● ok · dekning» ikke forsvinner av at denne finnes.
+  // ─── 083 · R-START SIER ALLTID FRA ───────────────────────────────────────────────────────
+  // Aldri et stille avvik mellom velgeren og tegningen. To tilfeller, to nivåer:
+  //   · retningen ble byttet for å nå hjørnet  → `ok` (ingenting er galt, men det skal stå)
+  //   · hjørnet er ikke mulig i det hele tatt  → `advarsel` (⚠, ikke `ok` som i 080/081 —
+  //     Kenneth skal SE den; Godkjenn virker fortsatt)
   {
     const hj = { bl: 'nede til venstre', br: 'nede til høyre',
                  tl: 'oppe til venstre', tr: 'oppe til høyre' };
-    const feilKvadrant = cable._startCornerActual && cable.startCorner
-                      && cable._startCornerActual !== cable.startCorner;
-    // 081: også når kvadranten stemmer kan starten ligge langt fra hjørnet. Serpentinens to
-    // ender er låst av paritet: kommer kabelen inn i et felt med PARTALL baner, må den ut i
-    // samme ende den kom inn. Da er 80 cm fra hjørnet det nærmeste som finnes.
-    const langtUnna = !feilKvadrant && cable._startCornerOffCm != null && cable._startCornerOffCm > 40;
-    if (feilKvadrant) {
+    const navnR = d => d === 'v' ? 'Loddrett' : 'Vannrett';
+    const cf = cable._cornerFallback;
+    const bommer = cable._startCornerOffCm != null && cable._startCornerOffCm > 40;
+    if (cf) {
       ut.push({ niva: 'ok',
-        tekst: 'Start: ' + (hj[cable._startCornerActual] || '?') + ' — '
-             + (hj[cable.startCorner] || '?') + ' er ikke mulig i dette rommet.' });
-    } else if (langtUnna) {
-      ut.push({ niva: 'ok',
-        tekst: 'Start: ' + cable._startCornerOffCm + ' cm fra ' + (hj[cable.startCorner] || '?')
-             + ' — nærmere er ikke mulig med dette utlegget.' });
+        tekst: navnR(cf.wanted) + ' kan ikke starte ' + (hj[cable._startCornerWanted] || '?')
+             + ' i dette rommet — vist ' + navnR(cf.used).toLowerCase() + ' med start i hjørnet.',
+        handling: { tekst: 'Behold ' + navnR(cf.wanted).toLowerCase()
+                         + ' (start ' + cf.keptOffCm + ' cm unna)', kind: 'behold-retning' } });
+    } else if (bommer) {
+      const grunn = (cable._geoTransits > 0 || (cable._geoCells || 0) > 2)
+        ? ' (grunn: transitten bruker den enden)' : '';
+      ut.push({ niva: 'advarsel',
+        tekst: '⚠ Start kan ikke ligge ' + (hj[cable._startCornerWanted] || '?')
+             + ' i dette rommet — nærmeste er ' + cable._startCornerOffCm + ' cm unna' + grunn + '.',
+        handling: { tekst: 'Velg annet hjørne', kind: 'velg-hjorne' } });
     }
   }
   return ut;
@@ -28863,7 +28870,9 @@ function generateCableGeo(roomId, productId, opts) {
 
   // Ett forsøk: bygg rutenett, rut, bygg senterlinje, kontrollér. Returnerer {cable, chk} eller null.
   const attempt = (dir, cc, extraSweep) => {
-    let best = null, bestScore = -Infinity;
+    // 083 · R-START er et FILTER også her: finnes en gyldig kandidat som starter i hjørnet,
+    // returneres den — uansett hvor mye bedre en bommende kandidat scorer på dekning.
+    let best = null, bestScore = -Infinity, treff = null, treffScore = -Infinity;
     const grids = gridsFor(dir, cc, extraSweep, true);
     if (!grids.length) return null;
     for (let gi = 0; gi < grids.length; gi++) {
@@ -28888,12 +28897,15 @@ function generateCableGeo(roomId, productId, opts) {
                                     nCells: grid.cells.length, hull })
                  - 0.5 * ((grid.transits || []).length);   // ren avgjørelse ved likt, ikke straff
         if (sc > bestScore) { bestScore = sc; best = { cable, chk, grid, score: sc }; }
+        if (_cableHitsCorner(cable, room, wantCorner) && sc > treffScore) {
+          treffScore = sc; treff = { cable, chk, grid, score: sc };
+        }
       }
       // 074b: IKKE bryt ut på første rutenett med en gyldig kandidat. Den kappede og den
       // fjernede transitt-varianten er begge gyldige i noen rom, og det er poengsummen — med
       // båndhull-straffen — som skal avgjøre, ikke rekkefølgen de ble bygget i.
     }
-    return best;
+    return treff || best;                       // 083 · R-START foran alt annet enn harde krav
   };
 
   // ─── Lag F · Lengdesøk ────────────────────────────────────────────────────────────────────
@@ -29039,34 +29051,74 @@ function generateCableGeo(roomId, productId, opts) {
     if (bestR && bestR.score > winnerScore) { winnerScore = bestR.score; winner = bestR; }
   }
 
-  // ─── 082 · PARITETSRUNDEN: ETT LØP MINDRE FOR Å TREFFE HJØRNET ────────────────────────────
-  // Kenneth 15.10.2026: «ta ett løp mindre i øvre felt.»
+  // ─── 083 · HJØRNERUNDEN: SØKET GIR IKKE OPP FØR DET HAR LETT ETTER HJØRNET ───────────────
+  // Bommer vinneren, letes det på nytt — ned hele CC-stigen, med paritetsvarianter i ALLE
+  // celler. Aksepttesten er R-START-rekkefølgen: gyldig, lengde ±1 %, start ≤ 40 cm.
   //
-  // Boustrophedon: har en celle et PARTALL baner, kommer kabelen ut i samme ende den kom inn.
-  // Det er derfor loddrett utlegg startet 83 cm nede på veggen med «øvre venstre» valgt.
-  // Ett løp mindre gir oddetall, og utgangen flipper.
-  //
-  // ⚠ KJØRER BARE PÅ VINNERENS EGEN CC, og det er en målt beslutning. Først lette runden
-  // nedover hele CC-stigen med trimming. Den fant flere hjørner — men:
-  //   · Rom 5 mistet Kenneths egen fasit-CC (13,2 → 12,62),
-  //   · badHakk falt fra 92 til 89,7 % dekning,
-  //   · regresjonssuiten gikk fra 14 s til over 100 s.
-  // Runden kjøpte altså hjørnet ved å forringe utlegg Kenneth har godkjent, og betalte i fart.
-  // Her flyttes bare STARTEN: samme CC, samme lengde, og bare hvis dekningen ikke faller.
-  // Hjelper det ikke, står starten der den står og panelet oppgir avstanden i cm.
-  if (winner && winner.cable._startCornerOffCm > 40) {
-    const off = winner.cable._startCornerOffCm;
+  // ⚠ Dekningsvakten og «samme CC»-kravet fra 082 er FJERNET her, med vilje. De var nettopp
+  // det Kenneth har sagt skal tape: «start kabel følger retningsvelgeren, den må vinne over
+  // dekning». 082 lot fasit-CC og dekning blokkere hjørnet; 083 snur det.
+  // Blant flere som treffer: færrest hull, så høyest dekning, så nærmest utgangs-CC.
+  // ⚠ Bare når vinneren FAKTISK er gyldig: er den ikke det, er problemet et hardt krav, og
+  // hjørnet er uansett underordnet (R-START står etter harde krav). Målt: uten denne vakten
+  // brukte `skraa` og `kabelForKort` opptil 3,5 s på å lete etter et hjørne i et utlegg som
+  // aldri kunne bli gyldig.
+  // ⚠ MÅLT: retningsfallbacken kjører et HELT nytt søk i den andre retningen, og når det søket
+  // også kjørte hjørnerunden, gikk regresjonssuiten til 96 s (grensen er 40). Alt-retningen
+  // trenger ikke runden: den brukes bare hvis den treffer hjørnet av seg selv.
+  if (winner && winner.chk.ok && targetCm && !opts.noCornerRound
+      && !_cableHitsCorner(winner.cable, room, wantCorner)) {
+    const dir = winner.cable.direction, cc0 = winner.cable.spacing_cm;
     _parityOn = true;
     try {
-      const r = attempt(winner.cable.direction, winner.cable.spacing_cm, winner.cable._extraSweep || 0);
+      let budsjett = 40;                       // arbeidsbudsjett, ikke klokke (deterministisk)
+      const pLen = (d, cc2, ex2) => (budsjett-- <= 0 ? null : jevnLen(d, cc2, ex2));
+      // ⚠ MÅLT: med full stige og ingen tidlig avslutning brukte det verste rommet 3,8 s, over
+      // grensen på 1,5 s. Kuttet er valgt så det ikke koster kvalitet: et hullfritt treff er
+      // allerede toppen av sorteringen under, så det er ingenting igjen å lete etter.
+      const treff = [];
       const deknFor = winner.chk.metrics.coveragePct || 0;
-      const avvikFor = Math.abs(winner.chk.metrics.lenDevPct || 0);
-      if (r && !(r.cable._geoHoles > 0)
-          && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct
-          && Math.abs(r.chk.metrics.lenDevPct || 0) <= avvikFor + 0.1
-          && (r.chk.metrics.coveragePct || 0) >= deknFor - 0.1
-          && r.cable._startCornerOffCm != null
-          && r.cable._startCornerOffCm <= off - 30) { winner = r; winnerScore = r.score; }
+      let ferdig = false;
+      for (let st = 0; st <= 5 && budsjett > 0 && !ferdig; st++) {
+        const cc = st === 0 ? cc0 : ccHi - (ccHi - ccLo) * st / 5;
+        if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+        const len = pLen(dir, cc, 0);
+        let ex = 0;
+        if (len != null && len > targetCm) {
+          let exLo = 0, exHi = Math.max(5, cc * 3), gotDiff = Math.abs(len - targetCm);
+          for (let it = 0; it < 14 && budsjett > 0; it++) {
+            const e = (exLo + exHi) / 2;
+            const m2 = pLen(dir, cc, e);
+            if (m2 == null) { exHi = e; continue; }
+            const d2 = m2 - targetCm;
+            if (Math.abs(d2) < gotDiff) { gotDiff = Math.abs(d2); ex = e; }
+            if (d2 > 0) exLo = e; else exHi = e;
+            if (Math.abs(exHi - exLo) < 1e-3) break;
+          }
+        }
+        for (const e of (ex ? [ex, 0] : [0])) {
+          const r = attempt(dir, cc, e);
+          if (r && r.chk.ok
+              && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct
+              && _cableHitsCorner(r.cable, room, wantCorner)) {
+            treff.push(r);
+            // ⚠ MÅLT: å stoppe på FØRSTE hullfrie treff ga Rom 5 vannrett `tr` et utlegg med
+            // 73,9 % dekning der et senere trinn hadde 91 %. R-START vinner over dekning, men
+            // den skal ikke kaste bort dekning i unødvendig — så letingen fortsetter med
+            // mindre treffet også er omtrent like godt dekket som utgangspunktet.
+            if (!(r.cable._geoHoles > 0)
+                && (r.chk.metrics.coveragePct || 0) >= deknFor - 3) ferdig = true;
+            break;
+          }
+        }
+      }
+      if (treff.length) {
+        treff.sort((a, b) =>
+          (a.cable._geoHoles || 0) - (b.cable._geoHoles || 0)                      // færrest hull
+          || (b.chk.metrics.coveragePct || 0) - (a.chk.metrics.coveragePct || 0)   // så dekning
+          || Math.abs(a.cable.spacing_cm - cc0) - Math.abs(b.cable.spacing_cm - cc0)); // så nærmest utgangs-CC
+        winner = treff[0]; winnerScore = treff[0].score;
+      }
     } finally { _parityOn = false; }
   }
 
@@ -29129,11 +29181,9 @@ function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
   // FAKTISKE hjørnet og dermed kan foretrekke en rute som virkelig starter der.
   {
     const rm = S.rooms.find(r => r.id === roomId);
-    if (rm && rm.points && rm.points.length >= 3 && pts.length > 1) {
-      const xs = rm.points.map(p => p.x), ys = rm.points.map(p => p.y);
-      const hx = (startCorner === 'br' || startCorner === 'tr') ? Math.max(...xs) : Math.min(...xs);
-      const hy = (startCorner === 'tl' || startCorner === 'tr') ? Math.max(...ys) : Math.min(...ys);
-      const d = p => Math.hypot(p.x - hx, p.y - hy);
+    const h = _cableCornerPoint(rm, startCorner);                     // 083: samme hjørnepunkt
+    if (h && pts.length > 1) {
+      const d = p => Math.hypot(p.x - h.x, p.y - h.y);
       if (d(pts[pts.length - 1]) < d(pts[0])) pts = pts.slice().reverse();
     }
   }
@@ -29155,17 +29205,11 @@ function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
     // rutens to ender er gitt av geometrien, og noen ganger finnes ikke det valgte hjørnet.
     startCorner,
     _startCornerActual: _geoCornerOf(pts[0], S.rooms.find(r => r.id === roomId)),
-    // 081: hvor langt fra det valgte hjørnet starten faktisk havnet, i cm. Kvadranten alene er
-    // for grov til å si fra om: på Rom 5 loddrett lå starten 81 cm fra «øvre venstre» og ble
-    // likevel målt som samme kvadrant.
-    _startCornerOffCm: (() => {
-      const rm = S.rooms.find(r => r.id === roomId);
-      if (!rm || !rm.points || rm.points.length < 3) return null;
-      const xs = rm.points.map(p => p.x), ys = rm.points.map(p => p.y);
-      const hx = (startCorner === 'br' || startCorner === 'tr') ? Math.max(...xs) : Math.min(...xs);
-      const hy = (startCorner === 'tl' || startCorner === 'tr') ? Math.max(...ys) : Math.min(...ys);
-      return Math.round(Math.hypot(pts[0].x - hx, pts[0].y - hy));
-    })(),
+    // 083: ÉN hjørnedefinisjon for alle motorer — `_cableStartCornerOffCm`, som måler til
+    // rommets eget hjørnepunkt, ikke til den ytre rammens hjørne (som i et L-rom kan ligge
+    // utenfor rommet). Her sto en egen innebygd variant som målte til rammen.
+    _startCornerOffCm: _cableStartCornerOffCm(
+      { start: pts[0] }, S.rooms.find(r => r.id === roomId), startCorner),
     spacing_cm: cc,
     cc_mm: Math.round(cc * 10),
     totalLength_cm: Math.round(len * 10) / 10,
@@ -29265,6 +29309,37 @@ function _geoNoSolution(room, prod, roomId, productId, legal, ctx) {
 //
 // Poengsummen er bevisst grov og leksikografisk i praksis: gyldig slår ugyldig med 1000 poeng,
 // så ingen kombinasjon av dekning og lengde kan løfte et ulovlig utlegg over et lovlig.
+// ═══ 083 · R-START — KABELEN STARTER I DET HJØRNET VELGEREN PEKER PÅ ═══════════════════════
+// Kenneth 15.10.2026: «Det må være en låst regel at start kabel følger retningsvelgeren. Den må
+// vinne over dekning på varmekabel.»
+//
+// Rekkefølgen når mål står mot hverandre (låst, spec §0.9):
+//   1. harde krav  2. R-START  3. valgt retning  4. jevn CC  5. dekning  6. fasit-CC
+//
+// Hjørnet er rommets EGET hjørnepunkt nærmest velgerens hjørne av den ytre rammen — ikke
+// rammens hjørne, som i et L-rom kan ligge utenfor rommet.
+const _R_START_CM = 40;
+function _cableCornerPoint(room, corner) {
+  if (!room || !room.points || room.points.length < 3) return null;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const bx = (corner === 'br' || corner === 'tr') ? Math.max(...xs) : Math.min(...xs);
+  const by = (corner === 'tl' || corner === 'tr') ? Math.max(...ys) : Math.min(...ys);  // topp = størst y
+  let best = room.points[0], bd = Infinity;
+  for (const p of room.points) { const d = Math.hypot(p.x - bx, p.y - by); if (d < bd) { bd = d; best = p; } }
+  return best;
+}
+// Avstanden fra kabelens TILKOBLINGSENDE til det hjørnet. Én funksjon for alle motorer.
+function _cableStartCornerOffCm(cable, room, corner) {
+  if (!cable || !cable.start) return null;
+  const h = _cableCornerPoint(room, corner || (S.varmefolie && S.varmefolie.startCorner) || 'bl');
+  if (!h) return null;
+  return Math.round(Math.hypot(cable.start.x - h.x, cable.start.y - h.y));
+}
+function _cableHitsCorner(cable, room, corner) {
+  const d = _cableStartCornerOffCm(cable, room, corner);
+  return d != null && d <= _R_START_CM;
+}
+
 function _cableCandidateScore(chk) {
   if (!chk || !chk.metrics) return -Infinity;
   const m = chk.metrics;
@@ -29288,6 +29363,16 @@ function _cableCandidateScore(chk) {
 //   · begge ugyldige                           → den med færrest harde brudd, så poeng
 // Målt: et rent rektangel beholder dagens boustrophedon (dekning 98,8 % mot 97,1 %), mens
 // asymmetriske vegger bytter til ny motor (93,9 % mot 81,1 %, og bedre lengde).
+// 083: R-START er et FILTER, ikke et poeng. Finnes minst én gyldig kandidat som starter i
+// hjørnet, velges vinneren bare blant dem — uansett dekning, CC eller motor. Det gjelder også
+// dominans-testen under: en motor som bommer kan ikke vinne over en som treffer.
+function _cableFilterByCorner(cands, room, corner) {
+  if (!cands || !cands.length || !room) return cands;
+  const gyldige = cands.filter(c => c.chk && c.chk.ok);
+  const treff = gyldige.filter(c => _cableHitsCorner(c.cable, room, corner));
+  return treff.length ? treff : cands;
+}
+
 function _cablePickWinner(cands) {
   if (!cands || !cands.length) return null;
   const geo = cands.find(c => c.source === 'geo');
@@ -29335,7 +29420,9 @@ function _cableCandidatesForDirectionImpl(roomId, productId, opts, dir, room, ou
   // Ny motor: returnerer enten et kabelobjekt eller et strukturert «ingen løsning» (spec §5).
   let geoNo = null;
   try {
-    const g = generateCableGeo(roomId, productId, dir ? { direction: dir, startCorner: S.varmefolie.startCorner } : {});
+    const g = generateCableGeo(roomId, productId,
+      Object.assign(dir ? { direction: dir, startCorner: S.varmefolie.startCorner } : {},
+                    (opts && opts.noCornerRound) ? { noCornerRound: true } : {}));
     if (g && g.ok === false) geoNo = g;
     else if (g) {
       const chk = _cableGeometryCheck(g, room);
@@ -29343,11 +29430,23 @@ function _cableCandidatesForDirectionImpl(roomId, productId, opts, dir, room, ou
     }
   } catch (e) { if (S.ui && S.ui.debugCableEngine) console.warn('[cable-070] geo feilet', e); }
   // Dagens kaskade.
+  // ─── 083 · V6 UT AV KONKURRANSEN, SKEW BEHOLDES ─────────────────────────────────────────
+  // ⚠ MÅLT over 16 fixturer × 2 retninger (STATUS §21): geo vant 24 og alle 24 var gyldige,
+  // skew vant 2 og begge var gyldige (roterte rom, som geo ikke tar), v6 vant 6 og **alle seks
+  // var UGYLDIGE**. v6 vinner bare der ingen motor har et gyldig svar, og tegner da noe som ser
+  // plausibelt ut i stedet for at `_geoNoSolution` får si «ingen løsning» med grunn og forslag.
+  // Det er nøyaktig feilmodusen bak Rom 5-hendelsen i §14. Kenneth 15.10.2026: «ta v6 ut,
+  // behold skew.»
+  // ⚠ Kaskaden er IKKE fjernet — `_autoFillCableLegacy` er fortsatt fail-open-veien for soner,
+  // tvungen CC og manglende geometrikontroll. Den er bare tatt ut av KONKURRANSEN her.
   try {
     const l = _cableLegacyInDirection(roomId, productId, opts, dir);
     if (l) {
-      const chk = _cableGeometryCheck(l, room);
-      out.push({ cable: l, chk, score: _cableCandidateScore(chk), source: l._engine || 'kaskade', dir });
+      const motor = l._engine || 'kaskade';
+      if (motor === 'skew') {
+        const chk = _cableGeometryCheck(l, room);
+        out.push({ cable: l, chk, score: _cableCandidateScore(chk), source: motor, dir });
+      }
     }
   } catch (e) { if (S.ui && S.ui.debugCableEngine) console.warn('[cable-070] kaskade feilet', e); }
   out.sort((a, b) => b.score - a.score);
@@ -29385,9 +29484,11 @@ function _autoFillCableImpl(roomId, productId, opts) {
   // (den prøver allerede begge internt) og gir ny motor begge retninger å velge mellom.
   const primary = dirExplicit ? userDir : null;
 
+  const wantCorner = vf.startCorner || 'bl';
   let { cands, geoNo } = _cableCandidatesForDirection(roomId, productId, opts, primary, room);
-  let best = _cablePickWinner(cands);
+  let best = _cablePickWinner(_cableFilterByCorner(cands, room, wantCorner));   // 083 · R-START
   let fallback = null;
+  let cornerFallback = null;
 
   // Valgt retning gir ikke noe gyldig utlegg, men den andre gjør det → legg ut den gyldige,
   // og SI DET. Aldri et stille retningsbytte (det er Kenneths bad: loddrett går ikke, vannrett
@@ -29395,11 +29496,27 @@ function _autoFillCableImpl(roomId, productId, opts) {
   if (!(best && best.chk.ok) && dirExplicit) {
     const other = userDir === 'v' ? 'h' : 'v';
     const alt = _cableCandidatesForDirection(roomId, productId, opts, other, room);
-    const altBest = _cablePickWinner(alt.cands);
+    const altBest = _cablePickWinner(_cableFilterByCorner(alt.cands, room, wantCorner));
     if (altBest && altBest.chk.ok) {
       fallback = { wanted: userDir, used: other,
         reason: (geoNo && geoNo.reason) || 'Retningen gir ikke et gyldig utlegg i dette rommet.',
         rejected: cands.length ? cands[0] : null };
+      best = altBest;
+    }
+  }
+
+  // ─── 083 · TREFFER IKKE VALGT RETNING HJØRNET, MEN DEN ANDRE GJØR DET? ──────────────────
+  // R-START står FORAN valgt retning (spec §0.9 pkt 2 mot 3). Treffer den andre retningen
+  // hjørnet, legges den ut — men velgeren står fortsatt på Kenneths valg (074-regelen), og
+  // panelet sier det i én linje med en vei tilbake. Ingen dialog, ingen toast.
+  if (best && best.chk.ok && dirExplicit && !_cableHitsCorner(best.cable, room, wantCorner)) {
+    const other = userDir === 'v' ? 'h' : 'v';
+    const alt = _cableCandidatesForDirection(roomId, productId,
+      Object.assign({}, opts, { noCornerRound: true }), other, room);
+    const altBest = _cablePickWinner(_cableFilterByCorner(alt.cands, room, wantCorner));
+    if (altBest && altBest.chk.ok && _cableHitsCorner(altBest.cable, room, wantCorner)) {
+      cornerFallback = { wanted: userDir, used: other,
+                         keptOffCm: _cableStartCornerOffCm(best.cable, room, wantCorner) };
       best = altBest;
     }
   }
@@ -29426,6 +29543,10 @@ function _autoFillCableImpl(roomId, productId, opts) {
   if (fallback) {
     cable._dirFallback = { wanted: fallback.wanted, used: fallback.used, reason: fallback.reason };
   }
+  // 083: fakta på kabelen — panelet sier det, ingen beskjed herfra (074).
+  cable._startCornerWanted = wantCorner;
+  cable._startCornerOffCm = _cableStartCornerOffCm(cable, room, wantCorner);
+  if (cornerFallback) cable._cornerFallback = cornerFallback;
   room._cableNoSolution = (!chosen.chk.ok && geoNo) ? geoNo : null;
   // 074: forslaget regnes på VINNERENS dekning, ikke på en kandidat som tapte.
   // ⚠ Målt: `_finishCableAutoFill` kjører bare inne i den GAMLE kaskaden, og dens formel leser

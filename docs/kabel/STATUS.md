@@ -1033,3 +1033,69 @@ enden ligger 22 cm fra hjørnet, men der svinger kabelen videre; den er ikke fri
 
 **Vannrett klarer det derimot:** `bl` gir start (695, −1035) — **18 cm fra hjørnet**, 41,00 m,
 0 hull. Vil man ha starten nede til venstre i dette rommet, er vannrett veien.
+
+---
+
+## §23 · 083 — R-START: start i valgt hjørne. DELVIS FERDIG, to åpne punkter.
+
+### STEG 0.1 — hvorfor S lå nede til venstre i skjermbildet
+
+**Ingenting snur kabelen i dag.** Målt gjennom hele kjeden — `generateCableGeo` →
+`_autoFillCableImpl` → `_cablePreviewPlace` → GODKJENN — er `start` = (697, −841) og
+`end` = (695, −1035), uendret i hvert ledd. `_cableEndpoints` returnerer `cable.start`/`end`
+rått for geo-kabler, så merkene tegnes der motoren sa.
+
+Uten 080-snuingen ville `start` vært `pts[0]` = (695, −1035), altså **nede til venstre —
+nøyaktig skjermbildet**. Skjermbildet er fra kode før 080. Dagens feil er en annen og større:
+**ingen av endene er i nærheten av valgt hjørne** (281 og 346 cm fra øvre høyre).
+
+### STEG 0.2 — 128 kombinasjoner (16 fixturer × 2 retninger × 4 hjørner)
+
+| | før (e5127f6) | etter 083 |
+|---|---|---|
+| treffer hjørnet (≤ 40 cm) | **43** | **68** |
+| bommer | 61 | 36 |
+| ingen løsning | 24 | 24 |
+| motorer som vant | geo 55, skew 6, **v6 6 (alle ugyldige)** | geo 96, skew 8, **v6 0** |
+
+### Bygget
+
+* **v6 ut av konkurransen, skew beholdt** (`_cableCandidatesForDirectionImpl`). Kaskaden er
+  ikke fjernet — `_autoFillCableLegacy` er fortsatt fail-open for soner, tvungen CC og manglende
+  geometrikontroll.
+* **Én hjørnedefinisjon for alle motorer**: `_cableCornerPoint` / `_cableStartCornerOffCm` /
+  `_cableHitsCorner`. `_geoMakeCable` bruker den nå både til orientering og til `_startCornerOffCm`.
+* **R-START som filter**, ikke poeng: `_cableFilterByCorner` på kaskadenivå, og `treff || best`
+  inne i geos `attempt`.
+* **Hjørnerunden**: bommer vinneren, letes det ned CC-stigen med paritetsvarianter. Dekningsvakten
+  og «samme CC»-kravet fra 082 er fjernet — de var nettopp det Kenneth sa skulle tape.
+* **Retningsfallback for hjørnet** + panellinjer (`ok` ved retningsbytte, **⚠ advarsel** når
+  hjørnet er umulig, med avstand og grunn).
+
+### ⚠ ÅPENT 1 — regresjonssuiten er 177 s, kravet er 40 s
+
+Kuttene jeg gjorde (arbeidsbudsjett 40 lengdemålinger, stige 5 trinn, tidlig avslutning på
+hullfritt treff, hjørnerunden av for alt-retningen, runden kjører bare når vinneren er gyldig)
+holdt ikke. Årsaken er strukturell, ikke en innstilling: **hjørnerunden er et nytt, nesten
+fullstendig CC-søk som kjører etter hovedsøket**, og i batteriet bommer de fleste utlegg på
+hjørnet. Riktig løsning er å gjøre hjørnet til en betingelse **inne i** hovedsøkets CC-løkke
+(la `fastLen`/bisekssjonen styre mot trinn som gir hjørnetreff) i stedet for et etter-søk.
+Det er en omskriving av lengdesøket, ikke en justering. **Ikke gjort.**
+
+### ⚠ ÅPENT 2 — R-START og 076-fasiten kan ikke begge gjelde for Rom 5 loddrett `tr`
+
+Oppdraget krever både at «Rom 5 / 700W / loddrett / `tr` skal være uendret: CC 13,2, start oppe
+til høyre» og at R-START gjelder. Målt: **loddrett kan ikke starte oppe til høyre i Rom 5.**
+Rommets øvre høyre hjørnepunkt er (938,6, −836,1) (trinnet), og loddrett-rutens ender er
+(972, −1028) og (695, −917) — 195 og 231 cm unna. Under R-START bytter motoren derfor til
+vannrett, og fasiten brytes.
+
+Dette er en motsigelse i oppdraget, ikke en feil i koden. **Kenneth må velge**: enten gjelder
+R-START også her (og 076-fasiten for `tr` oppdateres), eller `tr` loddrett unntas.
+
+### Prisen målt der R-START slo til
+
+Verste tilfelle er Rom 5 vannrett `tr` (skjermbildet): hjørnet treffes på 30 cm, men dekningen
+faller fra ~91 % til **73,9 %** og CC fra 12,93 til 10,20. Lengden er fortsatt eksakt (41,00 m,
+0,00 %) og utlegget hullfritt. Panelet sier «⚠ 1,49 m² (26 %) uten kabel» og foreslår et lengre
+produkt. Det er regelen Kenneth ba om — men tallet bør han se før dette merges.

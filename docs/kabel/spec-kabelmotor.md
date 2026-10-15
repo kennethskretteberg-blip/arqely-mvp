@@ -100,3 +100,26 @@ bøyeradier, røde problemsegmenter, lagt lengde mot produktlengde.
 2. Ingen rom i galleriet er dårligere enn med dagens motor (samme eller bedre på hvert mål).
 3. Alle eksisterende regresjonsbatterier grønne.
 4. Kenneth har sett `docs/kabel/galleri.html` og forhåndsvisningen av grenen, og sagt «merge».
+
+## §0.9 · R-START (LÅST REGEL, 083)
+
+Kabelens start (tilkoblingsenden) ligger **≤ 40 cm** fra det hjørnet retningsvelgeren peker på.
+«Hjørnet» er rommets eget hjørnepunkt nærmest velgerens hjørne av rommets ytre ramme — ikke
+rammens hjørne, som i et L-rom kan ligge utenfor rommet (`_cableCornerPoint`).
+
+Rekkefølgen når mål står mot hverandre:
+
+1. Harde krav (§1: inne, ingen kryssing/nærføring, bøy, lengde ±1 %, CC-intervall, sammenhengende)
+2. **R-START** — start i valgt hjørne
+3. Valgt retning (loddrett/vannrett)
+4. Jevn CC (ingen hull > 1,25 × CC, 074b)
+5. Dekning
+6. Fasit-CC og øvrige myke mål
+
+Et utlegg som starter i hjørnet slår alltid et som ikke gjør det — uansett dekning og CC. Regelen
+gjelder på **kaskadenivå**, for alle motorer, ikke bare i geo-poengsummen
+(`_cableFilterByCorner`, `_cableHitsCorner`).
+
+Når hjørnet ikke går i valgt retning, men går i den andre: den andre legges ut, velgeren står
+fortsatt på brukerens valg, og panelet sier det i én linje med en vei tilbake. Går det i ingen
+retning: beste i valgt retning, merket ⚠ med avstand og grunn. Aldri et stille avvik.
