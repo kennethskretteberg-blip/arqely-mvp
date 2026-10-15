@@ -110,11 +110,18 @@ rammens hjørne, som i et L-rom kan ligge utenfor rommet (`_cableCornerPoint`).
 Rekkefølgen når mål står mot hverandre:
 
 1. Harde krav (§1: inne, ingen kryssing/nærføring, bøy, lengde ±1 %, CC-intervall, sammenhengende)
-2. **R-START** — start i valgt hjørne
-3. Valgt retning (loddrett/vannrett)
+2. **Valgt retning** — byttes aldri (088b)
+3. **R-START** — start i valgt hjørne
 4. Jevn CC (ingen hull > 1,25 × CC, 074b)
 5. Dekning
 6. Fasit-CC og øvrige myke mål
+
+⚠ **088b endret punkt 2 og 3.** 083 lot R-START rangere foran retningen, og da byttet motoren
+til vannrett når loddrett ikke kunne starte i hjørnet. Kenneth meldte det to ganger som at
+«retningsvelgeren virker ikke» — med rette. Hans egne ord var at starten må vinne over
+**dekning**; han sa aldri over **retning**. Når hjørnet ikke kan nås i valgt retning, legges
+utlegget likevel i valgt retning, og panelet sier avstanden og tilbyr den andre retningen med
+tall. Aldri et stille bytte.
 
 Et utlegg som starter i hjørnet slår alltid et som ikke gjør det — uansett dekning og CC. Regelen
 gjelder på **kaskadenivå**, for alle motorer, ikke bare i geo-poengsummen

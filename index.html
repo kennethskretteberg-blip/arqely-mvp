@@ -26609,14 +26609,18 @@ function _cableStatusLines(cable, room) {
     const hj = { bl: 'nede til venstre', br: 'nede til høyre',
                  tl: 'oppe til venstre', tr: 'oppe til høyre' };
     const navnR = d => d === 'v' ? 'Loddrett' : 'Vannrett';
-    const cf = cable._cornerFallback;
+    const alt = cable._cornerAlt;
     const bommer = cable._startCornerOffCm != null && cable._startCornerOffCm > 40;
-    if (cf) {
-      ut.push({ niva: 'ok',
-        tekst: navnR(cf.wanted) + ' kan ikke starte ' + (hj[cable._startCornerWanted] || '?')
-             + ' i dette rommet — vist ' + navnR(cf.used).toLowerCase() + ' med start i hjørnet.',
-        handling: { tekst: 'Behold ' + navnR(cf.wanted).toLowerCase()
-                         + ' (start ' + cf.keptOffCm + ' cm unna)', kind: 'behold-retning' } });
+    // 088b: retningen er beholdt. Treffer den ANDRE retningen hjørnet, tilbys den — med tall,
+    // så valget er Kenneths og ikke motorens.
+    if (bommer && alt) {
+      ut.push({ niva: 'advarsel',
+        tekst: '⚠ ' + navnR(cable.direction) + ' kan ikke starte '
+             + (hj[cable._startCornerWanted] || '?') + ' i dette rommet — nærmeste er '
+             + cable._startCornerOffCm + ' cm unna.',
+        handling: { tekst: 'Vis ' + navnR(alt.dir).toLowerCase()
+                         + ' i stedet (start ' + alt.offCm + ' cm)', kind: 'bytt-retning',
+                    dir: alt.dir } });
     } else if (bommer) {
       const grunn = (cable._geoTransits > 0 || (cable._geoCells || 0) > 2)
         ? ' (grunn: transitten bruker den enden)' : '';
@@ -29512,7 +29516,7 @@ function _autoFillCableImpl(roomId, productId, opts) {
   let { cands, geoNo } = _cableCandidatesForDirection(roomId, productId, opts, primary, room);
   let best = _cablePickWinner(_cableFilterByCorner(cands, room, wantCorner));   // 083 · R-START
   let fallback = null;
-  let cornerFallback = null;
+  let cornerAlt = null;   // 088b: den andre retningen TILBYS, byttes aldri til
 
   // Valgt retning gir ikke noe gyldig utlegg, men den andre gjør det → legg ut den gyldige,
   // og SI DET. Aldri et stille retningsbytte (det er Kenneths bad: loddrett går ikke, vannrett
@@ -29529,19 +29533,27 @@ function _autoFillCableImpl(roomId, productId, opts) {
     }
   }
 
-  // ─── 083 · TREFFER IKKE VALGT RETNING HJØRNET, MEN DEN ANDRE GJØR DET? ──────────────────
-  // R-START står FORAN valgt retning (spec §0.9 pkt 2 mot 3). Treffer den andre retningen
-  // hjørnet, legges den ut — men velgeren står fortsatt på Kenneths valg (074-regelen), og
-  // panelet sier det i én linje med en vei tilbake. Ingen dialog, ingen toast.
+  // ─── 088b · VALGT RETNING ER HARD. HJØRNET BYTTER DEN ALDRI ──────────────────────────────
+  // ⚠ 083 lot R-START rangere FORAN retningen, og da byttet motoren til vannrett når loddrett
+  // ikke kunne starte i hjørnet. Kenneth opplevde det to ganger som at «retningsvelgeren virker
+  // ikke» — med rette: han valgte loddrett og fikk vannrett.
+  //
+  // MÅLT på Rom 5 «øvre venstre»: loddrett kommer 188 cm (600W) og 124 cm (700W) fra hjørnet,
+  // vannrett 13 og 18 cm. Byttet var altså ikke en feil — det var feil RANGERING.
+  //
+  // Kenneths egne ord 15.10.2026 var «start kabel følger retningsvelgeren … den må vinne over
+  // DEKNING». Han sa aldri over retning; den rekkefølgen kom inn i spec'en i 083-oppdraget.
+  // Rekkefølgen er nå: harde krav → VALGT RETNING → R-START → jevn CC → dekning → fasit-CC.
+  //
+  // Den andre retningen måles fortsatt — men bare for å kunne TILBY den i panelet, aldri for å
+  // bytte bak ryggen på brukeren.
   if (best && best.chk.ok && dirExplicit && !_cableHitsCorner(best.cable, room, wantCorner)) {
     const other = userDir === 'v' ? 'h' : 'v';
     const alt = _cableCandidatesForDirection(roomId, productId,
       Object.assign({}, opts, { noCornerRound: true }), other, room);
     const altBest = _cablePickWinner(_cableFilterByCorner(alt.cands, room, wantCorner));
     if (altBest && altBest.chk.ok && _cableHitsCorner(altBest.cable, room, wantCorner)) {
-      cornerFallback = { wanted: userDir, used: other,
-                         keptOffCm: _cableStartCornerOffCm(best.cable, room, wantCorner) };
-      best = altBest;
+      cornerAlt = { dir: other, offCm: _cableStartCornerOffCm(altBest.cable, room, wantCorner) };
     }
   }
 
@@ -29570,7 +29582,7 @@ function _autoFillCableImpl(roomId, productId, opts) {
   // 083: fakta på kabelen — panelet sier det, ingen beskjed herfra (074).
   cable._startCornerWanted = wantCorner;
   cable._startCornerOffCm = _cableStartCornerOffCm(cable, room, wantCorner);
-  if (cornerFallback) cable._cornerFallback = cornerFallback;
+  if (cornerAlt) cable._cornerAlt = cornerAlt;
   room._cableNoSolution = (!chosen.chk.ok && geoNo) ? geoNo : null;
   // 074: forslaget regnes på VINNERENS dekning, ikke på en kandidat som tapte.
   // ⚠ Målt: `_finishCableAutoFill` kjører bare inne i den GAMLE kaskaden, og dens formel leser
@@ -31286,26 +31298,41 @@ async function _cableGeometryRegressionTest() {
             venstre ? sH.x < sC.x : sH.x > sC.x, venstre ? 'skjerm-x < senter' : 'skjerm-x > senter',
             'hjørne ' + sH.x.toFixed(0) + ' mot senter ' + sC.x.toFixed(0));
       }
-      // Og starten skal havne i riktig halvdel av SKJERMEN, ikke bare nær et tall.
-      // ⚠ Retningen kan byttes for å nå hjørnet (R-START foran retning, spec §0.9) — testen
-      // spør derfor om STARTEN, ikke om retningen.
+      // ── 088b · VALGT RETNING ER HARD, OG AVVIKET SIES ALLTID FRA ──────────────────────
+      // Kenneth 15.10.2026, etter å ha meldt «retningsvelgeren virker ikke» to ganger:
+      // retningen han peker på skal aldri byttes. Treffer hjørnet i den retningen — bra.
+      // Gjør det ikke, skal utlegget LIKEVEL ligge i valgt retning, og panelet skal si hvor
+      // langt unna starten ble og tilby den andre retningen med tall. Aldri et stille bytte.
       for (const [navn, pid, hj, dir] of [['600W tl', 22, 'tl', 'v'], ['700W tr', 23, 'tr', 'v'],
                                           ['600W bl', 22, 'bl', 'v'], ['700W tl vannrett', 23, 'tl', 'h']]) {
         _cableGalleryBuildScene(_cableFixtures.rom5);
         S.ui.selectedRoomId = 1;
         S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: hj, wallMarginCm: 2.5 });
         const k = _autoFillCableImpl(1, pid, { allowPartial: true });
-        if (!k || k.ok === false) { add('088 ' + navn + ': gir et utlegg', false, 'kabel', 'ingen løsning'); continue; }
-        const sS = w2s(k.start.x, k.start.y);
-        const oppe = hj[0] === 't', venstre = hj[1] === 'l';
-        add('088 ' + navn + ': starten er i ' + (oppe ? 'ØVRE' : 'nedre') + ' halvdel av skjermen',
-            oppe ? sS.y < sC.y : sS.y > sC.y, oppe ? 'skjerm-y < senter' : 'skjerm-y > senter',
-            'start ' + sS.y.toFixed(0) + ' mot senter ' + sC.y.toFixed(0));
-        add('088 ' + navn + ': starten er i ' + (venstre ? 'VENSTRE' : 'høyre') + ' halvdel',
-            venstre ? sS.x < sC.x : sS.x > sC.x, 'riktig halvdel',
-            'start ' + sS.x.toFixed(0) + ' mot senter ' + sC.x.toFixed(0));
-        add('088 ' + navn + ': start ≤ 40 cm fra hjørnet', k._startCornerOffCm <= 40,
-            '<= 40 cm', k._startCornerOffCm + ' cm');
+        if (!k || k.ok === false) { add('088b ' + navn + ': gir et utlegg', false, 'kabel', 'ingen løsning'); continue; }
+        add('088b ' + navn + ': VALGT RETNING er beholdt', k.direction === dir,
+            'retning ' + dir, 'fikk ' + k.direction);
+        const linjer = _cableStatusLines(k, S.rooms[0]);
+        if (k._startCornerOffCm <= 40) {
+          const sS = w2s(k.start.x, k.start.y);
+          const oppe = hj[0] === 't', venstre = hj[1] === 'l';
+          add('088b ' + navn + ': starten er i ' + (oppe ? 'ØVRE' : 'nedre') + ' halvdel av skjermen',
+              oppe ? sS.y < sC.y : sS.y > sC.y, oppe ? 'skjerm-y < senter' : 'skjerm-y > senter',
+              'start ' + sS.y.toFixed(0) + ' mot senter ' + sC.y.toFixed(0));
+          add('088b ' + navn + ': starten er i ' + (venstre ? 'VENSTRE' : 'høyre') + ' halvdel',
+              venstre ? sS.x < sC.x : sS.x > sC.x, 'riktig halvdel',
+              'start ' + sS.x.toFixed(0) + ' mot senter ' + sC.x.toFixed(0));
+        } else {
+          add('088b ' + navn + ': bommer → panelet sier hvor langt unna',
+              linjer.some(l => l.niva === 'advarsel' && /kan ikke starte/.test(l.tekst)
+                            && new RegExp(k._startCornerOffCm + ' cm').test(l.tekst)),
+              '⚠ med avstanden i cm', linjer.map(l => l.tekst).join(' | ').slice(0, 110));
+          add('088b ' + navn + ': …og tilbyr den andre retningen med tall',
+              linjer.some(l => l.handling && l.handling.kind === 'bytt-retning' && /\d+ cm/.test(l.handling.tekst)),
+              'handling «Vis … i stedet (start N cm)»',
+              (linjer.find(l => l.handling && l.handling.kind === 'bytt-retning') || {}).handling
+                ? linjer.find(l => l.handling && l.handling.kind === 'bytt-retning').handling.tekst : '(mangler)');
+        }
       }
       // 076-fasiten skal stå UTEN unntak nå som aksen er riktig (§23 ÅPENT 2).
       _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;

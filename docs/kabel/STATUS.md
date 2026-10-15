@@ -1269,3 +1269,42 @@ Skjermbildets tilfelle (600W / loddrett / tl) har nå **90,2 % dekning mot 89,1 
 linje på geo-kabler: `geo · ønsket øvre venstre · start 18 cm fra hjørnet`. Da avgjør et
 skjermbilde om utlegget er nytt eller lagret fra før. Det var nettopp dét spørsmålet som kostet
 oss tre runder 15.10.
+
+---
+
+## §27 · 088b — valgt retning er hard. Hjørnet bytter den aldri.
+
+Kenneth meldte to ganger at «retningsvelgeren virker ikke». Han hadde rett, men ikke på den måten
+jeg lette etter: motoren gjorde akkurat det spec §0.9 sa — **R-START rangerte foran retningen** —
+så når loddrett ikke kunne starte i hjørnet, byttet den til vannrett.
+
+**Målt, Rom 5, «øvre venstre»:**
+
+| | start-avstand | dekning | lengde |
+|---|---|---|---|
+| 600W **loddrett** (valgt) | **188 cm** | 89,1 % | 35,00 m |
+| 600W vannrett | 13 cm | 90,2 % | 35,29 m |
+| 700W **loddrett** (valgt) | **124 cm** | 93,4 % | 40,97 m |
+| 700W vannrett | 18 cm | 93,4 % | 41,00 m |
+
+Loddrett **kan ikke** starte øverst til venstre i det rommet. Byttet var altså ikke en feil — det
+var feil rangering.
+
+**Kenneths egne ord 15.10.2026:** «start kabel følger retningsvelgeren … den må vinne over
+**dekning**». Han sa aldri over **retning**. Den rekkefølgen kom inn i spec'en i 083-oppdraget,
+ikke fra ham.
+
+**Ny rekkefølge (spec §0.9):** harde krav → **valgt retning** → R-START → jevn CC → dekning →
+fasit-CC.
+
+Den andre retningen måles fortsatt, men bare for å kunne **tilbys**:
+
+> ⚠ Loddrett kan ikke starte oppe til venstre i dette rommet — nærmeste er 188 cm unna.
+> **[Vis vannrett i stedet (start 13 cm)]**
+
+**Målt etter endringen:** retningen beholdes i alle fire prøvene. 076-fasiten urørt (Rom 5 / 700W
+/ loddrett / `tr`: CC 13,20, loddrett, 13 cm, 0 hull, 93,4 %). Kenneths tilfelle (600W / loddrett
+/ `tl`) beholder loddrett med 89,1 % dekning og 0 hull, og panelet sier hvorfor starten ble
+188 cm unna.
+
+⚠ Suitetiden er uendret og fortsatt over kravet (§26).

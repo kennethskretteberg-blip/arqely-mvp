@@ -4,6 +4,20 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 088b — valgt retning er hard (15.10.2026, gren `kabelmotor`)
+
+083 lot R-START rangere foran retningen, så motoren byttet til vannrett når loddrett ikke kunne
+starte i hjørnet. Kenneth meldte det to ganger som at «retningsvelgeren virker ikke».
+
+Målt på Rom 5 «øvre venstre»: loddrett kommer 188 cm (600W) og 124 cm (700W) fra hjørnet,
+vannrett 13 og 18 cm. Byttet var ikke en feil — det var feil rangering. Kenneths egne ord var at
+starten må vinne over DEKNING; han sa aldri over RETNING.
+
+Ny rekkefølge (spec §0.9): harde krav → valgt retning → R-START → jevn CC → dekning → fasit-CC.
+Den andre retningen måles fortsatt, men tilbys i panelet med tall i stedet for å byttes til:
+«⚠ Loddrett kan ikke starte oppe til venstre — nærmeste er 188 cm. [Vis vannrett i stedet
+(start 13 cm)]». 076-fasiten er urørt.
+
 ## 088 — hjørnene var speilvendt (15.10.2026, gren `kabelmotor`)
 
 `w2s` gir `y = (wy − panY)·sc + h/2`, så større world-y ligger lenger NED på skjermen. «Topp» er
