@@ -666,7 +666,7 @@ Det forklarer alt som har vært uforklart:
 Tilbakefallet er dessuten **stumt**: `_cableLegalRegion` setter `approx: true`, men ingenting
 leser det, og brukeren får ingen beskjed.
 
-### Forslag (IKKE bygget — venter på Kenneth)
+### Forslag (BYGGET 15.10.2026 som 077 — se §15)
 
 1. **Forhåndslast ved oppstart.** Ett `_cblLoadClipper()` i oppstarten fjerner kappløpet i
    praksis.
@@ -677,3 +677,51 @@ leser det, og brukeren får ingen beskjed.
 
 ⚠ Dette er en **gren-feil**, ikke i drift: hele clipper/geo-maskineriet kom i 068, og `main`
 står på 073 (bygget på 1519bb0, før 068).
+
+---
+
+## §15 · 077 — fiksen (bygget 15.10.2026)
+
+Alle tre forslagene i §14 er bygget. Ingen terskel og ingen motor er rørt; dette handler bare om
+at biblioteket er på plass før noe legges ut.
+
+**1. Forhåndslast ved oppstart.** Ett `_cblLoadClipper()` rett etter `initSupabase()`.
+Målt på en kald lasting: skriptet hentes 112 ms etter navigasjonsstart og er i minnet etter 114 ms
+— lenge før noen kan rekke å klikke et produkt. Kommentaren på `_cblLoadClipper` som fortsatt
+påsto «LAT, bare når kontrollen faktisk kjøres» er oppdatert; den var blitt usann.
+
+**2. Utleggsveien venter — betinget.** `_cablePreviewPlace` er delt i to:
+en vakt som venter, og `_cablePreviewPlaceNow` med den gamle kroppen.
+
+> ⚠ **Første forsøk gjorde hele funksjonen `async`, og det var feil.** Jeg skrev i kommentaren at
+> «ingen kallsted leser tilstand synkront etter kallet». Det var en antakelse, ikke en måling:
+> `_soneRegressionTest` (8 påstander) og «Fyll rom automatisk» (`room._cablePreviewMeta`,
+> `_confirmCablePreview`) gjør nøyaktig det. Testbatteriet fanget det. Vakten venter derfor bare
+> når biblioteket faktisk ikke er klart — er det klart, er kallet synkront akkurat som før.
+
+**3. Ikke tap stumt.** `_autoFillCableImpl` setter `cable._geomApprox = true` når området bare var
+tilnærmet, og `_cableStatusLines` gir en advarsel: *«Lagt uten polygonbiblioteket — kantene er
+tilnærmet. Legg på nytt for et eksakt utlegg.»* Fail-open som 060: det legges fortsatt ut.
+
+**4. Låst med en test.** Seks nye påstander i `_cableGeometryRegressionTest` kjører Rom 5 **med
+clipper slått av** og sammenligner:
+
+| | motor | gyldig | merket |
+|---|---|---|---|
+| clipper av | v6 | nei (utenfor · kryssing · nærføring · lengde · brudd) | `_geomApprox` + panellinje |
+| clipper på | **geo** | **ja** | — |
+
+Pluss to oppførselspåstander som hindrer at `async`-feilen kommer tilbake: klart bibliotek skal
+gi et **synkront** kall, ulastet skal gi et løfte.
+
+**Status:** 22 av 22 batterier grønne (`_cableGeometryRegressionTest` 77 påstander).
+Galleriet er ikke regenerert — det `await`-er biblioteket selv og har derfor uendrede tall.
+
+**Sidefunn, rettet i samme runde:** `_prosjektlaasRegressionTest` sin påstand «i går gir «i går
+HH:MM»» brukte «30 timer siden», som før kl. 06 lander i forgårs. Den var rød av klokka, ikke av
+koden. Bygger nå i går eksplisitt (kl. 12 lokalt).
+
+**Fortsatt ikke rettet** (eget funn, tilbudt): GODKJENN lagrer ikke.
+`_confirmCablePreviewAndFinish` → `_confirmCablePreview` + `finishRoomWorkflow` kaller aldri
+`_scheduleAutoSave()`, så utlegget lever bare i nettleserminnet mens indikatoren viser et gammelt
+«lagret»-tidspunkt.

@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 077 — kabelutlegget ventet ikke på polygonbiblioteket (15.10.2026, gren `kabelmotor`)
+
+Rotårsaken bak de ugyldige utleggene i Rom 5. `clipper-lib` ble lastet LAT, og utleggsveien
+ventet ikke på den: tapte man kappløpet mot CDN-et, regnet `_cableLegalRegion` det lovlige
+området hjørnevis, ny motor fant ingen gyldig kandidat, og den gamle V6-motoren vant alene med
+20 løp som krysset seg selv. Målt: **v6 / CC 14,14 / ugyldig** uten biblioteket mot
+**geo / CC 15,28 / gyldig** med.
+
+- Biblioteket forhåndslastes ved oppstart (ferdig 114 ms etter navigasjonsstart).
+- `_cablePreviewPlace` venter på biblioteket — men bare når det ikke er klart, fordi sone-testen
+  og «Fyll rom automatisk» leser tilstand synkront rett etter kallet.
+- Et tilnærmet utlegg merkes (`_geomApprox`) og sier det i panelet, i stedet for å tape stumt.
+- Seks nye påstander kjører Rom 5 med clipper slått av, så dette ikke kan komme tilbake uoppdaget.
+- Sidefiks: tidspåstanden i `_prosjektlaasRegressionTest` var rød av klokka før kl. 06.
+
+Ingen terskel og ingen motor er endret. 22 av 22 regresjonsbatterier grønne.
+
 ## 076: Kabelmotor — Rom 5 som fasit og fast regresjon, CC låst, beste tilstand merket — 2026-10-14
 
 Etter sparring: Kenneth svarte på de tre spørsmålene i STATUS §10.6. CC skal ikke flyttes for

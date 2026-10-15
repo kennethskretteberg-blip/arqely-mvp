@@ -18571,7 +18571,26 @@ function _refreshCablePanel(familyName, categoryId) {
     _updateCableSelection(familyName || S.ui.manualFamilyName, categoryId != null ? categoryId : S.ui.manualCategoryId);
   }
 }
+// ─── 077 · UTLEGGSVEIEN VENTER PÅ POLYGONBIBLIOTEKET ────────────────────────────────────────
+// Dette er veien brukeren faktisk går (produktklikk, retningsendring, «Bytt», «Fyll rom
+// automatisk»), og uten denne vakten var første utlegg i en økt et kappløp mot CDN-et: tapte
+// man det, falt `_cableLegalRegion` tilbake på hjørnevis offset, ny motor fant ingen gyldig
+// kandidat, og V6 vant alene med et utlegg som krysset seg selv (STATUS §14).
+//
+// ⚠ Den kan IKKE bare gjøres `async`. Første forsøk gjorde det, og `_soneRegressionTest` +
+// «Fyll rom automatisk» falt: begge leser `room._cablePreviewMeta` SYNKRONT rett etter kallet.
+// Derfor er ventingen betinget — er biblioteket klart (normaltilfellet, fordi oppstarten
+// forhåndslaster det), kjører alt synkront akkurat som før. Bare i kappløpet utsettes jobben,
+// og da er et utsatt riktig utlegg bedre enn et øyeblikkelig galt.
 function _cablePreviewPlace(productId, nCables, familyName, categoryId, splitDir) {
+  if (typeof _cblLoadClipper === 'function' && typeof _cblClipperReady === 'function' && !_cblClipperReady()) {
+    if (splitDir === undefined) splitDir = _cableSplitDir;   // frys valget før vi slipper tråden
+    return _cblLoadClipper().catch(() => {})                 // fail-soft: legg ut uansett
+      .then(() => _cablePreviewPlaceNow(productId, nCables, familyName, categoryId, splitDir));
+  }
+  return _cablePreviewPlaceNow(productId, nCables, familyName, categoryId, splitDir);
+}
+function _cablePreviewPlaceNow(productId, nCables, familyName, categoryId, splitDir) {
   const roomId = S.ui.selectedRoomId; if (!roomId) return;
   const room = S.rooms.find(r => r.id === roomId); if (!room) return;
   // 008: gate på plasserings-laget (se _soneGateBlocks) — STEG 0 målte at denne veien la kabel
@@ -20318,8 +20337,12 @@ async function _prosjektlaasRegressionTest() {
   const iso = ms => new Date(na.getTime() - ms).toISOString();
   check('C: i dag gir bare klokkeslett', true,
     /^\d{2}[:.]\d{2}$/.test(_lockTimeLabel(iso(60 * 1000))), _lockTimeLabel(iso(60 * 1000)));
+  // ⚠ «30 timer siden» er IKKE i går hele døgnet: kjøres testen før kl. 06 lander den i forgårs,
+  // og påstanden ble rød av klokka, ikke av koden. Bygg i går eksplisitt i stedet (kl. 12 lokalt,
+  // trygt unna sommertidsskiftets time).
+  const _igaar = new Date(na.getFullYear(), na.getMonth(), na.getDate() - 1, 12, 0, 0).toISOString();
   check('C: i går gir «i går HH:MM»', true,
-    /^i går \d{2}[:.]\d{2}$/.test(_lockTimeLabel(iso(30 * 3600 * 1000))), _lockTimeLabel(iso(30 * 3600 * 1000)));
+    /^i går \d{2}[:.]\d{2}$/.test(_lockTimeLabel(_igaar)), _lockTimeLabel(_igaar));
   check('C: eldre gir dato uten klokkeslett', true,
     !/\d{2}[:.]\d{2}/.test(_lockTimeLabel(iso(9 * 864e5))), _lockTimeLabel(iso(9 * 864e5)));
   check('C: 20 sek gir «for 20 sek siden»', 'for 20 sek siden',
@@ -26493,6 +26516,12 @@ function _cableStatusLines(cable, room) {
       handling: { tekst: `Prøv ${valgt.toLowerCase()} likevel`, fn: '_cableForceWantedDirection()' } });
   }
 
+  // 077: tilnærmet lovlig område — si det, ikke la det være en stum forskjell.
+  if (cable._geomApprox) {
+    ut.push({ niva: 'advarsel',
+      tekst: 'Lagt uten polygonbiblioteket — kantene er tilnærmet. Legg på nytt for et eksakt utlegg.' });
+  }
+
   // 2) Gyldighet.
   if (cable._geomDefects && cable._geomDefects.length) {
     ut.push({ niva: 'feil',
@@ -26809,8 +26838,12 @@ let _cblClipperPromise = null;
 
 function _cblClipperReady() { return _cblClipperState === 'ready' && typeof ClipperLib !== 'undefined'; }
 
-// Lastes som de andre bibliotekene (pinnet versjon, jsDelivr) - men LAT, bare når kontrollen
-// faktisk kjøres, så vanlig bruk av appen ikke får et nytt blokkerende skript i <head>.
+// Lastes som de andre bibliotekene (pinnet versjon, jsDelivr), men asynkront - skriptet blokkerer
+// ikke oppstarten.
+// 077: lastingen var LAT, «bare når kontrollen faktisk kjøres». Det holdt ikke: utleggsveien
+// trenger biblioteket like mye som kontrollen, og uten det falt motoren stille tilbake på et
+// ugyldig utlegg (STATUS §14). Derfor startes lastingen nå ved oppstart (målt: ferdig 114 ms
+// etter navigasjonsstart), og `_cablePreviewPlace` venter på den hvis den likevel ikke er klar.
 function _cblLoadClipper() {
   if (_cblClipperPromise) return _cblClipperPromise;
   if (typeof ClipperLib !== 'undefined') { _cblClipperState = 'ready'; return Promise.resolve(true); }
@@ -28971,6 +29004,10 @@ function _autoFillCableImpl(roomId, productId, opts) {
   if (!room.points || room.points.length < 3 || typeof _cableGeometryCheck !== 'function') {
     return _autoFillCableLegacy(roomId, productId, opts);
   }
+  // 077: biblioteket ikke klart ennå → start lastingen (neste utlegg blir riktig) og la det
+  // stå på kabelen under at området bare var tilnærmet. Vi legger fortsatt ut — fail-open som
+  // før, 060-prinsippet — men ikke lenger stumt.
+  if (!_cblClipperReady()) { try { _cblLoadClipper(); } catch (e) {} }
   // FLERKABEL-SONER OG TVUNGET CC: holdes utenfor konkurransen i 070.
   // `_buildNCableZones` tvinger samme CC (`_forcedSpacingCm`) og samme vinkel i ALLE soner av et
   // område, slik at sonene får lik W/m². `generateCableGeo` søker sin egen CC for å treffe
@@ -29016,6 +29053,9 @@ function _autoFillCableImpl(roomId, productId, opts) {
     return null;
   }
   const cable = chosen.cable;
+  // 077: kjørte vi på det TILNÆRMEDE lovlige området (clipper ikke lastet), skal det stå på
+  // kabelen. Før falt motoren stille tilbake, og brukeren fikk et V6-utlegg uten å vite hvorfor.
+  if (!_cblClipperReady()) cable._geomApprox = true;
   cable._geomOk = !!chosen.chk.ok;
   cable._geomEngine = chosen.source;
   cable._geomDefects = chosen.chk.ok ? null : (chosen.chk.hard || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
@@ -30646,6 +30686,67 @@ async function _cableGeometryRegressionTest() {
           add(tag3 + ': gyldig når den først legges', c3.ok, 'ingen harde defekter',
               c3.ok ? 'ok' : (c3.hard || []).map(d => d.kind).join('+'));
         }
+      }
+    }
+
+    // ── 077 · UTEN POLYGONBIBLIOTEKET SKAL DET IKKE TAPES STUMT ─────────────────────────
+    // ⚠ Dette er rotårsaken bak Kenneths ugyldige Rom 5-utlegg (STATUS §14). Uten clipper-lib
+    // faller `_cableLegalRegion` tilbake på hjørnevis offset, ny motor finner ingen gyldig
+    // kandidat i et rom med konkav stubbe, og V6 vinner alene — med 20 løp som krysser seg
+    // selv. Målt: v6/CC 14,14/UGYLDIG uten biblioteket mot geo/CC 15,28/gyldig med.
+    {
+      const ekteReady = window._cblClipperReady;
+      let utenCab = null, medCab = null;
+      try {
+        window._cblClipperReady = () => false;
+        _cableGalleryBuildScene(_cableFixtures.rom5);
+        S.ui.selectedRoomId = 1;
+        S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
+        utenCab = _autoFillCableImpl(1, 22, { allowPartial: true });
+      } finally { window._cblClipperReady = ekteReady; }
+      _cableGalleryBuildScene(_cableFixtures.rom5);
+      S.ui.selectedRoomId = 1;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
+      medCab = _autoFillCableImpl(1, 22, { allowPartial: true });
+
+      add('077: med biblioteket vinner ny motor og utlegget er gyldig',
+          !!(medCab && medCab._geomOk && (medCab._geomEngine === 'geo')),
+          'geo + gyldig', medCab ? ((medCab._geomEngine || '?') + (medCab._geomOk ? ' gyldig' : ' UGYLDIG')) : 'ingen kabel');
+      // Uten biblioteket SKAL det fortsatt legges ut (fail-open som 060), men aldri stumt.
+      add('077: uten biblioteket legges det fortsatt ut', !!utenCab, 'kabelobjekt', utenCab ? 'ja' : 'null');
+      if (utenCab) {
+        add('077: …og det er MERKET som tilnærmet', !!utenCab._geomApprox,
+            '_geomApprox satt', utenCab._geomApprox ? 'merket' : 'STUMT');
+        const linjer = _cableStatusLines(utenCab, S.rooms[0]).map(l => l.tekst).join(' | ');
+        add('077: …og panelet sier fra', /tilnærmet/i.test(linjer), 'linje om tilnærmet kant',
+            linjer.slice(0, 70) || '(ingen linjer)');
+      }
+      // Kildesjekker: forhåndslastingen og ventingen må stå.
+      // ⚠ `_skript` er en lokal variabel i et ANNET testbatteri — et bart navneoppslag her
+      // ville kastet ReferenceError. Les sideteksten i stedet.
+      const _kilde077 = document.documentElement.innerHTML;
+      const harPreload = /initSupabase\(\);[\s\S]{0,2000}?_cblLoadClipper\(\)/.test(_kilde077);
+      add('077: biblioteket forhåndslastes ved oppstart', harPreload,
+          'kall etter initSupabase()', harPreload ? 'står der' : 'mangler');
+      // Oppførsel, ikke kildetekst: er biblioteket klart skal kallet være SYNKRONT (sone-testen
+      // og «Fyll rom automatisk» leser tilstand rett etterpå); er det ikke klart, skal kallet
+      // levere et løfte som venter.
+      _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+      const synk = _cablePreviewPlace(22, 1, 'TEST077', 9501, null);
+      add('077: klart bibliotek → synkront kall (ingen lesere brytes)',
+          !(synk && typeof synk.then === 'function'), 'ingen promise',
+          'returnerte et løfte');
+      {
+        const ekte = window._cblClipperReady;
+        let utsatt = null;
+        try {
+          window._cblClipperReady = () => false;
+          _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+          utsatt = _cablePreviewPlace(22, 1, 'TEST077', 9501, null);
+        } finally { window._cblClipperReady = ekte; }
+        add('077: ulastet bibliotek → kallet venter',
+            !!(utsatt && typeof utsatt.then === 'function'), 'et løfte', 'kjørte uten å vente');
+        if (utsatt && typeof utsatt.then === 'function') await utsatt;
       }
     }
 
@@ -74016,6 +74117,22 @@ async function initSupabase() {
   }
 }
 initSupabase();
+
+// ─── 077 · FORHÅNDSLAST POLYGONBIBLIOTEKET ──────────────────────────────────────────────────
+// ⚠ MÅLT på Kenneths eget lagrede utlegg (STATUS §14): `_cableLegalRegion` trenger clipper-lib
+// for ekte polygon-offset, og uten det faller den tilbake på `_offsetPolygon` — hjørnevis, og
+// «mindre riktig i konkave hjørner». Rom 5 har en konkav veggstubbe. Da fant ny motor ingen
+// gyldig kandidat, V6 vant konkurransen alene, og resultatet ble et utlegg med 20 løp som
+// krysset seg selv og lå utenfor rommet.
+//
+// Biblioteket lastes lat, og `_cblLoadClipper()` ble BARE kalt fra galleriet, testbatteriet og
+// 072-åpningskontrollen — aldri fra utleggsveien. Første auto-utlegg i en økt var derfor et
+// kappløp mot CDN-et. Det forklarer hvorfor det vekslet mellom Kenneths skjermbilder, og
+// hvorfor alle målinger i galleriet var grønne (de `await`-er alltid først).
+//
+// Dette kallet fjerner kappløpet i praksis. `_cblLoadClipper` er idempotent og fail-soft, så
+// et CDN som ikke svarer gir nøyaktig samme oppførsel som før — bare uten tilfeldigheten.
+try { if (typeof _cblLoadClipper === 'function') _cblLoadClipper(); } catch (e) { /* fail-soft som før */ }
 
 // ─── PROJECT CLOUD STORAGE (Supabase) ────────────────────────
 
