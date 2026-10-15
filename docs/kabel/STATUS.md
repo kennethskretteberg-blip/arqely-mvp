@@ -1138,3 +1138,36 @@ ikke plass uansett: 2 × 14,52 = 29 cm mot 17,6 cm tilgjengelig.
 flest mulig baner får plass i hvert felt, med CC uendret. Det bevarer jevn CC (079) og den
 globale avstanden (lag D) — det er bare startpunktet for banerekka som flyttes. ⚠ Må måles mot
 alle fixturer: en faseforskyvning som gir ett løp mer i ett felt kan koste et løp i et annet.
+
+---
+
+## §25 · 083b — `hitCable` krasjet på hver museklikk. Lerretet var dødt.
+
+Kenneth 15.10.2026: «jeg får ikke trykket på kabel … får heller ikke valgt rommet ved å trykke
+på det, jeg må gå i romliste.» Konsollen: **732 uncaught `TypeError: Cannot read properties of
+undefined (reading 'x')` fra `hitCable`.**
+
+```js
+const a = el.kind === 'run' ? el.a : el.from;      // ← geo har hverken a eller from
+const b = el.kind === 'run' ? el.b : el.to;
+if (distSeg(wx, wy, a.x, a.y, …))                  // ← kaster
+```
+
+`hitCable` kjente bare **skew**-motorens to baneformer. Geo sender ETT element
+`{kind:'uturn', pts:[…]}`. Kastet skjer i canvas-mousedown, så **hele klikk-kaskaden avbrytes** —
+verken kabel, rom eller vegg lar seg velge. Romlista virker, fordi den ikke går via lerretet.
+
+**Feilen har ligget der siden 068**, da geo begynte å sende `pathEls`. Den var usynlig i alle 22
+batteriene fordi **ingen av dem klikker på lerretet** — de kaller motorene og måler resultatet.
+
+Fiksen bruker samme trygge uttrekk som linje ~5193 allerede hadde (`el.pts || [el.from, el.to]`),
+og hopper over elementer uten brukbar geometri i stedet for å kaste. En ukjent `kind` kan ikke
+lamme lerretet igjen. Fire nye påstander låser det, inkludert et element med ukjent `kind`.
+
+⚠ **Lærdom for testdekningen:** alt som bare kan nås via et museklikk er utenfor alle batteriene.
+Det var min feilslutning gjennom hele denne runden at «data stemmer» var det samme som «appen
+virker». Kenneth kunne ikke engang velge kabelen for å kjøre diagnosen jeg ba om.
+
+Dette forklarer også hvorfor S/E-merkene så feil ut: jeg sammenlignet piksler i skjermbilder mot
+data, og kom til at merkene var byttet om. Det var en gjetning jeg ikke kunne måle. Den står
+fortsatt uavklart — men nå kan kabelen velges, så den lar seg endelig sjekke.

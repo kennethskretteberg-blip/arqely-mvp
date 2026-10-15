@@ -4,6 +4,17 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 083b — hitCable krasjet på hvert museklikk (15.10.2026, gren `kabelmotor`)
+
+732 uncaught TypeError i Kenneths konsoll: `hitCable` kjente bare skew-motorens baneformer
+(`kind:'run'` med a/b, ellers from/to), mens geo sender `{kind:'uturn', pts:[…]}`. `a` var
+undefined og `a.x` kastet. Kastet skjer i canvas-mousedown, så hele klikk-kaskaden døde —
+verken kabel, rom eller vegg lot seg velge på lerretet.
+
+Feilen har ligget der siden 068 og var usynlig i alle 22 batteriene, fordi ingen av dem klikker
+på lerretet. Fiksen bruker samme trygge uttrekk som resten av koden og hopper over elementer
+uten brukbar geometri. Fire nye påstander, inkludert et element med ukjent `kind`.
+
 ## 083 — R-START: kabelen starter i valgt hjørne (15.10.2026, gren `kabelmotor`) — DELVIS
 
 Ny låst regel (spec §0.9): kabelens tilkoblingsende ligger ≤ 40 cm fra det hjørnet
