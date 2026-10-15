@@ -4,6 +4,20 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 089 (delvis) — fixturet for Rom 5 hadde drevet fra virkeligheten (15.10.2026, gren `kabelmotor`)
+
+Kenneth meldte at det er plass til to løp til oppe til venstre i Rom 5. Han har rett — men feilen
+lot seg ikke reprodusere, fordi `_cableFixtures.rom5` var fra 13.10 og rommet var endret siden.
+På fixturet lå begge venstre felt 19,5 cm fra veggen; på den ekte geometrien ligger det ØVRE
+feltet **48,4 cm** unna. Fixturet er hentet på nytt fra skyen.
+
+Målt med riktig geometri (loddrett, start nede til venstre): 600W har 48,4 cm i øvre felt mot
+19,6 i nedre. 700W (17,0/17,2) og 10T (17,8/18,0) er ikke berørt.
+
+⚠ Mekanismen er IKKE fastslått: kandidat-loggingen ga motstridende tall fordi
+`_cableGeometryCheck` også kalles utenfor geo-motoren. R-VEGG er derfor ikke bygget — se
+STATUS §28.
+
 ## 088b — valgt retning er hard (15.10.2026, gren `kabelmotor`)
 
 083 lot R-START rangere foran retningen, så motoren byttet til vannrett når loddrett ikke kunne

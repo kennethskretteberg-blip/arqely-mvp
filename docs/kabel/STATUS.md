@@ -1138,6 +1138,10 @@ hentes på nytt før neste runde.
 
 ### 2. Det udekkede feltet øverst til venstre — det er plass til ETT løp til, ikke to
 
+> ⚠ **Denne målingen gjaldt NEDRE felt** (speilvendt y-akse, se §26), og den ble gjort på et
+> fixture som hadde drevet fra Kenneths faktiske rom. Det ØVRE feltet er målt i §28: der er det
+> **48,4 cm** fra vegg til første løp — plass til to løp, akkurat som Kenneth sa.
+
 | | |
 |---|---|
 | venstre vegg over stubben | x = 678,8 |
@@ -1308,3 +1312,40 @@ Den andre retningen måles fortsatt, men bare for å kunne **tilbys**:
 188 cm unna.
 
 ⚠ Suitetiden er uendret og fortsatt over kravet (§26).
+
+---
+
+## §28 · 089 — Kenneth har rett: 48,4 cm fra veggen i det ØVRE feltet. Fixturet hadde drevet.
+
+### Reprodusert på Kenneths faktiske geometri
+
+⚠ **Først måtte fixturet hentes på nytt.** `_cableFixtures.rom5` var fra 13.10 og stemte ikke
+lenger med rommet i skyen: venstre vegg over stubben sto på x = 678,8 i fixturet mot **677,4** i
+virkeligheten, og hjørnet ved stubben 678,1 mot **676,7**. På den gamle geometrien lå begge
+venstre felt 19,5 cm fra veggen — **feilen Kenneth meldte fantes ikke i fixturet**. Et fixture som
+har drevet fra virkeligheten er verre enn ingen: det gir grønne tester for et rom som ikke finnes.
+
+Med riktig geometri, Rom 5 loddrett, start nede til venstre:
+
+| produkt | CC | ØVRE felt: avstand fra vegg | NEDRE felt | dekning | hull |
+|---|---|---|---|---|---|
+| **600W 35m** | 14,53 | **48,4 cm** (≈ 3 × CC) | 19,6 cm | 87,2 % | 0 |
+| 700W 41m | 12,10 | 17,0 cm | 17,2 cm | 86,1 % | 0 |
+| 10T 600W 60m | 6,46 | 17,8 cm | 18,0 cm | 67,3 % | 0 |
+
+Kenneth så riktig, og det gjelder **bare 600W**. De to banene han tegnet i lilla finnes i det
+globale rutenettet — det nedre feltet bruker dem — men det øvre feltet starter tre baner inn.
+
+### ⚠ Mekanismen er IKKE fastslått (STEG 0.2 står åpen)
+
+Jeg forsøkte å logge hver kandidat med CC, lengde og veggavstand, men instrumenteringen lider av
+samme korrelasjonsfeil som lurte meg i §23: `_cableGeometryCheck` kalles også UTENFOR geo-motoren,
+og `window.__p` peker da på en annen senterlinje enn den som måles. Loggen ga motstridende tall
+(samme CC og lengde med både 19,4 og 48,4 cm). **Ingen rotårsak er meldt.**
+
+Lengdebudsjettet er fortsatt den mest sannsynlige forklaringen — to løp til koster ≈ 1,9 m, og
+kabelen er fast 35,00 m ved CC 14,53 — men det er en hypotese, ikke en måling. Neste runde må
+måle den med instrumentering som ikke kan feilkoble kandidat og senterlinje (tagg på selve
+kabelobjektet, ikke på en global variabel).
+
+**R-VEGG, større CC og faseforskyvning er derfor IKKE bygget.** Grunnlaget mangler.
