@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 080 — hjørnevelgeren betyr noe (15.10.2026, gren `kabelmotor`)
+
+Innsetningspunkt-velgeren var død i geo-motoren: alle fire hjørnevalg ga identisk start.
+`_geoMakeCable` bar `startCorner` videre som en etikett uten å orientere banen, og `_geoScore`
+fikk `corner: wantCorner` inn — sammenligningen var alltid sann.
+
+- Banen orienteres nå etter valget (en varmekabel har ingen egen retning, så å snu punktlista
+  er gratis), og poengleddet måler det faktiske hjørnet.
+- Rutens to ender er gitt av geometrien. Finnes ikke det valgte hjørnet — på Rom 5 ender ingen
+  rute nede til venstre, fordi det er der transitten går ut — sier panelet fra:
+  «Start: oppe til venstre — nede til venstre er ikke mulig i dette rommet.» Nivå `ok`, så den
+  ikke toaster på hvert utlegg.
+
+Utleggene er ellers uendret: 600W 35,00 m / 0 hull, 700W 40,97 m / 0 hull, 10T 60,00 m / 0 hull,
+alle med jevn CC. 22/22 batterier grønne (1003 påstander).
+
 ## 079 — jevn CC over hele gulvet (15.10.2026, gren `kabelmotor`)
 
 Kenneths regel: ytterste løp under utstikkeren skal flukte med det over, den vannrette strengen

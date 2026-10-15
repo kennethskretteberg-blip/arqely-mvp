@@ -26584,6 +26584,20 @@ function _cableStatusLines(cable, room) {
   }
 
   if (!ut.length && dekn != null) ut.push({ niva: 'ok', tekst: `● ok · dekning ${dekn.toFixed(0)} %` });
+  // 080: starten havnet ikke der velgeren sto. Rutens to ender er gitt av geometrien — i et rom
+  // der transitten går ut av et hjørne, kan nettopp det hjørnet ikke også være kabelens ende.
+  // Da skal det stå her, ikke bare se feil ut på tegningen.
+  // ⚠ Nivå `ok`, ikke `advarsel`: ingenting er galt med utlegget, og `_cableStatusToast` siler
+  // bort `ok` — dette er en opplysning i panelet, ikke en toast på hvert eneste utlegg.
+  // Lagt til ETTER ok-linja over, så «● ok · dekning» ikke forsvinner av at denne finnes.
+  if (cable._startCornerActual && cable.startCorner
+      && cable._startCornerActual !== cable.startCorner) {
+    const hj = { bl: 'nede til venstre', br: 'nede til høyre',
+                 tl: 'oppe til venstre', tr: 'oppe til høyre' };
+    ut.push({ niva: 'ok',
+      tekst: 'Start: ' + (hj[cable._startCornerActual] || '?') + ' — '
+           + (hj[cable.startCorner] || '?') + ' er ikke mulig i dette rommet.' });
+  }
   return ut;
 }
 
@@ -28805,7 +28819,9 @@ function generateCableGeo(roomId, productId, opts) {
         const hull = _geoInteriorHoles(pts, dir, grid);
         cable._geoHoles = hull;
         // Færrest transitter vinner når alt annet er likt (lag D).
-        const sc = _geoScore(chk, { dir, wantDir, corner: wantCorner, wantCorner,
+        // 080: MÅLT hjørne, ikke det ønskede. Før sto `corner: wantCorner` her, og da var
+        // sammenligningen i `_geoScore` alltid sann — et dødt ledd.
+        const sc = _geoScore(chk, { dir, wantDir, corner: _geoCornerOf(cable.start, room), wantCorner,
                                     nCells: grid.cells.length, hull })
                  - 0.5 * ((grid.transits || []).length);   // ren avgjørelse ved likt, ikke straff
         if (sc > bestScore) { bestScore = sc; best = { cable, chk, grid, score: sc }; }
@@ -28971,6 +28987,16 @@ function generateCableGeo(roomId, productId, opts) {
 // Kabelobjekt i kontrakten fra 068 STEG 0.5: `pathEls` (den formen skew allerede bruker og
 // som `_cableWorldSegments`, `_drawCableSkewPath` og `_offsetCableClone` håndterer) PLUSS
 // `centerline` — den ene ordnede punktlisten lengde, tegning og dekning alle leser.
+// 080: hvilket hjørne av rommet ligger punktet nærmest? ⚠ Verden har y OPPOVER som mindre
+// negativ, så «topp» er STØRST y. Samme konvensjon som `_uTurnIsHigh`.
+function _geoCornerOf(pt, room) {
+  if (!pt || !room || !room.points || room.points.length < 3) return null;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+  return (pt.y >= midY ? 't' : 'b') + (pt.x >= midX ? 'r' : 'l');
+}
+
 function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
   // 072: rutenettet KVANTISERER CC (lag C: `cc = W/(N−1)`), så kallerens `cc` er bare ønsket.
   // Uten denne linja bar kabelen det ØNSKEDE tallet videre som `spacing_cm`, og
@@ -28978,6 +29004,30 @@ function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
   // der løpene faktisk lå 11,21 fra hverandre, og straffet dekningen for en stripe som i
   // virkeligheten var varm.
   if (grid && grid.cc) cc = grid.cc;
+  // ─── 080 · STARTEN SKAL LIGGE DER VELGEREN SIER ──────────────────────────────────────────
+  // Kenneth 15.10.2026: «det eneste som ikke stemmer er start kabel ifht velgeren øverst til
+  // venstre i menyen hvor man setter innsetningspunkt og retning.»
+  //
+  // ⚠ MÅLT: alle fire hjørnevalg ga IDENTISK start — (972, −923), oppe til høyre. Kabelen bar
+  // `startCorner` videre som en etikett uten at noe orienterte banen etter den, og poengleddet
+  // i `_geoScore` fikk `corner: wantCorner` inn, så `ctx.corner === ctx.wantCorner` var alltid
+  // sant. Hjørnevalget var i praksis dødt i denne motoren.
+  //
+  // En varmekabel har ingen egen retning — den kalde halen kan sitte i hvilken som helst ende —
+  // så å snu punktlista er gratis og alltid lovlig. Geometrien er uendret; det er bare avgjort
+  // hvilken ende som er tilkoblingen. Begge endene er gitt av ruten, så velgeren får den av de
+  // to som ligger nærmest ønsket hjørne; resten styres av poengleddet under, som nå måler det
+  // FAKTISKE hjørnet og dermed kan foretrekke en rute som virkelig starter der.
+  {
+    const rm = S.rooms.find(r => r.id === roomId);
+    if (rm && rm.points && rm.points.length >= 3 && pts.length > 1) {
+      const xs = rm.points.map(p => p.x), ys = rm.points.map(p => p.y);
+      const hx = (startCorner === 'br' || startCorner === 'tr') ? Math.max(...xs) : Math.min(...xs);
+      const hy = (startCorner === 'tl' || startCorner === 'tr') ? Math.max(...ys) : Math.min(...ys);
+      const d = p => Math.hypot(p.x - hx, p.y - hy);
+      if (d(pts[pts.length - 1]) < d(pts[0])) pts = pts.slice().reverse();
+    }
+  }
   let len = 0;
   for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
   // pathEls bygges som ÉN uturn-kjede: hele banen i ett element, så ingen annen kode kan
@@ -28991,7 +29041,11 @@ function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
     centerline: pts.map(p => ({ x: p.x, y: p.y })),
     start: pts[0], end: pts[pts.length - 1],
     direction: dir,
+    // `startCorner` er fortsatt det BRUKEREN ba om (det er det annen kode leser).
+    // 080: `_startCornerActual` er det kabelen faktisk fikk. Er de ulike, sier panelet fra —
+    // rutens to ender er gitt av geometrien, og noen ganger finnes ikke det valgte hjørnet.
     startCorner,
+    _startCornerActual: _geoCornerOf(pts[0], S.rooms.find(r => r.id === roomId)),
     spacing_cm: cc,
     cc_mm: Math.round(cc * 10),
     totalLength_cm: Math.round(len * 10) / 10,
@@ -30871,6 +30925,47 @@ async function _cableGeometryRegressionTest() {
           add(tag3 + ': gyldig når den først legges', c3.ok, 'ingen harde defekter',
               c3.ok ? 'ok' : (c3.hard || []).map(d => d.kind).join('+'));
         }
+      }
+    }
+
+    // ── 080 · HJØRNEVELGEREN SKAL BETY NOE ──────────────────────────────────────────────
+    // ⚠ MÅLT: alle fire hjørnevalg ga identisk start, (972, −923). Kabelen bar `startCorner`
+    // som en ren etikett, og `_geoScore` fikk `corner: wantCorner` inn — sammenligningen var
+    // alltid sann. Her låses begge halvdelene: banen orienteres, og avviket sies fra om.
+    {
+      const start = {};
+      for (const hj of ['bl', 'br', 'tl', 'tr']) {
+        _cableGalleryBuildScene(_cableFixtures.rom5);
+        S.ui.selectedRoomId = 1;
+        S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: hj, wallMarginCm: 2.5 });
+        const k = _autoFillCableImpl(1, 22, { allowPartial: true });
+        start[hj] = k && k.start ? _geoCornerOf(k.start, S.rooms[0]) : null;
+      }
+      add('080: venstre-valg gir start til VENSTRE', /l$/.test(start.bl || '') && /l$/.test(start.tl || ''),
+          'bl og tl → …l', 'bl=' + start.bl + ' tl=' + start.tl);
+      add('080: høyre-valg gir start til HØYRE', /r$/.test(start.br || '') && /r$/.test(start.tr || ''),
+          'br og tr → …r', 'br=' + start.br + ' tr=' + start.tr);
+      add('080: valget endrer faktisk starten', start.bl !== start.br,
+          'ulik start for bl og br', start.bl + ' vs ' + start.br);
+      // Poengleddet må lese det MÅLTE hjørnet, ikke det ønskede — ellers er det alltid sant.
+      add('080: _geoScore får ikke `corner: wantCorner`',
+          !/corner:\s*wantCorner\s*,/.test(document.documentElement.innerHTML),
+          'måler faktisk hjørne', 'leddet er dødt igjen');
+      // Og når hjørnet ikke er mulig, skal panelet si det — aldri et stumt avvik.
+      _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
+      const kb = _autoFillCableImpl(1, 22, { allowPartial: true });
+      const avvik = kb && kb._startCornerActual && kb._startCornerActual !== kb.startCorner;
+      add('080: avviket er registrert på kabelen', !!kb && !!kb._startCornerActual,
+          '_startCornerActual satt', kb ? String(kb._startCornerActual) : 'ingen kabel');
+      if (avvik) {
+        const lj = _cableStatusLines(kb, S.rooms[0]);
+        add('080: panelet sier hvor starten faktisk ligger',
+            lj.some(l => /^Start: /.test(l.tekst)), 'en «Start: …»-linje',
+            lj.map(l => l.tekst).join(' | ').slice(0, 80));
+        add('080: …og den toaster ikke (nivå ok)',
+            lj.filter(l => /^Start: /.test(l.tekst)).every(l => l.niva === 'ok'),
+            'niva ok', lj.filter(l => /^Start: /.test(l.tekst)).map(l => l.niva).join());
       }
     }
 

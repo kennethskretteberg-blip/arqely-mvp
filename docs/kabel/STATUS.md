@@ -843,3 +843,48 @@ i regresjonen er senket 88 → 85 %, og innrømmelsen «badHakk41 får ha ett hu
 ingen fixture har lenger lov til å ha hull. 22/22 batterier grønne, 996 påstander.
 
 Motoren bruker 338 ms mot 173 ms på rom5 600W — 079d kjører bare når vinneren har hull.
+
+---
+
+## §18 · 080 — hjørnevelgeren betyr noe (15.10.2026)
+
+Kenneth, etter at utlegget ble godkjent: *«Det eneste som ikke stemmer er start kabel ifht
+velgeren øverst til venstre i menyen hvor man setter innsetningspunkt og retning.»*
+
+### Hva som var galt
+
+**Hjørnevalget var dødt i geo-motoren.** Målt: alle fire valg ga identisk start, (972, −923),
+oppe til høyre. To uavhengige grunner:
+
+1. `_geoMakeCable` bar `startCorner` videre som en ren **etikett**. Ingenting orienterte banen.
+2. `_geoScore` fikk `corner: wantCorner, wantCorner` inn, så `ctx.corner === ctx.wantCorner` var
+   **alltid sant**. De tre poengene for riktig hjørne ble delt ut uansett hvor kabelen startet.
+
+### Fiksen
+
+En varmekabel har ingen egen retning — den kalde halen kan sitte i hvilken som helst ende — så
+punktlista snus gratis. `_geoMakeCable` velger nå den av rutens to ender som ligger nærmest det
+valgte hjørnet, og `_geoScore` måler det **faktiske** hjørnet, slik at søket kan foretrekke en
+rute som virkelig starter der.
+
+### Grensen, og hvorfor den sies fra om
+
+Rutens to ender er gitt av geometrien. På Rom 5 med 600W er **hver eneste** kandidat `tl→tr`
+eller `tl→br` — ingen rute ender nede til venstre, fordi nettopp det hjørnet er der transitten
+går ut, og den enden kan ikke også være kabelens ende.
+
+Derfor lagres `_startCornerActual` på kabelen, og panelet sier:
+*«Start: oppe til venstre — nede til venstre er ikke mulig i dette rommet.»*
+Nivå `ok`, ikke `advarsel`: ingenting er galt med utlegget, og `_cableStatusToast` siler bort
+`ok`, så dette blir ikke en toast på hvert utlegg. Samme prinsipp som `_geomApprox` i 077 —
+aldri et stumt avvik.
+
+### Målt sluttresultat (Rom 5, loddrett, nedre venstre valgt)
+
+| produkt | CC | lengde | hull | maks gap øvre/nedre | start |
+|---|---|---|---|---|---|
+| InFloor 17T 600W 35m | 14,5 | **35,00 m (0,00 %)** | 0 | 14,6 / 14,6 | tl |
+| InFloor 17T 700W 41m | 13,2 | 40,97 m (−0,07 %) | 0 | 13,2 / 13,2 | tl |
+| InFloor 10T 600W 60m | 8,8 | **60,00 m (0,00 %)** | 0 | 8,8 / 8,8 | tl |
+
+22/22 batterier grønne, 1003 påstander.
