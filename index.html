@@ -27398,13 +27398,86 @@ function _cableGeometryCheck(cable, room, opts) {
     coveragePct: coveragePct == null ? null : +coveragePct.toFixed(1),
     nRuns: (cable.runs || []).length,
     nConnections: (cable.connections || []).length,
-    legalAreaApprox: !!legal.approx
+    legalAreaApprox: !!legal.approx,
+    // ─── 089 · R-VEGG ────────────────────────────────────────────────────────────────────
+    // Største tomme stripe mellom en vegg og nærmeste løp, målt PER BÅND (løp som overlapper
+    // i sveiperetningen hører til samme felt). Én tom bane ved veggen er lov (074b); to er det
+    // ikke. ⚠ MÅLT på Kenneths Rom 5 med 600W: 48,4 cm = 3,3 × CC i feltet over stubben, mot
+    // 19,6 cm i feltet under. Det er to ubrukte baner som finnes i rutenettet.
+    wallStripeCm: _cableWallStripe(cable, room, legal)
   };
+  metrics.wallStripeCC = (metrics.wallStripeCm == null || !metrics.ccFieldCm) ? null
+    : +(metrics.wallStripeCm / metrics.ccFieldCm).toFixed(2);
   if (S.ui && S.ui.debugCableEngine) {
     console.log('[cable-check]', room && room.name, metrics.engine, hard.length ? 'FEIL' : 'ok',
       { hard: hard.map(d => d.kind), soft: soft.map(d => d.kind), metrics });
   }
   return { ok: hard.length === 0, hard, soft, metrics, _polys: polys, _legal: legal };
+}
+
+// ─── 089 · R-VEGG: største tomme stripe mellom vegg og nærmeste løp ────────────────────────
+// Kenneth 15.10.2026: «Jeg er ganske sikker på at det er plass til 2 stk løp oppe til venstre.»
+// Han hadde rett — og grunnen var ikke geometri, men poengsummen: lengdeleddet (60 − |avvik|×20)
+// ga vinneren 12 poeng mer enn et gyldig alternativ som fylte stripen (CC 13,83 · 35,22 m
+// · +0,62 % · gap 18,8 cm mot vinnerens CC 14,53 · 35,00 m · 0,00 % · gap 48,4 cm).
+//
+// Målt per BÅND: løp som overlapper i sveiperetningen hører til samme felt. For hvert bånd
+// måles avstanden fra det ytterste løpet til rommets kant på den siden, i den retningen løpene
+// går PARALLELT med veggen. Returnerer den største i cm.
+function _cableWallStripe(cable, room, legal) {
+  try {
+    const cl = (cable && cable.centerline) || [];
+    if (cl.length < 4 || !room || !room.points || room.points.length < 3) return null;
+    const dir = cable.direction === 'h' ? 'h' : 'v';
+    const pk = dir === 'v' ? 'x' : 'y';          // på tvers av løpene
+    const sk = dir === 'v' ? 'y' : 'x';          // langs løpene
+    const cc = cable.spacing_cm || 0;
+    if (!(cc > 0)) return null;
+    const runs = [];
+    for (let i = 0; i + 1 < cl.length; i++) {
+      const a = cl[i], b = cl[i + 1];
+      if (Math.abs(a[pk] - b[pk]) < 0.05 && Math.abs(a[sk] - b[sk]) > cc * 0.5)
+        runs.push({ p: a[pk], lo: Math.min(a[sk], b[sk]), hi: Math.max(a[sk], b[sk]) });
+    }
+    if (runs.length < 2) return null;
+    // ⚠ FØRSTE FORSØK GRUPPERTE I BÅND, og det var feil på to måter: grupperingen ble
+    // rekkefølge-avhengig, og et bånds ytterkant er ikke nødvendigvis en VEGG — den kan være
+    // der et annet bånd overtar. Målt ga det 252 cm «veggstripe» i et rom på 300.
+    //
+    // Her spørres det per LØP i stedet, og spørsmålet er det eneste som betyr noe:
+    // finnes det et annet løp mellom dette og veggen som overlapper det i sveiperetningen?
+    // Gjør det ikke, er avstanden til veggen en ekte tom stripe.
+    const pts = room.points;
+    const kant = (mid) => {                       // rommets utstrekning på tvers, ved denne sveipen
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const a = pts[j], b = pts[i];
+        if ((a[sk] <= mid) === (b[sk] <= mid)) continue;
+        const t = (mid - a[sk]) / ((b[sk] - a[sk]) || 1e-9);
+        const x = a[pk] + t * (b[pk] - a[pk]);
+        if (x < lo) lo = x; if (x > hi) hi = x;
+      }
+      return (hi > lo) ? { lo, hi } : null;
+    };
+    let verst = 0;
+    for (const r of runs) {
+      // ⚠ MÅLT: et 14 cm langt KOBLINGSSTYKKE ble telt som et løp, og siden ingen nabo kan
+      // overlappe det med mer enn én CC (14,53), så det ut som om det sto alene mot veggen —
+      // og målingen meldte 252 cm veggstripe i et rom på 300. Et løp kortere enn 1,5 CC er
+      // ikke et feltløp, og overlappskravet må skaleres etter løpets egen lengde.
+      const len = r.hi - r.lo;
+      if (len < cc * 1.5) continue;
+      const k = kant((r.lo + r.hi) / 2);
+      if (!k) continue;
+      const krav = Math.min(cc, len * 0.6);
+      const dekket = (side) => runs.some(o =>
+        (side < 0 ? o.p < r.p - cc * 0.3 : o.p > r.p + cc * 0.3)
+        && Math.min(o.hi, r.hi) - Math.max(o.lo, r.lo) > krav);
+      if (!dekket(-1)) verst = Math.max(verst, r.p - k.lo);
+      if (!dekket(1))  verst = Math.max(verst, k.hi - r.p);
+    }
+    return +verst.toFixed(1);
+  } catch (e) { return null; }
 }
 
 // ─── Fixture-rom (spec §6) ──────────────────────────────────────────────────────────────────
@@ -28763,6 +28836,17 @@ function _geoScore(chk, ctx) {
   // dekning (Kenneths regel). Vekten er satt slik at den slår ut 30-poengs-dekningsleddet over:
   // et utlegg med hull skal tape mot et jevnt utlegg selv når det dekker mer.
   s -= 25 * Math.min(3, ctx.hull || 0);
+  // ─── 089 · R-VEGG ────────────────────────────────────────────────────────────────────────
+  // ⚠ Vekten er MÅLT, ikke valgt på magefølelse: lengdeleddet over ga vinneren 12 poeng mer enn
+  // det gyldige alternativet som fylte stripen (0,00 % mot +0,62 % avvik). Straffen må derfor
+  // overstige 12 — men den må tape mot hull-straffen (25), ellers kjøper den en fylt stripe for
+  // et hull midt i feltet, og det er stikk i strid med 074b.
+  // Gradert fra «kant + 1 CC» (lov, 074b) til «kant + 2 CC» (klart for mye).
+  if (m.wallStripeCm != null && m.ccFieldCm) {
+    const lov = (m.marginCm || 0) + m.ccFieldCm;
+    const over = (m.wallStripeCm - lov) / m.ccFieldCm;
+    if (over > 0) s -= 18 * Math.min(1, over);
+  }
   return s;
 }
 

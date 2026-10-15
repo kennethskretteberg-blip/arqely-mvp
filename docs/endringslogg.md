@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 089 — R-VEGG måles, og mekanismen er funnet (15.10.2026, gren `kabelmotor`)
+
+Instrumenteringen er rettet: senterlinja leses av kabelen som sendes inn i
+`_cableGeometryCheck`, ikke av en global variabel som kunne feilkoble kandidat og måling.
+
+Mekanismen bak de to tomme banene i Rom 5 med 600W: det er **ikke** lengdebudsjettet. Et gyldig
+utlegg som fyller stripen finnes (CC 13,83 · 35,22 m · +0,62 % · stripe 1,35 CC) — men det har
+et **hull inne i feltet**, og 074b sier at jevn avstand går foran å dekke ut mot veggen.
+Vinneren (CC 14,53 · 0 hull · stripe 3,34 CC) scorer 80,4 mot 57,1.
+
+- Ny `metrics.wallStripeCm` / `wallStripeCC`, målt per løp (ikke per bånd — to målefeil rettet
+  underveis, begge dokumentert i STATUS §29).
+- R-VEGG-straff i `_geoScore`, vekt 18: tyngre enn lengdeleddets 12 poeng forsprang, lettere enn
+  hull-straffen 25.
+
+⚠ Om Kenneths tegnede topologi (transitten forlenget til de to nye løpene) finnes uten hull er
+IKKE målt. Det avgjør om motoren mangler en variant, eller om 074b forbyr det han ber om.
+
 ## 089 (delvis) — fixturet for Rom 5 hadde drevet fra virkeligheten (15.10.2026, gren `kabelmotor`)
 
 Kenneth meldte at det er plass til to løp til oppe til venstre i Rom 5. Han har rett — men feilen

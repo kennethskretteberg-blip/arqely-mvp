@@ -1349,3 +1349,64 @@ måle den med instrumentering som ikke kan feilkoble kandidat og senterlinje (ta
 kabelobjektet, ikke på en global variabel).
 
 **R-VEGG, større CC og faseforskyvning er derfor IKKE bygget.** Grunnlaget mangler.
+
+---
+
+## §29 · 089 — mekanismen: å fylle veggstripen koster et HULL, og 074b forbyr det
+
+### Instrumenteringen, rettet
+
+Den forrige loggingen brukte en global variabel for senterlinja, og `_cableGeometryCheck` kalles
+også utenfor geo-motoren — så kandidat og senterlinje kunne feilkobles (§28). Rettet ved å lese
+senterlinja **av kabelen som sendes inn som første argument**. Ingen global. Tallene under er
+derfor etterprøvbare.
+
+### Mekanismen
+
+| score | CC | lengde | veggstripe | hull | dekning |
+|---|---|---|---|---|---|
+| **80,4** ← vinner | 14,53 | 35,00 m (0,00 %) | 48,5 cm (3,34 CC) | **0** | 87,2 % |
+| 76,5 | 13,83 | 35,00 m (0,00 %) | 32,6 cm (2,36 CC) | 0 | 83,8 % |
+| 57,1 | 13,83 | 35,22 m (+0,62 %) | **18,7 cm (1,35 CC)** | **1** | 84,3 % |
+
+**Det er ikke lengdebudsjettet.** Et gyldig utlegg som fyller stripen finnes, innenfor ±1 %.
+Men det har et **hull inne i feltet**, og 074b — Kenneths egen låste regel — sier at jevn avstand
+går foran å dekke helt ut mot veggen. Hull-straffen er 25 poeng; R-VEGG-straffen er bevisst 18,
+altså lettere, nøyaktig som 089-oppdraget ba om.
+
+Motoren gjør derfor akkurat det reglene sier. **Kenneths to lilla løp kan ikke fås uten et hull
+— blant de kandidatene motoren genererer i dag.**
+
+### Bygget
+
+* `_cableWallStripe(cable, room, legal)` → `metrics.wallStripeCm` / `wallStripeCC`.
+  Måles **per løp**, ikke per bånd: finnes det et annet løp mellom dette og veggen som overlapper
+  det i sveiperetningen? Gjør det ikke, er avstanden en ekte tom stripe.
+  ⚠ To feil måtte rettes underveis, begge målt: båndgruppering ble rekkefølge-avhengig og tok et
+  felts ytterkant for en vegg (ga 252 cm i et rom på 300), og et 14 cm langt koblingsstykke ble
+  telt som feltløp (ingen nabo kan overlappe det med én CC). Løp kortere enn 1,5 CC hoppes over,
+  og overlappskravet skaleres med løpets egen lengde.
+* R-VEGG-straff i `_geoScore`, gradert fra «kant + 1 CC» til «kant + 2 CC», vekt 18.
+  Vekten er målt: lengdeleddet ga vinneren 12 poeng forsprang, så straffen må overstige 12 —
+  og tape mot hull-straffen 25.
+
+### Målt, Rom 5 (loddrett, start nede til venstre)
+
+| produkt | CC | veggstripe | i CC | hull | dekning |
+|---|---|---|---|---|---|
+| 600W 35m | 14,53 | 48,5 cm | **3,34** | 0 | 87,2 % |
+| 700W 41m | 12,10 | 17,0 cm | 1,40 | 0 | 86,1 % |
+| 10T 600W 60m | 6,46 | 17,8 cm | 2,76 | 0 | 67,3 % |
+| 600W **vannrett** | 14,92 | 5,1 cm | 0,34 | 0 | 90,1 % |
+
+### Det som gjenstår, og som er Kenneths valg
+
+Kenneths tegning forlenger transitten langs stubben helt bort til de to nye løpene. **Om den
+topologien finnes uten hull er ikke målt** (STEG 0.3) — det krever at varianten bygges for hånd
+og kontrolleres. Enten:
+
+* **a)** den finnes → motoren mangler en variant, og den skal bygges, eller
+* **b)** den finnes ikke → da forbyr 074b det Kenneth ber om, og han må velge hvilken av de to
+  reglene som veier tyngst i dette rommet.
+
+⚠ Suitetiden er uendret og fortsatt over målet (§26). Utleggene tar nå 1,4–5,2 s per rom.
