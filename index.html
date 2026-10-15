@@ -28974,6 +28974,28 @@ function generateCableGeo(roomId, productId, opts) {
     return best;
   };
 
+  // 089b: lengden til den kandidaten som FYLLER veggstripen. Samme rolle som `jevnLen` har for
+  // hull: uten den styres trimmingen av en kandidat vi prøver å komme oss bort fra.
+  const veggLen = (dir, cc, extraSweep) => {
+    let best = null;
+    for (const grid of gridsFor(dir, cc, extraSweep, true)) {
+      for (const order of _geoRouteOrders(grid.cells, 8)) {
+        const plan = _geoPlanTraversals(grid, order);
+        if (!plan) continue;
+        const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
+        if (!pts || pts.length < 2) continue;
+        if (_geoInteriorHoles(pts, dir, grid) > 0) continue;          // aldri kjøp stripe for hull
+        const stripe = _cableWallStripe({ centerline: pts, direction: dir, spacing_cm: grid.cc }, room, legal);
+        if (stripe == null || stripe > (legal.margin || 0) + grid.cc + 1) continue;
+        let len = 0;
+        for (let i = 0; i + 1 < pts.length; i++) len += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        if (best == null || (targetCm && Math.abs(len - targetCm) < Math.abs(best - targetCm))) best = len;
+        break;
+      }
+    }
+    return best;
+  };
+
   // Ett forsøk: bygg rutenett, rut, bygg senterlinje, kontrollér. Returnerer {cable, chk} eller null.
   const attempt = (dir, cc, extraSweep) => {
     // 083 · R-START er et FILTER også her: finnes en gyldig kandidat som starter i hjørnet,
@@ -29226,6 +29248,58 @@ function generateCableGeo(roomId, productId, opts) {
         winner = treff[0]; winnerScore = treff[0].score;
       }
     } finally { _parityOn = false; }
+  }
+
+  // ─── 089b · VEGGRUNDEN: TRIM DEN KANDIDATEN SOM FYLLER STRIPEN ──────────────────────────
+  // ⚠ MÅLT på Rom 5 / 600W: varianten Kenneth tegnet FINNES — øvre celle med 6 baner fra 696,3
+  // og stripe 19,4 cm — men den lander på 34,25 m (−2,14 %) eller 36,03 m (+2,94 %), aldri
+  // innenfor ±1 %. Lengden er en sagtann i baneantallet (072). Den for lange kan trimmes ned,
+  // og det er nøyaktig det `extraSweep` gjør — motoren prøvde det bare aldri på denne varianten,
+  // fordi `jevnLen` måler den HOLEFRIE kandidaten, ikke den som fyller stripen.
+  //
+  // Kjører bare når vinneren faktisk bryter R-VEGG, og godtar bare noe som er like bra på alt
+  // annet: gyldig, innenfor lengden, hullfritt, og ikke dårligere dekning.
+  if (winner && winner.chk.ok && targetCm && !opts.noCornerRound) {
+    const wm = winner.chk.metrics;
+    const lov = (wm.marginCm || 0) + (wm.ccFieldCm || 0);
+    if (wm.wallStripeCm != null && wm.wallStripeCm > lov + 1) {
+      const dir = winner.cable.direction, cc0 = winner.cable.spacing_cm;
+      const deknFor = wm.coveragePct || 0;
+      _parityOn = true;
+      try {
+        let budsjett = 40, funnet = null;
+        const pLen = (d, c2, e2) => (budsjett-- <= 0 ? null : veggLen(d, c2, e2));
+        for (let st = 0; st <= 4 && budsjett > 0 && !funnet; st++) {
+          const cc = st === 0 ? cc0 : ccHi - (ccHi - ccLo) * st / 4;
+          if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+          const len = pLen(dir, cc, 0);
+          if (len == null) continue;
+          let ex = 0;
+          if (len > targetCm) {                       // bare en FOR LANG bane kan trekkes inn
+            let exLo = 0, exHi = Math.max(5, cc * 3), gotDiff = Math.abs(len - targetCm);
+            for (let it = 0; it < 14 && budsjett > 0; it++) {
+              const e = (exLo + exHi) / 2;
+              const m2 = pLen(dir, cc, e);
+              if (m2 == null) { exHi = e; continue; }
+              const d2 = m2 - targetCm;
+              if (Math.abs(d2) < gotDiff) { gotDiff = Math.abs(d2); ex = e; }
+              if (d2 > 0) exLo = e; else exHi = e;
+              if (Math.abs(exHi - exLo) < 1e-3) break;
+            }
+          }
+          for (const e of (ex ? [ex, 0] : [0])) {
+            const r = attempt(dir, cc, e);
+            if (r && r.chk.ok
+                && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct
+                && !(r.cable._geoHoles > 0)
+                && r.chk.metrics.wallStripeCm != null
+                && r.chk.metrics.wallStripeCm <= (r.chk.metrics.marginCm || 0) + r.chk.metrics.ccFieldCm + 1
+                && (r.chk.metrics.coveragePct || 0) >= deknFor - 0.1) { funnet = r; break; }
+          }
+        }
+        if (funnet) { winner = funnet; winnerScore = funnet.score; }
+      } finally { _parityOn = false; }
+    }
   }
 
   if (winner) {

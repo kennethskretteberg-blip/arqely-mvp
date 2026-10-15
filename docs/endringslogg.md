@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 089b — veggrunden: varianten Kenneth tegnet finnes, og den koster ingenting (15.10.2026, gren `kabelmotor`)
+
+Kenneths topologi (6 baner i øvre felt, de to ekstra løpene langs V6) genereres allerede av
+motoren — men ble avvist på LENGDE: 34,25 m (−2,14 %) eller 36,03 m (+2,94 %), aldri innenfor
+±1 %. Den for lange kan trimmes med `extraSweep`, men motoren prøvde det aldri på denne
+varianten, fordi `jevnLen` måler den hullfrie kandidaten og ikke den som fyller stripen.
+
+Ny `veggLen` + en runde som kjører bare når vinneren bryter R-VEGG, og som godtar bare noe som
+er like bra på alt annet.
+
+Rom 5 / 600W / loddrett: øvre felt 4 → **6 løp**, veggstripe 48,5 → **19,4 cm** (3,34 → 1,34 CC),
+dekning 87,2 → **88,7 %**. CC, lengde og hull uendret. 700W, 10T og vannrett uendret.
+
+⚠ Rettelse til STATUS §29: konklusjonen «å fylle stripen koster et hull» gjaldt bare de
+kandidatene som ble scoret. Den hullfrie varianten fantes, men ble avvist på lengde før den nådde
+poengsummen.
+
 ## 089 — R-VEGG måles, og mekanismen er funnet (15.10.2026, gren `kabelmotor`)
 
 Instrumenteringen er rettet: senterlinja leses av kabelen som sendes inn i

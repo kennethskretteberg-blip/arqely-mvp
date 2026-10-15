@@ -1410,3 +1410,63 @@ og kontrolleres. Enten:
   reglene som veier tyngst i dette rommet.
 
 ⚠ Suitetiden er uendret og fortsatt over målet (§26). Utleggene tar nå 1,4–5,2 s per rom.
+
+---
+
+## §30 · 089b — varianten finnes, og den koster ingenting. Kenneth hadde rett hele veien.
+
+### Varianten ble bygget og målt (STEG 0.3)
+
+Instrumentert på rutenettet `_geoMakeCable` får inn (ingen globale), viste søket at Kenneths
+topologi **allerede genereres**:
+
+```
+CC 14,53 · øvre celle 6 baner fra 696,3 · stripe 19,4 cm  →  34,25 m (−2,14 %)  AVVIST: lengde
+CC 14,53 · øvre celle 6 baner fra 696,3 · stripe 19,4 cm  →  36,03 m (+2,94 %)  AVVIST: lengde
+```
+
+Seks baner, første på 696,3 — nøyaktig de to løpene Kenneth tegnet i lilla. Den ble avvist på
+**lengde**: 34,25 m er for kort, 36,03 m for lang, og ±1 %-vinduet (34,65–35,35) treffes ikke.
+Lengden er en sagtann i baneantallet (072).
+
+**Men den for lange kan trimmes ned.** `extraSweep` gjør nøyaktig det — motoren prøvde det bare
+aldri på denne varianten, fordi `jevnLen` måler den HULLFRIE kandidaten, ikke den som fyller
+stripen. Samme feilklasse som 079d: *trimmingen styres av en kandidat vi prøver å komme oss bort
+fra.*
+
+### Veggrunden (089b)
+
+Ny `veggLen` + en runde som kjører **bare når vinneren bryter R-VEGG**, og som godtar bare noe
+som er like bra på alt annet: gyldig, innenfor ±1 %, hullfritt, og ikke dårligere dekning.
+
+### Målt, Rom 5 (loddrett, start nede til venstre)
+
+| | før 089 | **etter 089b** |
+|---|---|---|
+| løp i øvre felt | 4, fra 725,3 | **6, fra 696,3** |
+| veggstripe | 48,5 cm (**3,34 CC**) | **19,4 cm (1,34 CC)** |
+| CC | 14,53 | 14,53 (uendret) |
+| lengde | 35,00 m (0,00 %) | 35,00 m (0,00 %) |
+| hull | 0 | 0 |
+| **dekning** | 87,2 % | **88,7 %** |
+| start fra hjørnet | 23 cm | 25 cm |
+
+Bedre på dekning, bedre på veggstripe, uendret på CC, lengde og hull. **Ingenting ble byttet bort.**
+
+| øvrige | CC | stripe | dekning | hull |
+|---|---|---|---|---|
+| 700W loddrett | 12,10 | 17,0 cm (1,40 CC) | 86,1 % | 0 |
+| 10T 60m loddrett | 6,46 | 17,8 cm (2,76 CC) | 67,3 % | 0 |
+| 600W vannrett | 14,92 | 5,1 cm (0,34 CC) | 90,1 % | 0 |
+
+⚠ 10T ligger fortsatt på 2,76 CC. Veggrunden fant ingen bedre kandidat innenfor budsjettet der —
+ikke undersøkt videre.
+
+⚠ Suitetiden er uendret og fortsatt over målet (§26). 600W tar 2,8 s.
+
+### Rettelsen til §29
+
+§29 konkluderte at «å fylle veggstripen koster et hull, og 074b forbyr det». **Det var feil** —
+eller rettere: det gjaldt bare de kandidatene som ble scoret. Den hullfrie varianten fantes, men
+nådde aldri poengsummen fordi den ble avvist på lengde før den kom dit. Konklusjonen var riktig om
+datagrunnlaget og feil om virkeligheten.
