@@ -26590,13 +26590,24 @@ function _cableStatusLines(cable, room) {
   // ⚠ Nivå `ok`, ikke `advarsel`: ingenting er galt med utlegget, og `_cableStatusToast` siler
   // bort `ok` — dette er en opplysning i panelet, ikke en toast på hvert eneste utlegg.
   // Lagt til ETTER ok-linja over, så «● ok · dekning» ikke forsvinner av at denne finnes.
-  if (cable._startCornerActual && cable.startCorner
-      && cable._startCornerActual !== cable.startCorner) {
+  {
     const hj = { bl: 'nede til venstre', br: 'nede til høyre',
                  tl: 'oppe til venstre', tr: 'oppe til høyre' };
-    ut.push({ niva: 'ok',
-      tekst: 'Start: ' + (hj[cable._startCornerActual] || '?') + ' — '
-           + (hj[cable.startCorner] || '?') + ' er ikke mulig i dette rommet.' });
+    const feilKvadrant = cable._startCornerActual && cable.startCorner
+                      && cable._startCornerActual !== cable.startCorner;
+    // 081: også når kvadranten stemmer kan starten ligge langt fra hjørnet. Serpentinens to
+    // ender er låst av paritet: kommer kabelen inn i et felt med PARTALL baner, må den ut i
+    // samme ende den kom inn. Da er 80 cm fra hjørnet det nærmeste som finnes.
+    const langtUnna = !feilKvadrant && cable._startCornerOffCm != null && cable._startCornerOffCm > 40;
+    if (feilKvadrant) {
+      ut.push({ niva: 'ok',
+        tekst: 'Start: ' + (hj[cable._startCornerActual] || '?') + ' — '
+             + (hj[cable.startCorner] || '?') + ' er ikke mulig i dette rommet.' });
+    } else if (langtUnna) {
+      ut.push({ niva: 'ok',
+        tekst: 'Start: ' + cable._startCornerOffCm + ' cm fra ' + (hj[cable.startCorner] || '?')
+             + ' — nærmere er ikke mulig med dette utlegget.' });
+    }
   }
   return ut;
 }
@@ -28673,7 +28684,11 @@ function _geoScore(chk, ctx) {
   s += Math.min(30, (m.coveragePct || 0) * 0.3);                             // dekning
   s -= (chk.soft || []).length * 2;                                          // myke avvik
   if (ctx.dir === ctx.wantDir) s += 4;
-  if (ctx.corner === ctx.wantCorner) s += 3;
+  // 081: GRADERT, ikke binært. Før var dette `ctx.corner === ctx.wantCorner`, og med en
+  // kvadranttest kunne to kandidater 68 cm fra hverandre få nøyaktig samme poeng. Nå trekker
+  // leddet mot det hjørnet brukeren faktisk pekte på — også langs sveipeaksen, som er det
+  // vannrette utlegg manglet helt (opp/ned ble aldri hørt på).
+  s += 4 * (1 - (ctx.cornerDist == null ? 1 : ctx.cornerDist));
   s -= Math.max(0, ctx.nCells - 1) * 1.5;                                    // færrest overganger
   // 074b: et hull på mer enn 1,25 × CC inne i feltet er en TUNG straff — jevn avstand går foran
   // dekning (Kenneths regel). Vekten er satt slik at den slår ut 30-poengs-dekningsleddet over:
@@ -28821,7 +28836,8 @@ function generateCableGeo(roomId, productId, opts) {
         // Færrest transitter vinner når alt annet er likt (lag D).
         // 080: MÅLT hjørne, ikke det ønskede. Før sto `corner: wantCorner` her, og da var
         // sammenligningen i `_geoScore` alltid sann — et dødt ledd.
-        const sc = _geoScore(chk, { dir, wantDir, corner: _geoCornerOf(cable.start, room), wantCorner,
+        const sc = _geoScore(chk, { dir, wantDir, wantCorner,
+                                    cornerDist: _geoCornerDist(cable.start, room, wantCorner),
                                     nCells: grid.cells.length, hull })
                  - 0.5 * ((grid.transits || []).length);   // ren avgjørelse ved likt, ikke straff
         if (sc > bestScore) { bestScore = sc; best = { cable, chk, grid, score: sc }; }
@@ -28997,6 +29013,21 @@ function _geoCornerOf(pt, room) {
   return (pt.y >= midY ? 't' : 'b') + (pt.x >= midX ? 'r' : 'l');
 }
 
+// 081: hvor nær er punktet det ØNSKEDE hjørnet, 0 (i hjørnet) til 1 (motsatt hjørne)?
+// ⚠ `_geoCornerOf` over er kvadrantbasert, og det er for grovt til å STYRE søket: et punkt
+// 21 cm over rommets midtlinje måles som «øvre» selv om det ligger midt på veggen. Målt på
+// Rom 5: med «øvre venstre» startet kabelen på (695, −917) — øverste halvdel, ja, men
+// 68 cm under hjørnet, og poengleddet så ingen forskjell på den og (695, −849).
+function _geoCornerDist(pt, room, corner) {
+  if (!pt || !room || !room.points || room.points.length < 3) return 1;
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const hx = (corner === 'br' || corner === 'tr') ? x1 : x0;
+  const hy = (corner === 'tl' || corner === 'tr') ? y1 : y0;   // «topp» = størst y
+  const diag = Math.hypot(x1 - x0, y1 - y0) || 1;
+  return Math.min(1, Math.hypot(pt.x - hx, pt.y - hy) / diag);
+}
+
 function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
   // 072: rutenettet KVANTISERER CC (lag C: `cc = W/(N−1)`), så kallerens `cc` er bare ønsket.
   // Uten denne linja bar kabelen det ØNSKEDE tallet videre som `spacing_cm`, og
@@ -29046,6 +29077,17 @@ function _geoMakeCable(roomId, productId, dir, cc, pts, grid, startCorner) {
     // rutens to ender er gitt av geometrien, og noen ganger finnes ikke det valgte hjørnet.
     startCorner,
     _startCornerActual: _geoCornerOf(pts[0], S.rooms.find(r => r.id === roomId)),
+    // 081: hvor langt fra det valgte hjørnet starten faktisk havnet, i cm. Kvadranten alene er
+    // for grov til å si fra om: på Rom 5 loddrett lå starten 81 cm fra «øvre venstre» og ble
+    // likevel målt som samme kvadrant.
+    _startCornerOffCm: (() => {
+      const rm = S.rooms.find(r => r.id === roomId);
+      if (!rm || !rm.points || rm.points.length < 3) return null;
+      const xs = rm.points.map(p => p.x), ys = rm.points.map(p => p.y);
+      const hx = (startCorner === 'br' || startCorner === 'tr') ? Math.max(...xs) : Math.min(...xs);
+      const hy = (startCorner === 'tl' || startCorner === 'tr') ? Math.max(...ys) : Math.min(...ys);
+      return Math.round(Math.hypot(pts[0].x - hx, pts[0].y - hy));
+    })(),
     spacing_cm: cc,
     cc_mm: Math.round(cc * 10),
     totalLength_cm: Math.round(len * 10) / 10,
@@ -30947,6 +30989,38 @@ async function _cableGeometryRegressionTest() {
           'br og tr → …r', 'br=' + start.br + ' tr=' + start.tr);
       add('080: valget endrer faktisk starten', start.bl !== start.br,
           'ulik start for bl og br', start.bl + ' vs ' + start.br);
+      // ── 081 · OPP/NED SKAL OGSÅ HØRES PÅ ─────────────────────────────────────────────
+      // ⚠ MÅLT: vannrette utlegg hørte bare på venstre/høyre. Poengleddet var binært på
+      // kvadrant, så to kandidater 68 cm fra hverandre fikk nøyaktig samme poeng. Nå er det
+      // gradert på AVSTAND til det valgte hjørnet, og da teller sveipeaksen også.
+      const vLodd = {}, vVann = {};
+      for (const hj of ['tl', 'bl']) {
+        for (const [dir, mål] of [['h', vVann], ['v', vLodd]]) {
+          _cableGalleryBuildScene(_cableFixtures.rom5);
+          S.ui.selectedRoomId = 1;
+          S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: hj, wallMarginCm: 2.5 });
+          const k = _autoFillCableImpl(1, 23, { allowPartial: true });
+          mål[hj] = k && k.start ? +k.start.y.toFixed(0) : null;
+        }
+      }
+      add('081: vannrett hører på OPP/NED', vVann.tl != null && vVann.bl != null && vVann.tl > vVann.bl + 50,
+          'tl starter høyere enn bl', 'tl y=' + vVann.tl + ' bl y=' + vVann.bl);
+      add('081: vannrett tl starter nær taket', vVann.tl != null && vVann.tl > -860,
+          'y > -860 (rommets topp er -836)', 'y=' + vVann.tl);
+      add('081: vannrett bl starter nær gulvet', vVann.bl != null && vVann.bl < -1020,
+          'y < -1020 (rommets bunn er -1040)', 'y=' + vVann.bl);
+      // Loddrett i DETTE rommet er låst av paritet (6 baner i øvre felt) — det skal ikke
+      // påstås at den treffer hjørnet, men det skal STÅ i panelet hvor den havnet.
+      _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'tl', wallMarginCm: 2.5 });
+      const kt = _autoFillCableImpl(1, 23, { allowPartial: true });
+      add('081: avstanden til valgt hjørne er målt', kt && kt._startCornerOffCm != null,
+          '_startCornerOffCm satt', kt ? String(kt._startCornerOffCm) : 'ingen kabel');
+      if (kt && kt._startCornerOffCm > 40) {
+        const lj = _cableStatusLines(kt, S.rooms[0]).map(l => l.tekst);
+        add('081: panelet oppgir avstanden i cm', lj.some(l => /^Start: \d+ cm fra /.test(l)),
+            '«Start: N cm fra …»', lj.join(' | ').slice(0, 90));
+      }
       // Poengleddet må lese det MÅLTE hjørnet, ikke det ønskede — ellers er det alltid sant.
       add('080: _geoScore får ikke `corner: wantCorner`',
           !/corner:\s*wantCorner\s*,/.test(document.documentElement.innerHTML),

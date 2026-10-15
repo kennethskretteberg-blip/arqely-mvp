@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 081 — hjørnevelgeren hører på opp/ned (15.10.2026, gren `kabelmotor`)
+
+080 gjorde hjørneleddet levende, men det var fortsatt binært på KVADRANT. Målt: en start 21 cm
+over rommets midtlinje ble regnet som «øvre», og poengleddet så ingen forskjell på den og et
+punkt 68 cm høyere oppe. Derfor hørte vannrette utlegg bare på venstre/høyre.
+
+- Leddet er nå gradert på avstand til valgt hjørne, så sveipeaksen teller med.
+  Rom 5 vannrett: `tl` → y = −841, `bl` → y = −1035 (rommet er −836 … −1040).
+- Loddrett er låst av paritet: det øvre feltet har 6 baner, og med partall må kabelen ut i samme
+  ende den kom inn. Panelet oppgir avstanden: «Start: 83 cm fra oppe til venstre — nærmere er
+  ikke mulig med dette utlegget.»
+
+Hindringer, målt: én hindring gir 96,00 m eksakt, 0 hull, 0 kryssinger, 0 utenfor — motoren
+legger seg rundt den som rundt en veggstubbe. Tre hindringer er fortsatt ugyldig (10 celler
+trenger 6 transittkorridorer, taket er 2). Utleggene ellers uendret.
+22/22 batterier grønne (1008 påstander).
+
 ## 080 — hjørnevelgeren betyr noe (15.10.2026, gren `kabelmotor`)
 
 Innsetningspunkt-velgeren var død i geo-motoren: alle fire hjørnevalg ga identisk start.

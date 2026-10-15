@@ -888,3 +888,60 @@ aldri et stumt avvik.
 | InFloor 10T 600W 60m | 8,8 | **60,00 m (0,00 %)** | 0 | 8,8 / 8,8 | tl |
 
 22/22 batterier grønne, 1003 påstander.
+
+---
+
+## §19 · 081 — opp/ned i hjørnevelgeren, og hindringer målt
+
+Kenneth 15.10.2026: *«Hjørnevelgeren funker fortsatt ikke helt. Spesielt på de vannrette
+utleggene, den tar ikke høyde for om jeg setter start opp eller nede, kun venstre eller høyre.
+Og når jeg velger loddrett og setter velgeren øverst til venstre, starter den [midt på veggen],
+ønsker at den starter helt øverst i venstre hjørnet. Hvordan er denne motoren ifht hindringer?»*
+
+### Hvorfor opp/ned ble ignorert
+
+080 gjorde hjørneleddet levende, men det var fortsatt **binært på kvadrant**
+(`ctx.corner === ctx.wantCorner`). ⚠ MÅLT: starten på Rom 5 lå 21 cm over rommets midtlinje og
+ble derfor målt som «øvre» — poengleddet så ingen forskjell på den og et punkt 68 cm høyere
+oppe. Leddet er nå **gradert på avstand** til det valgte hjørnet
+(`_geoCornerDist`, `s += 4 * (1 − d/diagonal)`), og da teller sveipeaksen med.
+
+Målt på Rom 5, 700W vannrett: `tl` → y = −841, `bl` → y = −1035 (rommet er −836 … −1040).
+Opp/ned blir hørt på.
+
+### Loddrett: paritet låser starten, og det er den samme loven som 079b
+
+Alle kandidater starter på (695, −917) — **ingen rute ender øverst til venstre**. Det øvre
+venstre feltet har **6 baner, et partall**. Kabelen kommer inn nedenfra via transitten under
+utstikkeren, og med partall baner må den ut i samme ende den kom inn. For å komme ut øverst må
+feltet ha et oddetall baner — altså ett løp mindre, som koster dekning og endrer utlegget
+Kenneth nettopp godkjente. **Ikke gjort. Venter på Kenneths beslutning.**
+
+I stedet lagres `_startCornerOffCm` og panelet sier:
+*«Start: 83 cm fra oppe til venstre — nærmere er ikke mulig med dette utlegget.»*
+(Nivå `ok`, så den ikke toaster.) Kvadrant-meldinga fra 080 står ved siden av, for de tilfellene
+der hjørnet er helt umulig.
+
+### Hindringer — målt, ikke antatt
+
+| fixture | resultat |
+|---|---|
+| `enHindring` loddrett | 96,00 m (0,00 %) · 0 hull · 0 kryssinger · 0 utenfor · dekning 90,7 % · **gyldig** |
+| `enHindring` vannrett | 96,00 m (0,00 %) · 0 hull · dekning 91,8 % · **gyldig** |
+| `flereHindringer` (3 stk) | **UGYLDIG** — 2139 cm utenfor, brudd, nærføring 0 cm, +24 % lengde |
+
+Med **én** hindring legger motoren seg rundt den på nøyaktig samme måte som rundt veggstubben —
+samme transittmekanikk, samme kantavstand. Med **tre** faller den gjennom: 10 celler som trenger
+6 transittkorridorer mot et tak på 2. Ny motor finner ingen løsning, og en av de gamle vinner
+alene med et ugyldig utlegg. Står fra før på lista over ting som må løses før merge.
+
+### Uendret
+
+| | |
+|---|---|
+| 600W 35m | CC 14,5 · 35,00 m (0,00 %) · 0 hull · gap 14,6/14,6 · 89,1 % |
+| 700W 41m | CC 13,2 · 40,97 m (−0,07 %) · 0 hull · gap 13,2/13,2 · 93,4 % |
+| 10T 600W 60m | CC 8,8 · 60,00 m (0,00 %) · 0 hull · gap 8,8/8,8 · 91,8 % |
+| badHakk41 | CC 12,6 · 41,00 m (0,00 %) · 0 hull · gap 12,7/12,7 · 86,7 % |
+
+22/22 batterier grønne, 1008 påstander.
