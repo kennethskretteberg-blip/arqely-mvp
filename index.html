@@ -28263,7 +28263,9 @@ function _geoClipScanline(legal, sweepAxis, pos) {
 //
 // `extraSweep` trekker begge endene av hvert løp symmetrisk inn — lag F sin søkeparameter
 // for lengde, og lag E sin redning når en sving ikke får plass.
-function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi) {
+// 093: `forskyv` — 0 = ingen forskyvning (som før 092), 1 = minste forskyvning som gir et
+// intervall, 2 = minste som betjener flest felt. Se kommentaren ved bruken nedenfor.
+function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi, forskyv) {
   extraSweep = extraSweep || 0;
   const sweepAxis = direction === 'v' ? 'y' : 'x';
   const perpKey = direction === 'v' ? 'x' : 'y';
@@ -28307,6 +28309,7 @@ function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi) {
 
   const lanes = [];
   const byPos = [];
+  let ytterbaneFalt = false;
   const skann = (pos) => _geoClipScanline(legal, sweepAxis, pos)
     .map(([lo, hi]) => [lo + endInset, hi - endInset])
     .filter(([lo, hi]) => hi - lo > _GEO_EPS);
@@ -28329,21 +28332,34 @@ function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi) {
     // uendret, alle andre baner står stille, og kantkravet er like hardt som før — banen
     // flyttes INN i det lovlige området, aldri ut. `_cableGeometryCheck` kontrollerer uansett.
     if (!iv.length && (i === 0 || i === N - 1)) {
-      const retning = (i === 0) ? 1 : -1;
-      // ⚠ Ikke stopp på første posisjon som gir NOE. Målt på Kenneths rom (x = 677,3816):
-      // ved +0,10 cm gir skanlinja ett intervall, ved +0,20 gir den to — ett for feltet over
-      // stubben og ett for feltet under. Stopper man på det første, står det ene feltet
-      // fortsatt uten sin ytterste bane, og hele poenget er borte. Velg posisjonen som
-      // betjener flest felt, og blant dem den minste forskyvningen.
-      let best = null;
-      for (const d of [0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]) {
-        const p2 = pos + retning * d;
-        const iv2 = skann(p2);
-        if (!iv2.length) continue;
-        if (!best || iv2.length > best.iv.length) best = { pos: p2, iv: iv2 };
-        if (best.iv.length >= 2) break;            // to felt er det mest et rom her har
+      ytterbaneFalt = true;                        // 093: rutenettet VET at det mistet en ytterbane
+      if (forskyv) {
+        // ─── 093 · FORSKYVNINGEN ER EN VARIANT, IKKE EN NY STANDARD ──────────────────────
+        // ⚠ MÅLT i 092: å alltid forskyve løste Rom 5 / 700W `tr` (84,3 → 94,1 %) og
+        // 10T `bl` (67,3 → 92,1 %), men BRAKK R-START på to andre — 600W `bl` gikk fra
+        // start 25 cm til 77, og veggstripa fra 19,4 til 33,8 cm. Forskyvningen flytter hvor
+        // serpentinens frie ender havner, og det er gunstig i noen rom og ugunstig i andre.
+        //
+        // Samme lærdom som den speilede slyngen i 090: en slik endring skal være en VARIANT
+        // som scores sammen med de andre, ikke en ny standard. `gridsFor` bygger derfor både
+        // det uforskjøvne og det forskjøvne rutenettet, og R-START-filteret, R-VEGG og
+        // dekningen velger (spec §0.9/§0.10).
+        //
+        // To moduser, fordi de gir ulike svar: minste forskyvning som gir ET intervall
+        // (holder topologien likest), og minste som betjener FLEST felt. Målt på Kenneths
+        // geometri: +0,08 cm gir ett intervall, +0,15 cm gir to.
+        const retning = (i === 0) ? 1 : -1;
+        let valgt = null;
+        for (const d of [0.02, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]) {
+          const p2 = pos + retning * d;
+          const iv2 = skann(p2);
+          if (!iv2.length) continue;
+          if (forskyv === 1) { valgt = { pos: p2, iv: iv2 }; break; }   // minste som gir noe
+          if (!valgt || iv2.length > valgt.iv.length) valgt = { pos: p2, iv: iv2 };
+          if (valgt.iv.length >= 2) break;                              // flest felt
+        }
+        if (valgt) { pos = valgt.pos; iv = valgt.iv; }
       }
-      if (best) { pos = best.pos; iv = best.iv; }
     }
     const idxs = [];
     for (const [lo, hi] of iv) { idxs.push(lanes.length); lanes.push({ id: lanes.length, i, pos, lo, hi }); }
@@ -28414,7 +28430,7 @@ function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi) {
     if (iGap > 1) continue;                           // for langt fra hverandre i rutenettet
     A.adj.push(B.id); B.adj.push(A.id);
   }
-  return { direction, cc, extraSweep, N, x0, pMin, pMax, lanes, cells, endInset, sweepAxis, perpKey };
+  return { direction, cc, extraSweep, N, x0, pMin, pMax, lanes, cells, endInset, sweepAxis, perpKey, ytterbaneFalt, forskyv: forskyv || 0 };
 }
 
 // ─── Lag D · Rute ───────────────────────────────────────────────────────────────────────────
@@ -29172,7 +29188,18 @@ function generateCableGeo(roomId, productId, opts) {
   const gridsFor = (dir, cc, extraSweep, maxOrders) => {
     const base = _geoBuildGrid(legal, dir, cc, extraSweep || 0, ccLo, ccHi);
     if (!base) return [];
-    const ut = [base].concat(_geoTransitVariants(base, legal, maxOrders ? 6 : 3, maxOrders ? 2 : 1));
+    let ut = [base].concat(_geoTransitVariants(base, legal, maxOrders ? 6 : 3, maxOrders ? 2 : 1));
+    // 093: mistet basisrutenettet en ytterbane på en hundredel? Da — og bare da — bygges de
+    // forskjøvne variantene ved siden av. De koster ingenting i rom der ytterbanen traff.
+    if (base.ytterbaneFalt) {
+      for (const modus of [1, 2]) {
+        const g = _geoBuildGrid(legal, dir, cc, extraSweep || 0, ccLo, ccHi, modus);
+        if (!g || !g.lanes || g.lanes.length <= base.lanes.length) continue;
+        if (ut.some(x => x.lanes && x.lanes.length === g.lanes.length
+                      && Math.abs(x.lanes[0].pos - g.lanes[0].pos) < 1e-6)) continue;
+        ut = ut.concat([g], _geoTransitVariants(g, legal, maxOrders ? 4 : 2, 1));
+      }
+    }
     if (!_parityOn) return ut;
     const ekstra = [];
     for (const g of ut) { ekstra.push(..._geoParityVariants(g, 4)); if (ekstra.length >= 10) break; }

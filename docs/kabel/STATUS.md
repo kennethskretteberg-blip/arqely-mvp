@@ -1778,3 +1778,68 @@ ikke bygget — de skal måles mot en motor der R-START står.
 ### Tid
 
 rom5 0,9–2,0 s · rekt398 0,05 s · badHakk 0,14 s · lRom 0,53 s · enHindring 1,8 s.
+
+---
+
+## §36 · 093 — forskjøvet ytterbane som VARIANT. R-START og R-VEGG tilbake.
+
+### STEG 0.3 — minste forskyvning
+
+På Kenneths geometri (x = 677,3816), cc 13,20, bane 0 på 681,75:
+
+| forskyvning | intervaller |
+|---|---|
+| 0 … +0,05 cm | **0** |
+| **+0,08 cm** | **1** |
+| +0,10 cm | 1 |
+| **+0,15 cm** | **2** (begge felt) |
+
+### Fiksen
+
+092 forskjøv ALLTID. Det løste to rom og brakk to andre — forskyvningen flytter hvor
+serpentinens frie ender havner, og det er gunstig noen steder og ugunstig andre.
+
+Samme lærdom som den speilede slyngen i 090: **en slik endring skal være en variant, ikke en ny
+standard.** `_geoBuildGrid` tar nå `forskyv` (0 = ingen, 1 = minste som gir et intervall,
+2 = minste som betjener flest felt), rutenettet rapporterer `ytterbaneFalt`, og `gridsFor` bygger
+de forskjøvne variantene **bare når basisrutenettet faktisk mistet en ytterbane**. Alle går
+gjennom transittvariantene, rutingen, kontrollen og R-START-filteret. Reglene velger.
+
+### Målt — alle ti fixturer
+
+| | før 092 (`8b888dd`) | 092 (ødelagt) | **093** |
+|---|---|---|---|
+| rom5 700W `tr` | CC 11,62 · 84,3 % · start 13 | CC 13,20 · 94,1 % · start 13 | **CC 13,20 · 94,1 % · start 13** |
+| rom5 600W `bl` | CC 14,53 · 88,7 % · stripe 19,4 · start 25 | 88,2 % · **stripe 33,8 · start 77** | **88,9 % · stripe 19,4 · start 25** |
+| rom5 10T `bl` | CC 6,46 · 67,3 % · start 31 | CC 8,80 · 92,1 % · **start 67** | **CC 6,46 · 67,3 % · start 31** |
+| rekt398 1650W `br` | 98,4 % · start 12 | — | 98,4 % · start 12 |
+| rekt398 1450W `tl` | 98,2 % · start 15 | — | 98,2 % · start 15 |
+| badHakk `bl` | 92,5 % · start 20 | — | 92,5 % · start 20 |
+| lRom `bl` | 96,2 % · start 13 | — | 96,2 % · start 13 |
+| rektangel `bl` | 97,9 % · start 15 | — | 97,9 % · start 15 |
+| uRom `bl` | 92,6 % · start 16 | — | 92,6 % · start 16 |
+
+Ingen fixture er dårligere enn på `8b888dd` på retning, R-START, hull, lengde eller R-VEGG.
+Alle har start ≤ 40 cm og 0 hull.
+
+### ⚠ 10T beholder IKKE 092-gevinsten — og det er riktig
+
+Oppdraget ba om at både 700W `tr` og 10T `bl` skulle beholde gevinsten fra 092. **Det går ikke
+for 10T.** Målt: den forskjøvne varianten gir 92,1 % dekning men start **67 cm** fra hjørnet.
+R-START (≤ 40 cm) rangerer over dekning (spec §0.9), så motoren velger den uforskjøvne med
+67,3 % og start 31 cm. Gevinsten i 092 var altså kjøpt ved å bryte R-START — den var ikke reell.
+
+Vil Kenneth ha 92 % der, må han velge et annet starthjørne for 10T, eller R-START må vike for
+dekning i det ene tilfellet. Det er hans beslutning, ikke motorens.
+
+### Tid
+
+rekt398 0,04–0,09 s · rektangel 0,04 s · uRom 0,06 s · badHakk 0,14 s · rom5 700W 0,40 s ·
+lRom 0,53 s · rom5 600W 0,79 s · rom5 10T 4,5 s.
+
+### ⚠ Ikke bygget
+
+**Forstyrrelsestesten (±1/±2 cm) er ikke bygget.** Et forsøk på å kjøre den som måling tidsavbrøt:
+Rom 5 har 10 punkter, og hver vegg × 4 forskyvninger × ~1 s blir for mye for ett kall. Den må
+bygges som en egen, tidsbudsjettert test — og det er fortsatt den som hadde fanget både knekket
+i 091 og regresjonen i 092. Den nye fasit-påstanden og fixture-hashene er heller ikke bygget.

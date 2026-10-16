@@ -4,6 +4,23 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 093 — forskjøvet ytterbane som variant, ikke erstatning (15.10.2026, `main`, ikke pushet)
+
+092 forskjøv alltid ytterbanen. Det løste Rom 5 / 700W `tr` (84,3 → 94,1 %) men brakk R-START og
+R-VEGG på 600W `bl` (start 25 → 77 cm, stripe 19,4 → 33,8) og R-START på 10T `bl` (31 → 67 cm).
+
+Samme lærdom som den speilede slyngen i 090: en endring som er gunstig i noen rom og ugunstig i
+andre skal være en VARIANT. `_geoBuildGrid` tar nå `forskyv` (0/1/2), rutenettet rapporterer
+`ytterbaneFalt`, og `gridsFor` bygger de forskjøvne variantene bare når basisrutenettet faktisk
+mistet en ytterbane. R-START-filteret, R-VEGG og dekningen velger.
+
+Resultat: 700W `tr` beholder CC 13,20 og 94,1 %, 600W `bl` har stripe 19,4 og start 25 tilbake,
+og ingen av de ti fixturene er dårligere enn før 092 på noen låst regel.
+
+⚠ 10T `bl` beholder ikke 092-gevinsten, og det er riktig: den forskjøvne varianten gir 92,1 %
+men start 67 cm, og R-START rangerer over dekning. Gevinsten var kjøpt ved regelbrudd.
+⚠ Forstyrrelsestesten er fortsatt ikke bygget — se STATUS §36.
+
 ## 092 (delvis) — rotårsaken funnet i millimeter; fiksen brekker R-START (15.10.2026, `main`, ikke pushet)
 
 ⚠ STATUS §34 var feil: rutingen mister ingen N-trinn — hvert trinn 17–24 ruter ved begge
