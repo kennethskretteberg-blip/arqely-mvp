@@ -4,6 +4,24 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 092 (delvis) — rotårsaken funnet i millimeter; fiksen brekker R-START (15.10.2026, `main`, ikke pushet)
+
+⚠ STATUS §34 var feil: rutingen mister ingen N-trinn — hvert trinn 17–24 ruter ved begge
+veggposisjoner. Og «W falt 290,4 → 278,3» var min egen målefeil.
+
+Den ekte mekanismen: rutenettet spenner nøyaktig fra `pMin + EDGE_EPS` til `pMax − EDGE_EPS`,
+uten slakk. `pMin` er områdets ytterste PUNKT, og med en skrå vegg berører området det bare i
+ett y. Ved x = 677,47 lander bane 0 på 681,84 — 0,01 cm utenfor den brukbare grensen 681,85 —
+og forsvinner. Med den forsvinner 1,4 m kabel, CC 13,20 faller ut av ±1 %, og dekningen går fra
+93,4 % til 84,3 %.
+
+Fiksen (flytt ytterste bane noen tideler inn, til posisjonen som betjener flest felt) virker på
+hovedsaken: Kenneths rom går fra CC 11,62/84,3 % til **CC 13,20 · 41,00 m · 94,1 %**, og 10T fra
+67,3 % til 92,1 %.
+
+⚠ MEN R-START brekker på to tilfeller (rom5 600W `bl`: start 25 → 77 cm; 10T `bl`: 31 → 67 cm).
+**Skal ikke pushes.** Se STATUS §35.
+
 ## 091b — lengdesøket itererer over antall løp N (15.10.2026, `main`, ikke pushet)
 
 Lag F brukte grovsveip + bisekssjon over CC, mens kommentaren selv slo fast at lengden er en

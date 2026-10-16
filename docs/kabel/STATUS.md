@@ -1701,3 +1701,80 @@ Det er neste sak, og den skal måles i `_geoPlanTraversals`, ikke i lag F.
 
 Robusthetstesten (±1/±2 cm) og den nye fasit-påstanden for Rom 5 er fortsatt ikke bygget — de
 skal måles mot en motor der N-stigen er sammenhengende.
+
+---
+
+## §35 · 092 — rotårsaken er funnet og målt i millimeter. Fiksen er IKKE klar.
+
+### ⚠ §34 var feil. Rutingen mister ingen trinn.
+
+Første måling i 092 avkreftet premissen: ved **begge** veggposisjoner ruter hvert N-trinn fra
+17 til 24 (`RUTER 4` overalt). `_geoPlanTraversals` feiler ikke.
+
+⚠ Og min egen «W faller fra 290,4 til 278,3 cm» var en **målefeil**: jeg utledet W fra antall
+baner i et prøverutenett, og når en bane mangler blir W for lav — så de to tabellene ba om
+*forskjellige* CC-verdier. Det lovlige området er i virkeligheten stabilt (areal 5,117–5,119 m²,
+x fra 681,70–681,85 til 972,31 over hele intervallet).
+
+### Den ekte mekanismen, i millimeter
+
+Med faste CC-verdier ved begge posisjoner er forskjellen den samme i hver rad — **celle 0 mister
+sin ytterste bane**:
+
+| cc 13,20 | celle 0 | lengde |
+|---|---|---|
+| x = 677,49 | **8 baner fra 681,9** | **40,97 m** (−0,07 %) ✓ |
+| x = 677,47 | 7 baner fra 695,0 | 39,57 m (−3,5 %) ✗ |
+
+Hvorfor: rutenettet spenner **nøyaktig** fra `pMin + EDGE_EPS` til `pMax − EDGE_EPS` — ingen
+slakk (det var 072-fiksen). `pMin` er det lovlige områdets ytterste PUNKT, og med en lett skrå
+vegg berører området det punktet bare i ett y; den brukbare loddrette grensen ligger noen
+hundredeler lenger inn.
+
+```
+x = 677,49:  pMin 681,81 → bane 0 på 681,86  → innenfor grensen 681,85  ✓
+x = 677,47:  pMin 681,79 → bane 0 på 681,84  → 0,01 cm UTENFOR          ✗
+```
+
+**Ett løp er ≈ 1,4 m kabel.** Uten det faller CC 13,20 ut av ±1 %, søket går ned til 12,10/12,63
+og ender på 11,62 etter trimming — og dekningen faller fra 93,4 % til 84,3 % av en halv
+millimeter veggflytting.
+
+### Fiksen som er forsøkt
+
+Ytterste bane (`i === 0` eller `i === N−1`) flyttes noen tideler INN til skanlinja gir
+intervaller — og blant posisjonene velges den som betjener **flest felt**, ikke den første som
+gir noe (målt: ved +0,10 cm fikk Kenneths rom ett intervall, ved +0,20 to). CC er uendret, alle
+andre baner står stille, og banen flyttes aldri ut av lovlig område.
+
+**Virker på hovedsaken:**
+
+| | før | etter |
+|---|---|---|
+| rom5 / 700W / `tr` (Kenneths rom) | CC 11,62 · 84,3 % | **CC 13,20 · 41,00 m (0,00 %) · 94,1 %** |
+| rom5 / 10T / `bl` | CC 6,46 · 67,3 % | **CC 8,80 · 92,1 %** |
+
+Knekket er flyttet fra x = 677,48 til ≈ 677,25 — Kenneths geometri (677,3816) ligger nå trygt
+innenfor i stedet for en tidel utenfor.
+
+### ⚠ MEN: R-START brekker på to tilfeller. Skal ikke pushes.
+
+| | før | etter |
+|---|---|---|
+| rom5 / 600W / `bl` | start **25 cm** · stripe 19,4 | start **77 cm** · stripe 33,8 |
+| rom5 / 10T / `bl` | start **31 cm** | start **67 cm** |
+
+R-START krever ≤ 40 cm. Den forskjøvede ytterste banen endrer hvor serpentinens frie ender
+havner, og hjørnet mistes. Dette er **ikke** undersøkt videre — økten var på slutten.
+
+Øvrige fixturer er uendret (rekt398 98,4/98,2 %, badHakk 92,5 %, lRom 96,2 %, uRom 92,6 %,
+rektangel 97,9 %, enHindring 89,0 %).
+
+### Ikke bygget
+
+Robusthetstesten (±1/±2 cm), den sammenhengende-stige-påstanden og den nye fasit-påstanden er
+ikke bygget — de skal måles mot en motor der R-START står.
+
+### Tid
+
+rom5 0,9–2,0 s · rekt398 0,05 s · badHakk 0,14 s · lRom 0,53 s · enHindring 1,8 s.
