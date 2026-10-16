@@ -190,3 +190,28 @@ utelater den — lagt bakerst som varianter, aldri som erstatning (093).
   Brudd **måles og rapporteres**; de rettes ikke av testen.
 * **`_cableGeometryRegressionTest()`** — det store batteriet med alle sju motorene. **Ikke en port.**
   Manuell kjøring; V6-loggingen ligger bak `window._cableQuietV6`.
+
+## §0.13 · Flerkabelrom (soner) — felles CC og søm (096)
+
+Et rom med flere kabler deles i soner med **én felles CC** for alle sonene, slik at W/m² er lik over
+sømmen (Kenneths prioritet). Fra 096 går sonene gjennom **geo-motoren**:
+
+* `generateCableGeo(roomId, productId, { forcedCc, seam })` — `forcedCc` er et **krav**, aldri et
+  ønske: CC utledes ikke av N, lengdesøkets N-stige hoppes over, og den eneste frie variabelen er
+  den jevne trimmingen (`extraSweep`). Hjørne-, vegg- og enderunden kan heller ikke flytte CC.
+  Bindingen kan også ligge på rommet (`_forcedSpacingCm`, `_cableSeam`), som soneveien allerede setter.
+* **Søm:** på en søm er det ingen kantavstand. Ytterste løp ligger CC/2 fra kuttet, slik at avstanden
+  OVER sømmen blir én hel CC. Med fri CC løses dette i lukket form: (N−½) trinn ved én søm, N ved to.
+* **Den felles CC-ens VERDI** velges av `_zoneSharedCcFromGeo`: hver sone spørres hva den trenger med
+  sin søm, og den minste vinner. Regelen (én CC for alle soner) er urørt — areal/lengde er den
+  ideelle verdien, og den regner ikke med kantavstand og U-sving-inntrekking.
+* **Sømmen kan flyttes høyst ± 1 CC** (trinn CC/4, arbeidstak 2 ombygginger) hvis en sone ikke treffer
+  ±1 %. Den felles CC-en endres ikke. Går det ikke, rapporteres det med tall.
+* **Rekkefølge:** geo med bundet CC og søm først. Faller den gjennom: skew (roterte rom), så resten av
+  de gamle motorene. **V6 kan ikke vinne en sone** — den byttes ut når erstatningen er gyldig (eller
+  strengt bedre på utenfor/kryss/bøy). ⚠ Aldri blindt: målt ga erstatningen `utenfor` der V6 lå på
+  0,00 %, og et hardt brudd er verre enn store buer. Står V6 igjen, **merkes** den.
+* **Hver sonekabel kontrolleres der den lages** (`_geomOk`/`_geomDefects`). Før 096 gjorde ingen det,
+  og bare åpningskontrollen (072) merket dem i ettertid.
+* **Start:** hver sone starter i brukerens valgte hjørne av sin egen sone. R-START (§0.9) gjelder den
+  kabelen velgerens hjørne ligger i.

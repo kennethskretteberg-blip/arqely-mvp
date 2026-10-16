@@ -38,6 +38,23 @@ http.createServer((req, res) => {
     return;
   }
 
+  // 096: figurskriving for rapporten. NOYAKTIG én fil, som de to andre.
+  if (req.method === 'POST' && req.url === '/__write-figur') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const target = path.join(__dirname, 'docs', 'kabel', 'fasit', '096-rom8.svg');
+      const buf = Buffer.concat(chunks);
+      fs.mkdir(path.dirname(target), { recursive: true }, () => {
+        fs.writeFile(target, buf, err => {
+          res.writeHead(err ? 500 : 200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(err ? { ok: false, error: err.message } : { ok: true, bytes: buf.length, path: 'docs/kabel/fasit/096-rom8.svg' }));
+        });
+      });
+    });
+    return;
+  }
+
   // 095: lesing av baselinjen. ⚠ MAA vaere et eget endepunkt: den statiske ruten faller tilbake
   // til index.html for /docs/..., saa `fetch('/docs/kabel/baseline.json')` ga status 200 med HTML
   // og en stille JSON-feil i klienten — porten kunne ALDRI lese baselinjen sin.

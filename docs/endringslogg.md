@@ -4,6 +4,43 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 096 — flerkabel-soner går gjennom geo-motoren med felles CC og søm (16.10.2026, `main`, ikke pushet)
+
+Kenneths skjermbilde fra varmeplan.no: Rom 8, 2 × 3400W 200m i to soner. K1 jevn med røde ringer,
+K2 ødelagt med store buer. Begge ⚠.
+
+**STEG 0:** K2 var et **lagret** utlegg, merket ved åpning (072) — sonestien regner aldri defekter
+selv, så ⚠ kunne bare komme derfra. De store buene er **V6-koblinger**: et rent rektangel gir dem
+aldri (ti sideforhold målt, alle boustrophedon/0 koblinger), men med én hindring i høyre sone falt
+K2 til v6 med 5 koblinger mens K1 ble ren boustrophedon — nøyaktig bildet. V6 ble tatt ut av
+konkurransen i 083, men soneveien har aldri sett den avgjørelsen. ⚠ i labelen er for øvrig ikke en
+CC-advarsel: `_ccOverWarn(17T, 12,59)` er false (anbefalt maks 20 cm) — labelen skriver ⚠ også når
+`_geomDefects` finnes.
+
+* `generateCableGeo` tar nå imot **bundet CC** og **søm**: CC utledes ikke av N, N-stigen og alle tre
+  rundene hoppes over, søm-løpet pinnes CC/2 fra kuttet (1 CC over sømmen).
+* **Rotårsaken bak lengdefeilen var CC-VALGET, ikke motoren.** `sharedCC = areal/lengde` = 12,59
+  regner ikke med kantavstand og U-sving-inntrekking: 96 løp krever 1196 cm, det lovlige området er
+  1190. Nytt forpass `_zoneSharedCcFromGeo` spør hver sone hva den trenger og tar den minste —
+  12,53, **samme verdi i begge soner**, og da får begge 48 løp. Regelen (lik W/m² over sømmen) er urørt.
+* Sømmen kan flyttes høyst ± 1 CC hvis lengden ikke går opp (arbeidstak 2 ombygginger; uten taket
+  29 s mot 2,8 s). Den trengte 0 cm i alle målte rom — CC-forpasset løste det alene.
+* **V6 kan ikke vinne en sone**, men byttet krever at erstatningen er GYLDIG: ⚠ målt ga et blindt
+  bytte `utenfor` (kabel utenfor rommet, −9,36 %) der V6 lå på 0,00 %. Står V6 igjen, merkes den.
+* Hver sonekabel kontrolleres nå **der den lages**, ikke først ved neste åpning.
+
+**Rom 8 før → etter:** boustrophedon/boustrophedon CC 12,59 · −2,18 % · ugyldig (⚠ lengde) →
+**geo/geo CC 12,53 i begge · −0,11 % · gyldig · dekning 99,2/99,9 % · søm = 1 CC**, og 2047 → 365 ms.
+Figur: `docs/kabel/fasit/096-rom8.svg`.
+
+Tre nye fixtures (`rom8`, `rekt2kab`, `rekt2kabUlike`) og en egen flerkabelrad i porten som måler
+felles CC, lengde, søm, store buer og V6. Alle seks rader grønne, baselinjen er 142 rader,
+flerkabelradene tar 1,3 s. **Ingen enkabelrom endret.** 18 batterier grønne.
+⚠ `_cableZoneRegressionTest` B er bevisst endret fra «boustrophedon» til «geo» + tre nye påstander.
+Se `docs/kabel/STATUS.md` §39.
+
+---
+
 ## 095 — R-ENDE gjelder restceller; rask geo-port med lagret baselinje; forstyrrelsestest (16.10.2026, `main`, ikke pushet)
 
 Kenneths beslutninger: ikke kjøp R-ENDE med dekning (5–7 prosentpoeng er for dyrt), og presiser

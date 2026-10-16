@@ -2034,3 +2034,128 @@ ikke avbrytes. `veggFra`/`veggTil` deler jobben.
 
 §5 i oppdraget: 076-fasiten som form-og-krav, og fixtures med dato + geometri-hash med
 localhost-varsel ved drift. Suitetiden for det store batteriet står fortsatt urørt (ikke en port nå).
+
+---
+
+## §39 · 096 — flerkabel-soner går gjennom geo-motoren med felles CC og søm
+
+Kenneths skjermbilde fra varmeplan.no 16.10.2026: Rom 8 («Annet», 50,34 m², 2 × InFloor 17T 3400W
+200m, loddrett, to soner). K1 en jevn slynge med røde ringer i hjørnene; K2 ødelagt — store buer,
+løp av ulik lengde, vannrette strekk. Begge labelene ⚠ CC 12,5.
+
+### STEG 0 — hvem la K2, og var det nytt eller lagret?
+
+**Lagret, og merket ved åpning.** Sonestien regner ALDRI defekter selv: `_buildNCableZones` kaller
+`autoFillCable`, som treffer soneporten i `_autoFillCableImpl` og går rett til `_autoFillCableLegacy`
+— ingen `_cableGeometryCheck`, ingen `_geomDefects`. Det eneste stedet et sonekabel-utlegg kan bli
+merket, er åpningskontrollen `_geomSjekkLagredeUtlegg` (072), som leser geometrien URØRT og bare
+setter flagg. ⚠ og de røde ringene i skjermbildet kommer altså derfra.
+
+Reprodusert lokalt (syntetisk scene, aldri mot produksjonsdata) på et rektangel med nettoareal
+50,34 m² og lang akse 12 m — de to tallene som driver `sharedCC`:
+
+| | motor | CC | lengde | dekning | gyldig | defekter |
+|---|---|---|---|---|---|---|
+| K1 | boustrophedon | 12,59 | **−2,18 %** | 48,8 % | nei | `lengde` |
+| K2 | boustrophedon | 12,59 | **−2,18 %** | 48,8 % | nei | `lengde` |
+
+⚠ Det eksakte polygonet kan ikke leses av et skjermbilde (12 × 7 m gir 84 m², ikke 50,34), så
+fixturen `rom8` bruker arealet og retningen, som er det motoren faktisk regner på.
+
+**De store buene er V6.** Et rent rektangel gir aldri dem — jeg sveipte ti sideforhold, alle ga
+boustrophedon med 0 koblinger. Med **én hindring i høyre sone** falt K2 til `v6` med **5 koblinger**,
+mens K1 ble ren boustrophedon: nøyaktig bildet Kenneth sendte. Koblingene ER buene. V6 ble tatt ut
+av konkurransen i 083, men soneveien har aldri sett den avgjørelsen.
+
+### Hvorfor det står ⚠ CC — det er ikke CC-en
+
+`_ccOverWarn(InFloor 17T, 12,59)` er **false**: anbefalt maks er 20 cm, og romtypen «Annet» har
+ingen nedre grense. ⚠ kommer fra labelen selv, som skriver den når `_ccOverWarn(...) ||
+cable._geomDefects.length`. Det er altså geometridefekten (lengde), ikke avstanden.
+
+### Rotårsaken bak lengdefeilen: den IDEELLE CC-en holder ikke når den diskretiseres
+
+`sharedCC = nettoareal / total kabellengde` = 12,59 cm. Den regner ikke med at kantavstanden og
+U-svingenes inntrekking spiser ekte bredde. ⚠ MÅLT: 96 løp (48 per sone) krever 1196 cm, det
+lovlige området er 1190 — 6 cm for lite. Ved 12,59 får hver sone 47 løp og 191,60 m mot 200.
+
+Og sømmen alene kan ikke rette det — **målt som et nullsumspill**:
+
+| søm flyttet | sone 1 | sone 2 |
+|---|---|---|
+| 0 | 47 løp, −4,2 % | 47 løp, −4,2 % |
+| −3,15 cm | 187,48 m (−6,3 %) | **48 løp, −0,10 %** |
+| +3,15 cm | **48 løp, −0,10 %** | 187,48 m (−6,3 %) |
+
+Én sone får sitt 48. løp bare ved å ta bredden fra den andre.
+
+**Løsningen er én felles CC på 12,53 — samme verdi i BEGGE soner.** Regelen er urørt (lik W/m² over
+sømmen); det er bare verdien som justeres 0,5 % ned fra den ideelle, og da får begge soner 48 løp.
+Forpasset `_zoneSharedCcFromGeo` spør hver sone «hvilken CC trenger DU med din søm?» (søm pinnet,
+CC fri — løst i lukket form: (N−½) trinn ved én søm) og tar den MINSTE.
+
+### Rom 8 før og etter
+
+| | motor | CC | lengde | dekning | søm | gyldig |
+|---|---|---|---|---|---|---|
+| **FØR** | boustrophedon + boustrophedon | 12,59 / 12,59 | −2,18 % / −2,18 % | 48,8 % | 12,59 | **nei** (⚠ lengde) |
+| **ETTER** | **geo + geo** | **12,53 / 12,53** | **−0,11 % / −0,11 %** | 99,2 % / 99,9 % | **12,53 = 1 CC** | **ja** |
+
+Tid 2047 → **365 ms**. Vannrett: geo + geo, CC 12,41, 0,00 %. Figur: `docs/kabel/fasit/096-rom8.svg`.
+
+⚠ **Og en ærlig nyanse:** med soneporten slått av (`window._geoZoneAv`) gir boustrophedon nå også
+CC 12,53 og −0,10 %, fordi CC-forpasset mater den samme verdien til de gamle motorene. Lengdefeilen
+kom altså fra CC-VALGET, ikke fra motorvalget. Motorvalget er det som fjerner K2s store buer.
+
+### Hvor mye sømmen måtte flyttes: 0 cm
+
+CC-forpasset løste lengden alene i alle de målte rommene, så sømsøket aldri slo inn. Det står
+likevel (høyst ± 1 CC, trinn CC/4, felles CC urørt), med et arbeidstak på **2 ombygginger** — målt:
+uten taket brukte søket 29 s på et rom geo ikke kan ta, mot 2,8 s med.
+
+### V6 kan ikke vinne en sone — men et hardt brudd er verre enn en bue
+
+⚠ Et blindt bytte var MÅLT skadelig: erstatningen `serpentine-fallback` ga −9,36 % **og** defekten
+`utenfor` — kabel utenfor rommet — der V6 lå på 0,00 %. «Ikke verre» holdt heller ikke, for V6 hadde
+samme grove defekt. Kravet er derfor at erstatningen er **gyldig** (eller strengt bedre på
+utenfor/kryss/bøy). Står V6 igjen, beholdes den og **merkes** med sine defekter — aldri stum.
+
+Hindring-rommet etter 096: K1 **geo, gyldig, +0,74 %**; K2 v6 beholdt, men merket med
+`utenfor, kryssing, nærføring, bøy, lengde, brudd`. Før: K1 boustrophedon og K2 v6, begge umerkede.
+
+**Hver sonekabel kontrolleres nå der den LAGES.** Det var det som manglet: ⚠ sto på et utlegg som
+nettopp var lagt, fordi bare åpningskontrollen i 072 hadde regnet på det.
+
+### Start og retning
+
+Retningen er felles for alle soner, som før. Starten følger dagens regel: **hver sone starter i
+brukerens valgte hjørne av SIN EGEN sone.** Målt på Rom 8 med `bl`: K1 (5, −11) — R-START 12 cm —
+og K2 (606, −11), altså 606 cm fra rommets hjørne. Med `tr` er det speilvendt. R-START er dermed
+oppfylt for nøyaktig den kabelen velgerens hjørne ligger i. Regelen for de andre er IKKE endret.
+
+### Regresjon
+
+Tre nye fixtures (bare geometri): `rom8`, `rekt2kab` (2 × 200 m) og `rekt2kabUlike` (200 + 140 m).
+Porten har nå en egen flerkabelrad (`nøkkel|retning|soner`) som måler Kenneths fem krav:
+
+| rad | motorer | CC (Δ) | lengde | søm | koblinger | største bue |
+|---|---|---|---|---|---|---|
+| rom8 v | geo+geo | 12,53 / 12,53 (0) | −0,11 % | 12,53 | 0 / 0 | 0 |
+| rom8 h | geo+geo | 12,41 / 12,41 (0) | 0,00 % | 12,41 | 0 / 0 | 0 |
+| rekt2kab v | geo+geo | 12,53 / 12,53 (0) | −0,67 % | 12,53 | 0 / 0 | 0 |
+| rekt2kab h | geo+geo | 12,56 / 12,56 (0) | −0,38 % | 12,56 | 0 / 0 | 0 |
+| rekt2kabUlike v | geo+geo | 17,62 / 17,62 (0) | −0,13 / +0,87 % | 17,62 | 0 / 0 | 0 |
+| rekt2kabUlike h | geo+geo | 16,80 / 16,80 (0) | 0,00 % | 16,80 | 0 / 0 | 0 |
+
+Baselinjen er nå **142 rader**. Flerkabelradene tar **1,3 s** til sammen. **Ingen enkabelrom er
+endret** — porten er grønn på alle 136 rader fra 095. `_soneRegressionTest`, `_cableSkewRegressionTest`
+og 16 andre batterier grønne.
+
+⚠ **Én påstand er bevisst endret:** `_cableZoneRegressionTest` B sto «rektangelrom uendret — ren
+boustrophedon», altså den gamle kaskaden. Den er nå «geo i begge soner» PLUSS tre nye påstander
+(gyldig, ±1 %, felles CC) — strengere enn før. En påstand som låser et design, må oppdateres når
+designet er det som endres.
+
+⚠ **Og en målefeil hos meg:** jeg meldte først at påstand A (fasit-rommet) falt fra 4 til 6
+koblinger. Det var en forurenset side — isolert og på fersk side gir A 4 koblinger både før og etter.
+Kjør batteriet etter en reload, ikke etter en haug med sceneoppsett.
