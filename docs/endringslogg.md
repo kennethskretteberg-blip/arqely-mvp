@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 097 — PDF: én kilde for rommets produkter, og «m²» vises som m² (16.10.2026, `main`, ikke pushet)
+
+Kenneth (Coop Ålen, P0339 rev. 3): «Her regner ikke appen med rampe og inngang som jeg har lagt ut
+med frihånd. Den bør regnes med. Den er tatt med kun for produkter, så den kom med på materiallisten.»
+
+**STEG 0 — hvem leste hva.** Romsiden hadde riktige tall (3000 W og 34 800 W) fordi
+`_computeRoomStats` går gjennom `S.matPaths` via `_matFreeCatalog`. Oversiktene gjorde ikke:
+
+| sted | kilde | matPaths | aluboard |
+|---|---|---|---|
+| Romsidens topp | `_computeRoomStats` | **JA** | JA |
+| Romsidens Spesifikasjon | fire egne løkker | **NEI** | **NEI** |
+| Prosjektoversikt KPI + W | `_roomRatedEffectW` | **NEI** | JA |
+| Prosjektoversikt «Type» | `_roomProductFamily` (lokal) | **NEI** | **NEI** |
+| Romoversikt | `_roomProductBreakdown` | **NEI** | JA |
+| Materialliste (PDF/XLSX/Visma) | `_collectMaterialItems` | JA | JA |
+| Forhåndsvisning / kundeside | `_roomRatedEffectW` | **NEI** | JA |
+
+Fri folie (`foilFree`) var dekket overalt, via `_foilCountItemsForRoom`. **XLSX-hullet fra 19.08 er
+allerede lukket** — `_collectMaterialItems` har matPaths i dag, så materiallista trengte ingen endring.
+
+* Ny `_roomProductRows(room)` er **den ene kilden** og dekker alle ROOM_PRODUCT_KEYS:
+  strips/foilFree, cables, mats, **matPaths** (via `_matFreeCatalog(mp).segments`), plates, **aluboard**.
+  `_roomRatedEffectW`, `_roomDominantProduct`, `_roomProductBreakdown`, PDF-ens «Type»
+  (`_roomProductFamilyName`) og romsidens Spesifikasjon er alle uttrykt gjennom den.
+* Romsidens «Effekt» leser nå samme kilde som tabellene. ⚠ Det flytter ett tall: et kabelrom med
+  InFloor 17T 600W viste 595 W (geometri) på romsiden og 600 W i oversikten — nå 600 på begge.
+* **«m²» fikset ÉN gang for hele dokumentet** (`_pdfSuperscriptPatch`): tegnet manglet ikke i
+  kilden — jsPDFs StandardEncoding har det ikke, så det forsvant stille. `doc.text` overstyres og
+  tegner basisteksten pluss en mindre, løftet «2»; strenger uten «²» går urørt videre. Venstre-,
+  midt- og høyrejustering er målt riktige (høyre: 88,07 = 100 − 11,93).
+
+**Målt før → etter** (samme tre rom, lest ut av jsPDF med spion på `doc.text`): Installert effekt
+8400 → **46 200 W**; «Ingen produkter» 2 → **0**; Rampe/Inngang Type «—» → **InSnow 300T**;
+gjenstående «²» 6 ulike strenger → **0**, erstattet av 29 løftede toere. Materiallista 9 linjer,
+uendret. Figur: `docs/kabel/fasit/097-pdf-for-etter.svg`. 22 regresjonsbatterier grønne.
+
+---
+
 ## 096 — flerkabel-soner går gjennom geo-motoren med felles CC og søm (16.10.2026, `main`, ikke pushet)
 
 Kenneths skjermbilde fra varmeplan.no: Rom 8, 2 × 3400W 200m i to soner. K1 jevn med røde ringer,

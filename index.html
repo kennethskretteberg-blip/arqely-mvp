@@ -13275,79 +13275,50 @@ function _isSnowRoom(room) {
   return !!room && _roomModuleType(room.id) === 'snow';
 }
 
-function _roomRatedEffectW(room) {
-  let w = 0;
-  for (const c of _cablesForRoom(room.id)) {
-    if (c.reserve) continue;   // 025: reserven er ikke tilkoblet — teller ikke i rommets effekt
-    const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId); if (!p) continue;
-    if (p.total_effect_w) w += p.total_effect_w;
-    else if (p.cable_length_m && p.watt_per_m) w += p.cable_length_m * p.watt_per_m;
-    else if (p.watt_per_m) w += (c.totalLength_cm / 100) * p.watt_per_m;
-  }
-  for (const m of _matsForRoom(room.id)) {
-    w += _matRatedW(HEATING_PRODUCTS.find(pr => pr.id === m.productId), m);
-  }
-  for (const s of _foilCountItemsForRoom(room.id)) {  // F4d: inkl. fri folie
-    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId); if (!p) continue;
-    const nc = (p.netto_width_mm || p.width_mm || 500) / 10;
-    w += (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000;
-  }
-  for (const pl of _platesForRoom(room.id)) {
-    const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
-    w += (p?.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000;
-  }
-  w += _aluboardRoomEffectW(room.id);   // Aluboard: valgt FLXHEAT-kabels ratede effekt
-  return Math.round(w);
-}
-
-// Dominerende produkt i et rom (størst ratet effekt-bidrag) → { product, kind } eller null.
-// Brukes til kolonnene El.nr/art.nr/produkt/familie/Type i romoversikten når et rom har flere
-// produkter (vises da det dominerende, slik vedlegget gjør).
-function _roomDominantProduct(room) {
-  let best = null, bestW = -1;
-  const consider = (p, kind, w) => { if (p && w >= bestW) { bestW = w; best = { product: p, kind }; } };
-  for (const c of _cablesForRoom(room.id)) {
-    const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
-    const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
-    consider(p, 'Kabel', w);
-  }
-  for (const m of _matsForRoom(room.id)) {
-    const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
-    consider(p, 'Matte', _matRatedW(p, m));
-  }
-  for (const s of _foilCountItemsForRoom(room.id)) {  // F4d: inkl. fri folie
-    const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
-    const nc = p ? (p.netto_width_mm || p.width_mm || 500) / 10 : 0;
-    consider(p, 'Folie', p ? (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000 : 0);
-  }
-  for (const pl of _platesForRoom(room.id)) {
-    const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
-    consider(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0);
-  }
-  for (const it of _aluboardRoomItems(room.id)) consider(it.product, it.kind, it.effectW);
-  return best;
-}
-
-// Produkt-breakdown i et rom: én oppføring PER UNIK produkt-variant (ikke ett dominant
-// produkt). count = antall identiske elementer av varianten, effectW = sum RATET effekt for
-// de elementene (samme formel som _roomRatedEffectW). Brukes av Romoversikten så rom med
-// FLERE ULIKE kabler/produkter får én rad per variant (Antall/W korrekt per variant),
-// mens rommets felles CC og areal hører til rom-nivå. Sortert dominant (størst effekt) først.
-function _roomProductBreakdown(room) {
-  const map = new Map(); // key -> { product, kind, count, effectW, lengthM }
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 097 · ROMMETS PRODUKTER — ÉN KILDE (_roomProductRows)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Kenneth 16.10.2026 (Coop Ålen, P0339 rev. 3): «Her regner ikke appen med rampe og inngang som
+// jeg har lagt ut med frihånd. Den bør regnes med. Den er tatt med kun for produkter, så den kom
+// med på materiallisten.»
+//
+// ⚠ MÅLT FØR FIKSEN — hvem leste hva (STEG 0.1):
+//   Romsidens topp (W/areal/dekning)   `_computeRoomStats`      → matPaths JA, aluboard JA
+//   Romsidens Spesifikasjon (specRows) egne løkker              → matPaths NEI, aluboard NEI
+//   Prosjektoversikt KPI + W-kolonne   `_roomRatedEffectW`      → matPaths NEI, aluboard JA
+//   Prosjektoversikt «Type»            `_roomProductFamily`     → matPaths NEI, aluboard NEI
+//   Romoversikt (Ant/El.nr/.../W)      `_roomProductBreakdown`  → matPaths NEI, aluboard JA
+//   Materialliste (PDF + XLSX)         `_collectMaterialItems`  → matPaths JA, aluboard JA
+//   Forhåndsvisning / kundeside        `_roomRatedEffectW`      → matPaths NEI, aluboard JA
+// Derfor sto Rampe (3000 W) og Inngang (34 800 W) riktig på romsiden og i materiallista, men som
+// «— · 0 W» og «Ingen produkter» i oversiktene. Fri folie (`foilFree`) var dekket overalt, via
+// `_foilCountItemsForRoom`.
+//
+// Denne funksjonen er nå DEN ENE kilden, og den dekker alle samlingene i ROOM_PRODUCT_KEYS:
+// strips/foilFree, cables, mats, matPaths, plates, aluboard. Én rad per produktvariant.
+// `_roomRatedEffectW`, `_roomDominantProduct`, `_roomProductBreakdown`, PDF-ens «Type» og
+// romsidens Spesifikasjon er alle uttrykt gjennom den — de kan ikke lenger si hver sin ting.
+//
+// `effectW` er rundet (det er tallet som VISES per rad); `effectWRaw` er urundet, og romtotalen
+// summerer den — ellers ville en rad-for-rad-avrunding flyttet summer som har stått siden før.
+function _roomProductRows(room) {
+  if (!room) return [];
+  const map = new Map(); // key -> { product, kind, count, effectWRaw, lengthM, areaM2 }
   // Folie deles på lengde (Kenneth 17.09.2026): sju 100 cm-folier med ulik lengde skal bli sju
   // rader, ikke én rad med «Ant 7». Nøkkelen for folie er productId + lengde. lengthM rundes til
   // ÉN DESIMAL I METER — samme presisjon som vises — FØR gruppering, slik at 3,24 m og 3,19 m
   // ikke ender som to rader som begge står oppført som «3,2 m».
-  const add = (p, kind, w, lengthM) => {
+  const add = (p, kind, w, lengthM, areaM2, count, keySuffix) => {
     if (!p) return;
     // 025: reserven får sin EGEN rad, rett ved siden av hovedkabelen (samme produkt). Uten en
     // egen nøkkel ville de smeltet sammen til «2 stk» med dobbel W.
     const key = kind === 'Folie' ? (p.id + '|' + lengthM)
-              : (p.id + (kind === 'Reservekabel' ? '|reserve' : ''));
+              : (p.id + (keySuffix || '') + (kind === 'Reservekabel' ? '|reserve' : ''));
     let e = map.get(key);
-    if (!e) { e = { product: p, kind, count: 0, effectW: 0, lengthM }; map.set(key, e); }
-    e.count += 1; e.effectW += w;
+    if (!e) { e = { product: p, kind, count: 0, effectWRaw: 0, lengthM, areaM2: 0 }; map.set(key, e); }
+    e.count += (count == null ? 1 : count);
+    e.effectWRaw += (w || 0);
+    e.areaM2 += (areaM2 || 0);
   };
   // Hovedkabler først, reserver etter — så reserve-raden havner rett under sin hovedkabel-rad.
   for (const c of _cablesForRoom(room.id).slice().sort((x, y) => (x.reserve ? 1 : 0) - (y.reserve ? 1 : 0))) {
@@ -13355,31 +13326,85 @@ function _roomProductBreakdown(room) {
     const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
     // 025: reserven har 0 W (ikke tilkoblet) — W-cellen viser da «—» og Σ W er fortsatt
     // romtotalen. Antall/lengde/art.nr er som en vanlig kabel, så den bestilles.
-    add(p, c.reserve ? 'Reservekabel' : 'Kabel', c.reserve ? 0 : w, p ? (p.cable_length_m ?? null) : null);
+    add(p, c.reserve ? 'Reservekabel' : 'Kabel', c.reserve ? 0 : w, p ? (p.cable_length_m ?? null) : null, 0);
   }
   for (const m of _matsForRoom(room.id)) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
-    add(p, 'Matte', _matRatedW(p, m), null);
+    add(p, 'Matte', _matRatedW(p, m), null, (m.width_cm * _matLaidLengthCm(m)) / 10000);
+  }
+  // 097 · FRIHÅNDSMATTE. Samme kilde materiallista alltid har brukt (`_matFreeCatalog(mp).segments`),
+  // og samme `kind: 'Matte'` — ellers ville Gruppe/Type i Romoversikten fått en egen, ny verdi for
+  // det samme produktet. Én bane kan gi FLERE ruller (DEL A, 19.08), så det summeres over segments;
+  // `seg.product` kan mangle og faller tilbake til familieraden, akkurat som i materiallista.
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== room.id) continue;
+    const c = _matFreeCatalog(mp);
+    for (const seg of (c.segments || [])) {
+      const p = seg.product || c.fam;
+      add(p, 'Matte', seg.watt, null, seg.areaM2);
+    }
   }
   for (const s of _foilCountItemsForRoom(room.id)) {  // F4d: inkl. fri folie
     const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
     const nc = p ? (p.netto_width_mm || p.width_mm || 500) / 10 : 0;
     const lenKey = Math.round(s.length_cm / 10) / 10;
-    add(p, 'Folie', p ? (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000 : 0, lenKey);
+    add(p, 'Folie', p ? (p.watt_per_m2 || 0) * (nc * s.length_cm) / 10000 : 0, lenKey, (nc * s.length_cm) / 10000);
   }
   for (const pl of _platesForRoom(room.id)) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
-    add(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0, null);
+    add(p, 'Plate', p ? (p.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000 : 0, null,
+      (pl.width_cm * pl.length_cm) / 10000);
   }
   for (const it of _aluboardRoomItems(room.id)) {
-    if (!it.product) continue;
-    let e = map.get(it.product.id);
-    if (!e) { e = { product: it.product, kind: it.kind, count: 0, effectW: 0, lengthM: null }; map.set(it.product.id, e); }
-    e.count += it.count; e.effectW += it.effectW;
+    add(it.product, it.kind, it.effectW, it.meters || null, 0, it.count, '|alu');
   }
   return [...map.values()]
-    .map(e => ({ product: e.product, kind: e.kind, count: e.count, effectW: Math.round(e.effectW), lengthM: e.lengthM }))
-    .sort((a, b) => b.effectW - a.effectW);
+    .map(e => ({ product: e.product, kind: e.kind, count: e.count,
+                 effectW: Math.round(e.effectWRaw), effectWRaw: e.effectWRaw,
+                 lengthM: e.lengthM, areaM2: e.areaM2,
+                 elNr: e.product ? (e.product.el_no || null) : null,
+                 artNr: e.product ? (e.product.article_no || null) : null }))
+    .sort((a, b) => b.effectWRaw - a.effectWRaw);
+}
+
+// Rommets ratede effekt — summen av den ene kilden. Summerer URUNDET per rad og runder til slutt,
+// slik romtotalen alltid har gjort.
+function _roomRatedEffectW(room) {
+  if (!room) return 0;
+  let w = 0;
+  for (const r of _roomProductRows(room)) w += r.effectWRaw || 0;
+  return Math.round(w);
+}
+
+// Dominerende produkt i et rom (størst ratet effekt-bidrag) → { product, kind } eller null.
+// Brukes til kolonnene El.nr/art.nr/produkt/familie/Type i romoversikten når et rom har flere
+// produkter (vises da det dominerende, slik vedlegget gjør). Radene er sortert dominant først.
+function _roomDominantProduct(room) {
+  const rows = _roomProductRows(room);
+  return rows.length ? { product: rows[0].product, kind: rows[0].kind } : null;
+}
+
+// Produkt-breakdown i et rom: én oppføring PER UNIK produkt-variant. Beholdt som navn fordi
+// Romoversikten og to regresjonsbatterier kaller den; innholdet er nå den delte kilden.
+function _roomProductBreakdown(room) {
+  return _roomProductRows(room);
+}
+
+// 097 · dominerende produkt-FAMILIE (PDF-ens «Type»-kolonne). Lå tidligere som en egen lokal
+// funksjon inne i `exportPDF` med sine egne fire løkker — og den manglet både matPaths og
+// aluboard. Nå er den den samme kilden som alt annet.
+function _roomProductFamilyName(room) {
+  const byFam = new Map();
+  for (const r of _roomProductRows(room)) {
+    const p = r.product; if (!p) continue;
+    const sizeRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
+    const fam = p.product_family || (p.name ? p.name.replace(sizeRe, '').trim() : '\u2014');
+    byFam.set(fam, (byFam.get(fam) || 0) + (r.effectWRaw || 0));
+  }
+  if (!byFam.size) return '\u2014';
+  let best = '\u2014', bestW = -Infinity;
+  for (const [fam, w] of byFam) if (w > bestW) { best = fam; bestW = w; }
+  return best;
 }
 
 function _matTotalLengthMm(prod) {
@@ -67107,6 +67132,57 @@ function _exportFileName(kind, ext, rev) {
   return _docFileName(String(kind || 'varmeplan').toLowerCase(), ext, 'rev' + revNo);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 097 · «m²» I PDF-EN — ÉN LØSNING FOR HELE DOKUMENTET
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Kenneth 16.10.2026: «208.6 m», «57.60 m», «300 W/m», «Flate W/m» — toeren var borte overalt.
+// ⚠ Tegnet MANGLER IKKE i kilden: PDF-koden skriver både `'m²'` (literal) og `'m\u00b2'`
+// (escapet) — samme U+00B2. Det er jsPDFs standardfont-koding (StandardEncoding) som ikke har
+// plass til det; WinAnsi har det på 0xB2, StandardEncoding ikke. Derfor forsvinner det STILLE.
+//
+// Fikset ÉN gang for hele dokumentet, ikke tekst for tekst: `doc.text` overstyres, og en streng
+// som inneholder «²» tegnes som basistekst pluss en mindre, løftet «2». Strenger UTEN «²» går
+// urørt videre til original-funksjonen — da kan ingen eksisterende tekst flytte seg.
+//
+// Høyde- og høyrejustering krever at bredden regnes med den LØFTEDE toerens faktiske bredde
+// (mindre font), ellers ville en høyrejustert «W/m²»-celle havnet et par tideler feil.
+function _pdfSuperscriptPatch(doc) {
+  if (!doc || doc.__supPatched) return doc;
+  doc.__supPatched = true;
+  const orig = doc.text.bind(doc);
+  const SUP = 0.62;            // skalafaktor for den løftede toeren
+  const LIFT = 0.30;           // hvor høyt den løftes, som andel av skriftstørrelsen (mm)
+  const deler = (txt) => String(txt).split('\u00b2');
+  doc.text = function (txt, x, y, opts) {
+    // Flere linjer (array) eller ingen «²» → nøyaktig som før.
+    if (Array.isArray(txt) || typeof txt !== 'string' || txt.indexOf('\u00b2') < 0)
+      return orig(txt, x, y, opts);
+    const fs = doc.getFontSize();
+    const bitene = deler(txt);
+    // Total bredde: hver bit i full størrelse, pluss én løftet «2» mellom hver.
+    let total = 0;
+    for (let i = 0; i < bitene.length; i++) {
+      total += doc.getTextWidth(bitene[i]);
+      if (i < bitene.length - 1) total += doc.getTextWidth('2') * SUP;
+    }
+    const align = opts && opts.align;
+    let cx = align === 'right' ? x - total : align === 'center' ? x - total / 2 : x;
+    const restOpts = opts ? Object.assign({}, opts) : undefined;
+    if (restOpts) delete restOpts.align;        // vi plasserer selv, bit for bit
+    for (let i = 0; i < bitene.length; i++) {
+      if (bitene[i]) { orig(bitene[i], cx, y, restOpts); cx += doc.getTextWidth(bitene[i]); }
+      if (i < bitene.length - 1) {
+        doc.setFontSize(fs * SUP);
+        orig('2', cx, y - fs * LIFT * 0.3528, restOpts);   // pt → mm
+        cx += doc.getTextWidth('2');
+        doc.setFontSize(fs);
+      }
+    }
+    return doc;
+  };
+  return doc;
+}
+
 async function exportPDF(opts) {
   opts = opts || { cover:true, summary:true, rooms:S.rooms.map(r=>r.id), stairs:(S.stairs||[]).map(s=>s.id), roomTable:true, stairTable:true, materialList:true, pricing:false, discount:0, showDGDB:false, docs:false, signature:false, freeText:'' };
   if (!window.jspdf) { alert('PDF-bibliotek ikke lastet. Prøv igjen.'); return; }
@@ -67117,7 +67193,7 @@ async function exportPDF(opts) {
   const accessoryItems = accessoryResult.items || [];
   await _pdfBranding();   // last inn org-logo (co-brand) iht. flagg — stemples før save
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const doc = _pdfSuperscriptPatch(new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' }));
   const W = 210, H = 297; // A4 mm
   const M = 15; // margin
   const pw = W - 2 * M; // printable width
@@ -67359,41 +67435,11 @@ async function exportPDF(opts) {
   }
   y += cardH + 8;
 
-  // Pick the dominant product family for a room — shown as "Type"
-  // (e.g. "FlexFoil 60W", "InFloor 10T", "EcoMat 100T"). Selects the
-  // family with the highest installed W in the room.
-  const _roomProductFamily = (room) => {
-    const byFam = new Map();
-    const add = (pid, w) => {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === pid);
-      if (!p) return;
-      const sizeRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
-      const fam = p.product_family || (p.name ? p.name.replace(sizeRe, '').trim() : '—');
-      byFam.set(fam, (byFam.get(fam) || 0) + (w || 0));
-    };
-    for (const s of _foilCountItemsForRoom(room.id)) {  // F4d: inkl. fri folie
-      const p = HEATING_PRODUCTS.find(pr => pr.id === s.productId);
-      const nc = p ? (p.netto_width_mm || p.width_mm) / 10 : 0;
-      add(s.productId, (p?.watt_per_m2 || 0) * (nc * s.length_cm) / 10000);
-    }
-    for (const c of _cablesForRoom(room.id)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
-      add(c.productId, p?.watt_per_m ? p.watt_per_m * (c.totalLength_cm / 100) : 0);
-    }
-    for (const m of _matsForRoom(room.id)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
-      const a = (m.width_cm * _matLaidLengthCm(m)) / 10000;
-      add(m.productId, (p?.watt_per_m2 || 0) * a);
-    }
-    for (const pl of _platesForRoom(room.id)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === pl.productId);
-      add(pl.productId, (p?.watt_per_m2 || 0) * (pl.width_cm * pl.length_cm) / 10000);
-    }
-    if (!byFam.size) return '—';
-    let best = '—', bestW = -1;
-    for (const [fam, w] of byFam) { if (w > bestW) { best = fam; bestW = w; } }
-    return best;
-  };
+  // 097: «Type»-kolonnen kommer nå fra den DELTE kilden (_roomProductFamilyName →
+  // _roomProductRows). Den lokale utgaven her hadde sine egne fire løkker og manglet både
+  // matPaths (frihåndsmatte) og aluboard — derfor sto Rampe og Inngang med «—» i oversikten
+  // mens romsiden deres viste 3000 W og 34 800 W.
+  const _roomProductFamily = (room) => _roomProductFamilyName(room);
 
   // ── Per-floor tables (Rom · Type · m² · W/m² · W) ──
   // DEL D (spec-hurtig-prosjektering-bygg-niva.md): Bygg → Etasje → Rom, KUN når minst ett rom
@@ -67647,7 +67693,14 @@ async function exportPDF(opts) {
     const heatedM2 = (stats.stripM2 || 0) + (stats.cableAreaM2 || 0) + (stats.matAreaM2 || 0) + (stats.plateAreaM2 || 0);
     const dekningNettoPct = stats.nettoM2 > 0 ? Math.round((heatedM2 / stats.nettoM2) * 100) : 0;
     const dekningBruttoPct = stats.bruttoM2 > 0 ? Math.round((heatedM2 / stats.bruttoM2) * 100) : 0;
-    const totalW = Math.round(stats.totalW || 0);
+    // 097: romsidens «Effekt» leser nå SAMME kilde som Prosjektoversikten og Romoversikten
+    // (`_roomRatedEffectW` → `_roomProductRows`), ikke den geometri-utledede `stats.totalW`.
+    // Oppgaven krevde at de to aldri kan si hver sin ting. ⚠ MÅLT at det flytter ett tall: et
+    // kabelrom med InFloor 17T 600W viste 595 W på romsiden og 600 W i oversikten — nå 600 på
+    // begge. Ratet effekt ER det «installert effekt» betyr, og oversiktens «Brutto W/m²» har
+    // regnet ratet÷brutto siden spec-prosjektoversikt-etasjer-brutto-netto-effekt.md (DEL B/C),
+    // så dette gjør romsiden enig med tabellen på BÅDE W og W/m². Dekning og areal er urørt.
+    const totalW = Math.round(_roomRatedEffectW(room) || 0);
     const flateeffekt = _roomFlateeffektWm2(room, stats);   // 024: én kilde, delt med tabellene
     const wPerBrutto = stats.bruttoM2 > 0 ? Math.round(totalW / stats.bruttoM2) : 0;
 
@@ -67737,89 +67790,25 @@ async function exportPDF(opts) {
     doc.setTextColor(40, 50, 70);
     doc.setFontSize(8);
 
-    const specRows = [];
-    // Strips \u2014 N stk all at the same length doesn't really happen (each
-    // strip may be a different length around hindringer), so we display
-    // count + total length across the product.
-    const stripByProd = {};
-    for (const s of _foilCountItemsForRoom(room.id)) {  // F4d: inkl. fri folie
-      const k = s.productId;
-      if (!stripByProd[k]) stripByProd[k] = { count: 0, totalLen: 0 };
-      stripByProd[k].count++;
-      stripByProd[k].totalLen += s.length_cm;
-    }
-    for (const [pid, info] of Object.entries(stripByProd)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      const nc = p ? ((p.netto_width_mm || p.width_mm) / 10) : 0;
-      const m2 = (nc * info.totalLen) / 10000;
-      const watt = Math.round((p?.watt_per_m2 || 0) * m2);
-      specRows.push({
-        type: 'Varmefolie', name: p?.name || 'Folie',
-        antall: info.count + ' stk',
-        lengde: (info.totalLen / 100).toFixed(1) + ' m',
-        effekt: watt + ' W',
-      });
-    }
-    // Cables \u2014 usually 1 stk per product, total length is the cable length.
-    const cableByProd = {};
-    for (const c of _cablesForRoom(room.id)) {
-      const k = c.productId;
-      if (!cableByProd[k]) cableByProd[k] = { count: 0, totalLen: 0 };
-      cableByProd[k].count++;
-      cableByProd[k].totalLen += c.totalLength_cm || 0;
-    }
-    for (const [pid, info] of Object.entries(cableByProd)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      const lenM = info.totalLen / 100;
-      const watt = p?.watt_per_m ? Math.round(p.watt_per_m * lenM) : 0;
-      specRows.push({
-        type: 'Kabel', name: p?.name || 'Kabel',
-        antall: info.count + ' stk',
-        lengde: lenM.toFixed(1) + ' m',
-        effekt: watt + ' W',
-      });
-    }
-    // Mats \u2014 count the physical mat objects; length is num_runs \u00d7 length.
-    const matByProd = {};
-    for (const m of _matsForRoom(room.id)) {
-      const k = m.productId;
-      const mp = HEATING_PRODUCTS.find(pr => pr.id === k);
-      if (!matByProd[k]) matByProd[k] = { count: 0, totalLen: 0, totalArea: 0, watt: 0 };
-      const nRuns = m.num_runs || 1;
-      const totLen = _matLaidLengthCm(m);
-      matByProd[k].count++;
-      matByProd[k].totalLen += totLen;
-      matByProd[k].totalArea += (m.width_cm * totLen) / 10000;
-      matByProd[k].watt += _matRatedW(mp, m); // rated power per physical mat
-    }
-    for (const [pid, info] of Object.entries(matByProd)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      const watt = Math.round(info.watt);
-      specRows.push({
-        type: 'Matte', name: p?.name || 'Matte',
-        antall: info.count + ' stk',
-        lengde: (info.totalLen / 100).toFixed(1) + ' m',
-        effekt: watt + ' W',
-      });
-    }
-    // Plates \u2014 count only, no linear length.
-    const plateByProd = {};
-    for (const pl of _platesForRoom(room.id)) {
-      const k = pl.productId;
-      if (!plateByProd[k]) plateByProd[k] = { count: 0, areaM2: 0 };
-      plateByProd[k].count++;
-      plateByProd[k].areaM2 += (pl.width_cm * pl.length_cm) / 10000;
-    }
-    for (const [pid, info] of Object.entries(plateByProd)) {
-      const p = HEATING_PRODUCTS.find(pr => pr.id === +pid);
-      const watt = Math.round((p?.watt_per_m2 || 0) * info.areaM2);
-      specRows.push({
-        type: 'Plate', name: p?.name || 'Plate',
-        antall: info.count + ' stk',
-        lengde: '\u2014',
-        effekt: watt + ' W',
-      });
-    }
+    // 097 · SPESIFIKASJONEN LESER NÅ DEN DELTE KILDEN. Blokken her hadde fire egne løkker
+    // (folie/kabel/matte/plate) og manglet matPaths og aluboard — derfor sto det «Ingen produkter»
+    // på Rampe og Inngang, mens samme romside øverst viste 3000 W og 34 800 W fra
+    // `_computeRoomStats`. Nå er det den ene kilden, og de to tallene kan ikke være uenige.
+    //
+    // Lengdekolonnen: kabler og aluboard-kabel har en meterlengde (`lengthM`); folie har lengde
+    // per bredde; matter og plater har ikke en lineær lengde og viser «—», som før.
+    const specRows = _roomProductRows(room).map(r => {
+      let lengde = '\u2014';
+      if (r.kind === 'Folie') lengde = (r.lengthM != null ? r.lengthM.toFixed(1) : '\u2014') + ' m';
+      else if (r.lengthM != null) lengde = r.lengthM.toFixed(1) + ' m';
+      return {
+        type: r.kind, name: (r.product && r.product.name) || r.kind,
+        antall: r.count + ' stk',
+        lengde,
+        // 025: reservekabelen har 0 W (ikke tilkoblet) — vises som «—», ikke «0 W».
+        effekt: (r.kind === 'Reservekabel' && !r.effectW) ? '\u2014' : (r.effectW + ' W'),
+      };
+    });
     if (specRows.length === 0) {
       specRows.push({ type: '\u2014', name: 'Ingen produkter', antall: '', lengde: '', effekt: '' });
     }
@@ -74866,7 +74855,7 @@ function _docDataUrlToBlob(dataUrl) {
 function _docBuildPDF(st) {
   if (!window.jspdf) { _showToast('PDF-bibliotek ikke lastet.'); return null; }
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const doc = _pdfSuperscriptPatch(new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' }));
   const M = 18; let y = M;
   const line = (txt, size=10, bold=false, color=[20,20,20]) => {
     doc.setFont('helvetica', bold?'bold':'normal'); doc.setFontSize(size); doc.setTextColor(...color);
