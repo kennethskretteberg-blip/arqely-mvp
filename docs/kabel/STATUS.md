@@ -1580,3 +1580,74 @@ noe annet, er **ikke målt**. Det bør være neste sak.
 
 **Ytelse:** 090s fire varianter koster lite — Rom 5 / `tr` tar 655 ms med og 624 ms uten.
 De 4,3 s jeg målte i §31 kom fra det fjernede avbruddet, ikke fra 090.
+
+---
+
+## §33 · 091 — knekkpunktet er funnet og målt. Fiksen er IKKE bygget.
+
+### Hvor det knekker (STEG 0.2)
+
+Interpolert mellom gammel og ny Rom 5-geometri (begge punktene flytter seg 1,41 cm til venstre),
+700W, loddrett, `tr`:
+
+| venstre vegg x | CC | dekning | veggstripe | tid |
+|---|---|---|---|---|
+| 678,79 … **677,49** | **13,20** | **93,4 %** | 16,7 → 17,9 | 0,7–1,0 s |
+| **677,47** … 677,38 | 11,62 | 84,3 % | 16,6 | 4,3 s |
+
+**Det er ett hopp, ikke en glidning — og det skjer på 0,2 mm.** Rett før knekket har
+CC 13,2-kandidaten veggstripe 17,9 mot grensen 18,2: tre millimeter klaring.
+
+### Hvorfor (STEG 0.3)
+
+Poengsummene på hver side:
+
+```
+FØR  (x=677,49):  86,0 · CC 13,20 · 40,97 m · dekn 93,4 %     ← eneste scorede kandidat
+ETTER(x=677,47):  97,7 · CC 11,62 · 41,00 m · dekn 84,3 %
+                  82,1 · CC 12,10 · 41,00 m · dekn 86,1 %
+                  48,0 · CC 12,63 · 40,76 m · dekn 90,7 % (1 hull)
+```
+
+**CC 13,20 blir ikke utkonkurrert — den genereres ikke lenger i det hele tatt.**
+
+Rotårsaken ligger i `_geoBuildGrid`:
+
+```js
+let N = Math.max(2, Math.round(usable / cc) + 1);
+```
+
+`Math.round` er en knivsegg. En breddeendring på 0,2 mm får `usable/cc` til å krysse en
+halvgrense, **N hopper med 1**, lengden endres med et helt løp (≈ 2,4 %), og bisekssjonen i
+lag F — som antar at lengden varierer jevnt med CC — lander på et annet trinn. Det er
+sagtannen lag F-kommentaren allerede beskriver, nå med et målt utslag på 9 prosentpoeng.
+
+### To fikser forsøkt, begge rullet tilbake
+
+1. **Fjerne avbruddet i `tries`-løkka** (090b-hypotesen gjentatt): uendret CC 11,62, og 3–7×
+   tregere. Rullet tilbake.
+2. **Legge CC-ene for N−2 … N+2 inn i `tries`**, så nabotrinnene alltid prøves: uendret
+   CC 11,62, og 0,7 s → 6,5 s. Rullet tilbake.
+
+Nabotrinnene i N er altså ikke nok — CC 13,2 er utilgjengelig på den nye geometrien av en grunn
+som ligger dypere enn hvilke CC-verdier søket prøver.
+
+### STEG 0.4 er IKKE besvart
+
+Jeg forsøkte å bygge formen med CC ≈ 13 direkte på dagens geometri, men probe-en brukte bare
+BASISrutenettet og utelot transittvariantene motoren faktisk bruker — den ga «ingen rute» for
+alle CC rundt 13, og det er ikke en gyldig konklusjon. **Om formen finnes på dagens rom er
+fortsatt ukjent.**
+
+### Anbefaling
+
+Den riktige fiksen er den 090-oppdraget allerede beskrev og som ikke er bygget:
+**lengdesøket skal iterere over antall løp N, ikke over CC.** Da er N variabelen, CC følger av
+N (`cc = W/(N−1)`), og sagtannen forsvinner ved kilden i stedet for å lappes rundt. Det er en
+omskriving av lag F og bør være en egen oppgave med eget budsjett — ikke noe å begynne på på
+tampen av en økt, som disse to forsøkene viste.
+
+**Robusthetstesten og den nye fasit-påstanden er derfor heller ikke bygget** — de skal måles mot
+en motor som er robust, ikke mot en som har knivseggen i seg.
+
+⚠ «CC 13,2» var den GAMLE geometriens tall. Det skal ikke låses igjen.

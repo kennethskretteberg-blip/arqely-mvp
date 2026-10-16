@@ -4,6 +4,19 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 091 (delvis) — knekkpunktet funnet: N hopper på 0,2 mm (15.10.2026, `main`)
+
+Rom 5 / 700W / loddrett / `tr` faller fra CC 13,20 og 93,4 % dekning til CC 11,62 og 84,3 % når
+venstre vegg flyttes fra x = 677,49 til 677,47 — **0,2 mm**. Ett hopp, ikke en glidning.
+
+CC 13,20 blir ikke utkonkurrert; den genereres ikke lenger. Rotårsaken er
+`N = Math.round(usable / cc) + 1` i `_geoBuildGrid`: en knivsegg der N hopper med 1, lengden
+endres med et helt løp, og bisekssjonen i lag F lander på et annet trinn.
+
+⚠ To fikser forsøkt og rullet tilbake (fjerne avbruddet i `tries`; legge N±2 inn i `tries`) —
+begge uendret resultat og 3–9× tregere. Riktig fiks er å la lengdesøket iterere over N i stedet
+for CC. Ikke bygget. Se STATUS §33.
+
 ## 090b — «regresjonen» på 076-fasiten var ingen regresjon (15.10.2026, gren `kabelmotor`)
 
 Jeg meldte at 090 brøt 076-fasiten (Rom 5 / 700W / loddrett / `tr`: CC 13,20 → 11,62). Feil.
