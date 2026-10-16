@@ -26364,7 +26364,7 @@ function generateCableV6(roomId, productId, direction, startCorner) {
     }
   };
 
-  console.log(`[CableV6] runs=${output.runs.length}, cells=${cellSet.cells.length}, coverage=${finalCoverage.toFixed(1)}%, spacing=${result.spacing_cm.toFixed(1)}cm, total=${(output.totalLength_cm/100).toFixed(1)}m${prod.cable_length_m ? ', target=' + prod.cable_length_m + 'm, diff=' + ((output.totalLength_cm - prod.cable_length_m*100)/100).toFixed(2) + 'm' : ''}, warnings=${validation.warnings.length}, topology=${topology.complexity}`);
+  if (!window._cableQuietV6) console.log(`[CableV6] runs=${output.runs.length}, cells=${cellSet.cells.length}, coverage=${finalCoverage.toFixed(1)}%, spacing=${result.spacing_cm.toFixed(1)}cm, total=${(output.totalLength_cm/100).toFixed(1)}m${prod.cable_length_m ? ', target=' + prod.cable_length_m + 'm, diff=' + ((output.totalLength_cm - prod.cable_length_m*100)/100).toFixed(2) + 'm' : ''}, warnings=${validation.warnings.length}, topology=${topology.complexity}`);
 
   return output;
 }
@@ -27714,6 +27714,20 @@ function _cableEndeKort(cable, room) {
     if (runs.length < 2) return null;
     const kort = (r, friSw) => {
       const len = r.hi - r.lo;
+      // ─── 095 · R-ENDE GJELDER RESTCELLER, IKKE EKTE NISJER (Kenneths presisering) ─────────
+      // 094-regelen var for bred. Det Kenneth reagerte på, var en STUMP: en celle med én bane,
+      // 12,6 cm høy — for lav til en vanlig sving i begge ender (radius CC/2 i hver ende krever
+      // minst 2 × CC). Den lå der bare fordi rutingen måtte innom. En ende som fyller sin EGEN
+      // celle helt ut, også en grunn nisje, er riktig utlegg: nisjen er 78 cm, og kabelen går
+      // så langt den kan.
+      //
+      // Terskelen er derfor 2 × CC. Rom 5: 12,6 < 26,4 → restcelle, 094-reparasjonen står.
+      // badHakk: 78,1 > 22,4 → ikke restcelle, ingen påstand. Målt: det tar de fem vannrette
+      // radene i badHakk/badHakk41 ut av bruddlista uten å røre utlegget deres.
+      //
+      // «Én bane» trenger ingen egen test: hadde cellen flere baner, ville naboen under ha
+      // samme utstrekning, og avviket blitt 0 av seg selv.
+      if (len >= cc * 2) return 0;
       const krav = Math.min(cc, len * 0.6);
       const nabo = runs.filter(o => o !== r && Math.abs(o.p - r.p) > cc * 0.3
                       && Math.abs(o.p - r.p) < cc * 1.6
@@ -27825,7 +27839,10 @@ const _cableFixtures = {
   // ⚠ Skjermens akse: mindre y er ØVERST (088). Rektangelet er aksejustert, så hjørnene er
   // entydige: (x0,y0) er øvre venstre.
   rekt398: { name: 'Rektangel 398 x 271 (Kenneths skjermbilde 090)', klasse: 'referanse',
-    productId: null, note: '1650W 96m la seg med 44 løp og svingene 28 cm inne; 36 løp ved CC 11,1 gir 96 m.',
+    // ⚠ 095: sto som `productId: null`, og da ga alle åtte radene «ingen løsning» i porten —
+    // en fixture som ikke kan feile, fordi den aldri kjører. Noten navnga produktet selv:
+    // InFloor 17T 1650W 96m (id 31). Målt med det: CC 11,08 · 36 løp · 98,4 % · start 12 cm.
+    productId: 31, note: '1650W 96m la seg med 44 løp og svingene 28 cm inne; 36 løp ved CC 11,1 gir 96 m.',
     points: [{x:0,y:-271},{x:398,y:-271},{x:398,y:0},{x:0,y:0}] },
   badHakk41: { name: 'Kenneths bad med 41 m kabel (074)', klasse: 'referanse', productId: 23,
     targetWm2: 120, sammeGeometriSom: 'badHakk',
@@ -28503,7 +28520,7 @@ function _geoCellTraversals(cell) {
   return out;
 }
 
-function _geoRouteOrders(cells, maxOrders) {
+function _geoRouteOrders(cells, maxOrders, cc) {
   // Alle Hamilton-stier i naboskapsgrafen (celletallet er lite). Finnes ingen, brukes ren
   // perp-rekkefølge — da fanger overgangs-kravet under at det ikke går.
   const n = cells.length, orders = [];
@@ -28543,8 +28560,14 @@ function _geoRouteOrders(cells, maxOrders) {
   // = 6,6) i BEGGE ender. Den eneste kjeden som lar seg bygge, ender derfor i sliveren.
   const h = (l) => (l.lanes || []).length
     ? Math.max(...l.lanes.map(x => x.hi)) - Math.min(...l.lanes.map(x => x.lo)) : 0;
-  const droppbar = cells.filter(c => {
+  // ⚠ 095: PORTEN ER 2 × CC, ikke «lavere enn naboen». Uten den lagde rutingen dropp-varianten
+  // for ENHVER lav én-banes celle, og på badHakk41 vant den på LENGDELEDDET (40,74 m mot 41,37
+  // mot et mål på 41,00) — altså ble et utlegg endret i et rom som ikke har en restcelle-ende,
+  // og både dekning (82,9 → 81,5) og veggstripe (5,1 → 16,9) ble dårligere. Kenneth forbød
+  // nettopp det. En restcelle er for lav til en vanlig sving i begge ender: under 2 × CC.
+  const droppbar = (cc > 0 ? cells : []).filter(c => {
     if ((c.lanes || []).length !== 1) return false;              // bare én bane å miste
+    if (h(c) >= cc * 2) return false;                            // ekte nisje, ikke restcelle
     const naboer = (c.adj || []).filter(id => byId.has(id));
     if (!naboer.length) return false;
     return Math.max(...naboer.map(id => h(byId.get(id)))) - h(c) > 1;
@@ -28552,7 +28575,7 @@ function _geoRouteOrders(cells, maxOrders) {
   for (const d of droppbar) {
     if (cells.length < 3) break;                                 // en todeling trenger to igjen
     const rest = cells.filter(c => c.id !== d.id);
-    for (const o of _geoRouteOrders(rest, 4)) {
+    for (const o of _geoRouteOrders(rest, 4, cc)) {
       // Bare EKTE Hamilton-stier. Var sliveren den eneste broen, faller det rekursive kallet
       // tilbake på perp-sortering, og den rekkefølgen er ikke sammenhengende — da finnes det
       // ingen variant, og utlegget skal stå som før.
@@ -29055,7 +29078,7 @@ function _geoTrySplitTwo(grid, legal, prod) {
   const planGroup = (cells) => {
     if (!cells.length) return null;
     const sub = { direction: grid.direction, cc: grid.cc, cells };
-    for (const order of _geoRouteOrders(cells, 8)) {
+    for (const order of _geoRouteOrders(cells, 8, grid.cc)) {
       const plan = _geoPlanTraversals(sub, order);
       if (!plan) continue;
       const pts = _geoBuildCenterline(sub, order, plan, legal, prod);
@@ -29318,7 +29341,7 @@ function generateCableGeo(roomId, productId, opts) {
   const fastLen = (dir, cc, extraSweep) => {
     let best = null;
     for (const grid of gridsFor(dir, cc, extraSweep)) {
-      for (const order of _geoRouteOrders(grid.cells, 8)) {
+      for (const order of _geoRouteOrders(grid.cells, 8, grid.cc)) {
         const plan = _geoPlanTraversals(grid, order);
         if (!plan) continue;
         const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
@@ -29340,7 +29363,7 @@ function generateCableGeo(roomId, productId, opts) {
   const jevnLen = (dir, cc, extraSweep) => {
     let best = null;
     for (const grid of gridsFor(dir, cc, extraSweep, true)) {
-      for (const order of _geoRouteOrders(grid.cells, 8)) {
+      for (const order of _geoRouteOrders(grid.cells, 8, grid.cc)) {
         const plan = _geoPlanTraversals(grid, order);
         if (!plan) continue;
         const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
@@ -29360,7 +29383,7 @@ function generateCableGeo(roomId, productId, opts) {
   const veggLen = (dir, cc, extraSweep) => {
     let best = null;
     for (const grid of gridsFor(dir, cc, extraSweep, true)) {
-      for (const order of _geoRouteOrders(grid.cells, 8)) {
+      for (const order of _geoRouteOrders(grid.cells, 8, grid.cc)) {
         const plan = _geoPlanTraversals(grid, order);
         if (!plan) continue;
         const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
@@ -29385,7 +29408,7 @@ function generateCableGeo(roomId, productId, opts) {
   const endeLen = (dir, cc, extraSweep) => {
     let best = null;
     for (const grid of gridsFor(dir, cc, extraSweep, true)) {
-      for (const order of _geoRouteOrders(grid.cells, 8)) {
+      for (const order of _geoRouteOrders(grid.cells, 8, grid.cc)) {
         const plan = _geoPlanTraversals(grid, order);
         if (!plan) continue;
         const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
@@ -29411,7 +29434,7 @@ function generateCableGeo(roomId, productId, opts) {
     if (!grids.length) return null;
     for (let gi = 0; gi < grids.length; gi++) {
       const grid = grids[gi];
-      for (const order of _geoRouteOrders(grid.cells, 12)) {
+      for (const order of _geoRouteOrders(grid.cells, 12, grid.cc)) {
        // 090: ikke bare den første lovlige kjeden — også de speilede. Billig (samme rutenett,
        // samme lengde) og helt nødvendig for at R-START skal kunne nå et hjørne i den andre
        // enden uten å kjøpe det med tettere CC.
@@ -29928,7 +29951,7 @@ function _geoNoSolution(room, prod, roomId, productId, legal, ctx) {
     const grid = _geoBuildGrid(legal, dir, ccMid, 0);
     if (!grid) continue;
     let got = false;
-    for (const order of _geoRouteOrders(grid.cells, 8)) {
+    for (const order of _geoRouteOrders(grid.cells, 8, grid.cc)) {
       const plan = _geoPlanTraversals(grid, order);
       if (!plan) continue;
       const pts = _geoBuildCenterline(grid, order, plan, legal, prod);
@@ -31670,6 +31693,300 @@ function _autoFillMixedCables(roomId, productIds, forcedDir) {
 // utlegg slipper gjennom UTEN merking, eller (c) et rent rektangel har fått et nytt utlegg.
 // Fasiten er galleriets egne fixture-rom, ikke håndskrevne tall — da følger testen med når
 // rommene endres.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 095 · DEN RASKE PORTEN — _cableGeoSuite() + lagret baselinje
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Kenneth, 16.10.2026: «En regresjonstest som ikke blir ferdig på 13 minutter, er ingen test.»
+// Derfor to nivåer:
+//   · _cableGeoSuite()                  — PORTEN. Bare geo-motoren, alle fixtures × 2 retninger
+//                                         × 4 hjørner, hver rad mot `docs/kabel/baseline.json`.
+//                                         Kjøres før hver commit i kabelmotoren.
+//   · _cableGeometryRegressionTest()     — det store batteriet med alle sju motorene. BEHOLDES,
+//                                         men bare som manuell kjøring. Den er ikke en port:
+//                                         V6 er ute av konkurransen (083) og skal ikke kjøres
+//                                         der den ikke kan vinne.
+//
+// Dominans: en rad som er dårligere på et LÅST mål feiler. Bedre rader rapporteres, og
+// baselinjen oppdateres BARE med `_cableGeoSuite({ oppdaterBaseline: true })` — aldri av seg selv.
+const _GEO_SUITE_CORNERS = ['tr', 'bl', 'tl', 'br'];
+
+// Én rad: kjør geo-motoren alene og les av de ni feltene baselinjen holder.
+function _cableGeoSuiteRow(key, fx, dir, corner) {
+  try {
+    _cableGalleryActiveKey = key;
+    const room = _cableGalleryBuildScene(fx);
+    S.ui.selectedRoomId = 1;
+    S.varmefolie = Object.assign({}, S.varmefolie,
+      { direction: dir, dirExplicit: true, startCorner: corner, wallMarginCm: null });
+    const cab = _cableGalleryRunEngine('geo', 1, fx.productId, dir, corner);
+    if (!cab || cab._noSolution || cab._error || !cab.centerline || cab.centerline.length < 2)
+      return { status: 'ingen' };
+    const chk = _cableGeometryCheck(cab, room, { lengthTolPct: 1 });
+    const m = chk.metrics || {};
+    // N = antall rette løp i senterlinjen. Det er den frie variabelen lengdesøket itererer over
+    // (091), så den hører i baselinjen — en CC uten N sier ikke hvilket trinn man står på.
+    const pk = dir === 'v' ? 'x' : 'y', sk = dir === 'v' ? 'y' : 'x';
+    let n = 0;
+    for (let i = 0; i + 1 < cab.centerline.length; i++) {
+      const a = cab.centerline[i], b = cab.centerline[i + 1];
+      if (Math.abs(a[pk] - b[pk]) < 0.05 && Math.abs(a[sk] - b[sk]) > 2) n++;
+    }
+    let L = 0;
+    for (let i = 0; i + 1 < cab.centerline.length; i++)
+      L += Math.hypot(cab.centerline[i + 1].x - cab.centerline[i].x,
+                      cab.centerline[i + 1].y - cab.centerline[i].y);
+    return {
+      status: 'ok',
+      n,
+      cc: +(cab.spacing_cm || 0).toFixed(2),
+      m: +(L / 100).toFixed(2),
+      dek: m.coveragePct == null ? null : +m.coveragePct,
+      stripe: m.wallStripeCm == null ? null : +m.wallStripeCm,
+      ende: m.endeKortCm == null ? null : +m.endeKortCm,
+      start: (() => { const v = _cableStartCornerOffCm(cab, room, corner); return v == null ? null : +v.toFixed(0); })(),
+      hull: cab._geoHoles || 0,
+      gyldig: !!chk.ok,
+      // form — brukes av forstyrrelsestesten, ikke av dominansen
+      celler: cab._geoCells || null,
+      transitt: (cab._geoTransits || 0) > 0,
+      // R-VEGG-grensen hører til raden: margin og CC varierer per rom og produkt
+      strGrense: (m.marginCm != null && m.ccFieldCm) ? +((m.marginCm + m.ccFieldCm + 1).toFixed(1)) : null
+    };
+  } catch (e) { return { status: 'FEIL', feil: String(e && e.message || e) }; }
+}
+
+// Sammenligningen. ⚠ Bare LÅSTE mål feiler. CC og N RAPPORTERES, de feiler ikke: CC velges av
+// lengdesøket, og et annet trinn er ikke i seg selv dårligere. Det er dekning, gyldighet, hull,
+// R-START, R-VEGG og R-ENDE som er løftene.
+function _cableGeoSuiteCompare(base, naa) {
+  const feil = [], bedre = [], endret = [];
+  if (base.status !== naa.status) {
+    feil.push(`status ${base.status} → ${naa.status}`);
+    return { feil, bedre, endret };
+  }
+  if (naa.status !== 'ok') return { feil, bedre, endret };
+  if (base.gyldig && !naa.gyldig) feil.push('mistet gyldighet');
+  if (!base.gyldig && naa.gyldig) bedre.push('ble gyldig');
+  if ((naa.hull || 0) > (base.hull || 0)) feil.push(`hull ${base.hull} → ${naa.hull}`);
+  else if ((naa.hull || 0) < (base.hull || 0)) bedre.push(`hull ${base.hull} → ${naa.hull}`);
+  if (base.ende != null && naa.ende != null) {
+    if (naa.ende > base.ende + 1) feil.push(`R-ENDE ${base.ende} → ${naa.ende}`);
+    else if (naa.ende < base.ende - 1) bedre.push(`R-ENDE ${base.ende} → ${naa.ende}`);
+  }
+  if (base.start != null && naa.start != null && base.start <= 40 && naa.start > 40)
+    feil.push(`R-START ${base.start} → ${naa.start}`);
+  const gr = naa.strGrense != null ? naa.strGrense : base.strGrense;
+  if (gr != null && base.stripe != null && naa.stripe != null && base.stripe <= gr && naa.stripe > gr)
+    feil.push(`R-VEGG ${base.stripe} → ${naa.stripe} (grense ${gr})`);
+  if (base.dek != null && naa.dek != null) {
+    if (naa.dek < base.dek - 1) feil.push(`dekning ${base.dek} → ${naa.dek}`);
+    else if (naa.dek > base.dek + 1) bedre.push(`dekning ${base.dek} → ${naa.dek}`);
+  }
+  if (base.cc !== naa.cc || base.n !== naa.n)
+    endret.push(`N ${base.n}→${naa.n} · CC ${base.cc}→${naa.cc} · ${base.m}→${naa.m} m`);
+  return { feil, bedre, endret };
+}
+
+// Les den lagrede baselinjen. ⚠ EGET ENDEPUNKT, ikke den statiske stien: dev-serveren faller
+// tilbake til index.html for /docs/..., så `fetch('/docs/kabel/baseline.json')` svarte 200 med
+// HTML og `r.json()` kastet — inni en stille `catch`. Porten meldte «ingen baselinje» og jeg
+// trodde det var sant. Feil skal SIES her, ikke svelges.
+async function _cableGeoBaselineLes() {
+  try {
+    const r = await fetch('/__baseline', { cache: 'no-store' });
+    if (!r.ok) return null;
+    const ct = (r.headers.get('content-type') || '');
+    if (!/json/i.test(ct)) { console.warn('[geo-suite] baselinjen svarte ' + ct + ', ikke JSON'); return null; }
+    return await r.json();
+  } catch (e) { console.warn('[geo-suite] kunne ikke lese baselinjen: ' + (e && e.message)); return null; }
+}
+
+async function _cableGeoSuite(opts) {
+  opts = opts || {};
+  await _cblLoadClipper();
+  const t0 = performance.now();
+  // Ingen skyskriving og ingen toast under testing (stubben må settes HER, ikke av kallstedet —
+  // 094 lærte at en stubb satt utenfra også sabotérer andre batterier).
+  const ekteSave = window._performAutoSave; window._performAutoSave = async () => {};
+  const ekteToast = window._showToast; window._showToast = function () {};
+  const ekteQuiet = window._cableQuietV6; window._cableQuietV6 = true;
+  const rader = {}, tider = {};
+  try {
+    const keys = opts.only || Object.keys(_cableFixtures);
+    for (const key of keys) {
+      const fx = _cableFixtures[key]; if (!fx) continue;
+      const tk = performance.now();
+      for (const dir of ['v', 'h'])
+        for (const corner of _GEO_SUITE_CORNERS)
+          rader[`${key}|${dir}|${corner}`] = _cableGeoSuiteRow(key, fx, dir, corner);
+      tider[key] = Math.round(performance.now() - tk);
+      if (opts.loud !== false) console.log(`[geo-suite] ${key}: ${tider[key]} ms`);
+      // ⚠ INGEN PUST MELLOM FIXTURENE, og det er MÅLT, ikke en stilvalg. Første utgave la inn
+      // `await setTimeout(0)` her — jeg trodde en lang synkron blokk ble strupet. Den hypotesen
+      // var feil på to måter: det som ble sultet var MÅLINGEN min (en poll-timer fyrer ikke mens
+      // en fixture kjører synkront), og pusten slapp ventende timere inn til å konkurrere med
+      // utlegget. Med pust tok `enHindring` 64 455 ms, uten pust 14 645 ms — og alt etter den
+      // første pusten var tregere (smalPassasje 5067 mot 874 ms). Les framdriften i konsollen.
+    }
+  } finally {
+    window._performAutoSave = ekteSave; window._showToast = ekteToast; window._cableQuietV6 = ekteQuiet;
+  }
+  const ms = Math.round(performance.now() - t0);
+
+  if (opts.oppdaterBaseline) {
+    // `flett: true` leser inn den lagrede baselinjen først og legger bare DISSE radene over.
+    // ⚠ MÅLT og derfor nødvendig: kjørt som ÉN uavbrutt blokk baller én tilfeldig fixture på seg
+    // (enHindring 64 s i én kjøring, utsparing over 120 s i neste — mens summen av fixturene målt
+    // hver for seg er 63,6 s). Kjør porten i biter med `only` + `flett` når det skjer; da blir
+    // baselinjen den samme filen, ikke fire halve.
+    let samlet = rader;
+    if (opts.flett) {
+      const b0 = await _cableGeoBaselineLes();
+      if (b0 && b0.rader) samlet = Object.assign({}, b0.rader, rader);
+      else console.warn('[geo-suite] flett: fant ingen lagret baselinje — skriver bare disse radene');
+    }
+    const rader_ = samlet;
+    const body = JSON.stringify({ laget: new Date().toISOString(), commit: opts.commit || null, rader: rader_ }, null, 1);
+    let wrote = null;
+    try { const r = await fetch('/__write-baseline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+          if (r.ok) wrote = await r.json(); } catch (e) {}
+    console.log('[geo-suite] baselinje', wrote ? `skrevet (${Object.keys(rader_).length} rader, ${wrote.bytes} B)` : 'IKKE skrevet — ingen dev-server');
+    return { ok: true, ms, antall: Object.keys(rader_).length, rader, tider, wrote };
+  }
+
+  const base = await _cableGeoBaselineLes();
+  if (!base || !base.rader) {
+    console.warn('[geo-suite] ingen baselinje — kjør _cableGeoSuite({ oppdaterBaseline: true })');
+    // ⚠ `rader` er RADENE, ikke antallet. Første utgave returnerte antallet her og objektet i
+    // grenen under, og da leste en måling `Object.entries(tall)` → tom liste, som så ut som
+    // «ingen brudd». Samme felt skal ha samme type i alle grener.
+    return { ok: false, ms, grunn: 'ingen baselinje', antall: Object.keys(rader).length, rader, tider };
+  }
+  const feil = [], bedre = [], endret = [], nye = [], borte = [];
+  for (const k of Object.keys(rader)) {
+    if (!base.rader[k]) { nye.push(k); continue; }
+    const d = _cableGeoSuiteCompare(base.rader[k], rader[k]);
+    if (d.feil.length) feil.push(`${k}: ${d.feil.join(' · ')}`);
+    if (d.bedre.length) bedre.push(`${k}: ${d.bedre.join(' · ')}`);
+    if (d.endret.length) endret.push(`${k}: ${d.endret.join(' · ')}`);
+  }
+  // Bare rader som FAKTISK var i omfanget denne kjøringen kan være «borte». Uten denne
+  // filtreringen meldte en delmengdekjøring 96 borte rader, som leste som et tap.
+  const iOmfang = opts.only ? new Set(opts.only) : null;
+  for (const k of Object.keys(base.rader))
+    if (!rader[k] && (!iOmfang || iOmfang.has(k.split('|')[0]))) borte.push(k);
+  const ut = { ok: feil.length === 0, ms, antall: Object.keys(rader).length, feil, bedre, endret, nye, borte, rader, tider };
+  console.log(`[geo-suite] ${ut.ok ? 'GRØNN' : 'RØD'} · ${ut.antall} rader · ${(ms / 1000).toFixed(1)} s`
+    + (feil.length ? `\n  FEIL:\n   ${feil.join('\n   ')}` : '')
+    + (bedre.length ? `\n  bedre: ${bedre.join(' | ')}` : ''));
+  if (opts.forstyrrelse) ut.forstyrrelse = await _cableForstyrrelsesTest(opts.forstyrrelseOpts);
+  return ut;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 095 · FORSTYRRELSESTESTEN (etterspurt siden 091)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 091 viste at en veggflytting på 0,2 mm tok Rom 5 fra 93,4 % til 84,3 % dekning. Dette er testen
+// som ville fanget både det og regresjonen i 092: flytt hver vegg ± 1 og ± 2 cm, én om gangen,
+// og legg ut på nytt. Krav (Kenneth): dekning ≤ 3 prosentpoeng endring, CC ≤ 0,8 cm, samme form
+// (celler, transitt ja/nei, starthjørne) og start ≤ 40 cm.
+//
+// ⚠ Brudd MÅLES og RAPPORTERES her. De rettes ikke i samme runde.
+
+// Flytt vegg `i` (punkt i → i+1) langs sin utoverrettede normal. Normalretningen avgjøres mot
+// tyngdepunktet, ikke mot polygonets omløpsretning — det siste er en antakelse som blir feil
+// den dagen en fixture tegnes andre veien.
+function _cableFlyttVegg(points, i, delta) {
+  const n = points.length, j = (i + 1) % n;
+  const cx = points.reduce((a, p) => a + p.x, 0) / n, cy = points.reduce((a, p) => a + p.y, 0) / n;
+  const dx = points[j].x - points[i].x, dy = points[j].y - points[i].y;
+  const L = Math.hypot(dx, dy) || 1;
+  let nx = dy / L, ny = -dx / L;
+  const mx = (points[i].x + points[j].x) / 2, my = (points[i].y + points[j].y) / 2;
+  if ((mx - cx) * nx + (my - cy) * ny < 0) { nx = -nx; ny = -ny; }
+  const ut = points.map(p => ({ x: p.x, y: p.y }));
+  ut[i] = { x: points[i].x + nx * delta, y: points[i].y + ny * delta };
+  ut[j] = { x: points[j].x + nx * delta, y: points[j].y + ny * delta };
+  return ut;
+}
+
+async function _cableForstyrrelsesTest(opts) {
+  opts = opts || {};
+  await _cblLoadClipper();
+  const maksMs = opts.maksMs || 120000;
+  const t0 = performance.now();
+  const prod = (re) => (HEATING_PRODUCTS.filter(p => /InFloor/i.test(p.name || '')).find(p => re.test(p.name || '')) || {}).id;
+  const alle = [
+    { key: 'rom5', navn: '600W', pid: prod(/17T[^0-9]*600W/i) },
+    { key: 'rom5', navn: '700W', pid: prod(/17T[^0-9]*700W/i) },
+    // ⚠ «10T» må være et BESTEMT produkt. `/10T/` traff InFloor 10T 100W 10m — den minste i
+    // katalogen — og det er ikke kabelen §36 målte på. 400W/40 m er den 10T-lengden som ligger
+    // nærmest Rom 5s referanse på 41 m (17T 700W), så tallene kan sammenlignes.
+    { key: 'rom5', navn: '10T',  pid: prod(/10T[^0-9]*400W/i) },
+    { key: 'rekt398', navn: '1650W', pid: prod(/1650W/i) },
+    { key: 'rekt398', navn: '1450W', pid: prod(/1450W/i) },
+    { key: 'badHakk', navn: 'egen', pid: (_cableFixtures.badHakk || {}).productId }
+  ].filter(j => _cableFixtures[j.key]);
+  const jobber = opts.jobber ? alle.filter(j => opts.jobber.includes(j.key + '/' + j.navn)) : alle;
+  const dir = opts.dir || 'v', corner = opts.corner || 'tr';
+  const ekteSave = window._performAutoSave; window._performAutoSave = async () => {};
+  const ekteToast = window._showToast; window._showToast = function () {};
+  const ekteQuiet = window._cableQuietV6; window._cableQuietV6 = true;
+  const brudd = [], hoppet = [], kjort = [], treige = [];
+  try {
+    for (const j of jobber) {
+      if (!j.pid) { hoppet.push(`${j.key}/${j.navn}: produktet finnes ikke i katalogen`); continue; }
+      const fx0 = _cableFixtures[j.key];
+      const fx = Object.assign({}, fx0, { productId: j.pid });
+      const ref = _cableGeoSuiteRow(j.key, fx, dir, corner);
+      if (ref.status !== 'ok') { hoppet.push(`${j.key}/${j.navn}: referansen gir «${ref.status}»`); continue; }
+      const pts = fx0.points;
+      // `veggFra`/`veggTil` deler jobben. ⚠ MÅLT og derfor nødvendig: ett enkelt forstyrret
+      // utlegg kan bruke MINUTTER (Rom 5 / 700W brøt et budsjett på 200 s midt i ett kall), og
+      // budsjettet kan bare sjekkes MELLOM utlegg — en synkron motorkjøring kan ikke avbrytes.
+      const vFra = opts.veggFra != null ? opts.veggFra : 0;
+      const vTil = opts.veggTil != null ? Math.min(opts.veggTil, pts.length - 1) : pts.length - 1;
+      for (let i = vFra; i <= vTil; i++) {
+        for (const d of [1, -1, 2, -2]) {
+          if (performance.now() - t0 > maksMs) {
+            hoppet.push(`TIDSBUDSJETT: stoppet i ${j.key}/${j.navn} ved vegg ${i}`);
+            i = pts.length; break;
+          }
+          const fx2 = Object.assign({}, fx, { points: _cableFlyttVegg(pts, i, d) });
+          const tl = performance.now();
+          const r = _cableGeoSuiteRow(j.key, fx2, dir, corner);
+          const lms = Math.round(performance.now() - tl);
+          kjort.push(lms);
+          // Et utlegg som bruker over 5 s på en forstyrrelse på 1-2 cm er et funn i seg selv:
+          // referansen i samme rom bruker rundt ett sekund.
+          if (lms > 5000) treige.push({ rom: `${j.key}/${j.navn}`, vegg: i, cm: d, ms: lms });
+          const avvik = [];
+          if (r.status !== 'ok') avvik.push(`status «${r.status}»`);
+          else {
+            if (r.dek != null && ref.dek != null && Math.abs(r.dek - ref.dek) > 3)
+              avvik.push(`dekning ${ref.dek} → ${r.dek}`);
+            if (Math.abs(r.cc - ref.cc) > 0.8) avvik.push(`CC ${ref.cc} → ${r.cc}`);
+            if (r.celler !== ref.celler) avvik.push(`celler ${ref.celler} → ${r.celler}`);
+            if (r.transitt !== ref.transitt) avvik.push(`transitt ${ref.transitt} → ${r.transitt}`);
+            if (r.start != null && r.start > 40) avvik.push(`start ${r.start} cm`);
+          }
+          if (avvik.length) brudd.push({ rom: `${j.key}/${j.navn}`, vegg: i, cm: d, avvik: avvik.join(' · ') });
+        }
+      }
+    }
+  } finally {
+    window._performAutoSave = ekteSave; window._showToast = ekteToast; window._cableQuietV6 = ekteQuiet;
+  }
+  const ms = Math.round(performance.now() - t0);
+  console.log(`[forstyrrelse] ${kjort.length} utlegg · ${brudd.length} brudd · ${treige.length} treige · ${(ms / 1000).toFixed(1)} s`);
+  if (brudd.length) console.table(brudd);
+  if (treige.length) console.table(treige);
+  return { ms, kjort: kjort.length, verste: kjort.length ? Math.max(...kjort) : 0, brudd, treige, hoppet };
+}
+
+// ⚠ 095: DETTE ER IKKE EN PORT. Den kjører alle sju motorene × 17 fixtures × 2 retninger og
+// fullførte ikke på 13 minutter. Porten er `_cableGeoSuite()`. Denne beholdes for manuell
+// gjennomgang av motorkaskaden — V6-loggingen er nå bak `window._cableQuietV6`.
 async function _cableGeometryRegressionTest() {
   const results = [];
   const add = (name, ok, expected, got) => results.push({ name, ok: !!ok, expected, got });

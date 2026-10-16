@@ -1946,3 +1946,91 @@ som den er formulert, forbyr å dekke en grunn nisje med kabelens ende.
 
 Forstyrrelsestesten (±1/±2 cm) fra §35, den nye fasit-påstanden og fixture-hashene. Suitetiden
 (>4 min) er heller ikke rørt — den vokser med dette.
+
+---
+
+## §38 · 095 — R-ENDE gjelder restceller; rask port med lagret baselinje; forstyrrelsestesten
+
+Kenneths beslutninger 16.10.2026: (1) ikke kjøp R-ENDE med dekning — 5–7 prosentpoeng er for dyrt,
+badHakk står som i dag; (2) regelen presiseres til **restceller**, ikke ekte nisjer.
+
+### R-ENDE: bruddlista før og etter
+
+| rad | før (094) | etter (095) | utlegget |
+|---|---|---|---|
+| rom5 `v` tr/tl/br | 0 (reparert) | 0 | uendret — 12,6 < 2 × 13,2 ER en restcelle |
+| badHakk `h` tr/bl/tl/br | **190,8** | **0** | uendret — 78,1 > 2 × 11,21, ekte nisje |
+| badHakk41 `h` bl/tl | **190,8** | **0** | uendret |
+| badHakk41 `h` tr/br | 0 (endret av 094) | 0 | **tilbake til 2d047b5** |
+| badHakk `h` bl | 0 (endret av 094) | 0 | **tilbake til 2d047b5** |
+
+Terskelen er **2 × CC**: en celle med én bane som er lavere enn det, har ikke plass til en vanlig
+sving (radius CC/2) i begge ender. Null brudd igjen på 136 rader.
+
+### ⚠ Porten måtte inn i RUTINGEN også, ikke bare i målingen
+
+Første runde rettet bare `_cableEndeKort` og straffen. Da sto badHakk41 `h` tr/br fortsatt endret —
+og grunnen var ikke R-ENDE i det hele tatt: `_geoRouteOrders` lager dropp-varianten for **enhver**
+lav én-banes celle, og på badHakk41 vant den på **lengdeleddet** (40,74 m mot 41,37 mot et mål på
+41,00). Et utlegg ble altså endret i et rom uten restcelle-ende, og både dekning (82,9 → 81,5) og
+veggstripe (5,1 → 16,9) ble dårligere. Samme 2 × CC-port i `_geoRouteOrders` (nytt `cc`-argument,
+alle sju kallsteder) rettet det. **Mot `2d047b5` er nå bare rom5 `v` tr/tl/br endret — 133 av 136
+rader identiske.**
+
+### Den raske porten: `_cableGeoSuite()`
+
+136 rader (17 fixtures × 2 retninger × 4 hjørner), ni felt per rad: N, CC, lengde, dekning, stripe,
+endeKort, start-avstand, hull, gyldig (+ celler/transitt/R-VEGG-grense for forstyrrelsestesten).
+Dominans: gyldighet, hull, R-START, R-VEGG, R-ENDE og dekning (> 1 pp tap) **feiler**. N og CC
+**rapporteres** — CC velges av lengdesøket, og et annet trinn er ikke i seg selv dårligere.
+
+**Tid: 63,0 s** (24,1 + 11,4 + 27,5 s i tre biter), som stemmer med summen av fixturene målt hver
+for seg (63,6 s). Dyreste: enHindring 14,6 s · umuligStartHjorne 9,6 s · rom5 8,7 s · utsparing 7,8 s.
+
+⚠ **Kjørt som ÉN uavbrutt blokk er porten upålitelig:** én tilfeldig fixture baller på seg
+(enHindring 64 s i én kjøring, utsparing over 120 s i neste) mens de andre holder normal tid.
+Jeg fikk ikke tak i årsaken — angrelageret er kappet på 50, og scenen bygges rent per rad.
+Kjør porten i biter med `only` + `flett` til det er forstått. **Det er den ene tingen som ikke er
+løst her.**
+
+⚠ **To av mine egne målefeil underveis, begge verdt å huske.** (1) «Ingen R-ENDE-brudd» ble lest av
+et TALL: baselinje-grenen returnerte `rader` som antall og sammenligningsgrenen som objekt, så
+`Object.entries(tall)` ga tom liste. Samme felt skal ha samme type i alle grener. (2) Porten kunne
+**aldri** lese baselinjen sin: dev-serveren faller tilbake til `index.html` for `/docs/...`, så
+`fetch('/docs/kabel/baseline.json')` svarte 200 med HTML og `r.json()` kastet — inni en stille
+`catch`. Nytt endepunkt `GET /__baseline`, og feilen sies nå høyt.
+
+### ⚠ `rekt398` hadde `productId: null` — åtte rader som ikke kunne feile
+
+Alle åtte rekt398-radene var «ingen løsning» i baselinjen, fordi fixturen aldri fikk koblet et
+produkt. Notens egen tekst navnga det: InFloor 17T 1650W 96m (id 31). Målt med det: CC 11,08 ·
+36 løp · 98,4 % · start 12 cm. En fixture uten produkt er en test som ikke kan bli rød.
+
+### Forstyrrelsestesten (ventet siden 091) — 34 brudd av 136 kjørte forstyrrelser
+
+| rom / produkt | kjørt | brudd | signatur |
+|---|---|---|---|
+| rom5 / 700W | 40 av 40 | **20** | `celler 5 → 4`; dekning 93,4 → ~84, CC 13,20 → 11,62 |
+| rom5 / 600W | 16 av 40 (vegg 0–3) | **9** | CC 13,20 → 11,62, dekning 78,4 → ~71 |
+| rom5 / 10T 400W | 4 av 40 (vegg 0) | **4** | **R-START tapt** — start 118 cm |
+| rekt398 / 1650W | 16 av 16 | 0 | — |
+| rekt398 / 1450W | 16 av 16 | 0 | — |
+| badHakk / egen | 44 av 44 | **1** | vegg 5 −2 cm → «ingen løsning» |
+
+**091-knekken står.** N-iterasjonen i 091b gjorde søket *komplett*, ikke utlegget *robust*: hver
+eneste brudd-rad i rom5 700W har samme signatur — en vegg flyttet 1 cm fjerner en celle (5 → 4),
+og da er trinnet CC 13,20 ikke lenger mulig. 094-reparasjonen avhenger av 5-celle-rutenettet.
+
+Ett brudd går **oppover**: rom5 600W vegg 0 +2 cm gir 90,2 % mot referansens 78,4 % (CC 15,29).
+Et rom som blir 2 cm større burde ikke finne 12 prosentpoeng mer dekning — det er samme knekk,
+bare på den hyggelige siden, og det bekrefter at CC-valget henger på en knivsegg.
+
+**Ikke fullført:** rom5 600W vegg 4–9 (24 forstyrrelser) og rom5 10T vegg 1–9 (36). Grunnen er
+målt: enkelte forstyrrede utlegg bruker **minutter** i ett kall (10T koster 4,5 s per utlegg selv
+uforstyrret, jf. §36), og budsjettet kan bare sjekkes MELLOM utlegg — en synkron motorkjøring kan
+ikke avbrytes. `veggFra`/`veggTil` deler jobben.
+
+### Ikke rukket
+
+§5 i oppdraget: 076-fasiten som form-og-krav, og fixtures med dato + geometri-hash med
+localhost-varsel ved drift. Suitetiden for det store batteriet står fortsatt urørt (ikke en port nå).

@@ -4,6 +4,40 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 095 — R-ENDE gjelder restceller; rask geo-port med lagret baselinje; forstyrrelsestest (16.10.2026, `main`, ikke pushet)
+
+Kenneths beslutninger: ikke kjøp R-ENDE med dekning (5–7 prosentpoeng er for dyrt), og presiser
+regelen til **restceller**, ikke ekte nisjer.
+
+* **R-ENDE (spec §0.11, ny tekst):** den frie enden skal ikke ligge i en restcelle — en celle med
+  én bane lavere enn **2 × CC**, altså for lav til en vanlig sving i begge ender. En ende som fyller
+  sin egen celle helt ut, også en grunn nisje, er ikke et brudd. Rom 5 (12,6 < 26,4) er en restcelle
+  og reparasjonen står; badHakk (78,1 > 22,4) er en nisje. **Bruddlista gikk fra 6 rader til 0.**
+* ⚠ Porten måtte inn i **rutingen** også: `_geoRouteOrders` lagde dropp-varianten for enhver lav
+  én-banes celle, og på badHakk41 vant den på **lengdeleddet** — et utlegg endret i et rom uten
+  restcelle-ende, med dårligere dekning og veggstripe. Nytt `cc`-argument og samme 2 × CC-terskel.
+  **Mot `2d047b5` er nå bare rom5 `v` tr/tl/br endret: 133 av 136 rader identiske.**
+* **Ny rask port `_cableGeoSuite()`** — bare geo-motoren, 136 rader mot `docs/kabel/baseline.json`
+  (ni felt per rad), dominans på låste mål, baselinjen oppdateres bare med et eksplisitt kall.
+  **63,0 s.** `_cableGeometryRegressionTest` beholdes som manuell kjøring, ikke port; V6-loggingen
+  ligger bak `window._cableQuietV6`. Nye endepunkter `GET /__baseline` og `POST /__write-baseline`.
+* **Ny `_cableForstyrrelsesTest()`** (ventet siden 091): hver vegg ± 1 og ± 2 cm. **34 brudd av 136
+  kjørte forstyrrelser.** 091-knekken står: hver brudd-rad i rom5 700W har signaturen `celler 5 → 4`
+  — en vegg flyttet 1 cm fjerner en celle, og CC 13,20 blir umulig. N-iterasjonen i 091b gjorde
+  søket komplett, ikke utlegget robust. rekt398 er helt stabil, badHakk har ett brudd.
+* ⚠ `rekt398` hadde `productId: null` — åtte rader som ikke kunne feile. Koblet til 1650W 96m
+  (noten navnga det selv): CC 11,08 · 98,4 % · start 12 cm.
+* ⚠ To egne målefeil rettet: et felt som var tall i én gren og objekt i en annen («ingen brudd» lest
+  av et tall), og en stille `catch` som skjulte at porten aldri kunne lese baselinjen sin
+  (dev-serveren svarer med `index.html` for `/docs/...`).
+
+⚠ **Uløst:** porten er upålitelig kjørt som én uavbrutt blokk — én tilfeldig fixture baller på seg
+(enHindring 64 s i én kjøring, utsparing over 120 s i neste). Kjør i biter med `only` + `flett`.
+Ikke rukket: 076-fasiten som form-og-krav, og fixture-hash med drift-varsel.
+Se `docs/kabel/STATUS.md` §38.
+
+---
+
 ## 094 — R-ENDE: de frie endene rekker like langt som naboløpenes svinger (16.10.2026, `main`, ikke pushet)
 
 Kenneth: «700W innsett øverst til høyre: her er siste løp kortere enn løpene ved siden. Det skal det

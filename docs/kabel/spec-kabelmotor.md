@@ -139,27 +139,54 @@ mellom dette og veggen som overlapper det i sveiperetningen, er avstanden ikke e
 (`_cableWallStripe`, `metrics.wallStripeCm`). Straffen i `_geoScore` er gradert fra «kant + 1 CC»
 til «kant + 2 CC», vekt 18 — over lengdeleddet, under hull-straffen (25). Se STATUS §34.
 
-## §0.11 · R-ENDE (LÅST REGEL, 094)
+## §0.11 · R-ENDE (LÅST REGEL, 094, presisert i 095)
 
-Kabelens **to frie ender** skal rekke like langt som naboløpenes svinger, ± 1 cm. Kenneths ord
-16.10.2026: «her er siste løp kortere enn løpene ved siden. Det skal det ikke være. Siste løp må
-forlenges, og heller øke avstand fra alle løpene mot vegger.»
+**Kabelens frie ende skal ikke ligge i en restcelle.** En restcelle er en celle med **én bane som
+er lavere enn 2 × CC** — altså for lav til en vanlig sving (radius CC/2) i begge ender. En fri ende
+som fyller sin **egen** celle helt ut, også en grunn nisje, er **ikke** et brudd. Lengden tilpasses
+fortsatt jevnt i alle svinger (`extraSweep`), aldri ved å kappe endeløpet.
 
-Lengde som må bort, tas opp **jevnt i alle svinger** (`extraSweep`) — aldri ved å kappe én ende.
+Kenneths ord 16.10.2026: «her er siste løp kortere enn løpene ved siden. Det skal det ikke være.
+Siste løp må forlenges, og heller øke avstand fra alle løpene mot vegger.» Og presiseringen samme
+dag: «En ende som fyller en 78 cm dyp nisje helt ut, er riktig utlegg. Nisjen er 78 cm, og kabelen
+går så langt den kan.»
 
-Måles som `metrics.endeKortCm` (`_cableEndeKort`): for hver fri ende finnes nærmeste nabo-løp som
-overlapper i sveiperetningen, og det måles hvor langt naboens sving på samme side rekker forbi
-enden. ⚠ Overlappskravet skaleres etter løpets **egen** lengde (`min(CC, len × 0,6)`) — et løp på
-12,6 cm kan aldri overlappe en nabo med en hel CC, og et fast krav gjorde at målingen ikke fant
-noen nabo og meldte 0.
+⚠ **094-utgaven var for bred.** Den målte bare «kortere enn naboen» og meldte derfor brudd på seks
+rader der endecellen er en ekte nisje: badHakk (78,1 cm mot 2 × 11,21 = 22,4) og badHakk41 (85,9 mot
+2 × 13,45 = 26,9). Rom 5 er en restcelle (12,6 < 2 × 13,2 = 26,4), og reparasjonen der står.
 
-**Rekkefølge:** R-ENDE ligger **over R-VEGG** (Kenneth sa rett ut hva som skal gi etter når de to
-er i strid) og **under** harde krav, valgt retning, R-START og jevn CC. Vekt 22 i `_geoScore`.
-R-ENDE kjøpes **aldri** med dårligere dekning: enderunden godtar bare en kandidat som er like god
-på alt annet. Der en hel ende koster dekning, står utlegget, og målingen rapporterer avviket.
+Målt som `metrics.endeKortCm` (`_cableEndeKort`): er endeløpet ≥ 2 × CC, er svaret 0 og det finnes
+ingen påstand. Ellers finnes nærmeste nabo-løp som overlapper i sveiperetningen, og det måles hvor
+langt naboens sving på samme side rekker forbi enden. ⚠ Overlappskravet skaleres etter løpets
+**egen** lengde (`min(CC, len × 0,6)`) — et løp på 12,6 cm kan aldri overlappe en nabo med en hel CC.
 
-**Årsaken, målt (ikke en innkorting):** endeløpet er full høyde i sin **egen** rutenettcelle, og
-cellen er en sliver — Rom 5 700W `tr` endte i en celle på **én bane, 12,6 cm høy** ved siden av et
-felt på 69,4. `_geoRouteOrders` krever en Hamilton-sti, så hver celle må besøkes, og en sliver som
-ikke kan ta en U-sving i begge ender må derfor bli stiens **ende**. Fiksen er ekstra rekkefølger
-som **utelater** en kort én-banes celle — lagt bakerst som varianter, aldri som erstatning (093).
+**Porten er den samme i rutingen.** `_geoRouteOrders` lager rekkefølger som utelater en kort
+én-banes celle, og den porten må bruke samme 2 × CC-terskel. Uten den vant dropp-varianten på
+**lengdeleddet** i badHakk41 (40,74 m mot 41,37 mot et mål på 41,00) og endret et utlegg i et rom
+uten restcelle — dekning 82,9 → 81,5 og veggstripe 5,1 → 16,9.
+
+**Rekkefølge:** R-ENDE ligger **over R-VEGG** (Kenneth sa rett ut hva som skal gi etter når de to er
+i strid) og **under** harde krav, valgt retning, R-START og jevn CC. Vekt 22 i `_geoScore`.
+R-ENDE kjøpes **aldri** med dårligere dekning (Kenneths beslutning 095: 5–7 prosentpoeng er for
+dyrt). Enderunden godtar bare en kandidat som er like god på alt annet.
+
+**Årsaken, målt:** endeløpet er full høyde i sin **egen** rutenettcelle; det kortes ikke inn noe
+sted. `_geoRouteOrders` krever en Hamilton-sti, så hver celle må besøkes, og en restcelle som ikke
+kan ta en U-sving i begge ender må derfor bli stiens **ende**. Fiksen er ekstra rekkefølger som
+utelater den — lagt bakerst som varianter, aldri som erstatning (093).
+
+## §0.12 · Testnivåene (095)
+
+* **`_cableGeoSuite()` — PORTEN.** Bare geo-motoren, alle fixtures × 2 retninger × 4 hjørner (136
+  rader), hver rad mot `docs/kabel/baseline.json`. Kjøres før hver commit i kabelmotoren.
+  Baselinjen oppdateres BARE med `_cableGeoSuite({ oppdaterBaseline: true })`, aldri automatisk;
+  `flett: true` + `only` lar den bygges i biter.
+  Dominans — en rad feiler hvis den mister gyldighet, får flere hull, taper R-START (var ≤ 40 cm),
+  bryter R-VEGG (var innenfor), får større `endeKort` eller mister mer enn 1 prosentpoeng dekning.
+  N og CC **rapporteres**, de feiler ikke: CC velges av lengdesøket, og et annet trinn er ikke i seg
+  selv dårligere.
+* **`_cableForstyrrelsesTest()`** — flytter hver vegg ± 1 og ± 2 cm, én om gangen. Krav: dekning
+  ≤ 3 prosentpoeng, CC ≤ 0,8 cm, samme form (celler, transitt, starthjørne), start ≤ 40 cm.
+  Brudd **måles og rapporteres**; de rettes ikke av testen.
+* **`_cableGeometryRegressionTest()`** — det store batteriet med alle sju motorene. **Ikke en port.**
+  Manuell kjøring; V6-loggingen ligger bak `window._cableQuietV6`.

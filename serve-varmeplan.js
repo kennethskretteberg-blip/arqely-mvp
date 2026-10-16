@@ -38,6 +38,34 @@ http.createServer((req, res) => {
     return;
   }
 
+  // 095: lesing av baselinjen. ⚠ MAA vaere et eget endepunkt: den statiske ruten faller tilbake
+  // til index.html for /docs/..., saa `fetch('/docs/kabel/baseline.json')` ga status 200 med HTML
+  // og en stille JSON-feil i klienten — porten kunne ALDRI lese baselinjen sin.
+  if (req.method === 'GET' && req.url === '/__baseline') {
+    const target = path.join(__dirname, 'docs', 'kabel', 'baseline.json');
+    fs.readFile(target, (err, buf) => {
+      if (err) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"ingen baseline.json"}'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(buf);
+    });
+    return;
+  }
+
+  // 095: samme moenster, for den lagrede baselinjen til den raske geo-suiten. NOYAKTIG én fil.
+  if (req.method === 'POST' && req.url === '/__write-baseline') {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const target = path.join(__dirname, 'docs', 'kabel', 'baseline.json');
+      const buf = Buffer.concat(chunks);
+      fs.writeFile(target, buf, err => {
+        res.writeHead(err ? 500 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(err ? { ok: false, error: err.message } : { ok: true, bytes: buf.length, path: 'docs/kabel/baseline.json' }));
+      });
+    });
+    return;
+  }
+
   // 088: byggstempel. Kenneth og jeg brukte tre runder paa aa lete etter en feil som viste seg
   // aa vaere «ser du paa ny eller gammel kode?». Dette gjoer det til et blikk i statuslinja.
   if (req.url === '/__build.json') {
