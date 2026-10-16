@@ -1843,3 +1843,106 @@ lRom 0,53 s · rom5 600W 0,79 s · rom5 10T 4,5 s.
 Rom 5 har 10 punkter, og hver vegg × 4 forskyvninger × ~1 s blir for mye for ett kall. Den må
 bygges som en egen, tidsbudsjettert test — og det er fortsatt den som hadde fanget både knekket
 i 091 og regresjonen i 092. Den nye fasit-påstanden og fixture-hashene er heller ikke bygget.
+
+---
+
+## §37 · 094 — R-ENDE: de frie endene rekker like langt som naboløpenes svinger
+
+Kenneths melding (16.10.2026, 700W innsett øverst til høyre): «her er siste løp kortere enn løpene
+ved siden. Det skal det ikke være. Siste løp må forlenges, og heller øke avstand fra alle løpene
+mot vegger.» Skjermbilde: `docs/kabel/fasit/rom5-700W-tr-korte-endelop.png`.
+
+### ⚠ Det kortes ikke inn noe sted — og avviket var tre ganger større enn pikselmålingen
+
+STEG 0 på `2d047b5`, Rom 5 · 700W · loddrett · `tr` (CC 13,20 · 33 løp):
+
+| | perp | sveip | høyde |
+|---|---|---|---|
+| FØRSTE løp | 972,3 | −1028,5 → −922,4 | 106,1 — **lik naboen** |
+| SISTE løp | 681,9 | −917,0 → **−904,4** | **12,6** |
+| naboen (x 695) | 695,0 | −917,0 → −847,7 | 69,4 |
+
+Siste løp er **56,8 cm** for kort, ikke ~18 som pikslene tilsa. Og «hvor kortes de inn?» har ikke
+noe svar: endeløpet er **full høyde i sin egen rutenettcelle**. Cellen (id 1) har **én bane** og er
+12,6 cm høy. `_geoBuildCenterline` setter den frie enden til `ln.hi`/`ln.lo` — banens eget lovlige
+område — så ingen kode kapper noe. Rotårsaken ligger i **rutingen**: `_geoRouteOrders` krever en
+Hamilton-sti, altså at hver celle besøkes, og en 12,6 cm høy bane har ikke plass til en U-sving
+(radius CC/2 = 6,6) i **begge** ender. Rekkefølgene `4>3>2>1>0` og `4>3>0>1>2` finnes, men de
+**traverserer** sliveren og lar seg ikke bygge. Den eneste kjeden som går, ender i den.
+
+### Omfanget, målt over 136 kombinasjoner (17 fixtures × 2 retninger × 4 hjørner)
+
+9 brudd, alle med samme mekanisme — en **én-banes** celle lavere enn naboen:
+rom5 `v` (12,6 mot 69,4 · 3 hjørner), badHakk `h` (78,1 mot 268,9 · 4), badHakk41 `h` (85,9 mot 276,7 · 2).
+
+### ⚠ To feilspor jeg målte meg ut av
+
+**1. «Grad 1 i naboskapsgrafen» var feil kriterium.** Sliveren i Rom 5 har `adj[0,2]` — grad 2 — så
+filteret slo aldri inn. Resultatet var det verst mulige: R-ENDE-straffen slo ut 13,2-kandidaten
+**uten** at noe alternativ fantes, og CC falt til 11,62 med dekning 84,3 %. Nøyaktig det utfallet
+oppdraget forbyr. Kriteriet er nå «én bane og lavere enn naboen», uansett grad.
+
+**2. «Kandidaten med hel ende finnes og er gyldig» gjaldt feil retning.** Jeg leste CC 11,60 ·
+92,5 % · poeng 81,2 av en logg og meldte at den tapte på poeng i vannrett. Den var **loddrett** —
+retningsfallbacken kjører i samme kall. Med retningen lest av kabelen selv: i `h` finnes 26 gyldige
+kandidater med hel ende, men de dekker 81,9–83,6 % mot vinnerens 88,6 %.
+
+### Hva som er bygget
+
+* `_cableEndeKort(cable, room)` → `metrics.endeKortCm`. Overlappskravet skaleres etter løpets egen
+  lengde (`min(CC, len × 0,6)`) — **samme felle som i `_cableWallStripe` (089)**: et fast krav på
+  én CC gjorde at et 12,6 cm løp ikke fant noen nabo, og målingen meldte 0.
+* R-ENDE-straff i `_geoScore`, gradert, vekt **22** — over R-VEGG (18), under hull (25).
+* `_geoRouteOrders`: ekstra rekkefølger som **utelater** en kort én-banes celle. Lagt bakerst,
+  aldri som erstatning (093). Bare ekte Hamilton-stier — var sliveren eneste bro, finnes ingen
+  variant, og utlegget står.
+* `endeLen` + **enderunden**, bygget på veggrunden (089b). Nødvendig fordi **CC velges av
+  lengdesøket før poengene sammenlignes** — en bedre kandidat under en annen CC er usynlig for
+  rangeringen. ⚠ Stigen går over **N**, ikke brøkdeler av CC-intervallet: med 5 brøkdelstrinn traff
+  runden aldri CC 9,61 på badHakk. Grovsveip-fella fra 091, flyttet inn i en runde.
+* Galleri-kolonner: `stripe (cm)` (089, manglet) og `ende kort (cm)`.
+
+### Dominanstest mot `2d047b5` — 130 av 136 rader identiske, 0 harde brudd før og etter
+
+| kombinasjon | ende | CC | lengde | dekning | stripe |
+|---|---|---|---|---|---|
+| rom5 `v` tr/tl/br | 56,8 → **0** | 13,20 (uendret) | 41,30 → 40,97 m | 94,1 → 93,4 % | 17,9 (uendret) |
+| badHakk `h` bl | 190,8 → **0** | 9,17 → 9,61 | 47,00 → 46,65 m | 72,6 → **75,0 %** | 14,2 → **13,4** |
+| badHakk41 `h` tr/br | 190,8 → **0** | uendret | 41,37 → 40,74 m | 82,9 → 81,5 % | 5,1 → 16,9 |
+
+Kenneths rom er reparert med **CC og form i behold**; prisen er 0,7 prosentpoeng dekning — sliverens
+eget areal. badHakk41s stripe går 0,95 cm over R-VEGG-grensen (margin + CC = 15,95), altså nøyaktig
+den avveiningen Kenneth selv avgjorde: «heller øke avstand fra alle løpene mot vegger».
+
+### Tid
+
+**Kaskadeveien, 136 utlegg: 74,2 s → 93,7 s (+26 %).** +18,1 av de +19,5 s ligger i de tre
+fixturene med korte løvceller (22,8 → 40,9 s for gruppen rom5/badHakk/badHakk41/rekt398/
+rektangel/lRom); resten er støy.
+
+**Geo-motoren alene, 34 kjøringer (galleriets vei): 18,9 s → 22,8 s (+21 %).** Verste enkeltrom
+rom5 `v` 1,67 → 2,21 s, badHakk `h` → 2,37 s, enHindring `h` 3,41 → 3,39 s (uendret).
+
+Budsjettet i enderunden er **målt**: 24 sparte 1 s men mistet reparasjonen av badHakk `h` bl,
+60 ga ingen flere treff enn 40.
+
+⚠ **`_cableGeometryRegressionTest` fullførte ikke innen 13 minutter under 094, og jeg har ikke
+etablert baselinjen for den.** Den kjører sju motorer × 17 fixtures × 2 retninger, og V6 flommet
+konsollen mens den gikk — altså er hovedkostnaden ikke geo. Tallene over er det jeg faktisk har
+målt på begge versjoner. Suitetiden fra §35 står fortsatt uløst og vokser med dette.
+
+### ⚠ Fem brudd står igjen — en beslutning for Kenneth, ikke for motoren
+
+badHakk `h` tr/tl/br og badHakk41 `h` bl/tl står på `endeKortCm` 190,8. En hel ende finnes der, er
+gyldig og innenfor lengden, men koster **5–7 prosentpoeng dekning**. Enderunden godtar ikke det
+(089b-prinsippet: like god på alt annet), og R-ENDE skal ikke kjøpes med dekning uten at Kenneth
+har sagt det. Samme form som 10T-avveiningen i §36.
+
+Dette er dessuten verdt et spørsmål om regelen selv: i badHakk er endecellen **78 cm dyp fordi
+rommet er 78 cm dypt der**. Enden *kan* ikke rekke lenger uten å la den nisjen stå udekket. R-ENDE
+som den er formulert, forbyr å dekke en grunn nisje med kabelens ende.
+
+### ⚠ Fortsatt ikke bygget
+
+Forstyrrelsestesten (±1/±2 cm) fra §35, den nye fasit-påstanden og fixture-hashene. Suitetiden
+(>4 min) er heller ikke rørt — den vokser med dette.

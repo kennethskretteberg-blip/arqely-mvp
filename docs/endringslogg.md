@@ -4,6 +4,39 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 094 — R-ENDE: de frie endene rekker like langt som naboløpenes svinger (16.10.2026, `main`, ikke pushet)
+
+Kenneth: «700W innsett øverst til høyre: her er siste løp kortere enn løpene ved siden. Det skal det
+ikke være. Siste løp må forlenges, og heller øke avstand fra alle løpene mot vegger.»
+
+**Målt først: ingenting kortes inn.** Siste løp i Rom 5 700W `tr` går −917,0 → −904,4 — **12,6 cm**
+mot naboens 69,4, altså **56,8 cm** for kort (tre ganger mer enn pikselmålingen tilsa). Endeløpet er
+full høyde i sin **egen** rutenettcelle; cellen har én bane og er 12,6 cm høy. Rotårsaken ligger i
+rutingen: `_geoRouteOrders` krever en Hamilton-sti, og en 12,6 cm høy bane har ikke plass til en
+U-sving i begge ender — så den eneste kjeden som lar seg bygge, **ender** i sliveren.
+
+* Ny regel **R-ENDE** (spec §0.11): de to frie endene rekker like langt som naboløpenes svinger
+  ± 1 cm, og lengde som må bort tas opp jevnt i alle svinger (`extraSweep`), aldri ved å kappe én ende.
+* `_cableEndeKort` → `metrics.endeKortCm`, straff vekt 22 i `_geoScore` (over R-VEGG, under hull).
+* `_geoRouteOrders` gir ekstra rekkefølger som **utelater** en kort én-banes celle — variant, ikke
+  erstatning (093). `endeLen` + enderunden, bygget på veggrunden (089b), med stige over **N**.
+* Galleri-kolonner `stripe (cm)` (manglet fra 089) og `ende kort (cm)`.
+* Spec §0.10 (R-VEGG) skrevet inn — den sto bare i STATUS.
+
+**Dominans mot `2d047b5`: 130 av 136 kombinasjoner identiske, 0 harde brudd før og etter.** Rom 5 `v`
+reparert med CC 13,20 og formen i behold (dekning 94,1 → 93,4 %, sliverens eget areal); badHakk `h`
+bl ble bedre på alt (75,0 % mot 72,6, stripe 13,4 mot 14,2). Tid: kaskadeveien 74,2 → 93,7 s for
+136 utlegg (+26 %), geo-motoren alene 18,9 → 22,8 s (+21 %); +18,1 av +19,5 s ligger i de tre
+fixturene med korte løvceller. 21 regresjonsbatterier grønne — `_cableGeometryRegressionTest`
+fullførte ikke innen 13 min og har ingen etablert baselinje (den kjører sju motorer; V6 dominerer).
+
+⚠ **Fem brudd står igjen** (badHakk/badHakk41 vannrett, 190,8 cm): en hel ende finnes og er gyldig,
+men koster 5–7 prosentpoeng dekning. R-ENDE skal ikke kjøpes med dekning uten at Kenneth sier det.
+Der er endecellen dessuten 78 cm dyp **fordi rommet er 78 cm dypt** — R-ENDE som formulert forbyr å
+dekke en grunn nisje med kabelens ende. Se `docs/kabel/STATUS.md` §37.
+
+---
+
 ## 093 — forskjøvet ytterbane som variant, ikke erstatning (15.10.2026, `main`, ikke pushet)
 
 092 forskjøv alltid ytterbanen. Det løste Rom 5 / 700W `tr` (84,3 → 94,1 %) men brakk R-START og

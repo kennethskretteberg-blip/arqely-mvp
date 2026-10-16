@@ -130,3 +130,36 @@ gjelder på **kaskadenivå**, for alle motorer, ikke bare i geo-poengsummen
 Når hjørnet ikke går i valgt retning, men går i den andre: den andre legges ut, velgeren står
 fortsatt på brukerens valg, og panelet sier det i én linje med en vei tilbake. Går det i ingen
 retning: beste i valgt retning, merket ⚠ med avstand og grunn. Aldri et stille avvik.
+
+## §0.10 · R-VEGG (LÅST REGEL, 089)
+
+Ingen tom stripe mellom en vegg og nærmeste løp er bredere enn **margin + 1 CC**. Én ubrukt bane
+ved veggen er lov (074b); to er det ikke. Måles **per løp**, ikke per bånd: finnes det et annet løp
+mellom dette og veggen som overlapper det i sveiperetningen, er avstanden ikke en tom stripe
+(`_cableWallStripe`, `metrics.wallStripeCm`). Straffen i `_geoScore` er gradert fra «kant + 1 CC»
+til «kant + 2 CC», vekt 18 — over lengdeleddet, under hull-straffen (25). Se STATUS §34.
+
+## §0.11 · R-ENDE (LÅST REGEL, 094)
+
+Kabelens **to frie ender** skal rekke like langt som naboløpenes svinger, ± 1 cm. Kenneths ord
+16.10.2026: «her er siste løp kortere enn løpene ved siden. Det skal det ikke være. Siste løp må
+forlenges, og heller øke avstand fra alle løpene mot vegger.»
+
+Lengde som må bort, tas opp **jevnt i alle svinger** (`extraSweep`) — aldri ved å kappe én ende.
+
+Måles som `metrics.endeKortCm` (`_cableEndeKort`): for hver fri ende finnes nærmeste nabo-løp som
+overlapper i sveiperetningen, og det måles hvor langt naboens sving på samme side rekker forbi
+enden. ⚠ Overlappskravet skaleres etter løpets **egen** lengde (`min(CC, len × 0,6)`) — et løp på
+12,6 cm kan aldri overlappe en nabo med en hel CC, og et fast krav gjorde at målingen ikke fant
+noen nabo og meldte 0.
+
+**Rekkefølge:** R-ENDE ligger **over R-VEGG** (Kenneth sa rett ut hva som skal gi etter når de to
+er i strid) og **under** harde krav, valgt retning, R-START og jevn CC. Vekt 22 i `_geoScore`.
+R-ENDE kjøpes **aldri** med dårligere dekning: enderunden godtar bare en kandidat som er like god
+på alt annet. Der en hel ende koster dekning, står utlegget, og målingen rapporterer avviket.
+
+**Årsaken, målt (ikke en innkorting):** endeløpet er full høyde i sin **egen** rutenettcelle, og
+cellen er en sliver — Rom 5 700W `tr` endte i en celle på **én bane, 12,6 cm høy** ved siden av et
+felt på 69,4. `_geoRouteOrders` krever en Hamilton-sti, så hver celle må besøkes, og en sliver som
+ikke kan ta en U-sving i begge ender må derfor bli stiens **ende**. Fiksen er ekstra rekkefølger
+som **utelater** en kort én-banes celle — lagt bakerst som varianter, aldri som erstatning (093).
