@@ -4,6 +4,20 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 091b — lengdesøket itererer over antall løp N (15.10.2026, `main`, ikke pushet)
+
+Lag F brukte grovsveip + bisekssjon over CC, mens kommentaren selv slo fast at lengden er en
+SAGTANN i CC. N er den egentlige frie variabelen (`cc = W/(N−1)`). Søket teller nå N over hele
+det lovlige intervallet, med tidlig avslutning når et trinn treffer.
+
+Identiske utlegg i alle ti prøvene, og **4–8× raskere**: rekt398 531 → 79 ms, rom5 `tr`
+4202 → 619 ms, lRom 4729 → 526 ms, badHakk 1914 → 130 ms.
+
+⚠ Knekket i Rom 5 består. Målt: ved knekkpunktet kalles `attempt` med N−1 = 17, 20, 23, 24 —
+ikke sammenhengende. Trinnene 18, 19, 21 og 22 gir ingen rute i det hele tatt
+(`_geoPlanTraversals` returnerer null). Mekanismen ligger altså i RUTINGEN, ikke i lengdesøket
+og ikke i `Math.round`-knivseggen. Se STATUS §34.
+
 ## 091 (delvis) — knekkpunktet funnet: N hopper på 0,2 mm (15.10.2026, `main`)
 
 Rom 5 / 700W / loddrett / `tr` faller fra CC 13,20 og 93,4 % dekning til CC 11,62 og 84,3 % når

@@ -29273,13 +29273,25 @@ function generateCableGeo(roomId, productId, opts) {
       diag.push({ dir, cc, ok: !!r });
       continue;
     }
-    // Grovsveip for å finne et CC-intervall som omslutter mållengden, så bisekssjon.
-    // VIKTIG: antall løp N er et HELTALL, så lagt lengde er en sagtann i CC, ikke en jevn
-    // kurve. Målt på et 400×300-rom med 96 m kabel: N=32 gir 94,9 m og N=33 gir 97,8 m —
-    // 96,00 m finnes ikke for NOEN CC. Derfor holdes to kandidater: den nærmeste (kan være
-    // for kort) og den nærmeste SOM ER FOR LANG. Bare den siste kan trimmes ned med
-    // symmetrisk inntrukne vendepunkter, og det er den veien lengden faktisk kan treffes.
-    let lo = ccLo, hi = ccHi, bestDiff = Infinity, bestCc = null, bestEx = 0;
+    // ─── 091 · SØKET ITERERER OVER ANTALL LØP N, IKKE OVER CC ────────────────────────────
+    // ⚠ HER STO EN GROVSVEIP + BISEKSJON OVER CC, og den hadde en innebygd selvmotsigelse som
+    // kommentaren selv beskrev: «antall løp N er et HELTALL, så lagt lengde er en SAGTANN i CC,
+    // ikke en jevn kurve». En bisekssjon forutsetter nettopp en jevn kurve. Den lette altså med
+    // feil verktøy på en funksjon den visste var trappeformet.
+    //
+    // MÅLT på Rom 5 15.10.2026 (STATUS §33): en veggflytting på 0,2 mm tok 700W fra CC 13,20 og
+    // 93,4 % dekning til CC 11,62 og 84,3 %. Årsaken er `N = Math.round(usable / cc) + 1` i
+    // `_geoBuildGrid`: N hopper med 1, lengden endres med et helt løp (~2,4 %), og bisekssjonen
+    // landet på et helt annet trinn. CC 13,20 ble ikke utkonkurrert — den ble aldri generert.
+    //
+    // N er den EGENTLIGE frie variabelen: `cc = W/(N−1)` (lag C, 072). Når man teller N i stedet
+    // for å halvere CC, finnes hvert trinn nøyaktig én gang, ingen kan hoppes over, og
+    // knivseggen i `Math.round` har ingenting å gjøre med hvilke trinn som prøves.
+    //
+    // ⚠ Et tidligere forsøk la bare N−2 … N+2 inn i `tries` og VIRKET IKKE — CC 13,20 svarte
+    // til N−3 fra der bisekssjonen hadde landet. Vinduet må dekke hele det lovlige intervallet.
+    const tolCm = targetCm * tolPct / 100;
+    let bestDiff = Infinity, bestCc = null, bestEx = 0;
     let overCc = null, overDiff = Infinity;                  // nærmeste kandidat med lengde ≥ mål
     const note = (cc, len) => {
       const d = len - targetCm;
@@ -29287,25 +29299,35 @@ function generateCableGeo(roomId, productId, opts) {
       if (d >= 0 && d < overDiff) { overDiff = d; overCc = cc; }
       return d;
     };
-    const STEPS = 12;
-    let prev = null;
-    for (let s = 0; s <= STEPS; s++) {
-      const cc = ccHi - (ccHi - ccLo) * s / STEPS;          // fra stor CC (lite kabel) og nedover
-      const m = measure(cc, 0);
-      if (m) {
-        const d = note(cc, m.len);
-        if (prev && ((prev.d < 0) !== (d < 0))) { lo = Math.min(cc, prev.cc); hi = Math.max(cc, prev.cc); break; }
-        prev = { cc, d };
+    {
+      // Bredden av det lovlige området på tvers av løpene — den samme `usable` som
+      // `_geoBuildGrid` regner, hentet fra et rutenett i stedet for å gjentas her.
+      const probe = _geoBuildGrid(legal, dir, (ccLo + ccHi) / 2, 0, ccLo, ccHi);
+      let W = null;
+      if (probe && probe.lanes && probe.lanes.length > 1) {
+        const n = new Set(probe.lanes.map(l => +l.pos.toFixed(3))).size;
+        if (n > 1) W = probe.cc * (n - 1);
       }
-    }
-    const tolCm = targetCm * tolPct / 100;
-    for (let it = 0; it < 20 && bestDiff > tolCm * 0.3; it++) {
-      const mid = (lo + hi) / 2;
-      const m = measure(mid, 0);
-      if (!m) { lo = mid; continue; }
-      const d = note(mid, m.len);
-      if (d > 0) lo = mid; else hi = mid;                    // mindre CC → lengre kabel
-      if (Math.abs(hi - lo) < 1e-3) break;
+      if (W == null) {                                      // faller tilbake på gammelt sveip
+        for (let s = 0; s <= 12; s++) {
+          const cc = ccHi - (ccHi - ccLo) * s / 12;
+          const m = measure(cc, 0);
+          if (m) note(cc, m.len);
+        }
+      } else {
+        const nLo = Math.max(3, Math.ceil(W / ccHi) + 1);
+        const nHi = Math.min(400, Math.floor(W / ccLo) + 1);
+        for (let N = nLo; N <= nHi; N++) {
+          const cc = W / (N - 1);
+          if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+          const m = measure(cc, 0);
+          if (!m) continue;
+          note(cc, m.len);
+          // Treffer dette trinnet allerede, er det ingenting igjen å lete etter: lengden er
+          // monoton i N (flere løp → mer kabel), så nabotrinnene ligger lenger unna målet.
+          if (bestDiff <= tolCm * 0.3) break;
+        }
+      }
     }
     // Trimming (lag F): bare en bane som er FOR LANG kan trekkes inn. Treffer ikke CC alene,
     // velges den korteste for-lange kandidaten og vendepunktene trekkes symmetrisk inn.

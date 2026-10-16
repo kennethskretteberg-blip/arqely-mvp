@@ -1651,3 +1651,53 @@ tampen av en økt, som disse to forsøkene viste.
 en motor som er robust, ikke mot en som har knivseggen i seg.
 
 ⚠ «CC 13,2» var den GAMLE geometriens tall. Det skal ikke låses igjen.
+
+---
+
+## §34 · 091b — lengdesøket itererer over N. Og den ekte mekanismen bak knekket.
+
+### Omskrivingen
+
+Lag F hadde en innebygd selvmotsigelse som kommentaren selv beskrev: «antall løp N er et
+HELTALL, så lagt lengde er en SAGTANN i CC». En bisekssjon forutsetter en jevn kurve. Den lette
+altså med feil verktøy på en funksjon den visste var trappeformet.
+
+N er den egentlige frie variabelen (`cc = W/(N−1)`, lag C). Søket teller nå N over hele det
+lovlige intervallet i stedet for å halvere CC, med tidlig avslutning når et trinn treffer.
+
+**Resultat: identiske utlegg, 4–8× raskere.**
+
+| fixture | før | etter |
+|---|---|---|
+| rekt398 1650W | 531 ms | **79 ms** |
+| rom5 600W `bl` | 3566 ms | **445 ms** |
+| rom5 700W `tr` | 4202 ms | **619 ms** |
+| lRom | 4729 ms | **526 ms** |
+| badHakk | 1914 ms | **130 ms** |
+| enHindring | 1785 ms | 1785 ms |
+
+CC, lengde, dekning, hull og start-avstand er uendret i alle ti prøvene.
+
+### ⚠ Men knekket i Rom 5 består — og mekanismen er en annen enn antatt
+
+Omskrivingen fjerner bisekssjonens blindsoner, men ikke knekket. Målt hvilke CC `attempt`
+faktisk kalles med ved t = 0,94:
+
+```
+CC 17,08 · 14,52 · 12,63 · 12,10        →  N−1 = 17, 20, 23, 24
+```
+
+**Ikke sammenhengende.** Trinnene N−1 = 18, 19, 21 og 22 mangler, og CC 13,2 er nettopp 22.
+Disse trinnene hoppes ikke over av søket — `measure` returnerer **null**: rutenettet på de N-ene
+lar seg ikke rute i det hele tatt ved den veggposisjonen (`_geoPlanTraversals` finner ingen
+lovlig overgangskjede for noen cellerekkefølge).
+
+Så knekket ligger ikke i lengdesøket og ikke i `Math.round`-knivseggen. Det ligger i at
+**rutingen mister et helt N-trinn når veggen flyttes 0,2 mm** — sannsynligvis fordi en bane
+faller utenfor lovlig område eller en celle blir for tynn til at transitten kan kobles.
+Det er neste sak, og den skal måles i `_geoPlanTraversals`, ikke i lag F.
+
+### Hva som IKKE er gjort
+
+Robusthetstesten (±1/±2 cm) og den nye fasit-påstanden for Rom 5 er fortsatt ikke bygget — de
+skal måles mot en motor der N-stigen er sammenhengende.
