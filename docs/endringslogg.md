@@ -4,6 +4,87 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 090b — «regresjonen» på 076-fasiten var ingen regresjon (15.10.2026, gren `kabelmotor`)
+
+Jeg meldte at 090 brøt 076-fasiten (Rom 5 / 700W / loddrett / `tr`: CC 13,20 → 11,62). Feil.
+To hypoteser ble avkreftet ved måling (avbruddet i `tries`-løkka; veggrunden fra 089b), og den
+avgjørende testen — å slå av 090s ekstra varianter — ga fortsatt CC 11,62.
+
+Årsaken er at **089 hentet rom5-fixturet på nytt fra skyen**. Målt side om side på samme kode:
+gammel geometri gir CC 13,20 og 93,4 % dekning, Kenneths faktiske rom gir CC 11,62 og 84,3 %.
+Fasiten var registrert på et rom som ikke finnes lenger og må settes på nytt.
+
+⚠ Åpent: at ~2 cm veggendring koster 9 prosentpoeng dekning er mye, og om det er reelt er ikke
+målt. 090s fire varianter koster lite (655 ms mot 624 ms).
+
+## 090 — den speilede slyngen manglet (15.10.2026, gren `kabelmotor`)
+
+Kenneth: «Hvorfor legger 1650W-kabelen seg ikke lenger ut mot veggene?» Målt på et nytt fixture
+`rekt398` (398 × 271): for hjørnet `br` ga motoren 43 løp ved CC 9,02, svingene 26 cm inn fra
+veggen og dekning 80 %. For `tl` og `tr` ga den 36 løp ved CC 11,08 — det riktige.
+
+Mekanismen: for 36 løp (partall) ender kabelen med begge endene i samme ende av rommet.
+`_geoPlanTraversals` gjorde dybde-først og returnerte første lovlige kjede, så varianten med
+begge ender NEDERST ble aldri bygget. `br` bommet derfor med 261 cm, og hjørnerunden kjøpte
+hjørnet med 43 løp. `_geoPlanTraversals(grid, order, hopp)` kan nå hente de speilede variantene,
+og `attempt` prøver fire.
+
+Etter: alle fire hjørner gir N = 36 · CC 11,08 · 96,06 m (+0,06 %) · sving 5 cm fra veggen ·
+dekning 98,4 % · 0 hull · start 12 cm. 1450W uendret.
+
+⚠ REGRESJON: 076-fasiten (Rom 5 / 700W / loddrett / `tr`) gikk fra CC 13,20 / 93,4 % til
+CC 11,62 / 84,3 %. Lengdesøkets avbruddsbetingelse stopper nå på det første hjørnetreffet.
+Ikke undersøkt videre — se STATUS §31.
+
+## 089b — veggrunden: varianten Kenneth tegnet finnes, og den koster ingenting (15.10.2026, gren `kabelmotor`)
+
+Kenneths topologi (6 baner i øvre felt, de to ekstra løpene langs V6) genereres allerede av
+motoren — men ble avvist på LENGDE: 34,25 m (−2,14 %) eller 36,03 m (+2,94 %), aldri innenfor
+±1 %. Den for lange kan trimmes med `extraSweep`, men motoren prøvde det aldri på denne
+varianten, fordi `jevnLen` måler den hullfrie kandidaten og ikke den som fyller stripen.
+
+Ny `veggLen` + en runde som kjører bare når vinneren bryter R-VEGG, og som godtar bare noe som
+er like bra på alt annet.
+
+Rom 5 / 600W / loddrett: øvre felt 4 → **6 løp**, veggstripe 48,5 → **19,4 cm** (3,34 → 1,34 CC),
+dekning 87,2 → **88,7 %**. CC, lengde og hull uendret. 700W, 10T og vannrett uendret.
+
+⚠ Rettelse til STATUS §29: konklusjonen «å fylle stripen koster et hull» gjaldt bare de
+kandidatene som ble scoret. Den hullfrie varianten fantes, men ble avvist på lengde før den nådde
+poengsummen.
+
+## 089 — R-VEGG måles, og mekanismen er funnet (15.10.2026, gren `kabelmotor`)
+
+Instrumenteringen er rettet: senterlinja leses av kabelen som sendes inn i
+`_cableGeometryCheck`, ikke av en global variabel som kunne feilkoble kandidat og måling.
+
+Mekanismen bak de to tomme banene i Rom 5 med 600W: det er **ikke** lengdebudsjettet. Et gyldig
+utlegg som fyller stripen finnes (CC 13,83 · 35,22 m · +0,62 % · stripe 1,35 CC) — men det har
+et **hull inne i feltet**, og 074b sier at jevn avstand går foran å dekke ut mot veggen.
+Vinneren (CC 14,53 · 0 hull · stripe 3,34 CC) scorer 80,4 mot 57,1.
+
+- Ny `metrics.wallStripeCm` / `wallStripeCC`, målt per løp (ikke per bånd — to målefeil rettet
+  underveis, begge dokumentert i STATUS §29).
+- R-VEGG-straff i `_geoScore`, vekt 18: tyngre enn lengdeleddets 12 poeng forsprang, lettere enn
+  hull-straffen 25.
+
+⚠ Om Kenneths tegnede topologi (transitten forlenget til de to nye løpene) finnes uten hull er
+IKKE målt. Det avgjør om motoren mangler en variant, eller om 074b forbyr det han ber om.
+
+## 089 (delvis) — fixturet for Rom 5 hadde drevet fra virkeligheten (15.10.2026, gren `kabelmotor`)
+
+Kenneth meldte at det er plass til to løp til oppe til venstre i Rom 5. Han har rett — men feilen
+lot seg ikke reprodusere, fordi `_cableFixtures.rom5` var fra 13.10 og rommet var endret siden.
+På fixturet lå begge venstre felt 19,5 cm fra veggen; på den ekte geometrien ligger det ØVRE
+feltet **48,4 cm** unna. Fixturet er hentet på nytt fra skyen.
+
+Målt med riktig geometri (loddrett, start nede til venstre): 600W har 48,4 cm i øvre felt mot
+19,6 i nedre. 700W (17,0/17,2) og 10T (17,8/18,0) er ikke berørt.
+
+⚠ Mekanismen er IKKE fastslått: kandidat-loggingen ga motstridende tall fordi
+`_cableGeometryCheck` også kalles utenfor geo-motoren. R-VEGG er derfor ikke bygget — se
+STATUS §28.
+
 ## 088b — valgt retning er hard (15.10.2026, gren `kabelmotor`)
 
 083 lot R-START rangere foran retningen, så motoren byttet til vannrett når loddrett ikke kunne

@@ -1138,6 +1138,10 @@ hentes på nytt før neste runde.
 
 ### 2. Det udekkede feltet øverst til venstre — det er plass til ETT løp til, ikke to
 
+> ⚠ **Denne målingen gjaldt NEDRE felt** (speilvendt y-akse, se §26), og den ble gjort på et
+> fixture som hadde drevet fra Kenneths faktiske rom. Det ØVRE feltet er målt i §28: der er det
+> **48,4 cm** fra vegg til første løp — plass til to løp, akkurat som Kenneth sa.
+
 | | |
 |---|---|
 | venstre vegg over stubben | x = 678,8 |
@@ -1308,3 +1312,271 @@ Den andre retningen måles fortsatt, men bare for å kunne **tilbys**:
 188 cm unna.
 
 ⚠ Suitetiden er uendret og fortsatt over kravet (§26).
+
+---
+
+## §28 · 089 — Kenneth har rett: 48,4 cm fra veggen i det ØVRE feltet. Fixturet hadde drevet.
+
+### Reprodusert på Kenneths faktiske geometri
+
+⚠ **Først måtte fixturet hentes på nytt.** `_cableFixtures.rom5` var fra 13.10 og stemte ikke
+lenger med rommet i skyen: venstre vegg over stubben sto på x = 678,8 i fixturet mot **677,4** i
+virkeligheten, og hjørnet ved stubben 678,1 mot **676,7**. På den gamle geometrien lå begge
+venstre felt 19,5 cm fra veggen — **feilen Kenneth meldte fantes ikke i fixturet**. Et fixture som
+har drevet fra virkeligheten er verre enn ingen: det gir grønne tester for et rom som ikke finnes.
+
+Med riktig geometri, Rom 5 loddrett, start nede til venstre:
+
+| produkt | CC | ØVRE felt: avstand fra vegg | NEDRE felt | dekning | hull |
+|---|---|---|---|---|---|
+| **600W 35m** | 14,53 | **48,4 cm** (≈ 3 × CC) | 19,6 cm | 87,2 % | 0 |
+| 700W 41m | 12,10 | 17,0 cm | 17,2 cm | 86,1 % | 0 |
+| 10T 600W 60m | 6,46 | 17,8 cm | 18,0 cm | 67,3 % | 0 |
+
+Kenneth så riktig, og det gjelder **bare 600W**. De to banene han tegnet i lilla finnes i det
+globale rutenettet — det nedre feltet bruker dem — men det øvre feltet starter tre baner inn.
+
+### ⚠ Mekanismen er IKKE fastslått (STEG 0.2 står åpen)
+
+Jeg forsøkte å logge hver kandidat med CC, lengde og veggavstand, men instrumenteringen lider av
+samme korrelasjonsfeil som lurte meg i §23: `_cableGeometryCheck` kalles også UTENFOR geo-motoren,
+og `window.__p` peker da på en annen senterlinje enn den som måles. Loggen ga motstridende tall
+(samme CC og lengde med både 19,4 og 48,4 cm). **Ingen rotårsak er meldt.**
+
+Lengdebudsjettet er fortsatt den mest sannsynlige forklaringen — to løp til koster ≈ 1,9 m, og
+kabelen er fast 35,00 m ved CC 14,53 — men det er en hypotese, ikke en måling. Neste runde må
+måle den med instrumentering som ikke kan feilkoble kandidat og senterlinje (tagg på selve
+kabelobjektet, ikke på en global variabel).
+
+**R-VEGG, større CC og faseforskyvning er derfor IKKE bygget.** Grunnlaget mangler.
+
+---
+
+## §29 · 089 — mekanismen: å fylle veggstripen koster et HULL, og 074b forbyr det
+
+### Instrumenteringen, rettet
+
+Den forrige loggingen brukte en global variabel for senterlinja, og `_cableGeometryCheck` kalles
+også utenfor geo-motoren — så kandidat og senterlinje kunne feilkobles (§28). Rettet ved å lese
+senterlinja **av kabelen som sendes inn som første argument**. Ingen global. Tallene under er
+derfor etterprøvbare.
+
+### Mekanismen
+
+| score | CC | lengde | veggstripe | hull | dekning |
+|---|---|---|---|---|---|
+| **80,4** ← vinner | 14,53 | 35,00 m (0,00 %) | 48,5 cm (3,34 CC) | **0** | 87,2 % |
+| 76,5 | 13,83 | 35,00 m (0,00 %) | 32,6 cm (2,36 CC) | 0 | 83,8 % |
+| 57,1 | 13,83 | 35,22 m (+0,62 %) | **18,7 cm (1,35 CC)** | **1** | 84,3 % |
+
+**Det er ikke lengdebudsjettet.** Et gyldig utlegg som fyller stripen finnes, innenfor ±1 %.
+Men det har et **hull inne i feltet**, og 074b — Kenneths egen låste regel — sier at jevn avstand
+går foran å dekke helt ut mot veggen. Hull-straffen er 25 poeng; R-VEGG-straffen er bevisst 18,
+altså lettere, nøyaktig som 089-oppdraget ba om.
+
+Motoren gjør derfor akkurat det reglene sier. **Kenneths to lilla løp kan ikke fås uten et hull
+— blant de kandidatene motoren genererer i dag.**
+
+### Bygget
+
+* `_cableWallStripe(cable, room, legal)` → `metrics.wallStripeCm` / `wallStripeCC`.
+  Måles **per løp**, ikke per bånd: finnes det et annet løp mellom dette og veggen som overlapper
+  det i sveiperetningen? Gjør det ikke, er avstanden en ekte tom stripe.
+  ⚠ To feil måtte rettes underveis, begge målt: båndgruppering ble rekkefølge-avhengig og tok et
+  felts ytterkant for en vegg (ga 252 cm i et rom på 300), og et 14 cm langt koblingsstykke ble
+  telt som feltløp (ingen nabo kan overlappe det med én CC). Løp kortere enn 1,5 CC hoppes over,
+  og overlappskravet skaleres med løpets egen lengde.
+* R-VEGG-straff i `_geoScore`, gradert fra «kant + 1 CC» til «kant + 2 CC», vekt 18.
+  Vekten er målt: lengdeleddet ga vinneren 12 poeng forsprang, så straffen må overstige 12 —
+  og tape mot hull-straffen 25.
+
+### Målt, Rom 5 (loddrett, start nede til venstre)
+
+| produkt | CC | veggstripe | i CC | hull | dekning |
+|---|---|---|---|---|---|
+| 600W 35m | 14,53 | 48,5 cm | **3,34** | 0 | 87,2 % |
+| 700W 41m | 12,10 | 17,0 cm | 1,40 | 0 | 86,1 % |
+| 10T 600W 60m | 6,46 | 17,8 cm | 2,76 | 0 | 67,3 % |
+| 600W **vannrett** | 14,92 | 5,1 cm | 0,34 | 0 | 90,1 % |
+
+### Det som gjenstår, og som er Kenneths valg
+
+Kenneths tegning forlenger transitten langs stubben helt bort til de to nye løpene. **Om den
+topologien finnes uten hull er ikke målt** (STEG 0.3) — det krever at varianten bygges for hånd
+og kontrolleres. Enten:
+
+* **a)** den finnes → motoren mangler en variant, og den skal bygges, eller
+* **b)** den finnes ikke → da forbyr 074b det Kenneth ber om, og han må velge hvilken av de to
+  reglene som veier tyngst i dette rommet.
+
+⚠ Suitetiden er uendret og fortsatt over målet (§26). Utleggene tar nå 1,4–5,2 s per rom.
+
+---
+
+## §30 · 089b — varianten finnes, og den koster ingenting. Kenneth hadde rett hele veien.
+
+### Varianten ble bygget og målt (STEG 0.3)
+
+Instrumentert på rutenettet `_geoMakeCable` får inn (ingen globale), viste søket at Kenneths
+topologi **allerede genereres**:
+
+```
+CC 14,53 · øvre celle 6 baner fra 696,3 · stripe 19,4 cm  →  34,25 m (−2,14 %)  AVVIST: lengde
+CC 14,53 · øvre celle 6 baner fra 696,3 · stripe 19,4 cm  →  36,03 m (+2,94 %)  AVVIST: lengde
+```
+
+Seks baner, første på 696,3 — nøyaktig de to løpene Kenneth tegnet i lilla. Den ble avvist på
+**lengde**: 34,25 m er for kort, 36,03 m for lang, og ±1 %-vinduet (34,65–35,35) treffes ikke.
+Lengden er en sagtann i baneantallet (072).
+
+**Men den for lange kan trimmes ned.** `extraSweep` gjør nøyaktig det — motoren prøvde det bare
+aldri på denne varianten, fordi `jevnLen` måler den HULLFRIE kandidaten, ikke den som fyller
+stripen. Samme feilklasse som 079d: *trimmingen styres av en kandidat vi prøver å komme oss bort
+fra.*
+
+### Veggrunden (089b)
+
+Ny `veggLen` + en runde som kjører **bare når vinneren bryter R-VEGG**, og som godtar bare noe
+som er like bra på alt annet: gyldig, innenfor ±1 %, hullfritt, og ikke dårligere dekning.
+
+### Målt, Rom 5 (loddrett, start nede til venstre)
+
+| | før 089 | **etter 089b** |
+|---|---|---|
+| løp i øvre felt | 4, fra 725,3 | **6, fra 696,3** |
+| veggstripe | 48,5 cm (**3,34 CC**) | **19,4 cm (1,34 CC)** |
+| CC | 14,53 | 14,53 (uendret) |
+| lengde | 35,00 m (0,00 %) | 35,00 m (0,00 %) |
+| hull | 0 | 0 |
+| **dekning** | 87,2 % | **88,7 %** |
+| start fra hjørnet | 23 cm | 25 cm |
+
+Bedre på dekning, bedre på veggstripe, uendret på CC, lengde og hull. **Ingenting ble byttet bort.**
+
+| øvrige | CC | stripe | dekning | hull |
+|---|---|---|---|---|
+| 700W loddrett | 12,10 | 17,0 cm (1,40 CC) | 86,1 % | 0 |
+| 10T 60m loddrett | 6,46 | 17,8 cm (2,76 CC) | 67,3 % | 0 |
+| 600W vannrett | 14,92 | 5,1 cm (0,34 CC) | 90,1 % | 0 |
+
+⚠ 10T ligger fortsatt på 2,76 CC. Veggrunden fant ingen bedre kandidat innenfor budsjettet der —
+ikke undersøkt videre.
+
+⚠ Suitetiden er uendret og fortsatt over målet (§26). 600W tar 2,8 s.
+
+### Rettelsen til §29
+
+§29 konkluderte at «å fylle veggstripen koster et hull, og 074b forbyr det». **Det var feil** —
+eller rettere: det gjaldt bare de kandidatene som ble scoret. Den hullfrie varianten fantes, men
+nådde aldri poengsummen fordi den ble avvist på lengde før den kom dit. Konklusjonen var riktig om
+datagrunnlaget og feil om virkeligheten.
+
+---
+
+## §31 · 090 — den speilede slyngen manglet. Hjørnerunden kjøpte hjørnet med 43 løp.
+
+### STEG 0 — hvem valgte 44 løp, og hvorfor
+
+Nytt fixture `rekt398` (398 × 271, loddrette løp). 1650W 96m, per hjørne, **før**:
+
+| hjørne | N | CC | sving fra vegg | dekning | start-avstand |
+|---|---|---|---|---|---|
+| tl | 36 | 11,08 | 5,0 cm | 98,4 % | 12 cm |
+| tr | 36 | 11,08 | 5,0 cm | 98,4 % | 12 cm |
+| bl | 36 | 11,08 | 5,0 cm | 98,4 % | **261 cm** |
+| **br** | **43** | **9,02** | **26,3 cm** | **80,0 %** | 31 cm ← Kenneths bilde |
+
+Coworks regnestykke stemmer: 36 løp ved CC 11,08 gir 96,06 m (+0,06 %) uten noen innkorting.
+Motoren **finner** det — for tre av fire hjørner.
+
+**Mekanismen (STEG 0.4, og svaret er ja — varianten manglet):** for N = 36, et PARTALL, ender
+kabelen med begge endene i samme ende av rommet. Loggen for `br`:
+
+```
+N=36 · 96,06 m (+0,06 %) · start (393,−260) slutt (5,−260)  → begge ØVERST · off 261 · GYLDIG
+N=36 · 93,33 m (−2,78 %) · start (393,−11)  slutt (16,−260) → avvist paa lengde
+```
+
+Varianten med **begge ender nederst** — samme lengde, samme CC — ble aldri bygget.
+`_geoCellTraversals` lager fire traverseringer, men `_geoPlanTraversals` gjorde dybde-først og
+returnerte **første** lovlige kjede. For et rom med én celle ble det alltid den samme.
+
+Siden `br` da bommet med 261 cm, startet hjørnerunden (083) og lette nedover CC-stigen til den
+fant et ODDETALL løp med en ende nede: 43 løp ved CC 9,02. Hjørnerunden har ingen dekningsvakt,
+så svingene ble trukket 26 cm inn og dekningen falt til 80 %.
+
+### Rettet
+
+`_geoPlanTraversals(grid, order, hopp)` kan nå hente den 2., 3., … lovlige kjeden, og `attempt`
+prøver fire. Å speile slyngen er gratis: samme lengde, samme CC, samme jevnhet.
+
+**Etter — alle fire hjørner likt:** N = 36 · CC 11,08 · 96,06 m (+0,06 %) · sving 5,0 cm fra
+begge svingvegger · stripe 5,1 cm · dekning 98,4 % · 0 hull · start 12 cm.
+`br` gikk fra 517 ms til 283 ms, fordi hjørnerunden ikke lenger trengs.
+1450W 84m er uendret (N = 32, CC 12,51).
+
+### ⚠ «REGRESJONEN» PÅ 076-FASITEN VAR INGEN REGRESJON — se §32 nedenfor
+
+| Rom 5 / 700W / loddrett / `tr` | før 090 | etter 090 |
+|---|---|---|
+| CC | **13,20** (fasit) | 11,62 |
+| dekning | **93,4 %** | 84,3 % |
+| start | 13 cm | 19 cm |
+
+CC 13,2-kandidaten **scores ikke lenger i det hele tatt**. Årsaken er en kjedereaksjon, ikke
+poengsummen: med flere varianter finner `attempt` et hjørnetreff tidligere, og `tries`-løkka i
+lengdesøket bryter av (`if (bestR && |dev| <= tol && !hull) break;`) før CC-trinnet 13,2 prøves.
+
+Dette er IKKE undersøkt videre — økten var på slutten, og jeg ville ikke starte en
+justeringsrunde til på tampen. Mest sannsynlige fiks: avbruddsbetingelsen må også kreve at
+R-VEGG er oppfylt og at dekningen ikke er vesentlig dårligere enn beste kjente, slik at søket
+ikke stopper på det første hjørnetreffet.
+
+### Øvrige fixturer (loddrett, `bl`) — alle gyldige, 0 hull, start ≤ 40 cm
+
+| | CC | stripe | dekning |
+|---|---|---|---|
+| rom5 600W | 14,53 | 19,4 | 88,7 % |
+| rom5 10T | 6,46 | 17,8 | 67,3 % |
+| badHakk | 11,60 | 16,7 | 92,5 % |
+| lRom | 11,82 | 16,9 | 96,2 % |
+| enHindring | 10,26 | 5,1 | 89,0 % |
+| rektangel | 12,18 | 5,1 | 97,9 % |
+
+⚠ STEG 0.5 (hullet i Rom 5) ble besvart i §30: varianten fantes, men ble avvist på lengde før
+den nådde poengsummen. Ikke en paritetsvariant.
+
+⚠ Suitetiden er ikke målt i denne runden. Enkeltutlegg tar 0,06–1,8 s.
+
+---
+
+## §32 · 090b — «regresjonen» var fasiten målt på et rom som ikke finnes
+
+Jeg meldte i §31 at 090 brøt 076-fasiten (Rom 5 / 700W / loddrett / `tr`: CC 13,20 → 11,62).
+**Det var feil**, og jeg bommet to ganger til før jeg målte det ordentlig:
+
+1. **Første hypotese:** avbruddet i `tries`-løkka stoppet på første hjørnetreff. Jeg fjernet det.
+   Resultatet var uendret CC 11,62, og alt ble 3–7× tregere. Rullet tilbake.
+2. **Andre hypotese:** veggrunden (089b) byttet vinner. Nøytralisert `_cableWallStripe` →
+   fortsatt CC 11,62. Avkreftet.
+3. **Avgjørende test:** slo av 090s ekstra varianter (`hopp > 0` → null). **Fortsatt CC 11,62.**
+   090 var altså ikke årsaken i det hele tatt.
+
+Da sto bare én endring igjen: **089 hentet `_cableFixtures.rom5` på nytt fra skyen.** Målt side
+om side på samme kode:
+
+| geometri | CC | lengde | dekning | stripe | start |
+|---|---|---|---|---|---|
+| gammelt fixture (før 089) | **13,20** | 40,97 m (−0,07 %) | **93,4 %** | 16,7 | 13 cm |
+| Kenneths rom i dag | 11,62 | 41,00 m (0,00 %) | 84,3 % | 16,5 | 19 cm |
+
+**076-fasiten «CC 13,2» ble registrert på et rom som ikke finnes lenger.** Kenneth endret Rom 5
+etter 13.10 (venstre vegg 678,8 → 677,4, hjørnet ved stubben 678,1 → 676,7). Fasiten må settes
+på nytt på den ekte geometrien, eller forkastes.
+
+⚠ **Men ett spørsmål står igjen, og det er ikke besvart:** at ~2 cm veggendring flytter dekningen
+fra 93,4 % til 84,3 % er mye. Om det er reelt (rommet er genuint vanskeligere) eller et tegn på
+noe annet, er **ikke målt**. Det bør være neste sak.
+
+**Ytelse:** 090s fire varianter koster lite — Rom 5 / `tr` tar 655 ms med og 624 ms uten.
+De 4,3 s jeg målte i §31 kom fra det fjernede avbruddet, ikke fra 090.
