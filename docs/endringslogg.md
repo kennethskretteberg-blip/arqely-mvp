@@ -4,6 +4,31 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 099 — Kabelmotor: stigetrinn innenfor toleransen er varianter; robust mot 1 cm veggflytting (17.10.2026, `main`, ikke pushet)
+
+Underlag: STATUS §38 (forstyrrelsestesten: 34 brudd av 136, «celler 5 → 4»). Full måling i STATUS §40.
+
+**STEG 0 — hypotesen var feil.** Trinnene ved cellegrensene i Rom 5 er 75–111 cm, ikke nær én CC.
+«Celle 5» var en 12,6 cm lang én-banes sliver fra 093-varianten. Det som faktisk skjedde: stigen
+gir CC 12,605 → 40,96 m (−3,9 cm) og CC 13,205 → 41,30 m (+30 cm) på referansen, så begge havner i
+`tries` og 13,205 vinner på poeng (hull 0, 93,4 %). Flyttes vegg 2 én cm, blir 12,605 → 41,00 m
+(+0,1 cm): da er 12,605 selv «nærmeste for lange», 13,205 prøves aldri, vinneren har et hull, og
+079d går ned til 11,62 / 84,7 %. Fire centimeter kabel avgjorde ni prosentpoeng.
+
+**Gjort** (`generateCableGeo`): (1) etter `tries` og 079d prøves hvert stigetrinn som treffer lengden
+innenfor ±1 % pluss N ± 1 rundt beste trinn, med trim via `jevnLen`; valg R-START først, så poeng;
+bare når `tries` ikke ga et hullfritt treff. (2) 093-forskyvningen rekker 0,2 × CC (var 0,5 cm).
+(3) Delt `_geoCcStige`. (4) `opts.trace` i lengdesøket. (5) Forstyrrelsestesten: «R-START tapt»
+krever at referansen traff; `_geoCells` teller celler med ≥ 2 baner.
+
+**Målt:** rom5/700W **20 → 1** brudd av 40 · 10T 40 → 6 (28 av de 40 var feilmålt — referansen
+har selv start 118 cm) · 600W 20 → 23 (⚠ referansen står igjen alene på 78,4 %, se SPØRSMÅL) ·
+badHakk 1 → 1. **Porten grønn, 142 rader, 19,8 s**; to rader bedre (enHindring v tr/tl 89 → 95,3 %),
+ingen dårligere. Baselinjen skrevet på nytt. Rullet tilbake etter måling: «099 alltid på» (4 røde)
+og hjørnerunden på N-stigen (7 røde).
+
+---
+
 ## 075 — Høyreklikkmenyer måler egen høyde og holdes innenfor skjermen; romtyper i to kolonner (17.10.2026, `main`, ikke pushet)
 
 Kenneth: «Menyen som kommer opp ved høyreklikk fra rom er så stor at den går under skjermen, ingen

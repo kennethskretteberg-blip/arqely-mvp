@@ -28503,7 +28503,16 @@ function _geoBuildGrid(legal, direction, cc, extraSweep, ccLo, ccHi, forskyv, bi
         // geometri: +0,08 cm gir ett intervall, +0,15 cm gir to.
         const retning = (i === 0) ? 1 : -1;
         let valgt = null;
-        for (const d of [0.02, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]) {
+        // 099: lista rakk til 0,5 cm. ⚠ MÅLT på Rom 5: `pMin` settes av den SKRÅ nedre venstre-
+        // veggen (V10), mens øvre venstre-vegg (V6) ligger 0,15 cm lenger inn — derfor traff
+        // +0,15 på Kenneths geometri. Flyttes V6 1 cm inn (eller V10 1 cm ut), ligger øvre felts
+        // grense 1,1–2,1 cm innenfor `pMin`, ingen d ≤ 0,5 når den, og ytterbanen finnes bare
+        // som en 3,5 cm sliver i nedre felt → 7 baner øverst → CC 13,2 når ikke 41 m → 84 %.
+        // Rekkevidden er nå 0,2 × CC (2,6 cm ved CC 13,2). Fortsatt en VARIANT som scores; på
+        // Kenneths geometri velges fortsatt +0,15 (første d med to felt), så baselinjen står.
+        const maksD = window._geo099Av ? 0.5 : 0.2 * cc;   // `_geo099Av`: A/B-bryter for måling (som `_geoZoneAv`)
+        for (const d of [0.02, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5]) {
+          if (d > maksD) break;
           const p2 = pos + retning * d;
           const iv2 = skann(p2);
           if (!iv2.length) continue;
@@ -29333,6 +29342,32 @@ function _geoScore(chk, ctx) {
 //   → eller { ok:false, reason, conflicts, achievedLen, targetLen, cc, minClearance,
 //             uncovered, suggestions } (spec §5)
 // REN: leser S, skriver ingenting.
+// 099: CC-stigen rundt et utgangspunkt — de samme N-trinnene lengdesøket går (cc = W/(N−1)),
+// sortert nærmest `cc0` først, `cc0` selv først, høyst `maks` trinn. Delt av hjørnerunden (099)
+// og enderunden (094), så ingen runde kan gå i grovsveip-fella (STATUS §37, §40) på egen hånd.
+// Uten målbar bredde (W == null) faller den tilbake på fire brøkdelstrinn, som før.
+function _geoCcStige(legal, dir, ccLo, ccHi, cc0, maks) {
+  const stigen = [cc0];
+  const probe = _geoBuildGrid(legal, dir, (ccLo + ccHi) / 2, 0, ccLo, ccHi);
+  let W = null;
+  if (probe && probe.lanes && probe.lanes.length > 1) {
+    const n = new Set(probe.lanes.map(l => +l.pos.toFixed(3))).size;
+    if (n > 1) W = probe.cc * (n - 1);
+  }
+  if (W != null) {
+    const nLo = Math.max(3, Math.ceil(W / ccHi) + 1);
+    const nHi = Math.min(400, Math.floor(W / ccLo) + 1);
+    for (let N = nLo; N <= nHi; N++) {
+      const cc = W / (N - 1);
+      if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+      if (Math.abs(cc - cc0) > 1e-6) stigen.push(cc);
+    }
+    stigen.sort((x, y) => Math.abs(x - cc0) - Math.abs(y - cc0));
+    if (stigen.length > maks) stigen.length = maks;
+  } else for (let st = 1; st <= 4; st++) stigen.push(ccHi - (ccHi - ccLo) * st / 4);
+  return stigen;
+}
+
 function generateCableGeo(roomId, productId, opts) {
   opts = opts || {};
   const room = S.rooms.find(r => r.id === roomId);
@@ -29612,8 +29647,11 @@ function generateCableGeo(roomId, productId, opts) {
     const tolCm = targetCm * tolPct / 100;
     let bestDiff = Infinity, bestCc = null, bestEx = 0;
     let overCc = null, overDiff = Infinity;                  // nærmeste kandidat med lengde ≥ mål
+    const stige = [];                                         // 099: hele stigen, trinn for trinn
     const note = (cc, len) => {
       const d = len - targetCm;
+      stige.push({ cc, len, diff: d });
+      if (opts.trace) opts.trace.push({ steg: 'stige', dir, cc: +cc.toFixed(3), len: +(len / 100).toFixed(2), diffCm: +d.toFixed(1) });
       if (Math.abs(d) < bestDiff) { bestDiff = Math.abs(d); bestCc = cc; }
       if (d >= 0 && d < overDiff) { overDiff = d; overCc = cc; }
       return d;
@@ -29682,9 +29720,11 @@ function generateCableGeo(roomId, productId, opts) {
         ? [[bundetCc, bestEx], [bundetCc, 0]]
         : [[bestCc, bestEx], [bestCc, 0], [bestCc * 1.02, bestEx], [bestCc * 0.98, bestEx]];
       if (bundetCc == null && overCc != null && overCc !== bestCc) tries.splice(1, 0, [overCc, bestEx]);
+      if (opts.trace) opts.trace.push({ steg: 'tries', dir, bestCc: +bestCc.toFixed(3), bestEx: +bestEx.toFixed(2), bestDiffCm: +bestDiff.toFixed(1), overCc: overCc == null ? null : +overCc.toFixed(3), tries: tries.map(t => +t[0].toFixed(3)) });
       for (const [cc, ex] of tries) {
         if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
         const r = attempt(dir, cc, ex);
+        if (opts.trace) opts.trace.push({ steg: 'attempt', dir, cc: +cc.toFixed(3), ex: +ex.toFixed(2), ok: !!r, score: r ? +r.score.toFixed(1) : null, celler: r ? r.grid.cells.length : null, dek: r ? r.chk.metrics.coveragePct : null, dev: r ? r.chk.metrics.lenDevPct : null, hull: r ? r.cable._geoHoles : null });
         if (r && (!bestR || r.score > bestR.score)) bestR = r;
         // 074b: stopp bare når lengden er truffet OG utlegget er jevnt. Har vinneren et
         // båndhull, finnes det ofte en jevn løsning på en ANNEN CC som må trimmes ned — se
@@ -29692,6 +29732,9 @@ function generateCableGeo(roomId, productId, opts) {
         if (bestR && Math.abs(bestR.chk.metrics.lenDevPct || 0) <= tolPct
             && !(bestR.cable._geoHoles > 0)) break;
       }
+
+      // 099: trengs stigevariantene? Avgjøres FØR 079d, på det `tries` faktisk ga.
+      const trengs099 = !bestR || bestR.cable._geoHoles > 0 || Math.abs(bestR.chk.metrics.lenDevPct || 0) > tolPct;
       // ─── 079d · FOR LANG KABEL → TETTERE CC OG FLERE LØP ─────────────────────────────
       // Kenneth 15.10.2026: «Dersom kabel blir litt for kort, så justeres dette med at alle løp
       // reduseres litt på lengde. Dersom kabel er for lang, justeres dette med tettere cc og
@@ -29730,8 +29773,88 @@ function generateCableGeo(roomId, productId, opts) {
               && Math.abs(r.chk.metrics.lenDevPct || 0) <= tolPct) fant = r;
         }
         if (fant) bestR = fant;
+        if (opts.trace) opts.trace.push({ steg: '079d', dir, fant: !!fant, cc: fant ? +fant.cable.spacing_cm.toFixed(3) : null, dek: fant ? fant.chk.metrics.coveragePct : null, score: fant ? +fant.score.toFixed(1) : null, hjorne: fant ? _cableHitsCorner(fant.cable, room, wantCorner) : null });
       }
 
+      // ─── 099 · STIGETRINN INNENFOR TOLERANSEN ER VARIANTER, IKKE ET TERNINGKAST ─────────
+      // ⚠ MÅLT på Rom 5 / 700W / loddrett / `tr` (STATUS §40). Hypotesen i oppdraget — at et
+      // cellesnitt i lag B vipper over «trinn > én CC»-terskelen — var FEIL: trinnene ved
+      // cellegrensene er 75–111 cm, langt over CC. «Celle 5 → 4» er bare et symptom av at
+      // 093-varianten (forskjøvet ytterbane) lager en 12,6 cm lang én-banes celle.
+      //
+      // Det som faktisk skjer, i centimeter:
+      //   referansen:  stigen gir CC 12,605 → 40,96 m (−3,9 cm) og CC 13,205 → 41,30 m (+30 cm).
+      //                12,605 er «best», 13,205 er «nærmeste for lange» → BEGGE havner i `tries`,
+      //                og 13,205 vinner på poeng (hull 0, 93,4 %) over 12,605 (hull 1, 91,1 %).
+      //   vegg 2 +1 cm: CC 12,605 → 41,00 m (+0,1 cm). Nå er 12,605 også «nærmeste for lange»,
+      //                13,205 prøves ALDRI, vinneren har et hull, og 079d-løkka under går ned
+      //                til CC 11,62 og 84,7 %. Fire centimeter kabel avgjorde ni prosentpoeng.
+      //
+      // Samme klasse som 094 (STATUS §37): CC velges av lengdesøket FØR poengene sammenlignes,
+      // så en bedre kandidat på et nabotrinn er usynlig for rangeringen. Regelen her flytter
+      // IKKE CC for jevnhetens skyld (076 står): hvert trinn som prøves treffer lengden innenfor
+      // ±1 % av seg selv, uten trimming. Det er bare MENGDEN kandidater poengene får se som
+      // gjøres uavhengig av hvilken side av målet et trinn tilfeldigvis landet på.
+      //
+      // Kjører BARE når `tries` ikke ga et hullfritt treff innenfor toleransen (`trengs099`) — da
+      // er dagens vinner enten holete eller utenfor lengden. Rader der `tries` alt traff, er
+      // derfor bit for bit uendret (dominans, målt mot baselinjen). ⚠ MÅLT: «alltid på»
+      // (`_geo099Alltid`) ga fire røde rader (lRom h, badHakk41 h tl, rom5 h) — poengsummen
+      // bytter da bort dekning. Porten er grønn bare med gaten.
+      //
+      // ⚠ Ligger ETTER 079d, og med R-START-PRIORITET, og det er målt: enHindring loddrett `br`
+      // fikk 11,14 / 95,3 % / hull 0 her, men den bommer på hjørnet; hjørnerunden gikk så ned
+      // til 9,07 / 77,4 %. 079d sin kandidat (10,54 / 90,7 %) TREFFER hjørnet og vinner derfor —
+      // samme regel som `attempt` (treff foran best): en kandidat som bommer på hjørnet slår
+      // aldri en som treffer, uansett poeng.
+      if (!window._geo099Av && bundetCc == null && stige.length && (window._geo099Alltid || trengs099)) {
+        const kand = [];
+        // (a) hvert stigetrinn hvis målte lengde ligger innenfor toleransen
+        for (const st of stige) if (Math.abs(st.diff) <= tolCm) kand.push(st.cc);
+        // (b) nabotrinnene (N ± 1) til det beste trinnet: lengdesonden ser bare ÉN rute per
+        //     rutenett (074b), og en gyldig variant i nabotrinnet kan ligge skjult bak den.
+        //     Målt: vegg 0 +2 cm gir 13,205 → 40,47 m i sonden, men forskyv2-transitt1 har
+        //     41,33 m (+0,8 %) og 93,4 % — `attempt` finner den, sonden gjorde det ikke.
+        const bi = stige.findIndex(st => Math.abs(st.cc - bestCc) < 1e-9);
+        if (bi > 0) kand.push(stige[bi - 1].cc);
+        if (bi >= 0 && bi + 1 < stige.length) kand.push(stige[bi + 1].cc);
+        const provd = new Set(tries.map(t => +t[0].toFixed(4) + '|' + +t[1].toFixed(3)));
+        const treffer = r => !!r && _cableHitsCorner(r.cable, room, wantCorner);
+        let valgt = bestR, valgtTreff = treffer(bestR);
+        for (const cc of kand) {
+          const nk = +cc.toFixed(4) + '|0';
+          if (provd.has(nk)) continue;
+          provd.add(nk);
+          if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
+          let r = attempt(dir, cc, 0);
+          let ex = 0;
+          if (!r || Math.abs(r.chk.metrics.lenDevPct || 0) > tolPct || r.cable._geoHoles > 0) {
+            // Den hullfrie varianten på dette trinnet kan være FOR LANG og usynlig for `tries`
+            // (sonden `fastLen` så en annen rute). MÅLT: vegg 4 +2 cm gir forskyv2-transitt1
+            // 41,43 m (+1,05 %) ved CC 13,205 — avvist på lengde, men trimbar. Samme mønster som
+            // 079d: mål den hullfrie (`jevnLen`), trekk svingene symmetrisk inn, prøv igjen.
+            const len = jevnLen(dir, cc, 0);
+            if (len != null && len > targetCm) {
+              let exLo = 0, exHi = Math.max(5, cc * 3), gotDiff = Math.abs(len - targetCm);
+              for (let it = 0; it < 18; it++) {
+                const e = (exLo + exHi) / 2;
+                const m2 = jevnLen(dir, cc, e);
+                if (m2 == null) { exHi = e; continue; }
+                const d2 = m2 - targetCm;
+                if (Math.abs(d2) < gotDiff) { gotDiff = Math.abs(d2); ex = e; }
+                if (d2 > 0) exLo = e; else exHi = e;
+                if (Math.abs(exHi - exLo) < 1e-3) break;
+              }
+              if (ex > 0) { const r2 = attempt(dir, cc, ex); if (r2 && (!r || r2.score > r.score)) r = r2; }
+            }
+          }
+          if (opts.trace) opts.trace.push({ steg: '099', dir, cc: +cc.toFixed(3), ex: +ex.toFixed(2), ok: !!r, score: r ? +r.score.toFixed(1) : null, celler: r ? r.grid.cells.length : null, dek: r ? r.chk.metrics.coveragePct : null, dev: r ? r.chk.metrics.lenDevPct : null, hull: r ? r.cable._geoHoles : null });
+          if (!r || Math.abs(r.chk.metrics.lenDevPct || 0) > tolPct) continue;   // må treffe lengden selv
+          const h = treffer(r);
+          if (!valgt || (h && !valgtTreff) || (h === valgtTreff && r.score > valgt.score)) { valgt = r; valgtTreff = h; }   // R-START, så poeng
+        }
+        if (valgt !== bestR) bestR = valgt;
+      }
       // ─── 076 · CC FLYTTES ALDRI FOR JEVNHETENS SKYLD ─────────────────────────────────
       // Kenneth 14.10.2026, etter sparring: «CC skal ikke flyttes for jevnhetens skyld.
       // CC = netto areal / kabellengde (016-regelen), innenfor produktets/romtypens grenser.
@@ -29782,6 +29905,11 @@ function generateCableGeo(roomId, productId, opts) {
       const treff = [];
       const deknFor = winner.chk.metrics.coveragePct || 0;
       let ferdig = false;
+      // ⚠ 099 PRØVDE å la runden gå N-stigen nærmeste-først (som enderunden, 094) — MÅLT og
+      // rullet tilbake: budsjettet på 40 brukes opp på nære trinn, og sju baselinjerader falt
+      // (lRom h 98,5 → 89, umuligStartHjorne h 99,1 → 89,9, badHakk41 v bl R-START 24 → 83).
+      // Grovsveipet her er altså ikke bare en felle — det er også det som rekker LANGT innenfor
+      // budsjettet. Står som åpent punkt i STATUS §40.
       for (let st = 0; st <= 5 && budsjett > 0 && !ferdig; st++) {
         // 096: med bundet CC er det bare ETT trinn å prøve — CC-en selv. Å vandre stigen her
         // ville gitt ulik W/m² over sømmen.
@@ -29818,6 +29946,7 @@ function generateCableGeo(roomId, productId, opts) {
           }
         }
       }
+      if (opts.trace) opts.trace.push({ steg: 'hjorne', dir, fra: { cc: +cc0.toFixed(3), dek: deknFor, hjorne: false }, treff: treff.map(t => ({ cc: +t.cable.spacing_cm.toFixed(3), dek: t.chk.metrics.coveragePct, hull: t.cable._geoHoles || 0, score: +t.score.toFixed(1) })) });
       if (treff.length) {
         treff.sort((a, b) =>
           (a.cable._geoHoles || 0) - (b.cable._geoHoles || 0)                      // færrest hull
@@ -29905,30 +30034,12 @@ function generateCableGeo(roomId, productId, opts) {
       // er nøyaktig der kandidaten med hel ende ligger (92,5 % dekning, gyldig). Det er
       // grovsveip-fella fra 091 om igjen, bare flyttet inn i en runde. Nærmeste trinn først, så
       // formen endres så lite som mulig.
-      const stigen = [cc0];
-      if (bundetCc == null) {
-        const probe = _geoBuildGrid(legal, dir, (ccLo + ccHi) / 2, 0, ccLo, ccHi);
-        let W = null;
-        if (probe && probe.lanes && probe.lanes.length > 1) {
-          const n = new Set(probe.lanes.map(l => +l.pos.toFixed(3))).size;
-          if (n > 1) W = probe.cc * (n - 1);
-        }
-        if (W != null) {
-          const nLo = Math.max(3, Math.ceil(W / ccHi) + 1);
-          const nHi = Math.min(400, Math.floor(W / ccLo) + 1);
-          for (let N = nLo; N <= nHi; N++) {
-            const cc = W / (N - 1);
-            if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
-            if (Math.abs(cc - cc0) > 1e-6) stigen.push(cc);
-          }
-          stigen.sort((x, y) => Math.abs(x - cc0) - Math.abs(y - cc0));
-          // ⚠ MÅLT: full stige tok badHakk vannrett til 4,0 s — og runden finner INGENTING der
-          // (de hele endene koster 5-7 prosentpoeng dekning, som vakten under ikke godtar).
-          // De tolv nærmeste trinnene holder: begge rommene som faktisk blir reparert, finner
-          // sitt trinn innenfor to hakk av utgangs-CC.
-          if (stigen.length > 12) stigen.length = 12;
-        } else for (let st = 1; st <= 4; st++) stigen.push(ccHi - (ccHi - ccLo) * st / 4);
-      }
+      // ⚠ MÅLT: full stige tok badHakk vannrett til 4,0 s — og runden finner INGENTING der
+      // (de hele endene koster 5-7 prosentpoeng dekning, som vakten under ikke godtar).
+      // De tolv nærmeste trinnene holder: begge rommene som faktisk blir reparert, finner
+      // sitt trinn innenfor to hakk av utgangs-CC. (099: stigen bygges av `_geoCcStige`, delt
+      // med hjørnerunden — identisk logikk som sto her.)
+      const stigen = bundetCc == null ? _geoCcStige(legal, dir, ccLo, ccHi, cc0, 12) : [cc0];
       for (const cc of stigen) {
         if (budsjett <= 0 || funnet) break;
         if (cc < ccLo - _GEO_EPS || cc > ccHi + _GEO_EPS) continue;
@@ -29963,7 +30074,11 @@ function generateCableGeo(roomId, productId, opts) {
 
   if (winner) {
     winner.cable._geoScore = +winnerScore.toFixed(1);
-    winner.cable._geoCells = winner.grid.cells.length;
+    // 099: celler med minst to baner. ⚠ MÅLT: 093-varianten (forskjøvet ytterbane) kan gi en
+    // 12,6 cm lang én-banes «celle» i nedre venstre felt på Rom 5 — den finnes ikke i tegningen
+    // (transitten tar den), men telte som «celler 5 → 4» i forstyrrelsestesten hver gang
+    // ytterbanen traff uten forskyvning. Formen er den samme; tallet skal si det.
+    winner.cable._geoCells = winner.grid.cells.filter(c => c.n >= 2).length;
     return winner.cable;
   }
   return _geoNoSolution(room, prod, roomId, productId, legal, { ccLo, ccHi, targetCm, tolPct, dirs, diag });
@@ -32342,6 +32457,7 @@ async function _cableForstyrrelsesTest(opts) {
       const fx = Object.assign({}, fx0, { productId: j.pid });
       const ref = _cableGeoSuiteRow(j.key, fx, dir, corner);
       if (ref.status !== 'ok') { hoppet.push(`${j.key}/${j.navn}: referansen gir «${ref.status}»`); continue; }
+      if (ref.start > 40) hoppet.push(`${j.key}/${j.navn}: referansen bommer selv på hjørnet (start ${ref.start} cm) — R-START måles ikke`);
       const pts = fx0.points;
       // `veggFra`/`veggTil` deler jobben. ⚠ MÅLT og derfor nødvendig: ett enkelt forstyrret
       // utlegg kan bruke MINUTTER (Rom 5 / 700W brøt et budsjett på 200 s midt i ett kall), og
@@ -32370,7 +32486,10 @@ async function _cableForstyrrelsesTest(opts) {
             if (Math.abs(r.cc - ref.cc) > 0.8) avvik.push(`CC ${ref.cc} → ${r.cc}`);
             if (r.celler !== ref.celler) avvik.push(`celler ${ref.celler} → ${r.celler}`);
             if (r.transitt !== ref.transitt) avvik.push(`transitt ${ref.transitt} → ${r.transitt}`);
-            if (r.start != null && r.start > 40) avvik.push(`start ${r.start} cm`);
+            // 099: «R-START tapt» krever at REFERANSEN traff hjørnet. ⚠ MÅLT: 10T-referansen har
+            // selv start 118 cm, og §38 leste 40 av 40 «start 118» som tapt R-START — det var en
+            // egenskap ved referansen, ikke ved forstyrrelsen. Bommer begge, telles det ikke.
+            if (r.start != null && r.start > 40 && !(ref.start > 40)) avvik.push(`R-START tapt: start ${r.start} cm`);
           }
           if (avvik.length) brudd.push({ rom: `${j.key}/${j.navn}`, vegg: i, cm: d, avvik: avvik.join(' · ') });
         }

@@ -2159,3 +2159,102 @@ designet er det som endres.
 ⚠ **Og en målefeil hos meg:** jeg meldte først at påstand A (fasit-rommet) falt fra 4 til 6
 koblinger. Det var en forurenset side — isolert og på fersk side gir A 4 koblinger både før og etter.
 Kjør batteriet etter en reload, ikke etter en haug med sceneoppsett.
+
+---
+
+## §40 · 099 — «celler 5 → 4» var ikke et cellesnitt. Fire centimeter kabel avgjorde ni prosentpoeng.
+
+### STEG 0.1 — hypotesen var feil, og det er målt
+
+Oppdraget antok at lag B deler rommet der et trinn i grensen vipper over «én CC»-terskelen. Sonden
+(`_p099`, rutenett ved CC 13,20 på Rom 5 / 700W / loddrett / `tr`) viser trinnene ved cellegrensene:
+**105,4 · 111,4 · 74,7 cm** — alle langt over CC. Ingen av dem er i nærheten av en terskel, hverken
+før eller etter forstyrrelsen.
+
+«Celle 5» er 093-varianten: basisrutenettet mister ytterbanen (`ytterbaneFalt`), forskyv2 (+0,15 cm)
+henter den tilbake i øvre venstre felt (8 baner) og lager samtidig en **12,6 cm lang én-banes
+«celle»** i nedre venstre felt, fordi V10 er skrå (0,7 cm over 93 cm). Tegningen har 8 + 7 + 12 + 3
+baner uansett — transitten tar sliveren. Tallet «5» var en artefakt.
+
+### Den ekte mekanismen (sporing `opts.trace` i lengdesøket)
+
+| | CC 12,605 | CC 13,205 | `tries` | vinner |
+|---|---|---|---|---|
+| referansen | 40,96 m (**−3,9 cm**) | 41,30 m (+30 cm) | 12,605 (best) **og 13,205 (nærmeste for lange)** | 13,205 · hull 0 · **93,4 %** |
+| vegg 2 +1 cm | 41,00 m (**+0,1 cm**) | 41,34 m (+34 cm) | 12,605 er nå selv «nærmeste for lange» → **13,205 prøves aldri** | 12,605 · hull 1 → 079d → 11,62 · **84,7 %** |
+
+Begge trinnene treffer lengden innenfor ±1 % på begge geometriene, og 13,205-kandidaten FINNES på
+den forstyrrede (41,34 m, 93,5 %, gyldig, start 13). Den ble bare ikke vist for poengsummen. Det er
+094-klassen (§37) om igjen: **CC velges av lengdesøket FØR poengene sammenlignes.**
+
+### STEG 0.2 — én mekanisme eller flere?
+
+| rom / produkt | før | mekanisme |
+|---|---|---|
+| rom5 / 700W | 20 av 40 | 16 er «tries»-knivseggen over; 4 er ytterbanen som ikke når øvre felt (V6 inn 1–2 cm / V10 ut 1–2 cm: øvre felts grense ligger 1,1–2,1 cm innenfor `pMin`, og 093-lista rakk 0,5 cm) |
+| rom5 / 600W | 20 av 40 | samme to, men referansen (78,4 %, hull 0) er den som står igjen alene — se under |
+| rom5 / 10T | **40 av 40** | ⚠ **feilmålt i §38**: 28 av 40 var «start 118 cm», og referansen har SELV start 118 cm. R-START ble aldri tapt — testen målte et absolutt krav uten å se på referansen. Resten (12) er CC-trinnet 13,83 → 12,63 |
+| badHakk | 1 av 44 | vegg 5 −2 cm → «ingen løsning» — ikke undersøkt |
+
+### STEG 0.3 — er 5-celle-utlegget gyldig på forstyrret geometri?
+
+Ja: vegg 2 +1: 41,34 m, +0,83 %, 94,2 %, start 13 · vegg 0 +2: 41,33 m, +0,8 %, 93,4 % · vegg 8 +1:
+41,23 m, 94,1 %. Alle gyldige i `_cableGeometryCheck`. For vegg 9 +1 og vegg 5 −1/−2 fantes det
+IKKE før 093-rekkevidden ble utvidet (ytterbanen nådde ikke øvre felt).
+
+### Bygget
+
+1. **Stigetrinn innenfor toleransen er varianter** (etter `tries` og 079d, i `generateCableGeo`):
+   hvert trinn hvis målte lengde ligger innenfor ±1 %, pluss N ± 1 rundt det beste trinnet (sonden
+   ser bare én rute per rutenett, 074b), kjøres gjennom `attempt` — med trim via `jevnLen` når den
+   hullfrie varianten er for lang (vegg 4 +2: 41,43 m = +1,05 % → trimmet til 0,00 %). Valg:
+   **R-START først, så poeng.** Gate: kjører bare når `tries` ikke ga et hullfritt treff innenfor
+   lengden — rader der `tries` traff, er bit for bit uendret.
+2. **093-rekkevidden 0,5 cm → 0,2 × CC** (2,6 cm ved 13,2). Fortsatt en variant; på Kenneths
+   geometri velges fortsatt +0,15.
+3. Delt `_geoCcStige` (brukes av enderunden; identisk logikk som sto der).
+4. Sporing: `generateCableGeo(…, { trace: [] })` logger stige, tries, attempt, 079d, 099 og hjørnerunden.
+5. Forstyrrelsestesten: «R-START tapt» krever at referansen traff (ellers `hoppet`-merknad);
+   `_geoCells` teller celler med ≥ 2 baner (sliveren telte som form).
+
+### To ting som ble MÅLT og rullet tilbake
+
+* **«099 alltid på»** (`window._geo099Alltid`): fire røde rader — lRom h tl/br 98,5 → 93,6,
+  badHakk41 h tl 91,4 → 85,3, rom5 h tr/br 90,7 → 86–87. Poengsummen bytter bort dekning når den
+  får velge fritt. Derfor gaten.
+* **Hjørnerunden på N-stigen nærmeste-først** (som enderunden): sju røde rader — budsjettet på 40
+  brukes opp på nære trinn, og lRom h tr falt 98,5 → 89, umuligStartHjorne h br 99,1 → 89,9,
+  badHakk41 v bl R-START 24 → 83. Grovsveipet er også det som rekker langt. ⚠ Men fella er ekte:
+  på enHindring `br` fant hjørnerunden 9,07 / 77,4 % fordi 10,54 / 90,7 % (hjørne, hull 0) aldri
+  ble prøvd — det reddes i dag av at 099-blokken ligger ETTER 079d med R-START-prioritet, ikke av
+  hjørnerunden selv. **Åpent punkt.**
+
+### Forstyrrelsestesten før → etter (loddrett, `tr`, ± 1 / ± 2 cm per vegg)
+
+| rom / produkt | før | etter | det som står igjen |
+|---|---|---|---|
+| rom5 / 700W | **20** av 40 | **1** | vegg 4 −2 cm: 93,4 → 84,4 (CC 11,62) |
+| rom5 / 600W | 20 av 40 | **23** | ⚠ referansen er den som står alene: 78,4 % (hull 0) — gaten slår ikke inn, og de forstyrrede finner enten 92,6 % (CC 15,29, via 099) eller 71 % (CC 11,62). Det RIKTIGE utlegget på referansen er trolig 92,6 % — se SPØRSMÅL |
+| rom5 / 10T 400W | 40 av 40 (28 feilmålt) | **6** | CC 13,83 → 12,63, 94,7 → 87–91 %; R-START måles ikke (referansen bommer selv) |
+| badHakk | 1 av 44 | 1 | vegg 5 −2 cm «ingen» |
+| **sum** | **81 av 164** | **31** | |
+
+### Porten: grønn, 142 rader, 19,8 s (3 biter: 7,8 + 6,0 + 6,1 s)
+
+Endrede rader mot baselinjen fra 096:
+
+| rad | før | etter |
+|---|---|---|
+| enHindring v tr | N 51 · CC 10,26 · 89,0 % | N 48 · CC 11,14 · **95,3 %** |
+| enHindring v tl | N 49 · CC 10,54 · 90,2 % | N 48 · CC 11,14 · **95,3 %** |
+
+Ingen rad dårligere. Baselinjen er skrevet på nytt (`1422d23 + 099`) med `celler` i ny betydning.
+⚠ Tiden: §38 oppga 63 s for 136 rader; nå 19,8 s for 142. Jeg har ikke målt 096-koden på denne
+maskinen i dag, så hvor mye som er 099 (079d-løkka kjøres sjeldnere) og hvor mye som er dagsform,
+vet jeg ikke. Heap mellom bitene: 20 MB flatt. «Balling» oppsto ikke i noen av de seks kjøringene.
+
+### Tid per utlegg (rom5 / 700W / v / tr)
+
+referansen 181 → **132 ms** · vegg 2 +1 861 → **328–548 ms** · vegg 4 +2 1119 → **387 ms**.
+Forstyrrede utlegg er RASKERE enn før, fordi 079d sin ti-trinns nedstigning ikke lenger kjøres når
+099 har funnet et hullfritt trinn.

@@ -21,4 +21,28 @@ ende) for alle eksisterende `top`-trapper, så det bør være en egen prompt.
 
 ## 099 · Kabelmotor, cellesnitt som variant
 
+**Valgt:** promptens hypotese (cellesnitt nær terskelen) ble målt og avkreftet (STATUS §40), så
+«cellesnitt som variant» er IKKE bygget. Bygget er det målingen pekte på: stigetrinn innenfor
+lengdetoleransen som varianter (R-START først, så poeng), og 093-forskyvningen med rekkevidde 0,2 × CC.
+
+**Spørsmål 1 — rom5 / 600W:** referansen gir 78,4 % (CC 13,2, hull 0). Flyttes en vegg 1–2 cm,
+finner motoren 88–92,6 % (CC 15,29, hull 0, gyldig) på de fleste geometriene — men IKKE på
+referansen, fordi 099 bare kjører når `tries` ikke traff hullfritt. «099 alltid på» henter 92,6 %
+også der, men koster fire baselinjerader (lRom h, badHakk41 h tl, rom5 h) 4–6 prosentpoeng, fordi
+poengsummen da bytter bort dekning. Vil du (a) ha gaten som nå (600W-referansen blir 78,4 %), eller
+(b) at jeg lager en egen regel «aldri bytt bort dekning» for alltid-på? (b) er en egen prompt.
+
+**Spørsmål 2 — hjørnerunden:** den går fem grove CC-trinn og mister trinn som ligger ett hakk unna
+(enHindring `br`: 10,54 / 90,7 % finnes, runden fant 9,07 / 77,4 %). N-stigen nærmeste-først (som
+enderunden) brakk sju rader fordi budsjettet (40) brukes opp på nære trinn. Skal jeg bruke en egen
+prompt på en hjørnerunde med både grovsveip og nære trinn innenfor et høyere budsjett?
+
+**Spørsmål 3 — 10T i Rom 5 treffer aldri hjørnet** (start 118 cm, også på referansen). §38 leste det
+som «R-START tapt». Det er en R-START-sak for 10T 400W/40 m i dette rommet, ikke en robusthetssak.
+Skal den undersøkes?
+
+**Merknad:** `_geoCells` teller nå celler med minst to baner (sliveren på 12,6 cm telte som «celle»),
+og «R-START tapt» i forstyrrelsestesten krever at referansen traff hjørnet. Begge er endringer i
+MÅLINGEN, ikke i motoren — si fra hvis du vil ha de gamle definisjonene tilbake.
+
 ## 065 · PWA på Windows
