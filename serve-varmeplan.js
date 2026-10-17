@@ -6,7 +6,10 @@ const path = require('path');
 const FILE = path.join(__dirname, 'index.html');
 const PORT = process.env.PORT || 4000;
 
-const MIME = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.css': 'text/css' };
+// 065: .webmanifest/.ico/.json saa manifest og ikoner kan testes lokalt (ukjent endelse faller
+// ellers tilbake til index.html — og da ser DevTools et «manifest» som er HTML).
+const MIME = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.css': 'text/css',
+               '.webmanifest': 'application/manifest+json', '.ico': 'image/x-icon', '.json': 'application/json' };
 const DEV_AUTH_FILE = path.join(__dirname, '.dev-auth.json');
 
 http.createServer((req, res) => {

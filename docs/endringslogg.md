@@ -4,6 +4,59 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 065 — Varmeplan som installerbar app (PWA) på Windows (17.10.2026, `main`, ikke pushet)
+
+Kenneth 12.10.2026: «Jeg ønsker å lage Varmeplan-appen som en desktop-app på Windows-PC.» Valgt:
+installerbar nettapp (PWA) fremfor .exe — Edge/Chrome installerer varmeplan.no som egen app med eget
+vindu, ikon i Start-meny og oppgavelinje. Appen er fortsatt varmeplan.no: hver deploy er ute neste
+gang den åpnes, ingen installasjonsfil, ingen kodesignering. En .exe (Electron/Tauri) er utsatt til
+det finnes et behov en nettside ikke dekker. «Ikke Cenika-ikon eller farger — kjør Varmeplan.»
+
+**STEG 0.** (1) Ingen `package.json`/Node-verktøykjede i repoet — PNG-ene er rastrert én gang fra
+SVG-ene med den lokale Chromium-en (Playwright), ingen npm-pakke lagt til. (2) Vercel svarer **404**
+(`text/plain`) på `/sw.js` og `/manifest.webmanifest` før filene finnes — en gammel cache kan altså
+ikke ha sett en HTML-side som sw. (3) Oppstartsstier: `?present=<token>` (+ `&forslag=<token>`),
+`?kunde=<token>`, `?invite=<token>` (leses og vaskes av URL-en før Supabase starter), `?dev`
+(localhost). Install-knapp og sw-registrering er stengt på alle kundeflatene.
+
+**Gjort**
+* **Ikon:** `icons/varmeplan.svg` (512, avrundet kvadrat `#0d0e10` med kant `#252830`, tykk geometrisk
+  V i `#22d3ee` med flat bunn, varmekabel i slynge med fire U-svinger under, opacity .55, kun stier),
+  `varmeplan-maskable.svg` (80 % innenfor trygg sone, fyller flaten), `favicon.svg` (bare V, større —
+  slyngen blir grøt under 32 px). PNG: 192, 512, maskable 512, apple-touch 180, favicon 16/32,
+  `favicon.ico` (16+32, Pillow). `docs/pwa/ikon-forhandsvisning.html` viser alt på lys/mørk bakgrunn
+  og i en simulert Windows-oppgavelinje (32/48). 16 px: V-en er lesbar; slyngen ikke.
+* **`manifest.webmanifest`:** standalone, `start_url /?kilde=app`, `launch_handler focus-existing`,
+  fire ikoner. **`window-controls-overlay` er droppet** (bare `standalone`): topplinja har knapper
+  øverst til høyre som ville havnet under Windows-knappene, og dra-området måtte bygges med
+  `titlebar-area-*` — kan ikke måles her uten en Windows-PC.
+* **`<head>`:** manifest, favicon svg/png/ico, apple-touch-icon, to `theme-color`-metaer (mørk/lys);
+  `_pwaSyncThemeColor()` setter begge til appens eget tema ved oppstart og i `setTheme`. Samme
+  ikonlenker i `admin.html`.
+* **`sw.js`:** `install → skipWaiting`, `activate → clients.claim + slett alle cacher`; `fetch`
+  håndterer BARE `mode === 'navigate'`, nettverk først, og svarer ved nettverksfeil med en innebygd
+  «Varmeplan trenger internett»-side (503). Ingen `caches.put` — aldri en gammel versjon.
+  Registreres etter `load`, bare på https/localhost, aldri på kundeflatene. `vercel.json`: `no-cache` +
+  `Service-Worker-Allowed` for `/sw.js`, `application/manifest+json` for manifestet. Dev-serveren fikk
+  `.webmanifest/.ico/.json` i MIME-tabellen (ellers falt manifestet tilbake til index.html).
+* **«⬇ Installer Varmeplan»:** `beforeinstallprompt` fanges; knapp i avatar-menyen (dashbord og
+  topplinje) og en engangslinje på dashbordet («Installer · Ikke nå», «Ikke nå» huskes i
+  localStorage). `appinstalled` → begge skjules, toast «Varmeplan er installert — finn den i
+  Start-menyen». Kjører appen alt installert (`display-mode: standalone`) → ingen knapp. Nettlesere
+  uten `beforeinstallprompt` (Firefox, Safari): ingen knapp, ingen feil.
+* `?kilde=app` fjernes fra adressen ved oppstart. `docs/pwa/INSTALLER.md`: tre linjer til Fredrik.
+* Ny `_pwaRegressionTest()` (13 sjekker, grønn): manifest-lenke, theme-color, ikoner, registreringen
+  gatet (kildesjekk), sw.js uten `caches.put/open/add`, bare navigasjon, egen offline-side, manifest
+  som JSON med riktige felt.
+
+**Målt lokalt (headless Chromium):** sw registrert og aktiv på `/?dev`; `?present=` og `?kunde=` →
+ingen registrering, ingen knapp; simulert `beforeinstallprompt` → knapp i begge menyer + linja;
+«Ikke nå» → skjult og husket; «Installer» → `prompt()` kalt; `appinstalled` → toast; theme-color
+`#0d0e10` i mørkt og `#f0f4f8` i lyst tema; **nettet av → «Varmeplan trenger internett»-siden med
+Prøv igjen**, ikke hvit side. Ikke testet: selve installasjonen i Edge på Windows, Lighthouse.
+
+---
+
 ## 099 — Kabelmotor: stigetrinn innenfor toleransen er varianter; robust mot 1 cm veggflytting (17.10.2026, `main`, ikke pushet)
 
 Underlag: STATUS §38 (forstyrrelsestesten: 34 brudd av 136, «celler 5 → 4»). Full måling i STATUS §40.

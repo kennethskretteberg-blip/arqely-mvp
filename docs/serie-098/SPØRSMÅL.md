@@ -46,3 +46,19 @@ og «R-START tapt» i forstyrrelsestesten krever at referansen traff hjørnet. B
 MÅLINGEN, ikke i motoren — si fra hvis du vil ha de gamle definisjonene tilbake.
 
 ## 065 · PWA på Windows
+
+**Valgt:** `display: standalone` uten `window-controls-overlay` (kan ikke måles uten Windows; se
+endringsloggen). PNG-ene er laget med den lokale Chromium-en i stedet for `npx @resvg/resvg-js-cli`
+— samme resultat, ingen nedlasting av verktøy.
+
+**Spørsmål 1:** Skal `admin.html` også kunne installeres (eget manifest), eller holder ikonet?
+Jeg lot admin være en vanlig side.
+
+**Spørsmål 2:** Har en installatør først logget inn på varmeplan.no i Edge, ligger service workeren
+på hele origin-et — også når samme person åpner en `?present=`-lenke i samme nettleser. Den gjør
+bare «nettverk først» på navigasjon, så siden virker som før, men «Service Workers tom for den
+økten» gjelder bare en kunde som aldri har logget inn. Er det greit, eller skal `?present=` aktivt
+avregistrere?
+
+**Merknad:** Lighthouse og selve installasjonen i Edge på Windows er ikke kjørt her — det er
+sjekkpunkt 1–3 og 6 i prompten, som Kenneth må gjøre på PC-en.
