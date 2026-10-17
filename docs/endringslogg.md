@@ -4,6 +4,51 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 098 — Trapp, sidevisning: start og slutt speilet riktig per trinn; «Sidevisning» følger tegningen (17.10.2026, `main`, ikke pushet)
+
+Kenneth (Test Cenika, P0341): «Grønt og rødt merke … ligger feil plassert på sidevisning av trappen.
+Grønn start bør ligge helt til venstre. Rød stopp bør ligge helt til høyre.»
+
+**STEG 0 — målt, ikke antatt** (syntetisk trapp 10 × 30 cm, kantavstand 2 cm, og Kenneths egen Trapp 1):
+
+| | plan: brøk fra forkanten | sidevisning før | sidevisning etter |
+|---|---|---|---|
+| start, trinn 1, `bottom` | 0,067 (2 cm) | **0,933** (ved opptrinnet) | 0,067 |
+| slutt, trinn 10, `bottom` | 0,933 | **0,067** | 0,933 |
+
+* `run.pos_cm` er plan-lokal: `pos = 0` er `surf.y_cm`. Med byggeretning `bottom` (standard) ligger
+  neste trinn ved MINKENDE y, så `pos = 0` er opptrinnssiden og `pos = d_cm` forkanten (Regel 14).
+  Sidevisningen tegner opptrinnet i HØYRE ende, men brukte `xStart + pos_cm` — hele løpsrekka var
+  speilet innenfor hvert trinn. Det syntes bare på prikkene, fordi løpene ellers ligger jevnt.
+* **Avhenger av byggeretning:** med `top` ligger neste trinn ved ØKENDE y, så der er `pos = d_cm`
+  den delte kanten. Motoren (`generateStairCable`) leser ikke byggeretningen, så for `top`-trapper
+  legger PLANEN starten 2 cm fra opptrinnet, ikke fra forkanten (målt: brøk 0,933). Det er en
+  motor-/plan-sak utenfor 098 («Skal IKKE endre kabelutlegget») — står i SPØRSMÅL.
+* Repos: symmetriske marginer, samme løpsposisjoner speilet — bildet er likt, hvert løp får riktig side.
+* Skjermens `_drawStairSide` hadde samme speiling på løpsmerkene, og tegnet INGEN start-/sluttprikker.
+
+**Gjort**
+* Ny `_stairSideX(stair, sc, pos_cm)`: `xStart + depth − pos` for `bottom`, `xStart + pos` for `top`
+  — altså planens klatreretning projisert på sidevisningens x-akse. Brukes for løpsmerkene og
+  prikkene i både `_stairDrawSideToCanvas` (PDF) og `_drawStairSide` (skjerm).
+* Ny `_stairCableEndpoints(stair)`: start/slutt per kabel uavhengig av visning (kabelens egen
+  reiserekkefølge, første/siste segment per `cableIdx`). PDF-sidevisningen og skjermens sidevisning
+  leser den; skjermen har nå også grønn/rød prikk (og K1/K2 ved flere kabler). Planvisningene er urørt.
+* PDF: «Sidevisning» sto alene på side 3 med tegningen på side 4. Plasskontrollen var
+  `min(bildehøyde, 60) + 10`; nå sjekkes HELE blokken (overskrift + bilde + luft) før overskriften,
+  og bildets makshøyde holder av plass til overskriften. Tegnforklaringen «Start kabel · Slutt
+  kabel» hører til plantegningen: det siste planbildet får 12 mm mindre (6 mm linje + 6 mm luft),
+  så linja ikke skyves alene over på neste side. Målt: Test Kenneth-PDF-en gikk fra 7 til 6 sider,
+  side 2 = plan + tegnforklaring, side 3 = «Sidevisning» + tegning.
+* Ny `_stairSideRegressionTest()` (25 sjekker, grønn): trapper med/uten repos, begge byggeretninger,
+  snudd kabelstart og to kabler — brøken «avstand fra forkanten / trinndybde» er lik i plan og side
+  for hver kabels start og slutt; standardoppsettet har start < 0,2 og slutt > 0,8 fra venstre.
+  `_stairRegressionTest()` fortsatt grønn (24/24).
+
+Skjermbilder før/etter: `docs/serie-098/skjermbilder/098-*`.
+
+---
+
 ## 097 — PDF: én kilde for rommets produkter, og «m²» vises som m² (16.10.2026, `main`, ikke pushet)
 
 Kenneth (Coop Ålen, P0339 rev. 3): «Her regner ikke appen med rampe og inngang som jeg har lagt ut

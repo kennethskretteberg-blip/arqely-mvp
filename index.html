@@ -39319,6 +39319,45 @@ function _drawStairPlan(stair) {
   ctx.restore();
 }
 
+// 098 (Kenneth 17.10.2026: «grønn start bør ligge helt til venstre, rød stopp helt til høyre»):
+// dybdeposisjonen run.pos_cm er PLAN-lokal (0 = surf.y_cm). Sidevisningen tegner trappen stigende
+// mot HØYRE, med opptrinnet til neste trinn i høyre ende av hvert trinn. I planen ligger neste trinn
+// ved MINKENDE y når byggeretningen er 'bottom' (standard) og ved ØKENDE y ved 'top'
+// (_generateStairSurfaces). Sidevisningens x må derfor følge planens klatreretning:
+//   'bottom': x = xStart + depth − pos   (pos=0 er riser-siden, pos=d er forkanten — Regel 14)
+//   'top':    x = xStart + pos
+// Målt (STEG 0): før lå startprikken 28/30 fra venstre på trinn 1 (ved opptrinnet) mens planen
+// hadde den 2/30 fra forkanten. Samme regel for repos — de er symmetriske, så bildet er likt, men
+// hvert løp får riktig side. Brukes av løpsmerker OG start-/sluttprikker på skjerm og i PDF.
+function _stairSideX(stair, sc, pos_cm) {
+  const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
+  return sc.xStart + (bottomUp ? sc.depth - pos_cm : pos_cm);
+}
+// 098: start-/sluttpunkt per kabel, uavhengig av visning — flatene i kabelens EGEN reiserekkefølge
+// (stair.runs sin emisjonsrekkefølge, som kan være snudd ved cableStartFromTop), første/siste
+// segment per cableIdx. Returnerer { [cableIdx]: { start:{si,pos_cm,x_cm}, end:{...} } } der x_cm
+// er inn-/ut-enden langs bredden (planens x) og pos_cm dybdeposisjonen (planens y, lokal).
+function _stairCableEndpoints(stair) {
+  const surfs = stair.surfaces || [], endpoints = {};
+  if (!stair.runs || !stair.runs.length) return endpoints;
+  const runsBySurf = {};
+  for (const r of stair.runs) (runsBySurf[r.surfaceIdx] = runsBySurf[r.surfaceIdx] || []).push(r);
+  const seen = new Set(), order = [];
+  for (const r of stair.runs) if (!seen.has(r.surfaceIdx)) { seen.add(r.surfaceIdx); order.push(r.surfaceIdx); }
+  for (const si of order) {
+    const sf = surfs[si]; if (!sf) continue;
+    for (const run of (runsBySurf[si] || [])) {
+      const segsT = run.isGoingRight ? run.segments : [...run.segments].reverse();
+      for (const seg of segsT) {
+        const inX = run.isGoingRight ? seg.start_cm : seg.end_cm, outX = run.isGoingRight ? seg.end_cm : seg.start_cm;
+        const a = { si, pos_cm: run.pos_cm, x_cm: sf.x_cm + inX }, b = { si, pos_cm: run.pos_cm, x_cm: sf.x_cm + outX };
+        if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: a, end: b }; else endpoints[seg.cableIdx].end = b;
+      }
+    }
+  }
+  return endpoints;
+}
+
 function _drawStairSide(stair) {
   const isSel = S.ui.selectedStairId === stair.id;
   const isHov = !isSel && _hoveredStairId === stair.id;
@@ -39410,8 +39449,9 @@ function _drawStairSide(stair) {
       // stedet for én linje som strekker seg over hele trinnet (uansett N).
       const tickHalf = Math.max(1.5, Math.min(sc.depth * 0.12, 5));
       for (const run of surfRuns) {
-        const tx0 = Math.max(sc.xStart, sc.xStart + run.pos_cm - tickHalf);
-        const tx1 = Math.min(sc.xStart + sc.depth, sc.xStart + run.pos_cm + tickHalf);
+        const sx = _stairSideX(stair, sc, run.pos_cm);   // 098: speilet per trinn etter byggeretning
+        const tx0 = Math.max(sc.xStart, sx - tickHalf);
+        const tx1 = Math.min(sc.xStart + sc.depth, sx + tickHalf);
         // STEG 2 (Regel 11): et løp kan tilhøre to kabler — sidevisningen er en dybde-skjematisk
         // strek (viser ikke bredden), så del streken proporsjonalt etter hvert segments cm-lengde
         // og fargelegg hver del deretter, i stedet for å velge én farge for hele streken.
@@ -39453,6 +39493,23 @@ function _drawStairSide(stair) {
       }
     }
     ctx.setLineDash([]);
+
+    // 098: start-/sluttprikk per kabel også på skjermens sidevisning (PDF-en hadde dem fra 085,
+    // skjermen ikke) — samme kilde (_stairCableEndpoints) og samme speiling (_stairSideX) som PDF.
+    const endpoints = _stairCableEndpoints(stair);
+    for (let ci = 0; ci < Math.max(1, (stair.cables || []).length); ci++) {
+      const ep = endpoints[ci]; if (!ep) continue;
+      const scS = surfSideCoords[ep.start.si], scE = surfSideCoords[ep.end.si];
+      if (scS) {
+        const sp = w2s(ox + _stairSideX(stair, scS, ep.start.pos_cm), oy + scS.yTop);
+        ctx.fillStyle = '#22cc44'; ctx.beginPath(); ctx.arc(sp.x, sp.y, 4, 0, Math.PI * 2); ctx.fill();
+        if (hasMultiCable) { ctx.fillStyle = STAIR_CABLE_COLORS[ci] || '#fff'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText('K' + (ci + 1), sp.x + 6, sp.y - 2); }
+      }
+      if (scE) {
+        const epx = w2s(ox + _stairSideX(stair, scE, ep.end.pos_cm), oy + scE.yTop);
+        ctx.fillStyle = '#ee3322'; ctx.beginPath(); ctx.arc(epx.x, epx.y, 4, 0, Math.PI * 2); ctx.fill();
+      }
+    }
   }
 
   // 085: opptrinn-kjede + total høyde (venstre), inntrinn-kjede + total lengde (under) når valgt.
@@ -43538,6 +43595,83 @@ function _stairRegressionTest() {
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_stairRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// 098 — regresjonstest for sidevisningens speiling. Kjøres fra konsollen: _stairSideRegressionTest().
+// For trapper med/uten repos, begge byggeretninger, snudd kabelstart og flere kabler skal start- og
+// sluttprikken i sidevisningen ligge på SAMME fysiske kant som i planen: brøken «avstand fra
+// forkanten / trinndybde» sammenlignes mellom de to visningene. Planens forkant for en flate er den
+// kanten som vender BORT fra neste flate i trappa (samme definisjon som «↓ Nederste trinn»-teksten
+// i _stairDrawToCanvas); sidevisningens forkant er alltid venstre ende (xStart).
+function _stairSideRegressionTest() {
+  const saved = { stairs: S.stairs, sel: S.ui.selectedStairId, prods: HEATING_PRODUCTS.slice(), cats: PRODUCT_CATEGORIES.slice(),
+    nextStair: S.counters.nextStairId, undoLen: _undoStack.length, autosave: window._performAutoSave };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    window._performAutoSave = async () => {};
+    const LENS = [20, 30, 40.1, 49.7, 60, 70, 78.7, 89.1, 98, 106.9, 128.2, 139.9];
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push({ id: 9800, module_type: 'cable', name: 'TESTKABEL' });
+    HEATING_PRODUCTS.length = 0;
+    LENS.forEach((L, i) => HEATING_PRODUCTS.push({ id: 98000 + i, category_id: 9800, active: true, product_family: 'InSnow 30T',
+      name: `InSnow 30T ${Math.round(L * 30)}W ${L}m`, cable_length_m: L, watt_per_m: 30, voltage: 230 }));
+    const repos = [{ type: 'steps', stepCount: 4, stepDepth_cm: 30, stepHeight_cm: 17, width_cm: 100 }, { type: 'landing', depth_cm: 90, width_cm: 100 },
+      { type: 'steps', stepCount: 4, stepDepth_cm: 30, stepHeight_cm: 17, width_cm: 100 }];
+    const cases = [
+      ['bottom', {}], ['top', { buildDirection: 'top' }],
+      ['bottom+repos', { segments: repos }], ['top+repos', { buildDirection: 'top', segments: repos }],
+      ['bottom, start øverst', { cableStartFromTop: true }], ['top, start øverst', { buildDirection: 'top', cableStartFromTop: true }],
+      ['bottom, 2 kabler', { desiredCableCount: 2, width_cm: 200, step_count: 14 }],
+    ];
+    for (const [name, extra] of cases) {
+      S.counters.nextStairId = 998101;
+      const st = _createStairObj({ name: 'TEST', width_cm: 100, step_depth_cm: 30, step_height_cm: 17, step_count: 10,
+        edgeMargin_cm: 5, stepCC_cm: 10, cableSpacing_cm: 10, riserOffset_cm: 2, noseOffset_cm: 2, ...extra });
+      S.stairs = [st];
+      if (extra.desiredCableCount > 1) {   // to kabler får løp først når et to-kabel-forslag er valgt
+        const p2 = _generateStairProposals(st).find(p => p.cableCount === extra.desiredCableCount);
+        if (p2) _applyStairProposal(st, p2);
+      }
+      const surfs = st.surfaces;
+      if (!st.runs.length) { check(name + ': har utlegg', '>0 løp', false, 0); continue; }
+      // Planens forkant per flate: kanten som vender bort fra neste flate (siste flate: bort fra forrige).
+      const planFront = si => { const s = surfs[si], nb = surfs[si + 1] || surfs[si - 1]; const away = surfs[si + 1] ? 1 : -1;
+        const nbCenter = nb.y_cm + nb.d_cm / 2, c = s.y_cm + s.d_cm / 2; const nextIsBelow = (nbCenter > c) === (away === 1);
+        return nextIsBelow ? s.y_cm : s.y_cm + s.d_cm; };
+      const planFrac = p => Math.abs((surfs[p.si].y_cm + p.pos_cm) - planFront(p.si)) / surfs[p.si].d_cm;
+      let xs = 0; const coords = surfs.map(sf => { const c = { xStart: xs, depth: sf.d_cm }; xs += sf.d_cm; return c; });
+      const sideFrac = p => (_stairSideX(st, coords[p.si], p.pos_cm) - coords[p.si].xStart) / coords[p.si].depth;
+      const eps = _stairCableEndpoints(st);
+      const nC = Math.max(1, (st.cables || []).length);
+      check(name + ': antall kabler med endepunkt', nC, Object.keys(eps).length === nC, Object.keys(eps).length);
+      for (let ci = 0; ci < nC; ci++) {
+        const ep = eps[ci]; if (!ep) continue;
+        for (const [k, p] of [['start', ep.start], ['slutt', ep.end]]) {
+          const a = planFrac(p), b = sideFrac(p);
+          check(`${name}: K${ci + 1} ${k} (flate ${p.si + 1}) samme brøk fra forkanten`, a.toFixed(3), Math.abs(a - b) < 1e-6, b.toFixed(3));
+        }
+      }
+      // Fysisk forventning for standardoppsettet (bunn-start, 'bottom'): start ved forkanten nederst,
+      // slutt ved bakkanten øverst — det Kenneth ba om.
+      if (name === 'bottom') {
+        check('bottom: start på trinn 1 nær forkanten (venstre i side)', '< 0.2', sideFrac(eps[0].start) < 0.2 && eps[0].start.si === 0, sideFrac(eps[0].start).toFixed(3));
+        check('bottom: slutt på øverste trinn nær bakkanten (høyre i side)', '> 0.8', sideFrac(eps[0].end) > 0.8 && eps[0].end.si === surfs.length - 1, sideFrac(eps[0].end).toFixed(3));
+      }
+    }
+  } catch (e) {
+    results.push({ name: 'unntak', ok: false, expected: 'ingen', got: String(e && e.message || e) });
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(...saved.cats);
+    S.stairs = saved.stairs; S.ui.selectedStairId = saved.sel; S.counters.nextStairId = saved.nextStair;
+    _undoStack.length = saved.undoLen;
+    window._performAutoSave = saved.autosave;
+    _invalidateStairCache();
+    try { renderSidebar(); updateCtxBar(); render(); } catch (e) {}
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_stairSideRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
   return { ok: allOk, results };
 }
 
@@ -67967,9 +68101,15 @@ async function exportPDF(opts) {
     // alltid å prioritere bredden. Nå som liggende bånd får en liggende SIDE (over), er dette i
     // praksis alltid høyde-bundet for dem — bredde-bundet gjelder fortsatt en stående enkelttrapp.
     try {
-      for (const img of _stairImages) {
+      // 098: tegnforklaringen («Start kabel · Slutt kabel», 6 mm) hører til plantegningen — det
+      // SISTE bildet får plass trukket fra så linja aldri skyves alene over på neste side: 6 mm linje
+      // + 4 + 2 mm luft etter bildet (y += drawH + 4; y += 2) = 12 mm. Målt: 6 mm holdt ikke —
+      // lufta spiste reservasjonen og linja sto alene på side 3 likevel.
+      const _legendMm = (stair.runs && stair.runs.length > 0) ? 12 : 0;
+      for (let ii = 0; ii < _stairImages.length; ii++) {
+        const img = _stairImages[ii];
         _checkPageS(40);
-        const availH = (pageH_s - M) - y - 2; // 2mm sikkerhetsluft — _checkPageS(40) har avgjort endelig y
+        const availH = (pageH_s - M) - y - 2 - (ii === _stairImages.length - 1 ? _legendMm : 0); // 2mm sikkerhetsluft — _checkPageS(40) har avgjort endelig y
         let drawW = availH * img.aspect, drawH = availH;
         if (drawW > pw_s) { drawW = pw_s; drawH = pw_s / img.aspect; }
         doc.addImage(img.dataUrl, 'PNG', M + (pw_s - drawW) / 2, y, drawW, drawH);
@@ -68000,9 +68140,14 @@ async function exportPDF(opts) {
       let _sideImgs = [];
       try { _sideImgs = _renderStairSidePrintImages(stair); } catch(e) { _sideImgs = []; }
       if (_sideImgs.length) {
-        const _maxSideH = pageH_s - 2 * M;
+        // 098 (Kenneth: «Sidevisning» sto alene på side 3, tegningen kom på side 4): overskriften
+        // følger tegningen. Plassen sjekkes for HELE blokken (overskrift 4,5 mm + bilde + luft) FØR
+        // overskriften skrives, og bildets makshøyde holder av plass til overskriften, så blokken
+        // alltid får rom på en fersk side. Før: sjekken var min(bildehøyde, 60) + 10 — stemte
+        // bildet ikke i resten, kom sideskiftet ETTER overskriften.
+        const _maxSideH = pageH_s - 2 * M - 8.5;
         const _fit = img => { let w = pw_s, h = pw_s / img.aspect; if (h > _maxSideH) { w = _maxSideH * img.aspect; h = _maxSideH; } return { w, h }; };
-        _checkPageS(Math.min(_fit(_sideImgs[0]).h, 60) + 10);
+        _checkPageS(4.5 + _fit(_sideImgs[0]).h + 4);
         doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(20, 60, 130);
         doc.text('Sidevisning', M, y); y += 4.5;
         for (const img of _sideImgs) {
@@ -69625,8 +69770,9 @@ function _stairDrawSideToCanvas(stair, opts) {
       const sc = coords[+si];
       const tickHalf = Math.max(1.5, Math.min(sc.depth * 0.12, 5));
       for (const run of surfRuns) {
-        const tx0 = Math.max(sc.xStart, sc.xStart + run.pos_cm - tickHalf);
-        const tx1 = Math.min(sc.xStart + sc.depth, sc.xStart + run.pos_cm + tickHalf);
+        const sx = _stairSideX(stair, sc, run.pos_cm);   // 098: speilet per trinn etter byggeretning
+        const tx0 = Math.max(sc.xStart, sx - tickHalf);
+        const tx1 = Math.min(sc.xStart + sc.depth, sx + tickHalf);
         const totalCm = run.segments.reduce((s, g) => s + (g.end_cm - g.start_cm), 0) || 1;
         let acc = 0;
         for (const seg of run.segments) {
@@ -69654,21 +69800,14 @@ function _stairDrawSideToCanvas(stair, opts) {
     }
     c.setLineDash([]);
     // Start-/sluttprikk per kabel: første/siste segment i kabelens egen reiserekkefølge (som planen).
-    const endpoints = {};
-    const seen = new Set(), order = [];
-    for (const r of stair.runs) if (!seen.has(r.surfaceIdx)) { seen.add(r.surfaceIdx); order.push(r.surfaceIdx); }
-    for (const si of order) for (const run of (runsBySurf[si] || [])) {
-      const segsT = run.isGoingRight ? run.segments : [...run.segments].reverse();
-      for (const seg of segsT) {
-        const pt = { x: coords[si].xStart + run.pos_cm, y: coords[si].yTop, si };
-        if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: pt, end: pt }; else endpoints[seg.cableIdx].end = pt;
-      }
-    }
+    // 098: felles kilde (_stairCableEndpoints) og speilet x (_stairSideX) — før lå prikken på
+    // xStart + pos_cm, altså i opptrinnsenden for start og forkanten for slutt.
+    const endpoints = _stairCableEndpoints(stair);
     const markerR = Math.max(3, scale * 0.5);
     for (let ci = 0; ci < Math.max(1, (stair.cables || []).length); ci++) {
       const ep = endpoints[ci]; if (!ep) continue;
-      if (ep.start.si >= rFrom && ep.start.si <= rTo) { c.fillStyle = '#22cc44'; c.beginPath(); c.arc(tx(ep.start.x), ty(ep.start.y), markerR, 0, Math.PI * 2); c.fill(); }
-      if (ep.end.si >= rFrom && ep.end.si <= rTo) { c.fillStyle = '#ee3322'; c.beginPath(); c.arc(tx(ep.end.x), ty(ep.end.y), markerR, 0, Math.PI * 2); c.fill(); }
+      if (ep.start.si >= rFrom && ep.start.si <= rTo) { const sc = coords[ep.start.si]; c.fillStyle = '#22cc44'; c.beginPath(); c.arc(tx(_stairSideX(stair, sc, ep.start.pos_cm)), ty(sc.yTop), markerR, 0, Math.PI * 2); c.fill(); }
+      if (ep.end.si >= rFrom && ep.end.si <= rTo) { const sc = coords[ep.end.si]; c.fillStyle = '#ee3322'; c.beginPath(); c.arc(tx(_stairSideX(stair, sc, ep.end.pos_cm)), ty(sc.yTop), markerR, 0, Math.PI * 2); c.fill(); }
     }
   }
 
