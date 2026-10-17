@@ -4,6 +4,36 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 075 — Høyreklikkmenyer måler egen høyde og holdes innenfor skjermen; romtyper i to kolonner (17.10.2026, `main`, ikke pushet)
+
+Kenneth: «Menyen som kommer opp ved høyreklikk fra rom er så stor at den går under skjermen, ingen
+mulighet å se hva som står nederst.»
+
+**Målt i koden:** `showCtxAt` plasserte alle 15 høyreklikkmenyene med en fast antakelse
+(`top = min(y, innerHeight − 230)`, `left = min(x, innerWidth − 180)`); `#ctx-menu` hadde verken
+`max-height` eller rulling. Rom-menyen har ~20 rader (ti romtyper som én rad hver — tolv i
+Oslo Elektriske-kopien, der orgen har egne typer) og var 740+ px høy. `showProduktDropdown`
+gjettet 200 px bredde og leste `scrollHeight` før layout. De seks panelene (avstand, veggmargin,
+labelfarge m.fl.) måler allerede `offsetWidth/Height` og er urørt.
+
+**Gjort**
+* Ny `_placePopupAt(el, x, y)`: viser elementet usynlig, leser målt bredde/høyde, og plasserer det
+  under pekeren hvis det er plass, ellers OVER pekeren, ellers klemt til `[8, innerHeight − h − 8]`;
+  samme mot høyre/venstre kant. Brukes av `showCtxAt` (alle 15 menyene) og `showProduktDropdown`.
+* CSS: `#ctx-menu` og `#produkt-menu` har `max-height: calc(100vh − 16px); overflow-y: auto` —
+  på et lavt vindu rulles menyen i stedet for å forsvinne. `scrollTop` nullstilles ved åpning.
+* Rom-menyen: romtypene i et to-kolonners rutenett (`.ctx-grid`, ikon + navn, samme
+  `setRoomType`-klikk, rekkefølgen beholdt radvis), gjeldende romtype uthevet (`.ctx-item.sel`).
+  Lange navn får ellipse og `title`.
+
+**Målt etter** (1440 × 900, Ekebergveien 28-kopi, 12 romtyper): rom-menyen er 543 px (før ≈ 740).
+Høyreklikk 40 px over bunnen → åpner over pekeren (topp 311, bunn 854), «Slett rom» klikkbar.
+Øverst → under pekeren som før. Helt til høyre → speilet til venstre for pekeren (høyre kant 1420).
+Vindu 500 px høyt → menyen 484 px, rullbar (innhold 541), alt innenfor 8 px-margen. Vegg-, hjørne-
+og produktmenyene åpner riktig. Skjermbilder: `docs/serie-098/skjermbilder/075-*`.
+
+---
+
 ## 098 — Trapp, sidevisning: start og slutt speilet riktig per trinn; «Sidevisning» følger tegningen (17.10.2026, `main`, ikke pushet)
 
 Kenneth (Test Cenika, P0341): «Grønt og rødt merke … ligger feil plassert på sidevisning av trappen.
