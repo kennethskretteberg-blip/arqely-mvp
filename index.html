@@ -13297,6 +13297,70 @@ function _isSnowRoom(room) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
+// 036 · BEREGNET PER ROM — STEMPLET INN I PROSJEKTET VED LAGRING (til feltappen)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Feltappen (varmeplan-app) skal vise c/c og flateeffekt når montøren åpner et rom, men den
+// låste arkitekturen (07.10.2026) sier at appen ALDRI regner en regel på nytt. Derfor regner web
+// det ferdig og legger `room.computed` i `data.rooms[]` ved lagring (_buildSaveData). Appen viser
+// bare tallet. Ingen nye formler her — alt er de samme funksjonene Romoversikt/Excel/PDF bruker.
+//
+// Flateeffekt: SAMME per-rom-avgjørelse som Romoversikt (PDF-tabellen, Excel-arket og
+// _listWm2FlateStr) tar i dag: snø-rom → _roomFlateeffektWm2 (produktets W/m² der det ligger),
+// innendørs → ratet effekt ÷ netto gulv. Reserven teller ikke (0 W i _roomProductRows, og
+// _computeRoomStats hopper over den).
+function _roomOversiktWm2(room, stats) {
+  if (!room) return 0;
+  stats = stats || _computeRoomStats(room);
+  if (_isSnowRoom(room)) return _roomFlateeffektWm2(room, stats) || 0;
+  const nettoM2 = stats.nettoM2 || 0;
+  return nettoM2 > 0 ? Math.round(_roomRatedEffectW(room) / nettoM2) : 0;
+}
+
+// Rommets c/c — ÉTT tall bare når alle produktene med c/c i rommet har det samme. Flere ulike
+// (to kabler med 10 og 15 cm, kabel + matte) → null. Et tall som later som det gjelder hele
+// rommet når det ikke gjør det, er verre enn ingen tall. Folie og plater har ingen c/c.
+// Kilder er de samme som etikettene bruker: kabelens `spacing_cm`, mattens `mat_cc_mm` (fallback
+// 80 mm som i _matLabelInfoLine/drawMats), aluboard fast 10 cm (_aluboardComponents).
+function _roomCcCm(room) {
+  if (!room) return null;
+  const vals = new Set();
+  for (const c of _cablesForRoom(room.id)) {
+    if (c.reserve) continue;
+    if (c.spacing_cm > 0) vals.add(Math.round(c.spacing_cm * 10) / 10);
+  }
+  for (const m of _matsForRoom(room.id)) {
+    const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
+    vals.add(Math.round(((p?.mat_cc_mm || 80) / 10) * 10) / 10);
+  }
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== room.id) continue;
+    const p = (typeof _matFreeProdOf === 'function') ? _matFreeProdOf(mp) : null;
+    vals.add(Math.round(((p?.mat_cc_mm || 80) / 10) * 10) / 10);
+  }
+  if (typeof _aluboardsForRoom === 'function' && _aluboardsForRoom(room.id).length) vals.add(10);
+  return vals.size === 1 ? [...vals][0] : null;
+}
+
+// Selve stempelet. Returnerer et NYTT objekt — rører aldri rommet, S, undo eller tegningen.
+// Et rom uten produkter får flateeffektWm2 = null (ikke ønsket W/m² — det er ikke «beregnet»).
+// Kaster noe under (korrupt rom), returnerer vi null, og lagringen går som før uten stempel.
+function _roomComputedStamp(room) {
+  try {
+    const stats = _computeRoomStats(room);
+    const harProdukter = _roomProductRows(room).length > 0;
+    return {
+      nettoM2: Math.round((stats.nettoM2 || 0) * 100) / 100,
+      flateeffektWm2: harProdukter ? Math.round(_roomOversiktWm2(room, stats)) : null,
+      ccCm: harProdukter ? _roomCcCm(room) : null,
+      stampedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    console.warn('036: computed-stempel feilet for rom ' + (room && room.id) + ': ' + e.message);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
 // 097 · ROMMETS PRODUKTER — ÉN KILDE (_roomProductRows)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // Kenneth 16.10.2026 (Coop Ålen, P0339 rev. 3): «Her regner ikke appen med rampe og inngang som
@@ -35083,6 +35147,140 @@ function _flateeffektRegressionTest() {
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_flateeffektRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// ═══ 036 · REGRESJONSTEST «BEREGNET PER ROM» (room.computed) ══════════════════════════════
+// Kjør `_computedStampRegressionTest()` i konsollen etter endringer i _roomComputedStamp,
+// _roomCcCm, _roomOversiktWm2 eller _buildSaveData. Syntetisk katalog og rom, alt gjenopprettes.
+function _computedStampRegressionTest() {
+  const saved = { rooms: S.rooms, mats: S.mats, cables: S.cables, strips: S.strips, matPaths: S.matPaths,
+    hind: S.hindrings, zones: S.zones, parts: S.project && S.project.parts, part: S.ui.activePartId,
+    prods: HEATING_PRODUCTS.slice(), project: S.project };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const checkIkke = (name, cond, got) => results.push({ name, ok: !cond, expected: 'nei', got });
+  try {
+    const CAB = { id: 9971, category_id: 9500, active: true, product_family: 'STEMPELTEST',
+      name: 'STEMPELTEST 10T 100m', article_no: 'SP10', watt_per_m: 10, cable_length_m: 100,
+      total_effect_w: 1000, voltage: 230, min_spacing_mm: 50, max_spacing_mm: 200 };
+    const CAB2 = { id: 9972, category_id: 9500, active: true, product_family: 'STEMPELTEST',
+      name: 'STEMPELTEST 10T 50m', article_no: 'SP05', watt_per_m: 10, cable_length_m: 50,
+      total_effect_w: 500, voltage: 230, min_spacing_mm: 50, max_spacing_mm: 200 };
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(CAB, CAB2);
+    S.project = S.project || {};
+    S.project.parts = [{ id: 1, name: 'Inne', moduleType: 'indoor' }];
+    S.ui.activePartId = 1;
+    const PTS = [{x:0,y:0},{x:500,y:0},{x:500,y:400},{x:0,y:400}];   // 20 m² brutto
+    const mkRoom = (id, extra) => ({ id, name: 'R' + id, floorId: null, partId: 1,
+      shape: 'rect', wallThicknessCm: 0, points: PTS.map(p => ({...p})), walls: [], dims: [],
+      area: 200000, roomType: null, targetWm2: 130, moduleType: 'indoor', ...(extra || {}) });
+    const mkCable = (id, roomId, pid, cc, extra) => ({ id, roomId, productId: pid, labelOnly: true,
+      spacing_cm: cc, cc_mm: cc * 10, totalLength_cm: (HEATING_PRODUCTS.find(p => p.id === pid).cable_length_m) * 100,
+      runs: [], ...(extra || {}) });
+    const reset = () => { S.mats = []; S.cables = []; S.strips = []; S.matPaths = []; S.zones = [];
+      S.hindrings = []; _invalidateMatCache(); _invalidateStripCache();
+      if (typeof _invalidateCableCache === 'function') _invalidateCableCache(); };
+    // Romoversiktens egen formel (Excel-arket/PDF-tabellen, innendørs): ratet ÷ netto.
+    const oversikt = (room) => { const st = _computeRoomStats(room);
+      return _isSnowRoom(room) ? _roomFlateeffektWm2(room, st)
+        : (st.nettoM2 > 0 ? Math.round(_roomRatedEffectW(room) / st.nettoM2) : 0); };
+
+    // ── 1. Rom med ett produkt (1 m² hindring → 19 m² netto) ─────────────────────────────
+    reset();
+    S.rooms = [mkRoom(997001)];
+    S.hindrings = [{ id: 1, roomId: 997001, points: [{x:100,y:100},{x:200,y:100},{x:200,y:200},{x:100,y:200}] }];
+    S.cables = [mkCable(1, 997001, CAB.id, 10)];
+    let c = _roomComputedStamp(S.rooms[0]);
+    check('1: nettoM2 = 19,00 (20 − 1 hindring)', 19, c && c.nettoM2 === 19, c && c.nettoM2);
+    check('1: ccCm = 10', 10, c && c.ccCm === 10, c && c.ccCm);
+    check('1: flateeffektWm2 = det Romoversikt viser (1000 W ÷ 19 m² = 53)', oversikt(S.rooms[0]),
+      c && c.flateeffektWm2 === oversikt(S.rooms[0]) && c.flateeffektWm2 === 53, c && c.flateeffektWm2);
+    check('1: stampedAt er ISO-dato', true, c && /^\d{4}-\d{2}-\d{2}T/.test(c.stampedAt), c && c.stampedAt);
+    checkIkke('1: stempelet rører ikke rommet', 'computed' in S.rooms[0], 'computed satt på S.rooms');
+
+    // ── 2. To produkter med ulik c/c → ccCm null ─────────────────────────────────────────
+    reset();
+    S.rooms = [mkRoom(997002)];
+    S.cables = [mkCable(1, 997002, CAB.id, 10), mkCable(2, 997002, CAB2.id, 15)];
+    c = _roomComputedStamp(S.rooms[0]);
+    check('2: to ulike c/c → ccCm er null', null, c && c.ccCm === null, c && c.ccCm);
+    S.cables = [mkCable(1, 997002, CAB.id, 10), mkCable(2, 997002, CAB2.id, 10)];
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+    c = _roomComputedStamp(S.rooms[0]);
+    check('2b: to like c/c → ccCm = 10', 10, c && c.ccCm === 10, c && c.ccCm);
+
+    // ── 3. Hovedkabel + reserve → samme flateeffekt som uten reserven ───────────────────
+    reset();
+    S.rooms = [mkRoom(997003)];
+    S.cables = [mkCable(1, 997003, CAB.id, 10)];
+    const uten = _roomComputedStamp(S.rooms[0]);
+    S.cables = [mkCable(1, 997003, CAB.id, 10), mkCable(2, 997003, CAB.id, 10, { reserve: true, mainCableId: 1 })];
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+    const med = _roomComputedStamp(S.rooms[0]);
+    check('3: reserven endrer ikke flateeffekten', uten.flateeffektWm2,
+      med.flateeffektWm2 === uten.flateeffektWm2 && uten.flateeffektWm2 === 50, med.flateeffektWm2);
+    check('3: reserven endrer ikke c/c', 10, med.ccCm === 10, med.ccCm);
+
+    // ── 4. Rom uten produkter → nettoM2 satt, flateeffektWm2 null, ccCm null ────────────
+    reset();
+    S.rooms = [mkRoom(997004)];
+    c = _roomComputedStamp(S.rooms[0]);
+    check('4: tomt rom → nettoM2 = 20', 20, c && c.nettoM2 === 20, c && c.nettoM2);
+    check('4: tomt rom → flateeffektWm2 null (ikke ønsket W/m²)', null, c && c.flateeffektWm2 === null, c && c.flateeffektWm2);
+    check('4: tomt rom → ccCm null', null, c && c.ccCm === null, c && c.ccCm);
+
+    // ── 5. listMode-rom → nettoM2 = areal − listHindCm2 ──────────────────────────────────
+    reset();
+    S.rooms = [mkRoom(997005, { listMode: true, points: [], listHindCm2: 20000 })];
+    S.cables = [mkCable(1, 997005, CAB.id, 10)];
+    c = _roomComputedStamp(S.rooms[0]);
+    check('5: listMode → nettoM2 = 18 (20 − 2)', 18, c && c.nettoM2 === 18, c && c.nettoM2);
+    check('5: listMode → flateeffekt = Romoversiktens tall', oversikt(S.rooms[0]),
+      c && c.flateeffektWm2 === oversikt(S.rooms[0]), c && c.flateeffektWm2);
+
+    // ── 6. To stempler på rad er like (bortsett fra stampedAt) ──────────────────────────
+    reset();
+    S.rooms = [mkRoom(997006)];
+    S.hindrings = [{ id: 1, roomId: 997006, points: [{x:100,y:100},{x:200,y:100},{x:200,y:200},{x:100,y:200}] }];
+    S.cables = [mkCable(1, 997006, CAB.id, 10)];
+    const a = _roomComputedStamp(S.rooms[0]), b = _roomComputedStamp(S.rooms[0]);
+    const strip = (x) => JSON.stringify({ ...x, stampedAt: undefined });
+    check('6: lagring to ganger gir samme computed', strip(a), strip(a) === strip(b), strip(b));
+
+    // ── 7. Kildesjekk: _buildSaveData stempler, og stempelet er ingen brukerhandling ─────
+    const kSave = _kildeUtenKommentarer(_buildSaveData);
+    check('7: _buildSaveData kaller _roomComputedStamp per rom', true, /_roomComputedStamp\(r\)/.test(kSave), 'mangler');
+    check('7: et gammelt computed fra innlastingen kastes før nytt settes', true,
+      /computed: _gammelt/.test(kSave), 'gammelt stempel kan overleve');
+    const kStamp = _kildeUtenKommentarer(_roomComputedStamp) + _kildeUtenKommentarer(_roomCcCm) + _kildeUtenKommentarer(_roomOversiktWm2);
+    checkIkke('7: ingen pushUndo / render / _invalidate i stempelet', /pushUndo|render\(|_invalidate|_markProjectDirty/.test(kStamp), 'side-effekt');
+
+    // ── 8. Kostnad (B5): 40 rom med én kabel hver, stemplet som ved lagring ─────────────
+    reset();
+    S.rooms = []; S.cables = [];
+    for (let i = 0; i < 40; i++) { S.rooms.push(mkRoom(998100 + i)); S.cables.push(mkCable(100 + i, 998100 + i, CAB.id, 10)); }
+    S.hindrings = S.rooms.map((r, i) => ({ id: 500 + i, roomId: r.id, points: [{x:100,y:100},{x:200,y:100},{x:200,y:200},{x:100,y:200}] }));
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+    const t0 = performance.now();
+    const stamps = S.rooms.map(r => _roomComputedStamp(r));
+    const ms = Math.round((performance.now() - t0) * 10) / 10;
+    check('8: 40 rom stemplet på under 200 ms (målt: ' + ms + ' ms)', '< 200 ms', ms < 200 && stamps.every(Boolean), ms + ' ms');
+  } catch (e) {
+    check('testen kjørte uten å kaste', true, false, e.message);
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    S.project = saved.project;
+    if (S.project) S.project.parts = saved.parts;
+    S.rooms = saved.rooms; S.mats = saved.mats; S.cables = saved.cables; S.strips = saved.strips;
+    S.matPaths = saved.matPaths; S.hindrings = saved.hind; S.zones = saved.zones;
+    S.ui.activePartId = saved.part;
+    _invalidateMatCache(); _invalidateStripCache();
+    if (typeof _invalidateCableCache === 'function') _invalidateCableCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_computedStampRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  if (!allOk) console.table(results.filter(r => !r.ok));
   return { ok: allOk, results };
 }
 
@@ -64807,7 +65005,12 @@ function _wfKundeModal() {
   wrap.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:420px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,.4)">
     <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:14px">Kunde & prosjektinfo</div>
     <div class="dash-create-field" style="margin-bottom:10px"><label>Kontaktperson</label><input id="wf-k-contact" class="dash-create-input" value="${_esc(p.contact_name||'')}"></div>
-    <div class="dash-create-field" style="margin-bottom:16px"><label>Adresse</label><input id="wf-k-addr" class="dash-create-input" value="${_esc(p.description||'')}"></div>
+    <div class="dash-create-field" style="margin-bottom:10px"><label>Adresse</label><input id="wf-k-addr" class="dash-create-input" value="${_esc(p.description||'')}"></div>
+    <!-- 036: matrikkel + boligmappenummer tastes ÉN gang her ved prosjektering og følger
+         data.project til feltappens garantibevis (samsvarserklæringsskjemaet NHO Elektro-
+         dokumentasjon v2.0 har dem som egne felt; Boligmappa er godkjent oppbevaringssted). -->
+    <div class="dash-create-field" style="margin-bottom:10px"><label>Matrikkel</label><input id="wf-k-matrikkel" class="dash-create-input" value="${_esc(p.matrikkel||'')}" placeholder="kommunenr-gnr/bnr/fnr/snr"></div>
+    <div class="dash-create-field" style="margin-bottom:16px"><label>Boligmappenummer (valgfritt)</label><input id="wf-k-boligmappe" class="dash-create-input" value="${_esc(p.boligmappeNr||'')}" placeholder="Boligmappa"></div>
     <div class="dash-create-field" style="margin-bottom:16px">
       <!-- 062: feltet er erstattet av en LESBAR LINJE med «Endre». #wf-k-resp lever videre som
            skjult verdibærer, slik at _wfKundeSave fortsatt leser én og samme kilde — ingen ny
@@ -64904,6 +65107,11 @@ function _wfKundeSave() {
   if (!S.project) S.project = {};
   S.project.contact_name = g('wf-k-contact') || null;
   S.project.description = g('wf-k-addr');
+  // 036: tomt felt lagres IKKE som tom streng — nøkkelen fjernes, så feltappen kan skille
+  // «ikke oppgitt» (undefined) fra «oppgitt». Fritekst, ikke validert (formatet varierer).
+  const _matr = g('wf-k-matrikkel'), _bm = g('wf-k-boligmappe');
+  if (_matr) S.project.matrikkel = _matr; else delete S.project.matrikkel;
+  if (_bm) S.project.boligmappeNr = _bm; else delete S.project.boligmappeNr;
   // spec-prosjektert-av-redigerbar-og-kolonne.md DEL A, krav 3: responsible sin egen konvensjon
   // er '' for tomt (state-fabrikken, _restoreProject, _fetchProjects) — IKKE || null slik
   // contact_name gjør. Forsiden venter '', ikke null.
@@ -66022,12 +66230,20 @@ function _buildSaveData() {
     _version : 2,
     project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now(), _prog},
     floors   : S.floors.map(f=>({...f})),
-    rooms    : S.rooms.map(r=>({
-      ...r,
-      points : r.points.map(p=>({...p})),
-      walls  : r.walls.map(w=>({...w})),
-      dims   : (r.dims||[]).map(d=>({...d})),
-    })),
+    // 036: `computed` stemples ferskt ved HVER lagring (feltappen leser det). Et gammelt stempel
+    // fra innlastingen (ligger i r etter _restoreProject) kastes først, så det aldri overlever
+    // uendret ved siden av nye tall. Feiler stempelet, lagres rommet uten `computed`.
+    rooms    : S.rooms.map(r=>{
+      const { computed: _gammelt, ...rr } = r;
+      const computed = _roomComputedStamp(r);
+      return {
+        ...rr,
+        points : r.points.map(p=>({...p})),
+        walls  : r.walls.map(w=>({...w})),
+        dims   : (r.dims||[]).map(d=>({...d})),
+        ...(computed ? { computed } : {}),
+      };
+    }),
     hindrings: S.hindrings.map(h=>({...h, points:h.points.map(p=>({...p}))})),
     strips   : S.strips.map(s=>({...s})),
     cables   : S.cables.map(c=>({...c, runs:c.runs.map(r=>({...r, segments:r.segments.map(s=>({...s}))}))})),

@@ -4,6 +4,83 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 036 — Matrikkel/boligmappenr på prosjektet, og beregnet c/c + flateeffekt stemplet per rom (17.10.2026, `main`, ikke pushet)
+
+To ting feltappen (varmeplan-app) trenger fra web og som bare web kan lage. Kenneth 17.10.2026: web skal
+sende matrikkel og boligmappenummer så de tastes **én gang** ved prosjektering, og appen skal vise c/c og
+flateeffekt når montøren åpner et rom — uten å regne en regel på nytt (låst arkitektur 07.10.2026).
+
+**STEG 0 (målt før endring).** (1) `_computeRoomStats(room)` (l. 5406) returnerer bl.a. `nettoM2`,
+`cableCcCm` (første kabels `spacing_cm`), `cableWm2`, `matWm2`, `heatedM2`, `wm2Heated`, og hopper over
+reservekabelen (025); `_roomFlateeffektWm2(room, stats)` (l. 13276) = kabel-rom → `cableWm2`, ellers
+`wm2Heated`, tomt rom → ønsket W/m²; `_roomRatedEffectW(room)` (l. 13393) = Σ `_roomProductRows` (reserven
+0 W); `roomAreas(room)` (l. 48014) og `_calcNetArea(room)` (l. 52345) = samme nettoareal i cm²/tekst.
+**Romoversikt avgjør flateeffekt per rom** tre steder med samme uttrykk (PDF l. 67810, PDF-romoversikt
+l. 68519, Excel l. 77161): snø → `_roomFlateeffektWm2`, innendørs → `round(ratedW / nettoM2)`.
+(2) Lagring: `_saveToSupabase()` (l. 77686) skriver `row.data = _buildSaveData()` (l. 66010) til
+`romtegner_projects`; samme `_buildSaveData` brukes av autosave (IndexedDB + sky), versjonssnapshot og
+fileksport — stemplingen hører derfor hjemme i `_buildSaveData`. (3) `data.project` har i dag: `name`,
+`description` (**adresseteksten**), `address` (**objekt** `{text, representasjonspunkt}` fra adressesøket,
+ikke en streng), `customer`, `customer_id`, `contact_name`, `contact_id`, `responsible`,
+`responsible_user_id`, `type`, `parts`, `status`, `projectNo`, `revision`, `accessories`, `pricing`,
+`savedAt`, `_prog` m.fl. — **ingen `matrikkel`/`boligmappeNr`**. (4) `data.rooms[]` har **ikke** noe
+`computed` (0 treff). (5) Kundeopplysninger tastes i «Kunde & prosjektinfo» (`_wfKundeModal`, l. 64800:
+kontaktperson, adresse, prosjektert av; lagres i `_wfKundeSave`). (6) 26 regresjonsfunksjoner i
+`index.html`; romstatistikk dekkes av `_flateeffektRegressionTest`, `_reserveCableRegressionTest`,
+`_listevisningRegressionTest` og `_ccWarnRegressionTest`.
+
+**Gjort**
+* **A — prosjektdialogen:** «Kunde & prosjektinfo» har fått **Matrikkel** (hjelpetekst
+  `kommunenr-gnr/bnr/fnr/snr`) og **Boligmappenummer (valgfritt)** under Adresse. Lagres i
+  `data.project.matrikkel` / `data.project.boligmappeNr`. Tomt felt → nøkkelen **slettes** (ikke tom
+  streng), så appen skiller «ikke oppgitt» fra «oppgitt». Ingen nye kolonner.
+* **B — `room.computed`:** `_buildSaveData` stempler hvert rom med `_roomComputedStamp(r)` (ny, ved
+  `_isSnowRoom`). Gjenbruker `_computeRoomStats`, `_roomRatedEffectW`, `_roomFlateeffektWm2`,
+  `_isSnowRoom`, `_roomProductRows` — ingen ny formel. `_roomOversiktWm2(room, stats)` er Romoversiktens
+  per-rom-avgjørelse (snø/innendørs) samlet i én funksjon; de tre eksisterende kallerne er **ikke** rørt
+  (byte-identisk uttrykk — se SPØRSMÅL i app-løpet). `_roomCcCm(room)`: ett tall bare når alle produkter
+  med c/c i rommet har det samme (kabel `spacing_cm`, matte `mat_cc_mm`/80 mm-fallback, aluboard 10 cm);
+  ellers `null`. Reserven teller ikke. Rom uten produkter → `flateeffektWm2: null`, `ccCm: null`
+  (ønsket W/m² er ikke «beregnet»). Et gammelt `computed` fra innlastingen kastes før nytt settes.
+  Ingen `pushUndo`, ingen render, ingen mutasjon av `S.rooms` (sjekket i testen).
+* **Kostnad (B5):** målt i `_computedStampRegressionTest` sjekk 8: 40 rom med hindring og kabel stemples
+  på **0,5 ms** (hurtigprosjekterte kabler uten geometri). For tegnede kabler kjører
+  `_cableCoveredCm2`-samplingen, men den er allerede signatur-cachet og kjøres uansett per rom ved hver
+  Romoversikt-render — lagringen legger ikke til regnearbeid som ikke gjøres fra før.
+* **Regresjonstest** `_computedStampRegressionTest()` (19 sjekker): ett produkt → ccCm 10 og flateeffekt
+  = Romoversiktens tall (1000 W ÷ 19 m² = 53); to ulike c/c → null; hovedkabel + reserve → samme
+  flateeffekt og c/c som uten; tomt rom → nettoM2 20, flateeffekt null; listMode → nettoM2 = areal −
+  `listHindCm2`; to stempler like (unntatt `stampedAt`); kildesjekk av `_buildSaveData`; tidsmåling.
+* **Kjørt headless (Chromium, `?dev`-autologin, 300 produkter):** `_computedStampRegressionTest`,
+  `_flateeffektRegressionTest`, `_reserveCableRegressionTest`, `_ccWarnRegressionTest`,
+  `_soneRegressionTest`, `_cableZoneRegressionTest`, `_cableSkewRegressionTest`,
+  `_listevisningRegressionTest`, `_nyttProsjektRegressionTest`, `_kundeforslagRegressionTest`,
+  `_geoRegressionTest`, `_foilRegressionTest`, `_matRegressionTest`, `_matZoneRegressionTest`,
+  `_matFreeRegressionTest`, `_prefsRegressionTest`, `_gapRegressionTest`, `_stairRegressionTest`,
+  `_stairSideRegressionTest`, `_edgeMailRegressionTest`, `_gbao10RegressionTest` — **21 av 21 BESTÅTT**.
+  Ikke kjørt (async mot nett/lås eller tunge): `_prosjektlaasRegressionTest`, `_planRegressionTest`,
+  `_cableGeometryRegressionTest`, `_kundelenkeRegressionTest`, `_pwaRegressionTest`.
+
+### Til datakontrakten i feltappen (`varmeplan-app/docs/datakontrakt-web-app.md`)
+
+Web stempler fra og med 036 følgende i `romtegner_projects.data` ved **hver lagring** (manuell, autosave,
+versjonssnapshot, fileksport):
+
+| Felt | Type | Betydning |
+|---|---|---|
+| `data.project.matrikkel` | `string` \| *fraværende* | Matrikkel, fritekst (`kommunenr-gnr/bnr/fnr/snr`). Nøkkelen finnes **ikke** når tomt. |
+| `data.project.boligmappeNr` | `string` \| *fraværende* | Boligmappenummer, fritekst, valgfritt. Nøkkelen finnes **ikke** når tomt. |
+| `data.rooms[].computed` | `object` \| *fraværende* | Fraværende bare på prosjekter lagret før 036, eller hvis stemplingen kastet. |
+| `computed.nettoM2` | `number` (2 des.) | Nettoareal i m² = brutto − hindringer − forbudte soner (listMode: brutto − `listHindCm2`). |
+| `computed.flateeffektWm2` | `number` (0 des.) \| `null` | Det Romoversikt viser: snø-rom → produktets W/m² der det ligger; innendørs → ratet effekt ÷ netto m². Reserven teller ikke. `null` når rommet ikke har produkter. |
+| `computed.ccCm` | `number` (1 des.) \| `null` | Rommets c/c i cm — **bare** når alle produkter med c/c har samme verdi. `null` ved flere ulike, ved folie/plate alene, og i tomme rom. |
+| `computed.stampedAt` | `string` ISO 8601 | Når stempelet ble satt. Eldre enn prosjektets `savedAt`/`updated_at` ⇒ tallene er fra en tidligere lagring. |
+
+Merk for appen: `data.project.address` er et **objekt** (`{text, representasjonspunkt}`), ikke en streng —
+adresseteksten ligger i `data.project.description`.
+
+---
+
 ## 065 — Varmeplan som installerbar app (PWA) på Windows (17.10.2026, `main`, ikke pushet)
 
 Kenneth 12.10.2026: «Jeg ønsker å lage Varmeplan-appen som en desktop-app på Windows-PC.» Valgt:
