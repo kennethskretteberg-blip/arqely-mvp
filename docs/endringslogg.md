@@ -4,6 +4,95 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 100-web — Innebygd modus `?embed=app`: Varmeplan inne i feltappen, økt fra appen uten fornying, bare visning, berøring (18.10.2026, `main`, ikke pushet)
+
+Fellesprompt 100 for app og web (`prompter/feltapp/lop-051-052-100/100-…md`). Kenneth 18.10.2026:
+kabelmotoren bor bare i weben; appen viser weben i en WebView, allerede innlogget, og tegningen kan
+flyttes og zoomes med fingrene. **Ingen redigering** — det er neste prompt. App-delen ligger i
+`varmeplan-app` (commit 100 der: `react-native-webview`, `app/(modules)/varmeplan-web.tsx`,
+`src/lib/webEmbed.ts`).
+
+**STEG 0 (målt før endring).** (0.1) web på `f9fe084` (036), `main` ren og lik `origin/main`; ingen
+serie midt i. App på `c3e666d` (051 + 052 kjørt). (0.2) **Øktoverføringen, målt i klientkoden:**
+appen bruker `@supabase/auth-js` 2.108.2 — `_callRefreshToken` → `_refreshAccessToken` → POST
+`/token?grant_type=refresh_token`, og hvert svar gir et NYTT refresh-token; `getSession()` fornyer
+bare når `autoRefreshToken` er satt (GoTrueClient.js l. 4004). Weben laster `supabase-js@2` fra CDN
+med `createClient(url, key)` uten innstillinger → `autoRefreshToken: true` og `persistSession: true`
+(localStorage) som standard. **Hypotese (dokumentert serveroppførsel, ikke målt her):** Supabase Auth
+roterer refresh-token og oppdager gjenbruk utenfor et kort reuse-intervall → hele token-familien
+trekkes tilbake. To klienter som fornyer samme refresh-token hver for seg ville altså logget ut
+begge — også appen. Påstanden i prompten **bekreftes** så langt klientkoden kan vise det; derfor
+fornyer bare appen. (0.3) «tilpass»-funksjoner: `fitAll()` (l. 60959, hele prosjektet/aktiv del) og
+`fitRoom(id)` (l. 53871, ett rom); `selRoom(id)` (l. 53843) velger rommet og kaller `fitRoom`.
+(0.4) Lerretet: `canvas.addEventListener('wheel')` (l. 60320) zoomet mot pekeren med formelen inline;
+mus-pan satte `_panning/_panStart/_panSV` i `mousedown` (l. 57453 readOnly-grenen, l. 57466 present,
+l. 57485/57491 vanlig) og regnet `S.view.panX/panY` inline i `mousemove` to steder (l. 59046 present,
+l. 59239 vanlig). Ingen berøring på hovedlerretet (bare signaturfeltene og 030s kundeside-bro).
+(0.5) Prosjektskjermen i appen etter 051 er `app/(modules)/prosjekt.tsx`; «Åpne i Varmeplan» ligger
+under prosjektnavn/adresse, og hvert rom har «Vis rommet i Varmeplan» (sender `room=`).
+
+**Design valgt:** det prompten beskriver — appen eier kjeden. Appen sprøyter økten inn før siden
+laster (`window.__VP_APP_SESSION`, bare på tillatt vert), weben lager `_db` med
+`{persistSession:false, autoRefreshToken:false, storageKey:'vp-embed'}` og kaller `setSession()`.
+Under 5 min igjen → `postMessage({type:'vp:need-token'})`; appen fornyer med egen klient og sender ny
+økt via samme global + `CustomEvent('vp:session')`. Token aldri i URL, aldri i logg; global slettes
+etter bruk. Et **utløpt** access-token avvises uten `setSession` (det ville fått biblioteket til å
+fornye selv, utenfor appens kjede) — weben ber appen om nytt i stedet.
+
+**Gjort (alt gatet på `_isAppEmbed()` = `?embed=app`, strengt):**
+* `initSupabase()`: embed-grenen er første setning i `try`; resten av funksjonen (`?present=`,
+  `?kunde=`, `&forslag=`, eksisterende økt, `?dev`, innloggingsskjerm) er uendret.
+* `_appEmbedInit()`: body-klasse `app-embed`, viewport låses mot nettleser-zoom, høyreklikk
+  stoppes, egen klient, venter inntil 3 s på økten, `setSession`, token-vakt hvert minutt,
+  `vp:session`-lytter, `SIGNED_OUT` → «Logg inn i appen på nytt». Uten økt fra appen vises
+  **«Logg inn i appen på nytt»** (`#embed-login`), ikke Varmeplans innlogging. Deretter samme
+  `_authCheckProfileAndProceed()` som vanlig innlogging.
+* `_initAfterAuth()`: i innebygd modus hoppes prosjektliste, autosave og gjenoppretting over;
+  `?project=` åpnes med eksisterende `_kundeOpenFromMail` → `_openCloudProject` (ingen kopi), så
+  `_appEmbedAfterOpen()`.
+* `_openCloudProject()`: **ingen lås** i innebygd modus (en kollega i web skal ikke se montøren som
+  «arbeider i prosjektet»); `S.ui.readOnly = true` gater all redigering som ved lås. Panelet for
+  kundesvar åpnes ikke. `_lockToast()` sier «Visning – redigering kommer» i stedet for lås-teksten.
+* `_appEmbedAfterOpen()`: body `readonly` (CSS-gating, uten banner), romlinje `#embed-bar`
+  (prosjektnavn, rom-chips → `selRoom`, merke «Visning – redigering kommer»), `resizeCanvas()`,
+  `&room=` → `selRoom(id)` (zoomer dit med `fitRoom`), ellers `fitAll()`; `vp:ready` til appen.
+  CSS skjuler `#topbar #sidebar #sidebar-resizer #ctxbar #wip #statusbar #feedback-btn #zoom-badge`.
+* **Berøring** (`_appEmbedTouch`, bare i innebygd modus, `touch-action:none` på lerretet): én finger
+  panorerer, to fingre zoomer rundt midtpunktet. Kaller de **samme** funksjonene som musa: ny
+  `_panMove(clientX, clientY)` (formelen fra `mousemove`, som nå kaller den begge steder) og ny
+  `_zoomAtCanvasPoint(mx, my, zoom)` (formelen fra hjul-håndtereren, som nå kaller den). Ingen ny
+  tegneregel; kabelmotoren og utleggsreglene er urørt. `sw.js` urørt.
+* **Regresjonstest** `_appEmbedRegressionTest()` (30 sjekker, synkron): porten (`_isAppEmbed` streng),
+  `initSupabase`-grenene (embed før `createClient`, `present`/`kunde`/`dev`/`forslag`/innlogging står),
+  `_openCloudProject` uten lås men med `_lockEnterProject` uten flagget, `_initAfterAuth`-gatingen,
+  zoom-mot-punkt (punktet står stille, klemmes til 8 og `_minZoom()`), `_panMove`-formelen, berøring
+  bruker hjelperne og regner ikke selv, utløpt økt → `vp:need-token` uten `setSession`, ingen
+  `console.` i øktkoden, klienten fornyer aldri selv, CSS-porten finnes.
+
+**Kjørt headless (Chromium via Playwright i scratchpad, dev-server port 4333, `?dev`-autologin, 321
+produkter):** de 21 fra 036 + `_appEmbedRegressionTest` — **22 av 22 BESTÅTT.** I tillegg en
+innebygd-røyktest på det **dupliserte** prosjektet «Ekebergveien 28 (kopi)» (bare lesing): økt
+sprøytet inn med `addInitScript`, `?embed=app&project=…&room=5` → `vp:ready`, `body.app-embed` +
+`readonly`, `#app` vist, topplinje/sidepanel skjult, 4 rom-chips med «Rom 5» aktiv, `S.ui.readOnly`
+true, **ingen lås** (`_lockState.projectId` null, ingen hjerteslag), ingen periodisk lagring, zoom
+0,43 (fitRoom), `touch-action: none`, økten slettet fra `window`; syntetisk én-finger-drag flyttet
+`panX` uten å endre zoom, to-finger-knip økte zoom 0,43 → 0,95; `vp:session`-event med ny økt →
+fortsatt innlogget. Uten økt: «Logg inn i appen på nytt», `#auth-screen` skjult, `vp:error` sendt.
+Uten flagget: `/` viser innloggingsskjermen, `?present=…` går presentasjonsgrenen — ingen
+`app-embed`. Ikke kjørt (som i 036): `_prosjektlaasRegressionTest`, `_planRegressionTest`,
+`_cableGeometryRegressionTest`, `_kundelenkeRegressionTest`, `_pwaRegressionTest`. Én konsollfeil ved
+innlasting (`_assertProductSurfacesCoverAllCollections` om XLSX-bestilling) er uavhengig av 100.
+
+**Manuelt (Kenneth):** `node serve-varmeplan.js` på Mac-en; appen med
+`EXPO_PUBLIC_VARMEPLAN_WEB_URL=http://<Mac-IP>:4000`; prosjekt → «Åpne i Varmeplan»; rom → «Vis
+rommet i Varmeplan»; la stå > 1 time (appen skal fortsatt være innlogget); flymodus → appens melding.
+**Virker på varmeplan.no først når Kenneth har pushet `main`.**
+
+**Skal IKKE / ikke gjort:** ingen redigering, ingen talltastede rom, ingen auto i innebygd modus;
+ingen migrasjon, ingen RLS-endring, ingen Edge Function, ingen push.
+
+---
+
 ## 036 — Matrikkel/boligmappenr på prosjektet, og beregnet c/c + flateeffekt stemplet per rom (17.10.2026, `main`, ikke pushet)
 
 To ting feltappen (varmeplan-app) trenger fra web og som bare web kan lage. Kenneth 17.10.2026: web skal
