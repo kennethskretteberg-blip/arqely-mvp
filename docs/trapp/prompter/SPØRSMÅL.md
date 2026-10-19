@@ -77,3 +77,23 @@ Ingen. Felles innstilling (spørsmål 4 over), ikke lagret med prosjektet (som f
 6. **Produktlinja over lista står dobbelt** for én kabel («InSnow 30T 2100W 70m 70m») — den er
    uendret fra før, men blir overflødig nå som lista viser produktet. Skal jeg fjerne den?
 7. **Soner er urørt** (prompt 102). Med soner på vises fortsatt det gamle enkeltvalget.
+
+### 102
+
+1. **«Avstand foran/bak» per sone setter BÅDE nese og opptrinn**, akkurat som feltet gjør på
+   trappenivå. Prompten nevnte bare `noseOffset_cm`. Skal sonen kunne sette dem hver for seg?
+2. **Sonens gulv er et eget felt** («Avstand sider (min)»), ikke den løste verdien. Setter du 9 cm
+   på sone 2, er 9 cm minimum — løsningen kan fortsatt legge seg lenger inn (084/Regel 12 gjelder
+   også per sone). Trappas eget gulv røres aldri.
+3. **Én sone uten gyldig kabel tegnes udekket** (auto fant ingen kabel): sonen får ingen kabel,
+   marginen står på gulvet, og den røde meldingen står på sonen. De andre sonene tegnes som før.
+   Alternativet var å la hele trappa fryse, som i dag. Valgt: per sone (Regel 21).
+4. **Soneinnstillinger ryddes ved LAGRING**, ikke ved hver omregning — slår du en sone midlertidig
+   av mens du redigerer, står innstillingene til du lagrer. OK?
+5. **Sidefunn jeg rettet uten å spørre:** et repos fikk SIDE-avstanden tegnet inn som dybdemål i
+   målsettingen (både på skjerm og i PDF), og detaljutsnittet av Repos 1 oppga 27 m kabel i stedet
+   for 25 m. Motoren har alltid brukt repos-dybdemarginen; bare målsettingen og bildeteksten var
+   feil. Samme klasse feil som sonemarginen, så de ble rettet i samme grep.
+6. **Klikk mellom flatene** (inne i trappas boks, men ikke på et trinn) lar sonevalget stå. Skal det
+   heller nullstille til «Hele trappa»?
+7. **Trapper uten soner er uendret.** Sonevelgeren og underradene vises bare når soner er i bruk.

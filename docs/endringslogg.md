@@ -4,6 +4,74 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 102 — Trapp: hver sone som eget rom — velg sone, bytt kabel, se sonens egne mål (19.10.2026, `main`, ikke pushet)
+
+Kenneth 19.10.2026: «Den fyller seg ut automatisk når jeg setter soner, det er bra. Men jeg ønsker
+også etterpå å kunne velge en sone og endre kabel manuelt. Jeg savner også å kunne se detaljer i
+sidemenyen, som f.eks. avstand fra kanter i hver sone. Jeg ønsker at hver sone blir som hvert sitt
+rom.» Nytt: spec-trapp-kabelutlegg.md **Regel 21**.
+
+**STEG 0 (målt på en trapp delt i 4 trinn / repos / 6 trinn).**
+(0.1) Alle fire påstandene bekreftet: `_stairSolveZones` løste ALLTID auto; et manuelt kabelvalg
+(`_setStairCableProduct`) satte `cableProductId` uten å nå fram (sonene skrev over `cables` ved hver
+regenerering); én sone som feilet ga `ok:false` for HELE trappa, og `_regenerateStairCable` frøs de
+forrige kablene; panelet viste trappas felles tall (kantavstand 8,5) der sonene hadde 12,8 / 15,7 /
+13,0.
+(0.2) **Begge.** Trapper STÅR i venstremenyen (`stairItemHtml`), men hadde ingen underrader — mens
+rom har dem (`_soneRowsHtml`). Bygget begge steder: sone-underrader i venstremenyen og sonevelger i
+panelet.
+(0.3) **Nei.** `hitStair` treffer bare trappas ytre boks. Flategeometrien finnes
+(`surf.x_cm/y_cm/w_cm/d_cm`, samme regning som `_stairDimSnap` sin plan-gren), så en liten ny
+`_hitStairSurface(stair, wx, wy)` var alt som manglet.
+(0.4) Bare SIDEMARGINEN ble lest per flate (`zoneMarginForSurf`). Maks CC (trinn/repos), avstand
+foran/bak og repos-dybdemargin ble lest ÉN gang for hele trappa, utenfor flate-løkka — og
+`runsPerStep`-cachen fra et forslag gjaldt alle trinn, også i soner med egen CC.
+
+**Endringen.**
+1. **`stair.zoneSettings[<sonenummer>]`** = `{ productId, edgeMarginMin_cm, stepCC_cm, landingCC_cm,
+   noseOffset_cm }`. Alt valgfritt; tomt = arv fra trappa. Nøkkelen er sonenummeret, ikke en indeks,
+   så innstillingene følger sone 2 selv om segmentene flyttes. Lagres med trappa, er med i angre, og
+   ryddes ved lagring (`_stairPruneZoneSettings`) for nummer som ikke lenger finnes.
+2. **`_stairSurfSettings(stair, si, zoneRanges)`** — de EFFEKTIVE målene for én flate (sonen først,
+   så trappa). Én kilde, brukt av motoren, panelet, skjermtegningen, PDF-tegningen, målsettingen,
+   detaljutsnittene og PDF-ens sonetekst. Uten soner gir den nøyaktig trappas verdier.
+3. **`_stairZoneSubStair(stair, range)`** — sonen som sin egen lille trapp (egne flater, eget gulv,
+   egen maks CC og avstand foran/bak). `segments: []` gjør at `_stairZoneRanges` på den returnerer
+   null, så motoren regner sonen som en helt vanlig trapp — ingen rekursjon.
+4. **`_stairSolveZones`**: auto som før (`_stairSolveExactCableSet`, `maxCables:1`), manuell kabel
+   via **`_stairFitFixedSet`** fra 101 — ingen ny margin-matte. Hver sone feiler for seg: feilen
+   legges på sonen (`stair.cables[zi].error`), marginen på gulvet, og de andre sonene løses og
+   tegnes. `stair.zoneError` betyr nå KUN «sonene kan ikke brukes» (hull i inndelingen) — det er det
+   eneste `generateStairCable` faller tilbake fra. Sammendraget ligger i `stair.zoneIssues`.
+5. **Panelet**: sonevelger øverst («Hele trappa · Sone 1 · Sone 2 …», med sonens farge og ⚠).
+   «Hele trappa» viser dagens felles innstillinger + én klikkbar linje per sone. En valgt sone viser
+   sitt eget panel: kabel (Auto / produkt / «Tilbake til auto»), sonens gulv og løste kantavstand,
+   avstand foran/bak, maks CC trinn/repos (alle med «som trappa» som tomt felt), og sonens resultat
+   — behov, lagt, kabel, effekt, flateeffekt (Regel 16), løp og faktisk CC.
+6. **Venstremenyen**: underrader per sone under trappa (samme mønster som romsonene), med dekning,
+   kabel, W og kantavstand. Klikk velger sonen.
+7. **Tegningen**: valgt sone uthevet, de andre dempet. `S.ui.selectedStairZone` (nytt felt — IKKE
+   `selectedZoneId`, som er romsoner) nullstilles når trappa velges bort. Klikk på et trinn velger
+   sonen (`_hitStairSurface`).
+8. **Sidefunn, rettet samtidig** (samme årsak — trappas verdi brukt per flate): U-svingbuene,
+   per-flate-lengdene, overgangslinjene mellom flater, målsettingen på skjerm OG i PDF, og
+   detaljutsnittenes bildetekst leste alle trappas sidemargin. I tillegg fikk et REPOS tegnet
+   SIDE-marginen som dybdemål i målsettingen (motoren har alltid brukt `landingMargin_cm`): utsnittet
+   av Repos 1 sto «8,5 / 5» og «27 m kabel på repos» — nå «5 / 5» og «25 m».
+
+**Målt resultat.** Auto-sonene er bit-identiske med før 102 (målt mot `b47a65d`: 30 m@12,8 /
+25 m@15,7 / 45 m@13,0, samme strengantall per flate). Manuell 40,1 m i sone 3 gir kantavstand
+23,2 cm mens sone 1 og 2 står helt stille. En for lang kabel i sone 2 gir rød melding PÅ SONEN, og
+sone 1 og 3 tegnes som normalt. Maks CC 6 cm i sone 3 gir 6 løp per trinn der og 4 i de andre;
+tomt felt gir det gamle tilbake.
+
+**Ny regresjonstest:** `_stairZoneRegressionTest102()` (30 sjekker). `_stairRegressionTest`,
+`_stairSideRegressionTest` og `_stairManualSetRegressionTest` er fortsatt grønne, sammen med 22
+andre batterier. `_cableGeometryRegressionTest` har tre gamle, røde sjekker (romkabel-geometri) —
+nøyaktig de samme på `b47a65d`, altså ikke rørt av 102.
+
+---
+
 ## 101 — Trapp: manuelt kabelsett (ulike kabler i lista), fast sett løser sidemarginen som Forslag (19.10.2026, `main`, ikke pushet)
 
 Kenneth 19.10.2026: «Jeg ønsker også å kunne legge ut kabler manuelt, dvs. at jeg f.eks. kan velge

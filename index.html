@@ -4246,6 +4246,7 @@ const S = {
     selectedPlateId: null,       // selected plate id
     selectedAluboardId: null,    // selected Aluboard platesystem id
     selectedStairId: null,       // selected stair id
+    selectedStairZone: null,     // 102: valgt TRAPPESONE (sonenummer) — null = «Hele trappa». IKKE selectedZoneId (romsoner)
     stairPlaceMode: false,       // stair placement click mode active
     stairPlaceParams: null,      // pending stair parameters from modal
     platePlaceMode: false,       // plate placement click mode active
@@ -7926,7 +7927,7 @@ function _presentClearSelections() {
   u.selectedStripId = null;
   if (u.selectedStripIds && u.selectedStripIds.clear) u.selectedStripIds.clear();
   u.selectedWallId = null; u.selectedRoomId = null; u.selectedMatId = null;
-  u.selectedPlateId = null; u.selectedAluboardId = null; u.selectedStairId = null; u.selectedHindringId = null;
+  u.selectedPlateId = null; u.selectedAluboardId = null; u.selectedStairId = null; u.selectedStairZone = null; u.selectedHindringId = null;
   u.selectedDimId = null; u.selectedBg = null;
 }
 // ⚠ RETTET 030: `_presentEnter()` satte UBETINGET `presentPublic = false`, og begge de
@@ -38748,7 +38749,7 @@ function selectAluboard(id) {
   const u = S.ui;
   u.selectedAluboardId = id;
   u.selectedStripId = null; u.selectedStripIds = new Set(); u.selectedCableId = null;
-  u.selectedMatId = null; u.selectedPlateId = null; u.selectedStairId = null;
+  u.selectedMatId = null; u.selectedPlateId = null; u.selectedStairId = null; u.selectedStairZone = null;
   u.selectedZoneId = null; u.selectedHindringId = null;
   const ab = (S.aluboard || []).find(a => a.id === id);
   if (ab) u.selectedRoomId = ab.roomId;
@@ -39207,10 +39208,19 @@ function _drawStairPlan(stair) {
   ctx.save();
   const ox = stair.x_cm, oy = stair.y_cm;
 
+  // 102 (Regel 21): er en sone valgt, uthever vi den og demper de andre — samme grep som
+  // rommenes soner. _stairZoneRanges er trappas egen inndeling; null = ingen soner i bruk.
+  const _zRanges = !stair.zoneError ? _stairZoneRanges(stair) : null;
+  const _selZone = (isSel && _zRanges) ? S.ui.selectedStairZone : null;
+  const _zoneOfSurf = (si) => { if (!_zRanges) return null; const r = _zRanges.find(x => si >= x.fromSurf && si <= x.toSurf); return r ? r.zone : null; };
+  const _dimmed = (si) => _selZone != null && _zoneOfSurf(si) !== _selZone;
+
   // Draw surfaces
   let _landingNum = 0;
-  for (const surf of surfs) {
+  for (let _si = 0; _si < surfs.length; _si++) {
+    const surf = surfs[_si];
     if (surf.type === 'landing') _landingNum++;
+    ctx.globalAlpha = _dimmed(_si) ? 0.35 : 1;
     const tl = w2s(ox + surf.x_cm, oy + surf.y_cm);
     const br = w2s(ox + surf.x_cm + surf.w_cm, oy + surf.y_cm + surf.d_cm);
     const sw = br.x - tl.x, sh = br.y - tl.y;
@@ -39221,9 +39231,10 @@ function _drawStairPlan(stair) {
       : _lc('rgba(180,180,180,0.30)', 'rgba(80,80,80,0.25)');
     ctx.fillRect(tl.x, tl.y, sw, sh);
 
-    // Border
-    ctx.strokeStyle = isSel ? '#4ea8ff' : isHov ? '#70e850' : _lc('#888','#555');
-    ctx.lineWidth = isSel ? 2 : 1;
+    // Border — valgt sone får accent-rammen, resten trappas vanlige
+    const _selfZone = _selZone != null && _zoneOfSurf(_si) === _selZone;
+    ctx.strokeStyle = _selfZone ? '#22d3ee' : isSel ? '#4ea8ff' : isHov ? '#70e850' : _lc('#888','#555');
+    ctx.lineWidth = _selfZone ? 2.5 : isSel ? 2 : 1;
     ctx.strokeRect(tl.x, tl.y, sw, sh);
 
     // Step number label
@@ -39235,6 +39246,7 @@ function _drawStairPlan(stair) {
       ctx.fillText(label, tl.x + sw/2, tl.y + sh/2);
     }
   }
+  ctx.globalAlpha = 1;
 
   // Draw cable runs (multi-cable aware)
   if (stair.runs && stair.runs.length > 0) {
@@ -39261,7 +39273,10 @@ function _drawStairPlan(stair) {
       const surf = surfs[+si];
       if (!surf) continue;
       const surfW = surf.w_cm || stair.width_cm || 120;
-      const edgeMrg = stair.edgeMargin_cm || 5;
+      // 102: buene skal ligge på FLATENS margin — med soner er den sonens løste kantavstand, ikke
+      // trappas. Før ble alle buene tegnet på trappas margin, så de bommet i hver sone.
+      const edgeMrg = _stairSurfSettings(stair, +si, _zRanges).edgeMargin_cm;
+      ctx.globalAlpha = _dimmed(+si) ? 0.3 : 1;
       const entryRight = entryRightBySurf[+si] || false; // første flate: ingen inngang, starter venstre
       for (let ri = 0; ri < surfRuns.length; ri++) {
         const run = surfRuns[ri];
@@ -39385,6 +39400,7 @@ function _drawStairPlan(stair) {
       }
       ctx.setLineDash([]);
     }
+    ctx.globalAlpha = 1;   // 102: sone-dempingen gjelder kun løpene over
 
     // Start/end markers per cable. STEG 2 (Regel 11): et løp kan nå tilhøre to kabler (skjøt midt
     // i streng), så start/slutt for kabel ci finnes ved å gå den FYSISKE rekkefølgen (flate for
@@ -39449,10 +39465,7 @@ function _drawStairPlan(stair) {
   // Per-surface cable length labels (DEL B, spec-trapp-detaljutsnitt.md 11.09.2026: isSel-krav
   // fjernet — Kenneth vil se lengdene uten å måtte klikke trappen først. Zoom-grensen beholdt.)
   if (stair.runs && stair.runs.length > 0 && S.view.zoom > 0.2) {
-    const _edgeMrg = stair.edgeMargin_cm || 5;
-    const _rOff = stair.riserOffset_cm ?? 2;
-    const _nOff = stair.noseOffset_cm ?? 2;
-    // Calculate cable length per surface
+    // Calculate cable length per surface — 102: flatens EGEN margin (sonens, der den finnes).
     const _surfLens = {};
     for (let si = 0; si < surfs.length; si++) {
       const surf = surfs[si];
@@ -39460,7 +39473,7 @@ function _drawStairPlan(stair) {
       const sRuns = (stair.runs || []).filter(r => r.surfaceIdx === si);
       if (!sRuns.length) continue;
       const surfW = surf.w_cm || stair.width_cm || 120;
-      const runLen = surfW - 2 * _edgeMrg;
+      const runLen = surfW - 2 * _stairSurfSettings(stair, si, _zRanges).edgeMargin_cm;
       if (runLen <= 0) continue;
       const N = sRuns.length;
       const len = N * runLen; // straight runs — Regel 10: U-svinger telles ikke
@@ -39505,9 +39518,8 @@ function _drawStairPlan(stair) {
 
   // Dimension lines for cable runs (DEL B: isSel-krav fjernet, samme begrunnelse som over)
   if (stair.runs && stair.runs.length > 0 && S.view.zoom > 0.25) {
-    const edgeM = stair.edgeMargin_cm || 5;
-    const riserOff = stair.riserOffset_cm ?? 2;
-    const noseOff = stair.noseOffset_cm ?? 2;
+    // 102: målene leses PER FLATE (_stairSurfSettings) i hjelperne under — ikke én gang for hele
+    // trappa, som ville vist trappas verdier i en sone med egne.
     const dimColor = _lc('#2090e0','#60b0ff');
     const dimFont = `${Math.max(7, 9 * S.view.zoom)}px sans-serif`;
     ctx.strokeStyle = dimColor;
@@ -39527,6 +39539,9 @@ function _drawStairPlan(stair) {
 
     // Helper: draw depth dims for a surface (along-depth: offsets + CC between runs)
     function _drawSurfDepthDims(surf, surfRuns, isLanding) {
+      // 102: flatens EGNE mål (sonens, der den finnes). Fikser samtidig at et repos fikk SIDE-
+      // marginen tegnet som dybdemål — motoren har alltid brukt landingMargin_cm der.
+      const _ss = _stairSurfSettings(stair, surfs.indexOf(surf), _zRanges);
       const surfW = surf.w_cm || stair.width_cm || 120;
       const surfOx = ox + surf.x_cm;
       const surfOy = oy + surf.y_cm;
@@ -39535,7 +39550,7 @@ function _drawStairPlan(stair) {
       surfRuns.sort((a, b) => a.pos_cm - b.pos_cm);
 
       // Top offset (Regel 14: pos=0 er RISER-siden for trinn — se generateStairCable; edge margin for landings)
-      const topOff = isLanding ? edgeM : riserOff;
+      const topOff = _ss.depthStart_cm;
       const nA = w2s(dimXd, surfOy), nB = w2s(dimXd, surfOy + topOff);
       ctx.beginPath(); ctx.moveTo(nA.x, nA.y); ctx.lineTo(nB.x, nB.y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(nA.x - 3, nA.y); ctx.lineTo(nA.x + 3, nA.y); ctx.stroke();
@@ -39567,6 +39582,7 @@ function _drawStairPlan(stair) {
 
     // Helper: draw width dims for a surface (across-width: edge margins + DEL A totalbredde)
     function _drawSurfWidthDims(surf) {
+      const edgeM = _stairSurfSettings(stair, surfs.indexOf(surf), _zRanges).edgeMargin_cm;   // 102: sonens margin
       const surfW = surf.w_cm || stair.width_cm || 120;
       const surfOx = ox + surf.x_cm;
       const surfOy = oy + surf.y_cm;
@@ -39959,6 +39975,24 @@ function hitStair(wx, wy) {
   return null;
 }
 
+// 102 (Regel 21): hvilken FLATE (og dermed hvilken sone) ligger punktet i? hitStair treffer bare
+// trappas bokskant; flategeometrien ligger i surf.x_cm/y_cm/w_cm/d_cm (trapp-lokale koordinater,
+// samme regning som _stairDimSnap sin plan-gren). Returnerer { si, zone } eller null.
+function _hitStairSurface(stair, wx, wy) {
+  const surfs = stair && stair.surfaces || [];
+  if (!surfs.length) return null;
+  const ox = stair.x_cm, oy = stair.y_cm;
+  for (let si = 0; si < surfs.length; si++) {
+    const sf = surfs[si];
+    if (wx >= ox + sf.x_cm && wx <= ox + sf.x_cm + sf.w_cm && wy >= oy + sf.y_cm && wy <= oy + sf.y_cm + sf.d_cm) {
+      const ranges = !stair.zoneError ? _stairZoneRanges(stair) : null;
+      const r = ranges ? ranges.find(x => si >= x.fromSurf && si <= x.toSurf) : null;
+      return { si, zone: r ? r.zone : null };
+    }
+  }
+  return null;
+}
+
 // 087: snap for mållinjer i trapp-delen — trappens hjørner (prioritert) og trinnkanter, i både
 // plan (hver flates rektangel) og sidevisning (profilen, forskjøvet som i drawStairs ved 'both').
 // Radius 14 px, uttrykt i cm ved gjeldende zoom. null = ingen snap innen radius.
@@ -40013,6 +40047,8 @@ function _stairDimSnap(p) {
 
 function selectStair(id) {
   S.ui.selectedBg=null;
+  // 102: sonevalget hører til ÉN trapp — bytter man trapp (eller velger bort), nullstilles det.
+  if (S.ui.selectedStairId !== id) S.ui.selectedStairZone = null;
   S.ui.selectedStairId = id;
   S.ui.selectedStripId = null;
   S.ui.selectedStripIds = new Set();
@@ -40032,7 +40068,7 @@ function deleteStair(id) {
   pushUndo();
   S.stairs = S.stairs.filter(s => s.id !== id);
   _invalidateStairCache();
-  S.ui.selectedStairId = null;
+  S.ui.selectedStairId = null; S.ui.selectedStairZone = null;
   renderSidebar(); updateCtxBar(); render();
 }
 
@@ -40094,6 +40130,91 @@ function _setStairCableProduct(productId) {
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
+}
+
+// ══ 102 · SONEN SOM EGET ROM (Regel 21, Kenneth 19.10.2026) ══════════════════════════════
+// «Jeg ønsker at hver sone blir som hvert sitt rom.» Velg en sone, bytt kabel manuelt, og se
+// sonens EGNE mål. Alt skrives til stair.zoneSettings[<sonenummer>]; tomt felt = arv fra trappa.
+// Alle setterne går gjennom _setStairZoneField, som er det ene stedet som skriver.
+function _selectStairZone(zoneNo) {
+  const z = (zoneNo === '' || zoneNo == null) ? null : +zoneNo;
+  if (S.ui.selectedStairZone === z) return;
+  S.ui.selectedStairZone = z;   // ikke en datamodell-endring — ingen pushUndo
+  _updateStairSettingsPanel(); renderSidebar(); render();
+}
+
+// Skriv ETT felt på én sone. `val` tom streng/null = fjern overstyringen (arv fra trappa igjen).
+// `clamp` er en ren funksjon som begrenser tallverdien; utelatt for productId.
+function _setStairZoneField(zoneNo, field, val, clamp) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair || zoneNo == null) return;
+  const key = String(zoneNo);
+  const cur = _stairZoneSettings(stair, zoneNo);
+  let next;
+  if (val === '' || val == null) next = null;
+  else if (field === 'productId') next = parseInt(val) || null;
+  else { const num = parseFloat(val); next = isFinite(num) ? (clamp ? clamp(num) : num) : null; }
+  if ((cur[field] ?? null) === next) return;
+  pushUndo();
+  stair.zoneSettings = stair.zoneSettings || {};
+  stair.zoneSettings[key] = { ...(stair.zoneSettings[key] || {}) };
+  if (next == null) delete stair.zoneSettings[key][field];
+  else stair.zoneSettings[key][field] = next;
+  if (!Object.keys(stair.zoneSettings[key]).length) delete stair.zoneSettings[key];
+  if (next != null && field === 'productId') stair.noCable = false;   // å velge kabel legger den til igjen
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  _updateStairSettingsPanel(); renderSidebar(); updateCtxBar(); render();
+}
+
+// Kabel for sonen. Tom verdi = «Auto» (dagens oppførsel: motoren velger selv).
+function _setStairZoneProduct(zoneNo, productId) { _setStairZoneField(zoneNo, 'productId', productId); }
+// Sonens EGET gulv for kantavstanden (084/Regel 12 gjelder også per sone: den løste verdien
+// skrives ALDRI tilbake hit). Tomt = som trappa.
+function _setStairZoneEdgeMargin(zoneNo, val) { _setStairZoneField(zoneNo, 'edgeMarginMin_cm', val, n => Math.max(1, Math.min(20, n))); }
+// Én kontroll for nese OG opptrinn, nøyaktig som _setStairFrontBackOffset på trappenivå.
+function _setStairZoneFrontBack(zoneNo, val) { _setStairZoneField(zoneNo, 'noseOffset_cm', val, n => Math.max(0, Math.min(10, n))); }
+function _setStairZoneStepCC(zoneNo, val) { _setStairZoneField(zoneNo, 'stepCC_cm', val, n => Math.round(Math.max(3, Math.min(STAIR_MAX_CC_CM, n)) * 10) / 10); }
+function _setStairZoneLandingCC(zoneNo, val) { _setStairZoneField(zoneNo, 'landingCC_cm', val, n => Math.round(Math.max(3, Math.min(STAIR_MAX_CC_CM, n)) * 10) / 10); }
+
+// Sonens rad i stair.cables (løst kabel, margin, restavvik, feil) + dens zoneResult.
+function _stairZoneInfo(stair, zoneNo) {
+  if (!stair || zoneNo == null) return null;
+  const ranges = _stairZoneRanges(stair);
+  if (!ranges) return null;
+  const zi = ranges.findIndex(r => r.zone === zoneNo);
+  if (zi < 0) return null;
+  const r = ranges[zi];
+  const cable = (stair.cables || [])[zi] || null;
+  const res = (stair.zoneResults || [])[zi] || null;
+  const surfs = (stair.surfaces || []).slice(r.fromSurf, r.toSurf + 1);
+  const runs = (stair.runs || []).filter(x => x.surfaceIdx >= r.fromSurf && x.surfaceIdx <= r.toSurf);
+  // Faktisk N og CC leses fra RUTINGEN (Regel 9: tegning og tall fra samme kilde), på første
+  // trinn-flate i sonen — eller første flate i det hele tatt for en ren repos-sone.
+  const firstTreadSi = (() => { for (let si = r.fromSurf; si <= r.toSurf; si++) if ((stair.surfaces[si]||{}).type === 'tread') return si; return r.fromSurf; })();
+  const fRuns = (stair.runs || []).filter(x => x.surfaceIdx === firstTreadSi).sort((a, b) => a.pos_cm - b.pos_cm);
+  const actualCC = fRuns.length > 1 ? Math.abs(fRuns[1].pos_cm - fRuns[0].pos_cm) : 0;
+  const prod = cable && cable.productId ? HEATING_PRODUCTS.find(p => p.id === cable.productId) : null;
+  const wpm = prod?.watt_per_m || 0;
+  const eff = _stairSurfSettings(stair, firstTreadSi, ranges);
+  // Behovet for SONENS flater — samme kilde som motoren (Regel 9), ikke et nytt regnestykke.
+  const geo = generateStairCable({ ..._stairZoneSubStair(stair, r), edgeMargin_cm: cable ? cable.edgeMargin_cm : eff.edgeMargin_cm, cables: [{ productId: null }] });
+  return {
+    zone: zoneNo, zoneIdx: zi, fromSurf: r.fromSurf, toSurf: r.toSurf, cable, result: res,
+    settings: _stairZoneSettings(stair, zoneNo), eff,
+    treads: surfs.filter(s => s.type === 'tread').length,
+    landings: surfs.filter(s => s.type === 'landing').length,
+    runsPerStep: fRuns.length, actualCC_cm: Math.round(actualCC * 10) / 10,
+    wm2: (wpm > 0 && actualCC > 0) ? Math.round(wpm / (actualCC / 100)) : null,
+    product: prod,
+    laid_m: Math.round((cable?.length_cm || 0) / 100 * 10) / 10,
+    needed_m: Math.round(geo.totalCableLength_cm / 100 * 10) / 10,
+    watt: wpm ? Math.round((cable?.length_cm || 0) / 100 * wpm) : 0,
+    error: cable ? cable.error : null,
+    manual: !!(cable && cable.manual),
+    floorMargin_cm: res ? res.floorMargin_cm : _stairFloorMargin(stair),
+    runsCount: runs.length,
+  };
 }
 
 // ══ 101 · MANUELT KABELSETT (Regel 20, Kenneth 19.10.2026) ════════════════════════════════
@@ -40476,9 +40597,117 @@ function _renderStairSettingsPanel(stairId) {
         ? `<div style="background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:6px;padding:6px 8px;font-size:11px;color:var(--accent);margin-bottom:8px">Avstand fra sidene justert til ${(stair.edgeMargin_cm||0).toFixed(1)} cm (din: ${_stairFloorMargin(stair)} cm) så kabelsettet går opp${Math.abs(manFit.residual_cm || 0) > 0.05 ? ' — ' + _stairLenTxt(manFit.residual_cm) + (manFit.residual_cm > 0 ? ' til overs' : ' for kort') : ' — eksakt'}</div>`
         : '');
 
+  // ── 102 (Regel 21): sonevelger + «sonen som eget rom» ───────────────────────────────────
+  const zoneRanges = zonesActive ? _stairZoneRanges(stair) : null;
+  const zoneList = (zoneRanges || []).filter(r => r.zone != null);
+  const selZone = zonesActive && zoneList.some(r => r.zone === S.ui.selectedStairZone) ? S.ui.selectedStairZone : null;
+  const _card = (inner) => `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">${inner}</div>`;
+  const _handle = (title) => `<div id="stair-settings-handle" style="font-weight:600;font-size:13px;margin-bottom:8px;cursor:grab;user-select:none" title="Dra for å flytte">⠿ ${esc(title)}</div>`;
+  let zonePickerHtml = '';
+  if (zonesActive) {
+    const chip = (label, active, onclick, color) => `<button onclick="${onclick}" style="flex:0 0 auto;display:flex;align-items:center;gap:4px;padding:3px 7px;border-radius:5px;border:1px solid ${active ? 'var(--accent)' : 'var(--brd)'};background:${active ? 'rgba(34,211,238,.12)' : 'var(--surface2)'};color:${active ? 'var(--accent)' : 'var(--text)'};font-size:11px;font-weight:${active ? 600 : 400};cursor:pointer">${color ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}"></span>` : ''}${esc(label)}</button>`;
+    let chips = chip('Hele trappa', selZone == null, '_selectStairZone(null)', null);
+    for (let zi = 0; zi < zoneList.length; zi++) {
+      const r = zoneList[zi];
+      const c = (stair.cables || [])[zi];
+      const bad = c && c.error;
+      chips += chip('Sone ' + r.zone + (bad ? ' ⚠' : ''), selZone === r.zone, `_selectStairZone(${r.zone})`, (c && c.color) || STAIR_CABLE_COLORS[zi % STAIR_CABLE_COLORS.length]);
+    }
+    zonePickerHtml = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">${chips}</div>`;
+  }
+
+  // Sammendrag av sonefeil (Regel 21: detaljen står på sonen, trappa får bare én linje).
+  const zoneIssuesHtml = stair.zoneIssues ? `<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:6px 8px;font-size:11px;color:#ef4444;margin-bottom:8px">⚠ ${esc(stair.zoneIssues)}</div>` : '';
+
+  // ── En VALGT sone: samme oppsett som en trapp uten soner, men for sonen ──────────────────
+  if (selZone != null) {
+    const zi2 = zoneList.findIndex(r => r.zone === selZone);
+    const info = _stairZoneInfo(stair, selZone);
+    const zs = info ? info.settings : {};
+    const col = (stair.cables || [])[zi2]?.color || STAIR_CABLE_COLORS[zi2 % STAIR_CABLE_COLORS.length];
+    const inheritRow = (label, value, placeholder, onchange, min, max, step) => `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <span>${label}</span>
+        <span style="display:flex;align-items:center;gap:3px">
+          <input type="number" min="${min}" max="${max}" step="${step}" value="${value}" placeholder="${placeholder}" title="Tomt = som trappa (${placeholder})" style="width:56px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="${onchange}" onclick="event.stopPropagation()">
+          <span style="font-size:10px;color:var(--dim)">cm</span>
+        </span>
+      </div>`;
+    const hasLanding = info && info.landings > 0;
+    const solvedMargin = info && info.cable ? info.cable.edgeMargin_cm : null;
+    const zFloor = info ? info.floorMargin_cm : _stairFloorMargin(stair);
+    const errHtml = info && info.error
+      ? `<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:6px 8px;font-size:11px;color:#ef4444;margin-bottom:8px">⚠ ${esc(info.error)}</div>`
+      : (solvedMargin != null && Math.abs(solvedMargin - zFloor) > 0.05
+        ? `<div style="background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:6px;padding:6px 8px;font-size:11px;color:var(--accent);margin-bottom:8px">Avstand fra sidene justert til ${solvedMargin.toFixed(1)} cm (din: ${zFloor} cm) så kabelen går opp${info.cable && Math.abs(info.cable.marginResidual_cm || 0) > 0.05 ? ' — ' + _stairLenTxt(info.cable.marginResidual_cm) + (info.cable.marginResidual_cm > 0 ? ' til overs' : ' for kort') : ' — eksakt'}</div>`
+        : '');
+    const dekker = info ? [info.treads ? info.treads + (info.treads === 1 ? ' trinn' : ' trinn') : '', info.landings ? info.landings + ' repos' : ''].filter(Boolean).join(' + ') : '';
+    const zWm2 = info && info.wm2 != null ? info.wm2 : 0;
+    return _card(`${_handle('Sone ' + selZone + ' — Resultat')}
+      ${zonePickerHtml}${zoneErrorHtml}${errHtml}
+      <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);margin-bottom:8px">
+        <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${col}"></span>
+        ${esc(dekker || 'Ingen flater')}${info && info.manual ? ' · manuell kabel' : ' · auto'}
+      </div>
+      <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">${info && info.product ? esc(info.product.name) + ' (' + info.product.cable_length_m + ' m)' : 'Ingen kabel'}</div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Behov</span><span>${info ? info.needed_m.toFixed(1) : '0.0'} m</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Lagt</span><span>${info ? info.laid_m.toFixed(1) : '0.0'} m</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:var(--dim)">Kabel</span><span>${info && info.product ? info.product.cable_length_m.toFixed(1) + ' m' : '—'}</span></div>
+        <div style="color:${info && info.error ? '#ef4444' : '#22c55e'};font-weight:600;font-size:10px">${info && info.error ? '🔴 Går ikke opp' : '🟢 Passer'}</div>
+      </div>
+      <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px;font-weight:600"><span>Effekt</span><span>${info ? info.watt : 0} W</span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Flateeffekt</span><span style="font-weight:600;color:${zWm2 && zWm2 < 250 ? '#f59e0b' : zWm2 > 500 ? '#ef4444' : 'var(--text)'}">${zWm2 || '—'} W/m²</span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>Løp per ${info && info.treads === 0 ? 'repos' : 'trinn'}</span><span>${info ? info.runsPerStep : 0}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px"><span>CC</span><span>${info ? info.actualCC_cm.toFixed(1) : '0.0'} cm</span></div>
+        <div style="display:flex;justify-content:space-between"><span>Avstand sider</span><span>${solvedMargin != null ? solvedMargin.toFixed(1) : '—'} cm</span></div>
+      </div>
+      <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
+        ${inheritRow('Avstand sider (min)', zs.edgeMarginMin_cm != null ? zs.edgeMarginMin_cm : '', _stairFloorMargin(stair), `_setStairZoneEdgeMargin(${selZone}, this.value)`, 1, 20, 0.5)}
+        ${inheritRow('Avstand foran/bak', zs.noseOffset_cm != null ? zs.noseOffset_cm : '', (stair.noseOffset_cm ?? 2), `_setStairZoneFrontBack(${selZone}, this.value)`, 0, 10, 0.5)}
+        ${info && info.treads > 0 ? inheritRow('Maks CC trinn', zs.stepCC_cm != null ? zs.stepCC_cm : '', (stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM), `_setStairZoneStepCC(${selZone}, this.value)`, 3, STAIR_MAX_CC_CM, 0.5) : ''}
+        ${hasLanding ? inheritRow('Maks CC repos', zs.landingCC_cm != null ? zs.landingCC_cm : '', (stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM), `_setStairZoneLandingCC(${selZone}, this.value)`, 3, STAIR_MAX_CC_CM, 0.5) : ''}
+        <div style="font-size:10px;color:var(--dim);margin-top:2px">Tomt felt = som trappa.</div>
+      </div>
+      <div style="border-top:1px solid var(--brd);padding-top:8px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span>Kabel</span>
+          <select onchange="_setStairZoneProduct(${selZone}, this.value)" onclick="event.stopPropagation()" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:150px">
+            <option value=""${zs.productId ? '' : ' selected'}>Auto</option>
+            ${_varOptsFor(zs.productId || null)}
+          </select>
+        </div>
+        ${zs.productId ? `<button onclick="_setStairZoneProduct(${selZone}, '')" style="width:100%;margin-top:5px;padding:4px;border:1px solid var(--brd);border-radius:5px;background:var(--surface2);color:var(--text);font-size:11px;cursor:pointer">↩ Tilbake til auto</button>` : ''}
+      </div>
+      <button onclick="showStairEditModal(${stair.id})" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:11px">✎ Rediger trinn/soner</button>`);
+  }
+
+  // ── «Hele trappa»: dagens panel + én kort linje per sone ────────────────────────────────
+  let zoneSummaryHtml = '';
+  if (zonesActive) {
+    let rows = '';
+    for (let zi = 0; zi < zoneList.length; zi++) {
+      const r = zoneList[zi];
+      const c = (stair.cables || [])[zi];
+      const pr = c && c.productId ? HEATING_PRODUCTS.find(p => p.id === c.productId) : null;
+      const w = pr?.watt_per_m ? Math.round((c.length_cm || 0) / 100 * pr.watt_per_m) : 0;
+      rows += `<div onclick="_selectStairZone(${r.zone})" style="display:flex;align-items:center;gap:5px;padding:3px 0;font-size:11px;cursor:pointer" title="Åpne sonen">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${(c && c.color) || STAIR_CABLE_COLORS[zi % STAIR_CABLE_COLORS.length]};flex:0 0 auto"></span>
+        <span style="font-weight:600">Sone ${r.zone}</span>
+        <span style="flex:1;min-width:0;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pr ? esc(pr.name) : 'ingen kabel'}</span>
+        ${c && c.manual ? '<span style="flex:0 0 auto;color:var(--accent);font-size:10px" title="Kabel valgt manuelt">M</span>' : ''}
+        <span style="flex:0 0 auto;color:var(--dim)">${w} W</span>
+        <span style="color:${c && c.error ? '#ef4444' : '#22c55e'}">${c && c.error ? '⚠' : '✓'}</span>
+      </div>`;
+    }
+    zoneSummaryHtml = `<div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:8px">
+      <div style="font-size:10px;color:var(--dim);margin-bottom:2px">Soner — klikk for å åpne</div>${rows}</div>`;
+  }
+
   return `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">
     <div id="stair-settings-handle" style="font-weight:600;font-size:13px;margin-bottom:8px;cursor:grab;user-select:none" title="Dra for å flytte">⠿ ${zonesActive ? 'Soner' : isMultiCable ? 'Kabler' : 'Kabel'} — Resultat</div>
-    ${zoneErrorHtml}${manualFitHtml}${editShapeBtn}
+    ${zonePickerHtml}${zoneErrorHtml}${zoneIssuesHtml}${manualFitHtml}${editShapeBtn}${zoneSummaryHtml}
     ${!isMultiCable ? `<div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>` : ''}
     <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:6px">
       ${cableBreakdownHtml}
@@ -40956,7 +41185,7 @@ function _clearProductSelection() {
   S.ui.selectedMatId = null;
   S.ui.selectedMatPathId = null;
   S.ui.selectedPlateId = null;
-  S.ui.selectedStairId = null;
+  S.ui.selectedStairId = null; S.ui.selectedStairZone = null;
   S.ui.selectedZoneId = null;
   S.ui.selectedWallId = null;
   S.ui.selectedVertexIdx = null;
@@ -43118,6 +43347,99 @@ function _stairRunCount(usableDepth, maxCC) {
   return { N, actualCC };
 }
 
+// ══ 102 · SONENS EGNE INNSTILLINGER (Regel 21, Kenneth 19.10.2026) ═══════════════════════════
+// «Jeg ønsker at hver sone blir som hvert sitt rom.» Sonen kan overstyre kabel, kantavstand (gulv),
+// maks CC trinn/repos og avstand foran/bak. ALT er valgfritt: tomt felt = arv fra trappa, og en
+// trapp uten soner er derfor byte for byte som før.
+//   stair.zoneSettings = { <sonenummer>: { productId, edgeMarginMin_cm, stepCC_cm, landingCC_cm, noseOffset_cm } }
+// Nøkkelen er SONENUMMERET fra segmentlista, ikke en indeks — innstillingene følger sone 2 selv om
+// segmentene flyttes rundt. Nummer som ikke lenger finnes ryddes ved lagring
+// (_stairPruneZoneSettings).
+function _stairZoneSettings(stair, zoneNo) {
+  if (zoneNo == null) return {};
+  const zs = (stair && stair.zoneSettings) || {};
+  return zs[zoneNo] || zs[String(zoneNo)] || {};
+}
+
+// De EFFEKTIVE målene for én flate: sonens overstyring der den finnes, ellers trappas verdi.
+// Dette er den ene kilden motoren, panelet, tegningen og PDF-en leser — STEG 0.4 fant at bare
+// sidemarginen var per flate fra før (zoneMarginForSurf); maks CC, nese/opptrinn og repos-margin
+// ble lest ÉN gang for hele trappa, utenfor flate-løkka.
+// `zoneRanges` kan sendes inn når kalleren alt har regnet dem (motoren gjør det én gang per kall).
+// Uten soner returneres nøyaktig trappas egne verdier.
+function _stairSurfSettings(stair, si, zoneRanges) {
+  const surf = (stair.surfaces || [])[si] || {};
+  const isLanding = surf.type === 'landing';
+  const base = {
+    zone: null, zoneIdx: -1,
+    edgeMargin_cm: stair.edgeMargin_cm || 5,
+    edgeMarginFloor_cm: _stairFloorMargin(stair),
+    stepCC_cm: stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM,
+    landingCC_cm: stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM,
+    noseOffset_cm: stair.noseOffset_cm ?? 2,
+    riserOffset_cm: stair.riserOffset_cm ?? 2,
+    landingMargin_cm: stair.landingMargin_cm ?? 5,
+  };
+  const ranges = zoneRanges === undefined ? _stairZoneRanges(stair) : zoneRanges;
+  if (ranges) {
+    const zi = ranges.findIndex(r => si >= r.fromSurf && si <= r.toSurf);
+    if (zi >= 0) {
+      const r = ranges[zi];
+      base.zone = r.zone; base.zoneIdx = zi;
+      const zs = _stairZoneSettings(stair, r.zone);
+      // Sidemarginen er den LØSTE verdien per sone (satt av _stairSolveZones i stair.cables[zi]),
+      // ikke sonens gulv — gulvet er bare inngangsverdien løsningen aldri går under (084/Regel 12).
+      const cable = (stair.cables || [])[zi];
+      if (cable && cable.edgeMargin_cm != null) base.edgeMargin_cm = cable.edgeMargin_cm;
+      if (zs.edgeMarginMin_cm > 0) base.edgeMarginFloor_cm = zs.edgeMarginMin_cm;
+      if (zs.stepCC_cm > 0) base.stepCC_cm = zs.stepCC_cm;
+      if (zs.landingCC_cm > 0) base.landingCC_cm = zs.landingCC_cm;
+      // «Avstand foran/bak» er ÉN kontroll som setter både nese og opptrinn, nøyaktig som
+      // _setStairFrontBackOffset gjør på trappenivå.
+      if (zs.noseOffset_cm != null && zs.noseOffset_cm !== '') { base.noseOffset_cm = +zs.noseOffset_cm; base.riserOffset_cm = +zs.noseOffset_cm; }
+    }
+  }
+  base.maxCC_cm = Math.min(isLanding ? base.landingCC_cm : base.stepCC_cm, STAIR_MAX_CC_CM);
+  base.depthStart_cm = isLanding ? base.landingMargin_cm : base.riserOffset_cm;
+  base.depthEnd_cm = isLanding ? (surf.d_cm || 0) - base.landingMargin_cm : (surf.d_cm || 0) - base.noseOffset_cm;
+  return base;
+}
+
+// Sonen som en selvstendig «liten trapp» — alt løsningsmotorene (_stairSolveExactCableSet,
+// _stairFitFixedSet) trenger. segments tømmes med vilje: da gir _stairZoneRanges(subStair) null,
+// og motoren regner sonen som en helt vanlig trapp uten soner (ingen rekursjon). runsPerStep-cachen
+// fra et valgt forslag gjelder BARE uten soner — med soner følger N av sonens egen maks CC (Regel 3/7).
+function _stairZoneSubStair(stair, range) {
+  const zs = _stairZoneSettings(stair, range.zone);
+  const floor = zs.edgeMarginMin_cm > 0 ? zs.edgeMarginMin_cm : _stairFloorMargin(stair);
+  const nose = (zs.noseOffset_cm != null && zs.noseOffset_cm !== '') ? +zs.noseOffset_cm : null;
+  return {
+    ...stair,
+    surfaces: (stair.surfaces || []).slice(range.fromSurf, range.toSurf + 1),
+    segments: [],            // => ingen soner inne i sonen
+    zoneSettings: null,
+    zoneError: null,
+    cables: [],
+    runsPerStep: null,
+    edgeMargin_cm: floor,
+    edgeMarginMin_cm: floor,
+    stepCC_cm: zs.stepCC_cm > 0 ? zs.stepCC_cm : (stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
+    landingCC_cm: zs.landingCC_cm > 0 ? zs.landingCC_cm : (stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM),
+    noseOffset_cm: nose != null ? nose : (stair.noseOffset_cm ?? 2),
+    riserOffset_cm: nose != null ? nose : (stair.riserOffset_cm ?? 2),
+  };
+}
+
+// Rydd bort innstillinger for sonenummer som ikke lenger finnes i segmentlista. Kalles ved lagring
+// (_buildSaveData) — ikke ved hver regenerering, slik at en sone som midlertidig er slått av
+// beholder innstillingene sine mens brukeren redigerer.
+function _stairPruneZoneSettings(stair) {
+  if (!stair || !stair.zoneSettings) return;
+  const live = new Set((stair.segments || []).filter(s => s.zone != null).map(s => String(s.zone)));
+  for (const k of Object.keys(stair.zoneSettings)) if (!live.has(String(k))) delete stair.zoneSettings[k];
+  if (!Object.keys(stair.zoneSettings).length) delete stair.zoneSettings;
+}
+
 function generateStairCable(stair) {
   // Cable runs SIDE-TO-SIDE across stair width (X-axis).
   // Multiple runs per tread are distributed along the depth (Y-axis) with CC spacing.
@@ -43129,10 +43451,8 @@ function generateStairCable(stair) {
   if (!surfs || !surfs.length) return { runs:[], connections:[], totalCableLength_cm:0, cableLengths:[], coveredCableLength_cm:0 };
   // Kabel fjernet av bruker: behold geometri, men ingen kabel-lop.
   if (stair.noCable) return { runs:[], connections:[], totalCableLength_cm:0, cableLengths:[], coveredCableLength_cm:0 };
-  const edgeMargin = stair.edgeMargin_cm || 5;   // sidemargin — kun bredde/strenglengde, ALDRI dybde (Regel 7)
-  const riserOff = stair.riserOffset_cm ?? 2;
-  const noseOff = stair.noseOffset_cm ?? 2;
-  const landingMargin = stair.landingMargin_cm ?? 5; // repos' EGEN dybdemargin — ikke sidemarginen (Regel 2)
+  // 102: sidemargin, nese/opptrinn og repos-margin leses nå PER FLATE via _stairSurfSettings
+  // (sonen først, så trappa) i stedet for én gang her — se Regel 21. Uten soner er verdiene de samme.
 
   // STEG 7 (Soner): når brukeren har merket segmenter i den eksisterende segment-listen med en
   // sone, gjelder EGEN sidemargin per sone (Regel 12 «innenfor DEN sonen») — se _stairZoneRanges.
@@ -43140,13 +43460,10 @@ function generateStairCable(stair) {
   // _stairSolveZones, kalt fra _regenerateStairCable FØR denne funksjonen). stair.zoneError !=
   // null betyr forrige soneløsning feilet (hull/for stor sone) — da faller vi tilbake til vanlig,
   // udelt ruting med FORRIGE gyldige stair.cables i stedet for å tegne et mistilpasset utlegg.
+  // 102: zoneError betyr nå KUN «sonene kan ikke brukes i det hele tatt» (hull i inndelingen).
+  // En enkelt sone som ikke går opp stopper ikke de andre lenger (Regel 21) — den får sin egen
+  // feil i stair.zoneResults, og trappas sammendrag ligger i stair.zoneIssues.
   const zoneRanges = !stair.zoneError ? _stairZoneRanges(stair) : null;
-  const zoneMarginForSurf = (si) => {
-    if (!zoneRanges) return edgeMargin;
-    const z = zoneRanges.findIndex(r => si >= r.fromSurf && si <= r.toSurf);
-    const cable = z >= 0 ? (stair.cables || [])[z] : null;
-    return (cable && cable.edgeMargin_cm != null) ? cable.edgeMargin_cm : edgeMargin;
-  };
 
   // Pass 1: bygg rutingen som ÉN ordnet sekvens av strekk (STEG 1, Regel 11) — hver streng og hvert
   // opptrinn i den rekkefølgen kabelen faktisk følger, uten noe kabel-eierskap ennå. `isGoingRight`
@@ -43173,8 +43490,10 @@ function generateStairCable(stair) {
     const si = surfOrder[oi];
     const surf = surfs[si];
     const isLanding = (surf.type === 'landing');
-    const maxCC = Math.min(isLanding ? (stair.landingCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM)
-                                  : (stair.stepCC_cm || stair.cableSpacing_cm || STAIR_DEFAULT_MAX_CC_CM), STAIR_MAX_CC_CM);
+    // 102 (Regel 21): ALLE målene for flaten kommer nå fra ÉN kilde — sonens overstyring der den
+    // finnes, ellers trappas verdi. Uten soner er dette nøyaktig de gamle verdiene.
+    const ss = _stairSurfSettings(stair, si, zoneRanges);
+    const maxCC = ss.maxCC_cm;
 
     // Regel 14 (Kenneth 18.08.2026): kabelen starter NEDERST, PÅ TRAPPENESEN (run-indeks 0), og
     // arbeider innover mot opptrinnet (run-indeks N-1). Bekreftet empirisk (pikselrendering av
@@ -43184,12 +43503,12 @@ function generateStairCable(stair) {
     // og depthEnd (høy pos-grense) bruker noseOff — motsatt av før, som ga K1 på riser-siden i
     // stedet for nesen (pos-formelen under teller i tillegg NEDOVER fra depthEnd for trinn, eller
     // OPPOVER fra depthStart ved snudd opplegg — se startFromTop over).
-    const depthStart = isLanding ? landingMargin : riserOff;
-    const depthEnd = isLanding ? surf.d_cm - landingMargin : surf.d_cm - noseOff;
+    const depthStart = ss.depthStart_cm;
+    const depthEnd = ss.depthEnd_cm;
     const usableDepth = depthEnd - depthStart;
     if (usableDepth < 0.5) continue;
 
-    const surfMargin = zoneMarginForSurf(si);
+    const surfMargin = ss.edgeMargin_cm;
     const surfW = surf.w_cm || stair.width_cm || 120;
     const xStart = surfMargin;
     const xEnd = surfW - surfMargin;
@@ -43200,7 +43519,10 @@ function generateStairCable(stair) {
     // når en avrundet CC lagres tilbake som ny maks-CC). runsPerStep er alltid satt fra ren geometri
     // — aldri fra kabelvalg, jf. Regel 7 — se _generateStairProposals. Repos/landing har ingen slik
     // cache og regner alltid direkte fra _stairRunCount.
-    const { N, actualCC } = (!isLanding && stair.runsPerStep > 0)
+    // 102: cachen gjelder BARE uten soner. Med soner kan hver sone ha sin egen maks CC, og da må
+    // N regnes av sonens egen brukbare dybde (Regel 3/7) — ellers ville sone 3 arvet antallet
+    // forslaget fant for hele trappa.
+    const { N, actualCC } = (!isLanding && !zoneRanges && stair.runsPerStep > 0)
       ? { N: Math.max(1, stair.runsPerStep), actualCC: stair.runsPerStep > 1 ? usableDepth / (stair.runsPerStep - 1) : 0 }
       : _stairRunCount(usableDepth, maxCC);
 
@@ -43582,8 +43904,9 @@ function _stairSoneGeometryBlocks(stair) {
   const cbk = _stairCableLengthBreakdown(stair);
   if (!cbk.length) return [];
   const cables = stair.cables || [];
-  const riserOff = Math.round((stair.riserOffset_cm ?? 2) * 10) / 10;
-  const noseOff = Math.round((stair.noseOffset_cm ?? 2) * 10) / 10;
+  // 102 (Regel 17/21): dybdemarginene er nå SONENS, ikke trappas — samme effektive verdier som
+  // panelet og motoren leser (_stairSurfSettings). Uten soner er de trappas, som før.
+  const zoneRanges = !stair.zoneError ? _stairZoneRanges(stair) : null;
 
   const runsBySurf = {};
   for (const r of stair.runs) { (runsBySurf[r.surfaceIdx] = runsBySurf[r.surfaceIdx] || []).push(r); }
@@ -43627,6 +43950,11 @@ function _stairSoneGeometryBlocks(stair) {
       g.wm2 = (wPerM > 0 && g.actualCC > 0) ? Math.round(wPerM / (g.actualCC / 100)) : null;
     }
 
+    // 102: nese/opptrinn fra SONENS egne innstillinger — les dem på sonens første flate.
+    const refSi = cableObj && cableObj.fromSurf != null ? cableObj.fromSurf : (touched[0] ?? 0);
+    const eff = _stairSurfSettings(stair, refSi, zoneRanges);
+    const riserOff = Math.round(eff.riserOffset_cm * 10) / 10;
+    const noseOff = Math.round(eff.noseOffset_cm * 10) / 10;
     return { ...cb, edgeMargin_cm, riserOffset_cm: riserOff, noseOffset_cm: noseOff, groups, varies: groups.length > 1 };
   });
 }
@@ -43670,6 +43998,8 @@ function _stairZoneRanges(stair) {
 function _stairSolveZones(stair) {
   const ranges = _stairZoneRanges(stair);
   if (!ranges) return { ok: false, reason: 'Ingen soner satt.' };
+  // Hull er fortsatt en feil for HELE trappa: uten en sone på hvert segment vet motoren ikke hvor
+  // en kabel slutter og neste begynner. Alt annet løses per sone (102/Regel 21).
   if (ranges.some(r => r.zone == null)) {
     return { ok: false, reason: 'Hull i soneinndelingen: ett eller flere segmenter mangler sone. Alle segmenter må ha en sone når soner er i bruk.' };
   }
@@ -43678,22 +44008,40 @@ function _stairSolveZones(stair) {
   const zoneResults = [];
   for (let zi = 0; zi < ranges.length; zi++) {
     const r = ranges[zi];
-    const subStair = { ...stair, edgeMargin_cm: stair.edgeMargin_cm || 5, surfaces: stair.surfaces.slice(r.fromSurf, r.toSurf + 1) };
-    const solved = _stairSolveExactCableSet(subStair, { maxCables: 1 });
-    zoneResults.push({ zone: r.zone, fromSurf: r.fromSurf, toSurf: r.toSurf, solved });
-    if (!solved.ok) continue;
+    // 102: sonen løses som sin egen lille trapp — egne flater, eget gulv, egen maks CC og egen
+    // avstand foran/bak (arvet fra trappa der sonen ikke overstyrer).
+    const subStair = _stairZoneSubStair(stair, r);
+    const zs = _stairZoneSettings(stair, r.zone);
+    const floor = _stairFloorMargin(subStair);
+    // Manuell kabel (Regel 21): sonen får NØYAKTIG den kabelen brukeren valgte, og sidemarginen
+    // løses for den — samme hjelper og samme regler som et manuelt sett på hele trappa (101).
+    // Tom productId = auto, som før.
+    const manual = zs.productId != null && zs.productId !== '';
+    const solved = manual
+      ? _stairFitFixedSet(subStair, [zs.productId])
+      : _stairSolveExactCableSet(subStair, { maxCables: 1 });
+    const productId = manual ? zs.productId : (solved.ok ? solved.products[0].id : null);
+    zoneResults.push({ zone: r.zone, fromSurf: r.fromSurf, toSurf: r.toSurf, manual, floorMargin_cm: floor, solved });
+    // 102 (Regel 21): HVER sone feiler for seg. En sone som ikke går opp får marginen på gulvet og
+    // sin egen feiltekst — de andre sonene løses og tegnes som normalt. Ingen kabel ved auto-feil
+    // (productId null => ubegrenset kapasitet, hele sonen tegnes udekket), kabelen beholdes ved
+    // manuelt valg (brukeren skal se hva det valget gir).
     cables.push({
       index: zi, zone: r.zone, fromSurf: r.fromSurf, toSurf: r.toSurf,
-      productId: solved.products[0].id, edgeMargin_cm: solved.edgeMargin_cm,
+      productId,
+      edgeMargin_cm: solved.ok ? solved.edgeMargin_cm : floor,
       color: STAIR_CABLE_COLORS[zi % STAIR_CABLE_COLORS.length],
-      marginResidual_cm: solved.residual_cm || 0,   // Regel 15: restavvik etter mm-snapping, vist i panelet
+      marginResidual_cm: solved.ok ? (solved.residual_cm || 0) : 0,   // Regel 15: restavvik etter mm-snapping
+      manual,
+      error: solved.ok ? null : (solved.reason || 'Går ikke opp.'),
     });
   }
   const failed = zoneResults.filter(z => !z.solved.ok);
-  if (failed.length) {
-    return { ok: false, reason: `Sone ${failed.map(f => f.zone).join(', ')}: ${failed[0].solved.reason}`, zoneResults };
-  }
-  return { ok: true, cables, zoneResults };
+  return {
+    ok: true, cables, zoneResults,
+    // Trappas felles sammendrag — detaljen står på sonen (stair.cables[zi].error).
+    issues: failed.length ? `Sone ${failed.map(f => f.zone).join(', ')}: ${failed[0].solved.reason}` : null,
+  };
 }
 
 // STEG 3+4(korrigert av Kenneth 19.08.2026)+5+6 (Regel 11-13, spec-trapp-kabelutlegg.md): finn et
@@ -43799,7 +44147,9 @@ function _stairFitFixedSet(stair, productIds) {
 // «0.1 m for lange». Samme valg som _stairFitFromLengths gjør for sine advarsler.
 function _stairLenTxt(cm) {
   const a = Math.abs(cm);
-  return a >= 100 ? (a / 100).toFixed(1) + ' m' : Math.round(a) + ' cm';
+  if (a >= 100) return (a / 100).toFixed(1) + ' m';
+  // 102: under én centimeter er «0 cm» ingen opplysning — vis desimalen.
+  return a >= 1 ? Math.round(a) + ' cm' : a.toFixed(1) + ' cm';
 }
 
 function _stairSolveExactCableSet(stair, opts) {
@@ -44344,6 +44694,139 @@ function _stairManualSetRegressionTest() {
   return { ok: allOk, results };
 }
 
+// 102 (Regel 21) — regresjonstest for SONER SOM EGNE ROM. Kjøres fra konsollen:
+// _stairZoneRegressionTest102(). Samme syntetiske katalog og «rør ikke lagring»-oppsett som 084/101.
+// Låser: (A) auto-soner uendret etter 102, (B) manuell kabel per sone via _stairFitFixedSet,
+// (C) feil per sone uten å stoppe de andre, (D) sonens egne mål (maks CC, foran/bak, gulv) med arv
+// fra trappa, (E) opprydding av innstillinger for soner som forsvinner, (F) trapp UTEN soner urørt.
+function _stairZoneRegressionTest102() {
+  const saved = { stairs: S.stairs, sel: S.ui.selectedStairId, zone: S.ui.selectedStairZone,
+    prods: HEATING_PRODUCTS.slice(), cats: PRODUCT_CATEGORIES.slice(),
+    nextStair: S.counters.nextStairId, undoLen: _undoStack.length, autosave: window._performAutoSave };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    window._performAutoSave = async () => {};
+    const LENS = [5, 10, 15, 20, 25, 30, 35, 40.1, 45, 49.7, 55.3, 60, 70, 78.7, 89.1, 98, 106.9, 128.2, 139.9];
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push({ id: 9800, module_type: 'cable', name: 'TESTKABEL' });
+    HEATING_PRODUCTS.length = 0;
+    LENS.forEach((L, i) => HEATING_PRODUCTS.push({ id: 98000 + i, category_id: 9800, active: true, product_family: 'InSnow 30T',
+      name: `InSnow 30T ${Math.round(L * 30)}W ${L}m`, cable_length_m: L, watt_per_m: 30, voltage: 230 }));
+    const pidFor = L => (HEATING_PRODUCTS.find(p => Math.abs(p.cable_length_m - L) < 0.001) || {}).id;
+    // Tre soner: 4 trinn / repos / 6 trinn — samme form som Kenneths testtrapp.
+    const mkZoned = () => {
+      S.counters.nextStairId = 998001;
+      const st = _createStairObj({ name: 'TESTSONER', width_cm: 210, step_depth_cm: 30, step_height_cm: 17, step_count: 10,
+        edgeMargin_cm: 5, stepCC_cm: 10, landingCC_cm: 9, cableSpacing_cm: 10, riserOffset_cm: 2, noseOffset_cm: 2 });
+      st.segments = [
+        { type: 'steps', width_cm: 210, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 4, zone: 1 },
+        { type: 'landing', width_cm: 210, depth_cm: 120, zone: 2 },
+        { type: 'steps', width_cm: 210, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 6, zone: 3 },
+      ];
+      st.cables = []; st.selectedProposal = null; st.lastProposal = null; st.desiredCableCount = null;
+      S.stairs = [st]; S.ui.selectedStairId = st.id; S.ui.selectedStairZone = null;
+      _regenerateStairCable(st);
+      return st;
+    };
+    const sig = st => (st.cables || []).map(c => `${c.zone}:${(HEATING_PRODUCTS.find(p => p.id === c.productId) || {}).cable_length_m}@${c.edgeMargin_cm}/${c.marginResidual_cm}`).join(' | ');
+    const nPerSurf = st => { const by = {}; for (const r of st.runs) (by[r.surfaceIdx] ||= []).push(r); return Object.keys(by).sort((a,b)=>a-b).map(k => by[k].length).join(','); };
+
+    // ═══ A · auto-soner: fasit målt mot b47a65d (101), FØR 102 ════════════════════════════
+    let st = mkZoned();
+    // Fasiten er MÅLT på b47a65d (før 102) med nøyaktig denne geometrien — ikke gjettet.
+    const AUTO = '1:30@12.8/-1.4 | 2:25@15.7/-0.4 | 3:45@13/-1';
+    check('A1: auto-sonene uendret', AUTO, sig(st) === AUTO, sig(st));
+    check('A2: ingen feil', null, st.zoneError === null && st.zoneIssues == null, [st.zoneError, st.zoneIssues]);
+    const AUTO_N = nPerSurf(st);
+    check('A3: strengantall per flate', '4,4,4,4,14,4,4,4,4,4,4', AUTO_N === '4,4,4,4,14,4,4,4,4,4,4', AUTO_N);
+
+    // ═══ B · manuell kabel i én sone (Regel 21) ══════════════════════════════════════════
+    st = mkZoned();
+    _setStairZoneProduct(3, pidFor(40.1));
+    check('B1: sone 3 fikk valgt kabel', 40.1, (HEATING_PRODUCTS.find(p => p.id === st.cables[2].productId) || {}).cable_length_m === 40.1,
+      (HEATING_PRODUCTS.find(p => p.id === st.cables[2].productId) || {}).cable_length_m);
+    check('B2: sone 3 er merket manuell', true, st.cables[2].manual === true, st.cables[2].manual);
+    check('B3: sone 3 fikk løst egen margin (23,2)', 23.2, Math.abs(st.cables[2].edgeMargin_cm - 23.2) < 0.001, st.cables[2].edgeMargin_cm);
+    check('B4: sone 1 og 2 helt uendret', '1:30@12.8/-1.4 | 2:25@15.7/-0.4',
+      sig(st).split(' | ').slice(0, 2).join(' | ') === '1:30@12.8/-1.4 | 2:25@15.7/-0.4', sig(st).split(' | ').slice(0, 2).join(' | '));
+    check('B5: marginen skrev ALDRI tilbake til gulvet (084)', 5, _stairFloorMargin(st) === 5, _stairFloorMargin(st));
+    _setStairZoneProduct(3, '');   // tilbake til auto
+    check('B6: «Tilbake til auto» gir auto-svaret', AUTO, sig(st) === AUTO, sig(st));
+
+    // ═══ C · feil per sone stopper IKKE de andre (Regel 21) ══════════════════════════════
+    st = mkZoned();
+    _setStairZoneProduct(2, pidFor(70));   // altfor lang for et repos som trenger 28 m
+    check('C1: sone 2 har egen feil', true, /for lange/.test(st.cables[1].error || ''), st.cables[1].error);
+    check('C2: sone 2 på gulvet', 5, st.cables[1].edgeMargin_cm === 5, st.cables[1].edgeMargin_cm);
+    check('C3: sone 1 og 3 fortsatt gyldige', true, !st.cables[0].error && !st.cables[2].error, [st.cables[0].error, st.cables[2].error]);
+    check('C4: sone 1 og 3 TEGNES fortsatt', true, st.runs.some(r => r.surfaceIdx <= 3) && st.runs.some(r => r.surfaceIdx >= 5), nPerSurf(st));
+    check('C5: zoneError (= sonene kan ikke brukes) er fortsatt null', null, st.zoneError === null, st.zoneError);
+    check('C6: sammendrag nevner sonen', true, /^Sone 2:/.test(st.zoneIssues || ''), st.zoneIssues);
+    // Hull er fortsatt en feil for HELE trappa
+    st.segments[1].zone = null; _regenerateStairCable(st);
+    check('C7: hull gir fortsatt zoneError for hele trappa', true, /Hull i soneinndelingen/.test(st.zoneError || ''), st.zoneError);
+
+    // ═══ D · sonens egne mål, med arv fra trappa ═════════════════════════════════════════
+    st = mkZoned();
+    _setStairZoneStepCC(3, 6);
+    check('D1: bare sone 3 fikk flere løp', '4,4,4,4,14,6,6,6,6,6,6', nPerSurf(st) === '4,4,4,4,14,6,6,6,6,6,6', nPerSurf(st));
+    _setStairZoneStepCC(3, '');
+    check('D2: tomt felt = som trappa igjen', AUTO_N, nPerSurf(st) === AUTO_N, nPerSurf(st));
+    check('D3: og samme kabler som auto', AUTO, sig(st) === AUTO, sig(st));
+    // Avstand foran/bak per sone: færre løp når marginen øker
+    _setStairZoneFrontBack(1, 6);
+    const ss1 = _stairSurfSettings(st, 0);
+    check('D4: sonens nese OG opptrinn settes av ett felt', '6/6', ss1.noseOffset_cm === 6 && ss1.riserOffset_cm === 6, ss1.noseOffset_cm + '/' + ss1.riserOffset_cm);
+    check('D5: trappa selv er urørt', 2, st.noseOffset_cm === 2 && st.riserOffset_cm === 2, st.noseOffset_cm);
+    check('D6: flater utenfor sonen arver trappa', 2, _stairSurfSettings(st, 5).noseOffset_cm === 2, _stairSurfSettings(st, 5).noseOffset_cm);
+    _setStairZoneFrontBack(1, '');
+    // Sonens eget gulv
+    _setStairZoneEdgeMargin(2, 12);
+    check('D7: sonens gulv brukes i løsningen', true, st.cables[1].edgeMargin_cm >= 12, st.cables[1].edgeMargin_cm);
+    check('D8: trappas gulv urørt', 5, st.edgeMarginMin_cm === 5, st.edgeMarginMin_cm);
+    _setStairZoneEdgeMargin(2, '');
+    check('D9: tilbake til arv gir auto-svaret', AUTO, sig(st) === AUTO, sig(st));
+
+    // ═══ E · opprydding: sonenummer som forsvinner ═══════════════════════════════════════
+    st = mkZoned();
+    _setStairZoneProduct(3, pidFor(40.1));
+    _setStairZoneStepCC(1, 7);
+    st.segments[2].zone = 1;            // sone 3 finnes ikke lenger
+    _regenerateStairCable(st);
+    _stairPruneZoneSettings(st);
+    check('E1: sone 3 sine innstillinger ryddet', false, !(st.zoneSettings || {})['3'], Object.keys(st.zoneSettings || {}).join(','));
+    check('E2: sone 1 sine innstillinger står', 7, (st.zoneSettings || {})['1'] && st.zoneSettings['1'].stepCC_cm === 7, JSON.stringify(st.zoneSettings));
+
+    // ═══ F · trapp UTEN soner: byte for byte som før ═════════════════════════════════════
+    S.counters.nextStairId = 998101;
+    const plain = _createStairObj({ name: 'TESTFLAT', width_cm: 240, step_depth_cm: 32, step_height_cm: 16, step_count: 8,
+      edgeMargin_cm: 5, stepCC_cm: 10, cableSpacing_cm: 10, riserOffset_cm: 2, noseOffset_cm: 2 });
+    S.stairs = [plain]; S.ui.selectedStairId = plain.id;
+    const ssP = _stairSurfSettings(plain, 0);
+    check('F1: uten soner gir _stairSurfSettings trappas egne verdier', '5/10/2/2',
+      ssP.edgeMargin_cm === 5 && ssP.stepCC_cm === 10 && ssP.noseOffset_cm === 2 && ssP.riserOffset_cm === 2,
+      [ssP.edgeMargin_cm, ssP.stepCC_cm, ssP.noseOffset_cm, ssP.riserOffset_cm].join('/'));
+    check('F2: ingen sone funnet', null, ssP.zone === null, ssP.zone);
+    const propsP = _generateStairProposals(plain);
+    check('F3: forslagsmotoren uendret (70 m @ 12,4)', '70@12.4',
+      propsP[0] && propsP[0].products.map(p => p.length_m).join('+') === '70' && Math.abs(propsP[0].edgeMargin_cm - 12.4) < 0.01,
+      propsP[0] && propsP[0].products.map(p => p.length_m).join('+') + '@' + propsP[0].edgeMargin_cm);
+  } catch (e) {
+    results.push({ name: 'UNNTAK', ok: false, expected: '-', got: String(e && e.stack || e) });
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(...saved.cats);
+    S.stairs = saved.stairs; S.ui.selectedStairId = saved.sel; S.ui.selectedStairZone = saved.zone;
+    S.counters.nextStairId = saved.nextStair;
+    _undoStack.length = saved.undoLen;
+    window._performAutoSave = saved.autosave;
+    _invalidateStairCache(); renderSidebar(); updateCtxBar(); render(); _updateStairSettingsPanel();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_stairZoneRegressionTest102: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 // 098 — regresjonstest for sidevisningens speiling. Kjøres fra konsollen: _stairSideRegressionTest().
 // For trapper med/uten repos, begge byggeretninger, snudd kabelstart og flere kabler skal start- og
 // sluttprikken i sidevisningen ligge på SAMME fysiske kant som i planen: brøken «avstand fra
@@ -44793,11 +45276,16 @@ function _regenerateStairCable(stair) {
   const zoneRanges = _stairZoneRanges(stair);
   if (zoneRanges) {
     const solved = _stairSolveZones(stair);
-    if (solved.ok) { stair.cables = solved.cables; stair.zoneError = null; }
-    else { stair.zoneError = solved.reason; }
+    // 102 (Regel 21): zoneError betyr nå KUN at sonene ikke kan brukes i det hele tatt (hull i
+    // inndelingen) — det er den eneste tilstanden generateStairCable skal falle tilbake fra.
+    // En enkelt sone som ikke går opp står i stair.zoneIssues (sammendrag) og på sonen selv
+    // (stair.cables[zi].error), og stopper ikke de andre sonene.
+    if (solved.ok) { stair.cables = solved.cables; stair.zoneError = null; stair.zoneIssues = solved.issues || null; }
+    else { stair.zoneError = solved.reason; stair.zoneIssues = null; }
     stair.zoneResults = solved.zoneResults || null;
   } else {
     stair.zoneError = null;
+    stair.zoneIssues = null;
     stair.zoneResults = null;
     // Soner nettopp slått av (alle segmenter satt tilbake til «Auto») — rydd bort de gamle sone-
     // kablene i stedet for å la dem henge igjen som et vilkårlig flerkabel-oppsett. Spec (Soner):
@@ -51582,7 +52070,7 @@ function selectBgLayer(bg) {
   S.ui.selectedBg = bg;
   S.ui.selectedStripId = null; S.ui.selectedStripIds = new Set();
   S.ui.selectedCableId = null; S.ui.selectedZoneId = null; S.ui.selectedMatId = null;
-  S.ui.selectedPlateId = null; S.ui.selectedAluboardId = null; S.ui.selectedStairId = null; S.ui.selectedHindringId = null;
+  S.ui.selectedPlateId = null; S.ui.selectedAluboardId = null; S.ui.selectedStairId = null; S.ui.selectedStairZone = null; S.ui.selectedHindringId = null;
   S.ui.selectedHindringWallIdx = null; S.ui.selectedWallId = null; S.ui.selectedVertexIdx = null;
   S.ui.selectedDimId = null; S.ui.selectedRoomId = null; S.ui.selectedAnnot = null;
   // Make this layer the active one for its floor so quick-controls target it.
@@ -53604,7 +54092,42 @@ function stairItemHtml(st, paddingLeft) {
       <span class="room-area">${segSummary}, ${w}cm</span>
     </div>
     <button onclick="event.stopPropagation();startRenameStair(${st.id},this.closest('.room-item'))" title="Gi nytt navn" style="width:20px;height:20px;border:none;border-radius:3px;background:transparent;color:var(--dim);cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-left:auto"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
-  </div>`;
+  </div>${_stairSoneRowsHtml(st, paddingLeft)}`;
+}
+
+// 102 (Regel 21, Kenneth 19.10.2026: «hver sone blir som hvert sitt rom»): underrader per sone i
+// venstremenyen — samme mønster som _soneRowsHtml for romsoner (søsken ETTER forelderens </div>,
+// ikke nestet). Vises bare når trappa er valgt OG har soner. Klikk velger sonen, og panelet åpner
+// sonens egen side.
+function _stairSoneRowsHtml(st, paddingLeft) {
+  if (st.id !== S.ui.selectedStairId) return '';
+  const ranges = (!st.zoneError && typeof _stairZoneRanges === 'function') ? _stairZoneRanges(st) : null;
+  if (!ranges) return '';
+  const zones = ranges.filter(r => r.zone != null);
+  if (!zones.length) return '';
+  let html = '';
+  for (let zi = 0; zi < zones.length; zi++) {
+    const r = zones[zi];
+    const c = (st.cables || [])[zi];
+    const pr = c && c.productId ? HEATING_PRODUCTS.find(p => p.id === c.productId) : null;
+    const w = pr?.watt_per_m ? Math.round((c.length_cm || 0) / 100 * pr.watt_per_m) : 0;
+    const surfs = (st.surfaces || []).slice(r.fromSurf, r.toSurf + 1);
+    const nTread = surfs.filter(s => s.type === 'tread').length, nLand = surfs.filter(s => s.type === 'landing').length;
+    const dekker = [nTread ? nTread + ' trinn' : '', nLand ? nLand + ' repos' : ''].filter(Boolean).join(' + ');
+    const bits = [dekker, pr ? pr.cable_length_m + ' m' : 'ingen kabel', w + ' W',
+      c && c.edgeMargin_cm != null ? 'kant ' + c.edgeMargin_cm.toFixed(1) + ' cm' : ''].filter(Boolean);
+    const sel = S.ui.selectedStairZone === r.zone;
+    html += `<div class="room-item indented${sel ? ' sel' : ''}" data-stair-zone="${r.zone}"
+      onclick="_selectStairZone(${r.zone});renderSidebar();event.stopPropagation()"
+      style="padding-left:${paddingLeft + 14}px">
+      <span class="room-type-ico" style="color:${(c && c.color) || STAIR_CABLE_COLORS[zi % STAIR_CABLE_COLORS.length]}">↳</span>
+      <div class="room-info">
+        <span class="room-nm">Sone ${r.zone}${c && c.error ? ' ⚠' : ''}${c && c.manual ? ' · manuell' : ''}</span>
+        <span class="room-area">${esc(bits.join(' · '))}</span>
+      </div>
+    </div>`;
+  }
+  return html;
 }
 
 // DEL B: samme mønster som startRename (rom) — bytt .room-nm-spannet med et input, lagre på
@@ -57380,7 +57903,10 @@ function pushUndo() {
     matPaths:  (S.matPaths||[]).map(mp=>({...mp, start: mp.start ? {...mp.start} : mp.start, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates:    S.plates.map(p=>({...p})),
     aluboard:  (S.aluboard||[]).map(a=>({...a})),
-    stairs:    S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
+    // 102: segments og zoneSettings mutères i PLASS (sone-merking i byggeren, sonens innstillinger
+    // i panelet) — begge må klones, ellers er angre en stille no-op. Nøyaktig samme felle som
+    // matPaths/planWalls hadde (se kommentarene over).
+    stairs:    S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), segments:(s.segments||[]).map(g=>({...g})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])], zoneSettings: s.zoneSettings ? JSON.parse(JSON.stringify(s.zoneSettings)) : s.zoneSettings})),
     // F4a (Kenneth 17.09.2026): fri folie — egen liste, egen id-teller (nextFoilFreeId).
     foilFree:  (S.foilFree||[]).map(f=>({...f})),
     // ⚠ 046: planveggene MÅ være her. Målt i live-test: uten dette var Ctrl+Z en stille no-op
@@ -57507,7 +58033,7 @@ function undo() {
     if (!_findUserDim(S.ui.selectedDimId)) S.ui.selectedDimId = null;   // 087
   }
   if (S.ui.selectedStairId !== null && !S.stairs.find(s => s.id === S.ui.selectedStairId)) {
-    S.ui.selectedStairId = null;
+    S.ui.selectedStairId = null; S.ui.selectedStairZone = null;
   }
   if (S.ui.activeFloorId !== null && S.ui.activeFloorId !== '__global__' && !S.floors.find(f => f.id === S.ui.activeFloorId)) {
     S.ui.activeFloorId = S.floors.length > 0 ? S.floors[0].id : null;
@@ -59243,8 +59769,15 @@ canvas.addEventListener('mousedown', e=>{
     // ── Stair body click — select + start drag immediately ──
     const hsid = hitStair(rawWp0.x, rawWp0.y);
     if (hsid) {
+      const _wasSel = S.ui.selectedStairId === hsid.id;
       selectStair(hsid.id);
-      renderSidebar();
+      // 102 (Regel 21): klikk på et trinn velger SONEN trinnet ligger i — «hver sone blir som
+      // hvert sitt rom». Treffer klikket mellom flatene (trappas boks, men ingen flate), lar vi
+      // sonevalget stå som det er i stedet for å nullstille det tilfeldig.
+      const _hsf = _hitStairSurface(hsid, rawWp0.x, rawWp0.y);
+      if (_hsf && _hsf.zone != null) S.ui.selectedStairZone = _hsf.zone;
+      else if (!_wasSel) S.ui.selectedStairZone = null;
+      renderSidebar(); _updateStairSettingsPanel();
       pushUndo();
       _stairDragging = true;
       _stairDragAxis = 'free';
@@ -66672,6 +67205,10 @@ function _buildSaveData() {
                missing: r.steps.filter(s => s.status === 'todo').map(s => s.key) };
     } catch (e) { return null; }
   })();
+  // 102 (Regel 21): rydd bort soneinnstillinger for sonenummer som ikke lenger finnes i
+  // segmentlista — ved LAGRING, ikke ved hver regenerering, så en sone som midlertidig er slått av
+  // beholder innstillingene sine mens brukeren redigerer.
+  for (const st of (S.stairs || [])) _stairPruneZoneSettings(st);
   return {
     _version : 2,
     project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now(), _prog},
@@ -66698,7 +67235,7 @@ function _buildSaveData() {
     matPaths : (S.matPaths||[]).map(mp=>({...mp, start:{...mp.start}, moves:(mp.moves||[]).map(m=>({...m}))})),
     plates   : S.plates.map(p=>({...p})),
     aluboard : (S.aluboard||[]).map(a=>({...a})),
-    stairs   : S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])]})),
+    stairs   : S.stairs.map(s=>({...s, dims:(s.dims||[]).map(d=>({...d,p1:{...d.p1},p2:{...d.p2}})), segments:(s.segments||[]).map(seg=>({...seg})), surfaces:(s.surfaces||[]).map(f=>({...f})), runs:(s.runs||[]).map(r=>({...r, segments:r.segments.map(seg=>({...seg}))})), connections:(s.connections||[]).map(c=>({...c})), cables:(s.cables||[]).map(c=>({...c, surfaceRange:[...(c.surfaceRange||[])]})), cableLengths:[...(s.cableLengths||[])], zoneSettings: s.zoneSettings ? JSON.parse(JSON.stringify(s.zoneSettings)) : undefined})),   // 102: soneinnstillinger lagres med trappa
     // F4a (Kenneth 17.09.2026): fri folie — egen objekttype, ingen nestede arrays å klone.
     foilFree : (S.foilFree||[]).map(f=>({...f})),
     // STEG 2 (etasje-vanntett, Kenneth 19.08.2026): begge manglet helt fra før (STEG 0-funn) —
@@ -67090,7 +67627,7 @@ function _restoreProject(data) {
   _invalidateMatCache();
   _invalidatePlateCache();
   _invalidateStairCache();
-  S.ui.selectedStairId = null;
+  S.ui.selectedStairId = null; S.ui.selectedStairZone = null;
   S.rooms.forEach(r=>{ if(!r.dims) r.dims=[]; if(!r.annotOffsets) r.annotOffsets={}; if(r.wallThicknessCm==null) r.wallThicknessCm=0; if(r.stripDimSnap==null) r.stripDimSnap=false; if(r.matDimSnap==null) r.matDimSnap=false;
     if(r.walls) r.walls.forEach(w=>{ if(w.thicknessCm==null) w.thicknessCm=r.wallThicknessCm||0; if(!w.side) w.side='out'; });
   });
@@ -70280,7 +70817,8 @@ function _stairDrawToCanvas(stair, opts) {
       const sf = surfs[+si];
       if (!sf) continue;
       const surfW = sf.w_cm || stair.width_cm || 120;
-      const edgeMrg = stair.edgeMargin_cm || 5;
+      // 102: flatens EGEN margin (sonens, der den finnes) — buene lå før på trappas margin.
+      const edgeMrg = _stairSurfSettings(stair, +si).edgeMargin_cm;
       const entryRight = entryRightBySurf[+si] || false;
       for (let ri = 0; ri < surfRuns.length; ri++) {
         const run = surfRuns[ri];
@@ -70343,8 +70881,10 @@ function _stairDrawToCanvas(stair, opts) {
         const fRuns = runsBySurfConn[conn.fromSurf]||[];
         if (fRuns.length) {
           const exitRight = conn.exitRight; // fra motoren — ikke regnet på nytt lokalt (Regel 9)
-          const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : fromSurf.x_cm+(stair.edgeMargin_cm||5);
-          const entryX = exitRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-(stair.edgeMargin_cm||5) : toSurf.x_cm+(stair.edgeMargin_cm||5);
+          // 102: hver flate har sin EGEN margin (sonens) — overgangen går fra den enes kant til den andres.
+          const _mFrom = _stairSurfSettings(stair, conn.fromSurf).edgeMargin_cm, _mTo = _stairSurfSettings(stair, conn.toSurf).edgeMargin_cm;
+          const exitX = exitRight ? fromSurf.x_cm+(fromSurf.w_cm||stair.width_cm||120)-_mFrom : fromSurf.x_cm+_mFrom;
+          const entryX = exitRight ? toSurf.x_cm+(toSurf.w_cm||stair.width_cm||120)-_mTo : toSurf.x_cm+_mTo;
           const ax = exitX, bx = entryX;
           const ay = stair.cableStartFromTop ? fromSurf.y_cm : fromSurf.y_cm + fromSurf.d_cm;
           const by = stair.cableStartFromTop ? toSurf.y_cm + toSurf.d_cm : toSurf.y_cm;
@@ -70424,8 +70964,7 @@ function _stairDrawToCanvas(stair, opts) {
   // skjermversjonen: én trinn-flate per kabel + alle repos med løp, for å unngå at ALLE trinn
   // dimensjoneres (det ville vært ulesbart selv på en kort trapp).
   if (stair.runs && stair.runs.length > 0) {
-    const edgeM = stair.edgeMargin_cm || 5;
-    const riserOff = stair.riserOffset_cm ?? 2;
+    // 102: målene leses PER FLATE (sonens, der den finnes) — se _stairSurfSettings.
     c.strokeStyle = '#2090e0'; c.fillStyle = '#2090e0';
     c.font = Math.max(9, Math.round(scale * 2.4)) + 'px sans-serif'; c.lineWidth = 0.8; c.setLineDash([]);
 
@@ -70474,6 +71013,8 @@ function _stairDrawToCanvas(stair, opts) {
       if (!surf || !surfRuns.length) continue;
       const isLanding = surf.type === 'landing';
       const surfW = surf.w_cm || stair.width_cm || 120;
+      const _ssDim = _stairSurfSettings(stair, si);
+      const edgeM = _ssDim.edgeMargin_cm;
 
       // Bredde-mål (sidemargin) kun på første dimensjonerte flate i BÅNDET, over selve tegningen.
       if (si === firstDimSurf) {
@@ -70490,7 +71031,9 @@ function _stairDrawToCanvas(stair, opts) {
 
       // Dybde-mål (riser/nese-avstand + CC) til høyre for flaten.
       const dimXd = surf.x_cm + surfW + 3 / scale;
-      const topOff = isLanding ? edgeM : riserOff;
+      // 102: dybdemålet er flatens EGET (repos: landingMargin_cm, trinn: sonens opptrinnsavstand)
+      // — et repos fikk før SIDE-marginen tegnet inn som dybdemål.
+      const topOff = _ssDim.depthStart_cm;
       tick(dimXd, surf.y_cm, dimXd, surf.y_cm + topOff, _stairDimRound(topOff) + '', false);
       for (let ri = 0; ri < surfRuns.length - 1; ri++) {
         const cc = _stairDimRound(surfRuns[ri + 1].pos_cm - surfRuns[ri].pos_cm);
@@ -70753,8 +71296,6 @@ function _renderStairPrintImages(stair) {
 // geometri, fordi installatøren leter etter dem etter POSISJON, ikke etter type (Krav i spec).
 function _stairDetailGroups(stair) {
   const surfs = stair.surfaces || [];
-  const edgeM = stair.edgeMargin_cm || 5;
-  const riserOff = stair.riserOffset_cm ?? 2;
   const groups = [];
   const treadSigMap = new Map();
   let landingNum = 0;
@@ -70766,7 +71307,7 @@ function _stairDetailGroups(stair) {
     const surfRuns = (stair.runs || []).filter(r => r.surfaceIdx === si).sort((a, b) => a.pos_cm - b.pos_cm);
     if (!surfRuns.length) continue; // Test: trapp uten lagt kabel ennå -> ingen utsnitt for flaten
 
-    const topOff = isLanding ? edgeM : riserOff;
+    const topOff = _stairSurfSettings(stair, si).depthStart_cm;   // 102: flatens eget dybdemål
     const lastPos = surfRuns[surfRuns.length - 1].pos_cm;
     const botOff = surf.d_cm - lastPos;
     const ccVals = [];
@@ -70817,7 +71358,6 @@ function _stairDetailGroups(stair) {
 // motivets eget format, se kommentaren der) gir automatisk høy piksel-tetthet uten noen ny tegnekode.
 function _renderStairDetailInsets(stair) {
   const surfs = stair.surfaces || [];
-  const edgeM = stair.edgeMargin_cm || 5;
   const groups = _stairDetailGroups(stair);
   return groups.map(g => {
     const surf = surfs[g.repIdx];
@@ -70826,7 +71366,7 @@ function _renderStairDetailInsets(stair) {
     const surfRuns = (stair.runs || []).filter(r => r.surfaceIdx === g.repIdx).sort((a, b) => a.pos_cm - b.pos_cm);
     const N = surfRuns.length;
     const surfW = surf.w_cm || stair.width_cm || 120;
-    const runLen = surfW - 2 * edgeM;
+    const runLen = surfW - 2 * _stairSurfSettings(stair, g.repIdx).edgeMargin_cm;   // 102: sonens margin
     const lenM = _stairDimRound(N * Math.max(runLen, 0) / 100);
     const ccTxt = surfRuns.length > 1 ? _stairDimRound(surfRuns[1].pos_cm - surfRuns[0].pos_cm) + ' cm' : null;
     const strandTxt = N === 1 ? '1 streng' : N + ' strenger';
@@ -83020,7 +83560,7 @@ function _resetProjectState() {
     selectedRoomId:null, selectedWallId:null, selectedStripId:null,
     selectedHindringId:null, selectedHindringWallIdx:null,
     selectedVertexIdx:null, selectedDimId:null, selectedAnnot:null,
-    selectedCableId:null, selectedMatId:null, selectedPlateId:null, selectedStairId:null,
+    selectedCableId:null, selectedMatId:null, selectedPlateId:null, selectedStairId:null, selectedStairZone:null,
     selectedZoneId:null, activePartId:null, selectedLabelStripId:null, selectedLabelCableId:null, selectedLabelMatId:null, selectedLabelMatRectId:null,
     drawMode:null, movingWall:false, semiAutoMode:false,
     manualPlaceMode:false, dragWidth:null, dropPreviewStrip:null, dropPreviewMat:null,
