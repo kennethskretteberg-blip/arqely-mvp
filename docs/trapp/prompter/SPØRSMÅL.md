@@ -56,3 +56,24 @@ Ingen. Felles innstilling (spørsmål 4 over), ikke lagret med prosjektet (som f
    sidefunn, siden samme kode nå dekker alle tre måltyper.
 3. **Gjemte mål (lesende):** 5 i rom (Knut Arne og Bente: 1, Fossilveien 18: 4), 1 fritt uten
    etasje («Trapp»). Ikke rørt. Si fra om de skal slettes eller flyttes.
+
+### 101
+
+1. **Frydenbø Trapp 1 blir rød med dagens kabel.** 70 m-kabelen er 8 cm lengre enn behovet ved
+   kantavstanden du har satt (12,5 cm). Regel 11/12 sier da «går ikke opp», og panelet sier det nå
+   i stedet for å stå grønt på «Passer». Utlegget er uendret — marginen står på gulvet. Skal det
+   finnes en toleranse (f.eks. «overskudd under ett mm-snapp i margin, her 6,4 cm, telles som
+   eksakt»), eller er rødt riktig for 8 cm?
+2. **Meldingen bruker cm under én meter.** Prompten skrev «Kablene er X m for lange»; «0,1 m» er
+   misvisende for 8 cm, så teksten bytter til cm under en meter (samme valg som varslene ellers i
+   trappepanelet). Si fra om du heller vil ha meter alltid.
+3. **«Antall kabler» viser nå antall rader** (var tomt/«auto» før). Tomt felt betyr fortsatt at
+   Forslag-søket står fritt; endrer du tallet, legges rader til eller fjernes bakfra. OK?
+4. **Et manuelt bytte nullstiller «valgt forslag»** (som prompten ba om), men forslaget huskes, og
+   «Tilbakestill» gir deg hele forslaget tilbake — nå også kabelsettet, ikke bare målene. OK?
+5. **Marginen løses også på nytt når du endrer et mål etterpå** (maks CC, dybdemargin, trinnbredde,
+   din egen kantavstand) så lenge settet er manuelt. Alternativet var at den bare løses idet du
+   bytter kabel, og så blir stående feil etter en CC-endring. Valgt: løses på nytt.
+6. **Produktlinja over lista står dobbelt** for én kabel («InSnow 30T 2100W 70m 70m») — den er
+   uendret fra før, men blir overflødig nå som lista viser produktet. Skal jeg fjerne den?
+7. **Soner er urørt** (prompt 102). Med soner på vises fortsatt det gamle enkeltvalget.

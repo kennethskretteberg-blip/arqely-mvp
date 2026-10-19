@@ -4,6 +4,66 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 101 — Trapp: manuelt kabelsett (ulike kabler i lista), fast sett løser sidemarginen som Forslag (19.10.2026, `main`, ikke pushet)
+
+Kenneth 19.10.2026: «Jeg ønsker også å kunne legge ut kabler manuelt, dvs. at jeg f.eks. kan velge
+tre ulike kabler som legger seg jevnt ut i hele trappa.» Avklart: «jevnt» = hele trappa dekkes, lik
+CC hele veien, og sideavstanden justeres automatisk så summen av kabellengdene går opp — slik
+Forslag gjør i dag. Nytt: spec-trapp-kabelutlegg.md **Regel 20**.
+
+**STEG 0 (målt før endring).**
+(0.1) Et Forslag med ULIKE lengder (Frydenbø, forslag B = 20 m + 49,7 m) viste allerede riktige,
+forskjellige produkter i materiallista, PDF-ens trappeside, Trappeoversikten og XLSX — de går alle
+gjennom `_stairCableLengthBreakdown`/`_stairSoneGeometryBlocks`, som leser `stair.cables[]`. Det var
+altså IKKE «første kabel ganger antall» der. Feilen lå i de små, enkeltprodukt-lesende stedene.
+(0.2) Sju lesesteder leste `stair.cableProductId` (rad 1) i stedet for settet: `_stairSpacingDelta`,
+`_stairPerStepWm2`, `_renderStairSettingsPanel` (produktlinja + variant-nedtrekket),
+`getStairCableViolations`, ctx-barens én-kabel-gren, `_expPreviewStair` og PDF-ens fallback-gren.
+Fire til leste `cables[]` MEN med hver sin egen fallback-kopi (`_projectUsedProductIds`,
+HTML-forhåndsvisningens materialliste, PDF-materiallista, `_collectMaterialItems`).
+(0.3) `stair.cables` OVERLEVER alle målendringer etter et Forslag (kantavstand, maks CC trinn/repos,
+dybdemargin, CC-piler, og redigering av trinn/segmenter). Det er bare `_setStairFamily`,
+`_setStairCableProduct`, `_setStairDesiredCableCount` og «Fjern varmekabel» som nullstilte lista.
+
+**Endringen.**
+1. **`_stairMarginProbe(stair)`** — den delte margin-matematikken (strengantall + behov ved gulvet,
+   den lineære margin-løsningen, mm-snapping, begge margin-takene). `_stairSolveExactCableSet` sin
+   `tryCombo` og dens én-kabel-kandidat regner nå gjennom den; ingen kopi.
+2. **`_stairFitFixedSet(stair, productIds)`** — fast kabelsett → `{ ok, edgeMargin_cm, residual_cm,
+   reason }`. For langt (Regel 11: kan ikke kappes) → «Kablene er X for lange — velg en kortere
+   kabel». Over 75 %-grensen (Regel 19) → «Kablene er X for korte». Ellers margin snappet til hele
+   mm (Regel 15) + restavvik. Brukes også av 102 (kabel per sone).
+3. **Kabellista i trappepanelet** (når soner er AV): én rad per kabel i `stair.cables` — farge-prikk,
+   K1/K2/…, produktvelger og ✕, pluss «＋ Legg til kabel» (kopierer siste rads produkt). Lista ER
+   `stair.cables`; `cableProductId` følger rad 1. «Antall kabler» viser antall rader og legger til /
+   fjerner bakfra. Nye funksjoner: `_setStairCableRow`, `_addStairCableRow`, `_removeStairCableRow`,
+   `_stairApplyManualCables`.
+4. **Marginen løses ÉTT sted**: i `_regenerateStairCable`, gated på «ikke soner, ikke et valgt
+   forslag, ikke uten kabel». Dermed følger marginen med når brukeren senere endrer et mål — alle
+   setterne går gjennom der. Et valgt forslag røres ikke (det har allerede løst sin egen margin, og
+   de to takene er ikke identiske).
+5. **`_stairProductRows(stair)`** — én kilde for trappens produkter (produkt, lengde, lagt lengde,
+   W), i samme ånd som `_roomProductRows` (097). Alle elleve lesestedene fra STEG 0.2 leser nå den.
+   `_stairSetSpacingLimits` gir strengeste min/maks CC på tvers av settet.
+6. **«Tilbakestill»**: et manuelt bytte setter `selectedProposal = null` (Regel 20), men forslaget
+   huskes i `lastProposal`, og `_resetStairToProposal` gjenoppretter nå også forslagets KABELSETT.
+7. Panelet viser ÉN sannhet: er det manuelle settet ugyldig, blir «Samlet behov / Samlet kabel»-linja
+   rød med samme grunn — ikke grønn «Passer» rett under en rød melding.
+
+**Målt resultat.** Forslag er bit-identisk før/etter for Frydenbø Trapp 1, Test Cenika Trapp 1 og en
+trapp med repos (#276), og for tre syntetiske trapper målt mot `64876ef`. Tre ulike InSnow 30T
+(10 + 20 + 49,7 m) på Test Cenika Trapp 1: kjeden dekker hele trappa (79,69 m av 79,7 m kabel), lik
+CC 8,67 cm på alle ti trinn, sideavstand justert 5 → 7,3 cm, brukerens gulv urørt.
+**Frydenbø, én manuell kabel:** 70 m-kabelen er 8 cm LENGER enn behovet ved brukerens 12,5 cm gulv.
+Før sto det grønt «Passer»; nå står marginen på gulvet (uendret utlegg) og panelet sier hvorfor.
+
+**Ny regresjonstest:** `_stairManualSetRegressionTest()` (33 sjekker) — Forslag-fasit for tre
+trappeformer, `_stairFitFixedSet` for ok/for langt/for kort/blandet sett, kabellista, «et valgt
+forslag refittes ikke», Tilbakestill, og at soner er urørt. `_stairRegressionTest` og
+`_stairSideRegressionTest` er fortsatt grønne, sammen med 18 andre batterier.
+
+---
+
 ## 100-web — Innebygd modus `?embed=app`: Varmeplan inne i feltappen, økt fra appen uten fornying, bare visning, berøring (18.10.2026, `main`, ikke pushet)
 
 Fellesprompt 100 for app og web (`prompter/feltapp/lop-051-052-100/100-…md`). Kenneth 18.10.2026:

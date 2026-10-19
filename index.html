@@ -40039,9 +40039,11 @@ function deleteStair(id) {
 function _stairSpacingDelta(deltaMm) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
-  const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
-  const minCC = prod?.min_spacing_mm ? prod.min_spacing_mm / 10 : 3;
-  const maxCC = Math.min(STAIR_MAX_CC_CM, prod?.max_spacing_mm ? prod.max_spacing_mm / 10 : 10);
+  // 101: strengeste leverandørgrense på tvers av HELE kabelsettet (stair.cables), ikke bare
+  // første kabel — et blandet sett skal følge den strengeste regelen.
+  const lim = _stairSetSpacingLimits(stair);
+  const minCC = lim.min_mm ? lim.min_mm / 10 : 3;
+  const maxCC = Math.min(STAIR_MAX_CC_CM, lim.max_mm ? lim.max_mm / 10 : 10);
   const newCC = Math.round((stair.cableSpacing_cm + deltaMm / 10) * 10) / 10;
   if (newCC < minCC || newCC > maxCC) return;
   pushUndo();
@@ -40076,6 +40078,10 @@ function _setStairFamily(famVoltKey) {
   _updateStairSettingsPanel(); updateCtxBar(); render();
 }
 
+// 101: gammel inngang — ÉTT produkt for hele trappa. Beholdt for bakoverkompatibilitet (og brukt
+// av sone-modus, der kabelen per sone velges automatisk i dag): setter ALLE radene i kabellista til
+// samme produkt, som er nøyaktig det den gjorde før (cables=[] -> fallbacken bygde N kopier).
+// Det brukeren ser i panelet utenfor sone-modus er nå lista (_setStairCableRow m.fl.).
 function _setStairCableProduct(productId) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
@@ -40085,6 +40091,59 @@ function _setStairCableProduct(productId) {
   if (pid) stair.noCable = false;   // a velge kabel legger den til igjen
   stair.cableProductId = pid;
   stair.cables = [];
+  _regenerateStairCable(stair);
+  _invalidateStairCache();
+  _updateStairSettingsPanel(); updateCtxBar(); render();
+}
+
+// ══ 101 · MANUELT KABELSETT (Regel 20, Kenneth 19.10.2026) ════════════════════════════════
+// Kabellista i panelet ER stair.cables — ingen parallell liste. Disse er de eneste inngangene som
+// endrer den manuelt, og alle tre går gjennom _stairApplyManualCables.
+function _setStairCableRow(idx, productId) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair || !stair.cables || !stair.cables[idx]) return;
+  const pid = parseInt(productId) || null;
+  if (pid === stair.cables[idx].productId && !stair.noCable) return;
+  pushUndo();
+  if (pid) stair.noCable = false;   // å velge kabel legger den til igjen
+  stair.cables[idx].productId = pid;
+  _stairApplyManualCables(stair);
+}
+
+// «＋ Legg til kabel» — ny rad som kopierer siste rads produkt (brukeren bytter den etterpå om han
+// vil). Rekkefølgen i lista ER rekkefølgen i kjeden fra kabelstart (bunn, eller topp med
+// «Kabelstart: Topp») — _stairAllocateCables forbruker kabel 0 først.
+function _addStairCableRow() {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair) return;
+  if (!stair.cables) stair.cables = [];
+  if (stair.cables.length >= 12) return;
+  pushUndo();
+  stair.noCable = false;
+  const last = stair.cables[stair.cables.length - 1];
+  stair.cables.push({ index: stair.cables.length, productId: last ? last.productId : (stair.cableProductId || null) });
+  _stairApplyManualCables(stair);
+}
+
+function _removeStairCableRow(idx) {
+  const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
+  if (!stair || !stair.cables || stair.cables.length <= 1) return;
+  pushUndo();
+  stair.cables.splice(idx, 1);
+  _stairApplyManualCables(stair);
+}
+
+// Normaliser lista, speil rad 1 til cableProductId (bakoverkompatibilitet), marker settet som
+// MANUELT (ikke et forslag) og la _regenerateStairCable løse sidemarginen med _stairFitFixedSet.
+// selectedProposal nullstilles fordi settet ikke lenger ER forslaget; lastProposal husker det, slik
+// at «Tilbakestill» fortsatt virker som i dag.
+function _stairApplyManualCables(stair) {
+  stair.cables.forEach((c, i) => { c.index = i; c.color = STAIR_CABLE_COLORS[i % STAIR_CABLE_COLORS.length]; });
+  stair.cableProductId = stair.cables[0] ? (stair.cables[0].productId || null) : null;
+  // «Antall kabler» viser antall rader (Regel 20) — feltet er samme brukerkrav som før, nå tosidig.
+  stair.desiredCableCount = stair.cables.length;
+  if (stair.selectedProposal) stair.lastProposal = stair.selectedProposal;
+  stair.selectedProposal = null;
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -40145,10 +40204,20 @@ function _setStairDesiredCableCount(val) {
   stair.desiredCableCount = next;
   // DEL A (spec-trapp-antall-manuelt.md, Kenneth 11.09.2026): dette feltet styrte tidligere KUN
   // Forslag-søket (_stairSolveExactCableSet) — det manuelle Kabel-nedtrekket ignorerte det helt og
-  // bygde alltid nøyaktig én kabel («jeg velger 2 stk... den legger bare ut 1 stk»). Nullstill
-  // stair.cables slik at _regenerateStairCable sin fallback (leser nå desiredCableCount) bygger på
-  // nytt med riktig antall — samme mønster som _setStairCableProduct/_setStairFamily under.
-  stair.cables = [];
+  // bygde alltid nøyaktig én kabel («jeg velger 2 stk... den legger bare ut 1 stk»).
+  // 101 (Regel 20): nå er feltet to sider av kabellista. Endres tallet, LEGGES rader til (kopi av
+  // siste) eller FJERNES bakfra — lista nullstilles ikke lenger, så et blandet sett beholder de
+  // radene brukeren har valgt. Tomt felt (null) = motoren søker fritt igjen; lista står som den er.
+  if (next != null && !_stairZoneRanges(stair)) {
+    if (!stair.cables) stair.cables = [];
+    while (stair.cables.length > next) stair.cables.pop();
+    while (stair.cables.length < next) {
+      const last = stair.cables[stair.cables.length - 1];
+      stair.cables.push({ index: stair.cables.length, productId: last ? last.productId : (stair.cableProductId || null) });
+    }
+    _stairApplyManualCables(stair);
+    return;
+  }
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -40216,9 +40285,11 @@ function _setStairLandingCC(val) {
 
 function _resetStairToProposal() {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
-  if (!stair || !stair.selectedProposal) return;
+  // 101: etter et manuelt kabelbytte er selectedProposal null (Regel 20) — lastProposal er da
+  // veien tilbake, slik at knappen virker som før.
+  if (!stair || !(stair.selectedProposal || stair.lastProposal)) return;
   pushUndo();
-  const p = stair.selectedProposal;
+  const p = stair.selectedProposal || stair.lastProposal;
   // «Maks CC trinn/repos» (stepCC_cm/landingCC_cm) er brukerens TAK og skal IKKE skrives over med
   // forslagets oppnådde CC her — det var nettopp denne selv-forurensningen som låste forslags-
   // motoren til gårsdagens tetthet (STEG 0-funn, Regel 7). Strengantallet gjenopprettes i stedet
@@ -40232,6 +40303,14 @@ function _resetStairToProposal() {
   // verdi her ville brutt Regel 13s eksakte kjede igjen (kabelsettet ble valgt for å treffe DENNE
   // marginen nøyaktig, ikke 5).
   if (p.edgeMargin_cm != null) stair.edgeMargin_cm = p.edgeMargin_cm;
+  // 101: gjenopprett også forslagets KABELSETT. Før 101 kunne lista ikke endres manuelt, så dette
+  // var alltid et nullgrep; nå er det nettopp det brukeren vil tilbakestille. selectedProposal
+  // settes tilbake, så _regenerateStairCable lar forslagets egen margin (over) stå.
+  if (p.products && p.products.length) {
+    stair.cableProductId = p.products[0].id;
+    stair.cables = p.products.map((pp, i) => ({ index: i, productId: pp.id, color: STAIR_CABLE_COLORS[i] || STAIR_CABLE_COLORS[0] }));
+  }
+  stair.selectedProposal = p;
   _regenerateStairCable(stair);
   _invalidateStairCache();
   _updateStairSettingsPanel(); updateCtxBar(); render();
@@ -40242,9 +40321,10 @@ function _resetStairToProposal() {
 // W/m² er misvisende. Formel: W/m² = (kabelens W/m) / (CC i meter) — samme formel som
 // _stairSoneGeometryBlocks (PDF-utskriften), nå eneste kilde alle andre visninger leser fra.
 function _stairPerStepWm2(stair) {
-  const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
-  if (!prod) return 0;
-  const wpm = prod.watt_per_m || 0;
+  // 101: W/m rett fra kabelsettet (stair.cables), ikke fra stair.cableProductId. Hele settet har
+  // samme familie og spenning (Regel 20), så W/m er den samme for alle radene — men kilden skal
+  // likevel være lista, ikke «første kabel».
+  const wpm = (_stairProductRows(stair).find(r => r.wattPerM > 0) || {}).wattPerM || 0;
   if (wpm <= 0) return 0;
   const surfs = stair.surfaces || [];
   const firstTread = surfs.find(s => s.type === 'tread');
@@ -40255,10 +40335,23 @@ function _stairPerStepWm2(stair) {
   return actualCC_cm > 0 ? Math.round(wpm / (actualCC_cm / 100)) : 0;
 }
 
+// 101 (Regel 20): «gikk det manuelle kabelsettet opp?» — ÉN kilde. stair.manualFit settes av
+// _regenerateStairCable (det ene stedet marginen løses). Et nettopp åpnet prosjekt har ikke bygget
+// utlegget på nytt (_restoreProject bruker lagrede runs), så feltet kan mangle i en eldre blob —
+// da regnes svaret fram her, med samme hjelper.
+function _stairManualFit(stair) {
+  if (!stair) return null;
+  if (stair.manualFit !== undefined) return stair.manualFit;
+  if (stair.noCable || stair.selectedProposal || _stairZoneRanges(stair)) return null;
+  const ids = (stair.cables || []).map(c => c.productId);
+  return (ids.length && ids.every(id => id != null)) ? _stairFitFixedSet(stair, ids) : null;
+}
+
 function _renderStairSettingsPanel(stairId) {
   const stair = S.stairs.find(s => s.id === stairId);
   if (!stair) return '';
-  const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+  // 101: panelets produkt-linje leser kabelsettet (stair.cables), ikke stair.cableProductId.
+  const prod = (_stairProductRows(stair).find(r => r.product) || {}).product || null;
   const fit = _stairCableSetFit(stair);
   const surfs = stair.surfaces || [];
   const stepWm2 = _stairPerStepWm2(stair);
@@ -40268,8 +40361,14 @@ function _renderStairSettingsPanel(stairId) {
   const treadRuns = treadRunsList.length;
   const actualStepCC = treadRuns > 1 ? Math.abs(treadRunsList[1].pos_cm - treadRunsList[0].pos_cm) : (stair.stepCC_cm || stair.cableSpacing_cm || 8);
 
-  const fitColor = fit.status === 'error' ? '#ef4444' : fit.status === 'warn' ? '#f59e0b' : '#22c55e';
-  const fitIcon = fit.status === 'error' ? '🔴' : fit.status === 'warn' ? '🟡' : '🟢';
+  // 101: ett svar, ikke to. Er det manuelle settet ugyldig (Regel 11/19), skal linja under
+  // «Samlet behov / Samlet kabel» ikke stå grønn og si «Passer» rett under den røde meldingen —
+  // _stairFitFromLengths måler bare prosentavvik og kjenner ikke gulvet eller 75 %-grensen.
+  const _manFitEarly = _stairManualFit(stair);
+  const fitBad = !!(_manFitEarly && !_manFitEarly.ok);
+  const fitColor = (fitBad || fit.status === 'error') ? '#ef4444' : fit.status === 'warn' ? '#f59e0b' : '#22c55e';
+  const fitIcon = (fitBad || fit.status === 'error') ? '🔴' : fit.status === 'warn' ? '🟡' : '🟢';
+  const fitLabel = fitBad ? (_manFitEarly.short || 'Går ikke opp') : (fit.label || 'Passer');
 
   // Product family+voltage dropdown
   const allCable = HEATING_PRODUCTS.filter(p => { const c = PRODUCT_CATEGORIES.find(c2=>c2.id===p.category_id); return c && c.module_type==='cable' && p.active!==false && (p.cable_length_m||0)>0; });
@@ -40284,6 +40383,10 @@ function _renderStairSettingsPanel(stairId) {
   const famVariants = allCable.filter(p => { const fam = p.product_family || p.name.split(' ').slice(0,2).join(' '); return fam === curFam && (p.voltage||230) === curVolt; }).sort((a,b) => (a.cable_length_m||0) - (b.cable_length_m||0));
   const variantOpts = famVariants.map(p => `<option value="${p.id}"${p.id===stair.cableProductId?' selected':''}>${(p.cable_length_m||0)}m · ${(p.total_effect_w||0)}W</option>`).join('');
   const hasVariantSelected = stair.cableProductId && famVariants.some(p => p.id === stair.cableProductId);
+  // 101 (Regel 20): kabellista — én rad per kabel i stair.cables, i kjederekkefølge fra kabelstart.
+  // Samme familie/spenning i hele settet, så alternativene er de samme i hver rad (famVariants).
+  const _varOptsFor = (pid) => famVariants.map(p => `<option value="${p.id}"${p.id===pid?' selected':''}>${(p.cable_length_m||0)}m · ${(p.total_effect_w||0)}W</option>`).join('');
+  const prodRows = _stairProductRows(stair);
 
   // Per-cable breakdown
   const cableBreakdown = _stairCableLengthBreakdown(stair);
@@ -40330,7 +40433,7 @@ function _renderStairSettingsPanel(stairId) {
     cableBreakdownHtml += `<div style="padding:6px 0 0;border-top:1px solid var(--brd);margin-top:2px">
       <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:1px"><span style="color:var(--dim)">Samlet behov</span><span>${fit.neededLength_m.toFixed(1)} m</span></div>
       <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:var(--dim)">Samlet kabel</span><span>${fit.availableLength_m.toFixed(1)} m</span></div>
-      <div style="color:${fitColor};font-weight:600;font-size:10px">${fitIcon} ${fit.label || 'Passer'}</div>
+      <div style="color:${fitColor};font-weight:600;font-size:10px">${fitIcon} ${esc(fitLabel)}</div>
     </div>`;
   }
 
@@ -40341,9 +40444,41 @@ function _renderStairSettingsPanel(stairId) {
   const zoneErrorHtml = stair.zoneError ? `<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:6px 8px;font-size:11px;color:#ef4444;margin-bottom:8px">⚠ ${esc(stair.zoneError)}</div>` : '';
   const editShapeBtn = `<button onclick="showStairEditModal(${stair.id})" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:11px;margin-bottom:8px">✎ Rediger trinn/soner${zonesActive ? ' (soner på)' : ''}</button>`;
 
+  // ── 101 (Regel 20): kabellista. ÉN rad per kabel i stair.cables, med farge-prikk, K-nummer,
+  // produktvelger og ✕. «＋ Legg til kabel» kopierer siste rads produkt. Lista ER stair.cables.
+  let cableListHtml = '';
+  if (!zonesActive) {
+    const canRemove = prodRows.length > 1;
+    let rows = '';
+    for (const r of prodRows) {
+      rows += `<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+        <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${r.color};flex:0 0 auto"></span>
+        <span style="font-size:11px;font-weight:600;min-width:20px">K${r.index + 1}</span>
+        <select onchange="_setStairCableRow(${r.index}, this.value)" onclick="event.stopPropagation()" style="flex:1;min-width:0;font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text)">
+          <option value=""${r.productId ? '' : ' selected'}>Velg kabel...</option>
+          ${_varOptsFor(r.productId)}
+        </select>
+        <button onclick="_removeStairCableRow(${r.index})" title="Fjern denne kabelen" ${canRemove ? '' : 'disabled'} style="flex:0 0 auto;width:20px;padding:2px 0;border:1px solid var(--brd);border-radius:4px;background:var(--surface2);color:${canRemove ? '#e0563f' : 'var(--dim)'};font-size:11px;cursor:${canRemove ? 'pointer' : 'default'};opacity:${canRemove ? 1 : .4}">✕</button>
+      </div>`;
+    }
+    cableListHtml = `<div style="margin-bottom:4px">Kabler</div>${rows}
+      <button onclick="_addStairCableRow()" style="width:100%;padding:4px;border:1px dashed var(--brd);border-radius:5px;background:transparent;color:var(--dim);font-size:11px;cursor:pointer">＋ Legg til kabel</button>`;
+  }
+
+  // 101 (Regel 20): gikk det manuelle settet opp? For langt (Regel 11 — kan ikke kappes) eller for
+  // kort (Regel 19 — under 75 % varmet bredde) sies tydelig, i samme røde stil som zoneError, og
+  // marginen står da på brukerens gulv. Går det opp, vises den justerte sidemarginen.
+  const manFit = _manFitEarly;
+  const manualFitHtml = !manFit ? ''
+    : !manFit.ok
+      ? `<div style="background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:6px 8px;font-size:11px;color:#ef4444;margin-bottom:8px">⚠ ${esc(manFit.reason)}</div>`
+      : (Math.abs((stair.edgeMargin_cm || 0) - _stairFloorMargin(stair)) > 0.05
+        ? `<div style="background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);border-radius:6px;padding:6px 8px;font-size:11px;color:var(--accent);margin-bottom:8px">Avstand fra sidene justert til ${(stair.edgeMargin_cm||0).toFixed(1)} cm (din: ${_stairFloorMargin(stair)} cm) så kabelsettet går opp${Math.abs(manFit.residual_cm || 0) > 0.05 ? ' — ' + _stairLenTxt(manFit.residual_cm) + (manFit.residual_cm > 0 ? ' til overs' : ' for kort') : ' — eksakt'}</div>`
+        : '');
+
   return `<div style="background:var(--surface);border:1px solid var(--brd);border-radius:8px;padding:12px;font-size:12px;color:var(--text);max-width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.15)">
     <div id="stair-settings-handle" style="font-weight:600;font-size:13px;margin-bottom:8px;cursor:grab;user-select:none" title="Dra for å flytte">⠿ ${zonesActive ? 'Soner' : isMultiCable ? 'Kabler' : 'Kabel'} — Resultat</div>
-    ${zoneErrorHtml}${editShapeBtn}
+    ${zoneErrorHtml}${manualFitHtml}${editShapeBtn}
     ${!isMultiCable ? `<div style="font-size:11px;color:var(--dim);margin-bottom:6px">${prod ? esc(prod.name) + ' ' + (prod.cable_length_m||'') + 'm' : 'Ingen kabel valgt'}</div>` : ''}
     <div style="border-top:1px solid var(--brd);padding-top:6px;margin-bottom:6px">
       ${cableBreakdownHtml}
@@ -40402,7 +40537,7 @@ function _renderStairSettingsPanel(stairId) {
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span title="Styrer BÅDE Forslag-søket og manuelt kabelvalg under: sett et tall her for like mange fysiske kabler av valgt produkt, uansett om du bruker Forslag eller velger kabel manuelt (spec-trapp-antall-manuelt.md, 11.09.2026)">Antall kabler</span>
         <span style="display:flex;align-items:center;gap:3px">
-          <input type="number" min="0" max="12" step="1" value="${stair.desiredCableCount || ''}" placeholder="auto" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairDesiredCableCount(this.value)" onclick="event.stopPropagation()">
+          <input type="number" min="0" max="12" step="1" value="${stair.desiredCableCount || prodRows.length || ''}" placeholder="auto" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairDesiredCableCount(this.value)" onclick="event.stopPropagation()">
         </span>
       </div>
       ${stair.desiredCableCount ? `<div style="display:flex;align-items:center;justify-content:space-between">
@@ -40417,14 +40552,13 @@ function _renderStairSettingsPanel(stairId) {
         <span>Familie</span>
         <select onchange="_setStairFamily(this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:160px" onclick="event.stopPropagation()">${famOpts}</select>
       </div>
-      <div style="display:flex;align-items:center;justify-content:space-between">
+      ${zonesActive ? `<div style="display:flex;align-items:center;justify-content:space-between">
         <span>Kabel</span>
         <select onchange="_setStairCableProduct(this.value)" style="font-size:11px;padding:2px 4px;border-radius:4px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);max-width:160px" onclick="event.stopPropagation()">
           <option value=""${hasVariantSelected?'':' selected'}>Velg kabel...</option>
           ${variantOpts}
         </select>
-      </div>
-      ${!zonesActive && stair.desiredCableCount > 1 && hasVariantSelected ? `<div style="font-size:10px;color:var(--dim);margin-top:4px;text-align:right">→ ${stair.desiredCableCount} stk lagt ut (se «Antall kabler» over)</div>` : ''}
+      </div>` : cableListHtml}
     </div>
     ${stair.noCable
       ? `<button onclick="_stairAddCable(${stairId})" style="width:100%;padding:7px;border:none;border-radius:6px;background:var(--accent);color:#0d0e10;font-size:12px;font-weight:600;cursor:pointer;margin-bottom:6px">＋ Legg til varmekabel</button>`
@@ -40483,7 +40617,9 @@ function getStairCableViolations(stairId) {
   const stair = S.stairs.find(s => s.id === stairId);
   if (!stair) return { hasAny: false };
   const v = {};
-  const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+  // 101: leverandørgrenser og W/m fra HELE settet (stair.cables), ikke bare første kabel.
+  const _lim = _stairSetSpacingLimits(stair);
+  const _wpm = (_stairProductRows(stair).find(r => r.wattPerM > 0) || {}).wattPerM || 0;
 
   // Sjekk BYGGET cc fra faktiske løp (stair.runs), ikke innstillingen — de kan i teorien avvike
   // (avrundingsdrift, se _stairRunCount-kommentaren i generateStairCable). Finn verste (største)
@@ -40508,14 +40644,14 @@ function getStairCableViolations(stairId) {
   // CC > maks (bygget verdi, ikke innstillingen)
   if (worstCC > 0) v.maxSpacing = { actual: worstCC * 10, max: worstMaxCC * 10 };
   // Supplier min
-  if (prod?.min_spacing_mm && cc * 10 < prod.min_spacing_mm) v.minSpacing = { actual: cc * 10, min: prod.min_spacing_mm };
+  if (_lim.min_mm && cc * 10 < _lim.min_mm) v.minSpacing = { actual: cc * 10, min: _lim.min_mm };
   // Supplier max
-  if (prod?.max_spacing_mm && cc * 10 > prod.max_spacing_mm) v.supplierMaxSpacing = { actual: cc * 10, max: prod.max_spacing_mm };
+  if (_lim.max_mm && cc * 10 > _lim.max_mm) v.supplierMaxSpacing = { actual: cc * 10, max: _lim.max_mm };
   // STEG 3 (Regel 16): flateeffekt regnes av CC (W/m ÷ CC i meter), ikke areal — se
   // _stairSoneGeometryBlocks. Sjekker verste (BREDESTE, altså laveste flateeffekt) faktiske CC
   // blant TRINN-flatene (repos har ingen tilsvarende "stråler ut i luft"-begrunnelse, jf. Regel 16,
   // og holdes derfor utenfor — samme avgrensning som _stairSoneGeometryBlocks bruker).
-  if (prod?.watt_per_m) {
+  if (_wpm > 0) {
     const surfsForDensity = stair.surfaces || [];
     let widestTreadCC = 0;
     for (const si in runsBySurfV) {
@@ -40527,7 +40663,7 @@ function getStairCableViolations(stairId) {
       if (builtCC > widestTreadCC) widestTreadCC = builtCC;
     }
     if (widestTreadCC > 0) {
-      const density = prod.watt_per_m / (widestTreadCC / 100);
+      const density = _wpm / (widestTreadCC / 100);
       if (density < STAIR_MIN_DENSITY_WM2) v.lowDensity = { actual: Math.round(density), min: STAIR_MIN_DENSITY_WM2 };
     }
   }
@@ -40544,9 +40680,9 @@ function getStairCableViolations(stairId) {
       if (error > 0.05) cableMismatches.push({ cable: ci + 1, actual: actual_m.toFixed(1), target, error: (error * 100).toFixed(0) });
     }
     if (cableMismatches.length > 0) v.cableLengthMismatch = cableMismatches;
-  } else if (prod?.cable_length_m) {
+  } else if ((_stairProductRows(stair)[0] || {}).productLength_m > 0) {
     const actual = stair.totalCableLength_cm / 100;
-    const target = prod.cable_length_m;
+    const target = _stairProductRows(stair)[0].productLength_m;
     const error = Math.abs(actual - target) / target;
     if (error > 0.05) v.cableLengthMismatch = { actual: actual.toFixed(1), target, error: (error * 100).toFixed(0) };
   }
@@ -43330,6 +43466,47 @@ function _stairFitFromLengths(availLen_m, neededLen_m) {
   return { availableLength_m: availLen_m, neededLength_m: neededLen_m, diff_m: diff, diff_pct: pct, status, label };
 }
 
+// 101 (Regel 20, «én kilde»): trappens PRODUKTER — én rad per fysisk kabel, lest fra stair.cables.
+// Samme tanke som _roomProductRows (097): panel, ctx-bar, PDF, spesifikasjon, materialliste, XLSX og
+// romoversikt leser HER, slik at et blandet sett (ulike lengder) aldri kan vises som «første kabel
+// ganger antall». Faller tilbake på den eldre enkeltkabel-formen (stair.cableProductId) for gamle
+// prosjekter som ennå ikke har cables[].
+// [{ index, label, color, productId, product, productLength_m, laidLength_m, wattPerM, watt }]
+function _stairProductRows(stair) {
+  if (!stair) return [];
+  const cables = (stair.cables || []).filter(Boolean);
+  const list = cables.length ? cables
+    : (stair.cableProductId ? [{ index: 0, productId: stair.cableProductId, length_cm: stair.totalCableLength_cm }] : []);
+  return list.map((c, i) => {
+    const product = c.productId ? HEATING_PRODUCTS.find(p => p.id === c.productId) : null;
+    const laid_m = Math.round((c.length_cm || 0) / 100 * 10) / 10;
+    return {
+      index: i,
+      // Soner (STEG 7) navngir seg selv; ellers er kabelen K1, K2 …, i kjederekkefølge fra kabelstart.
+      label: c.zone != null ? ('Sone ' + c.zone) : ('K' + (i + 1)),
+      color: c.color || STAIR_CABLE_COLORS[i % STAIR_CABLE_COLORS.length],
+      productId: c.productId || null, product,
+      productLength_m: product?.cable_length_m || 0,
+      laidLength_m: laid_m,
+      wattPerM: product?.watt_per_m || 0,
+      watt: product?.watt_per_m ? Math.round(laid_m * product.watt_per_m) : 0,
+    };
+  });
+}
+
+// 101: strengeste leverandørregel på tvers av kablene i settet — samme tanke som
+// _effectiveGapCmPair for folie. Et blandet sett skal følge den STRENGESTE grensen, ikke
+// tilfeldigvis den første kabelens.
+function _stairSetSpacingLimits(stair) {
+  const rows = _stairProductRows(stair).filter(r => r.product);
+  let min_mm = 0, max_mm = Infinity;
+  for (const r of rows) {
+    if (r.product.min_spacing_mm) min_mm = Math.max(min_mm, r.product.min_spacing_mm);
+    if (r.product.max_spacing_mm) max_mm = Math.min(max_mm, r.product.max_spacing_mm);
+  }
+  return { min_mm: min_mm || 0, max_mm: isFinite(max_mm) ? max_mm : 0 };
+}
+
 function _stairCableLengthBreakdown(stair) {
   if (!stair || !stair.surfaces || !stair.runs) return [];
   const cables = stair.cables || [];
@@ -43340,14 +43517,17 @@ function _stairCableLengthBreakdown(stair) {
   // (STEG 1+2, Regel 11). Det finnes ikke lenger noe eget «udelt behov per kabel»: under
   // meter-basert deling ER en indre kabels behov nøyaktig det den fikk tildelt, ved konstruksjon.
   const assignedData = _stairAccumulateCableData(surfs, stair.runs, stair.connections, nCables);
+  // 101: produkt/etikett/farge per kabel kommer fra _stairProductRows — ÉN kilde, delt med panel,
+  // ctx-bar og alle utskrifter (Regel 20: «alle utskrifter leser stair.cables»).
+  const prodRows = _stairProductRows(stair);
 
   // Build result
   const result = [];
   for (let ci = 0; ci < nCables; ci++) {
     const ad = assignedData[ci];
     const cableObj = cables[ci];
-    const prodId = cableObj ? cableObj.productId : stair.cableProductId;
-    const prod = prodId ? HEATING_PRODUCTS.find(p => p.id === prodId) : null;
+    const pr = prodRows[ci] || null;
+    const prod = pr ? pr.product : null;
     const totalAssigned_cm = ad.stepsLen + ad.reposLen + ad.connectionLen;
     const totalAssigned_m = Math.round(totalAssigned_cm / 100 * 10) / 10;
     const productLength_m = prod?.cable_length_m || 0;
@@ -43357,8 +43537,8 @@ function _stairCableLengthBreakdown(stair) {
       cableIdx: ci,
       // STEG 7 (Soner): cableObj.zone er satt av _stairSolveZones — vis «Sone N» i stedet for
       // den generiske «K1/K2» når kabelen faktisk representerer en brukerdefinert sone.
-      label: cableObj?.zone != null ? ('Sone ' + cableObj.zone) : ('K' + (ci + 1)),
-      color: cableObj?.color || STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0],
+      label: pr ? pr.label : ('K' + (ci + 1)),
+      color: pr ? pr.color : (STAIR_CABLE_COLORS[ci] || STAIR_CABLE_COLORS[0]),
       product: prod,
       stepsLength_m: Math.round(ad.stepsLen / 100 * 10) / 10,
       reposLength_m: Math.round(ad.reposLen / 100 * 10) / 10,
@@ -43546,6 +43726,82 @@ const STAIR_SINGLE_MAX_MARGIN_FRAC = 0.125;
 // Over gulv + så mange cm: forslaget vises fortsatt, men med gult merke «Stor kantavstand».
 const STAIR_SINGLE_WARN_ABOVE_FLOOR_CM = 15;
 
+// 101 (Regel 20, Kenneth 19.10.2026): den DELTE margin-matematikken. Både forslagsmotoren
+// (_stairSolveExactCableSet sin tryCombo og dens en-kabel-kandidat) og et fast, brukervalgt
+// kabelsett (_stairFitFixedSet, brukt av det manuelle kabelsettet her og av 102s kabel per sone)
+// trenger nøyaktig det samme: strengantallet og behovet VED GULVET (Regel 7 — strengantallet er
+// uavhengig av sidemarginen), og den lineære løsningen for sidemarginen (Regel 12) snappet til hele
+// millimeter (Regel 15). Dette er den ene kilden — ikke en kopi per kallested.
+//   needed(m) = needed(gulv) - 2*totalStrands*(m - gulv)   =>   m = gulv + (needed(gulv) - sum) / (2*totalStrands)
+function _stairMarginProbe(stair) {
+  const floorMargin = _stairFloorMargin(stair);
+  // cables:[{productId:null}] => ubegrenset kapasitet i _stairAllocateCables, altså hele, uklippet
+  // ruten (samme prinsipp som matte-auto sin idealLenCm-probe).
+  const probe = generateStairCable({ ...stair, edgeMargin_cm: floorMargin, cables: [{ productId: null }] });
+  const totalStrands = probe.runs.length;
+  const neededAtFloor_cm = probe.totalCableLength_cm;
+  const minSurfW = Math.min(...(stair.surfaces || []).map(s => s.w_cm || stair.width_cm || 120));
+  return {
+    ok: totalStrands > 0 && neededAtFloor_cm > 0,
+    floorMargin, totalStrands, neededAtFloor_cm, minSurfW,
+    // Fornuftig margintak for det FRIE flerkabel-søket: strenglengden må forbli klart positiv
+    // (halve smaleste flate er geometrisk umulig å passere) OG marginen skal ikke bli urealistisk
+    // bred (+15 cm fra brukerens gulv — et sett som krever mer bør vike for et annet sett).
+    maxSaneMargin: Math.min(minSurfW / 2 - 1, floorMargin + 15),
+    // Regel 19-taket: varmet bredde >= 75 % av smaleste flate, altså høyst 12,5 % per side. Gjelder
+    // en-kabel-forslaget OG alle manuelle sett (Regel 20: «aldri under 75 % varmet bredde»).
+    maxMargin75: Math.min(minSurfW * STAIR_SINGLE_MAX_MARGIN_FRAC, minSurfW / 2 - 1),
+    // Regel 12 + 15: marginen som får `sum_cm` til å gå opp — aldri under brukerens gulv, snappet
+    // til hele mm. exactMargin beholdes for sorteringen i forslagsmotoren.
+    solve(sum_cm) {
+      const exactMargin = floorMargin + (neededAtFloor_cm - sum_cm) / (2 * totalStrands);
+      return { exactMargin, margin: Math.max(floorMargin, Math.round(exactMargin * 10) / 10) };
+    },
+  };
+}
+
+// 101 (Regel 20): FAST kabelsett -> sidemargin. Brukeren har valgt kablene selv (ulike lengder er
+// lov, så lenge familie/spenning er den samme); det eneste som gjenstår er justeringsvariabelen
+// (Regel 12). Samme formel, samme grenser og samme mm-snapping som Forslag — delt via
+// _stairMarginProbe, ikke kopiert. Brukes også av 102 (velg kabel til en sone).
+// Returnerer { ok, edgeMargin_cm, residual_cm, reason }.
+function _stairFitFixedSet(stair, productIds) {
+  const ids = (productIds || []);
+  if (!ids.length || ids.some(id => id == null)) return { ok: false, reason: 'Ingen kabel valgt.' };
+  const prods = ids.map(id => HEATING_PRODUCTS.find(p => p.id === id));
+  if (prods.some(p => !p || !(p.cable_length_m > 0))) return { ok: false, reason: 'Ukjent kabelprodukt i settet.' };
+  const pr = _stairMarginProbe(stair);
+  if (!pr.ok) return { ok: false, reason: 'Ingen geometri å beregne kabel for.' };
+  const sum_cm = prods.reduce((s, p) => s + p.cable_length_m, 0) * 100;
+  // Regel 11 (kabelen kan ikke kappes) + Regel 12 (marginen kan aldri under brukerens gulv): et
+  // sett som er lengre enn behovet ved gulvet har ingen lovlig løsning — si fra, ikke jukse.
+  if (sum_cm > pr.neededAtFloor_cm + 0.01) {
+    return { ok: false, edgeMargin_cm: pr.floorMargin, residual_cm: 0,
+      short: `${_stairLenTxt(sum_cm - pr.neededAtFloor_cm)} for lange`,
+      reason: `Kablene er ${_stairLenTxt(sum_cm - pr.neededAtFloor_cm)} for lange — velg en kortere kabel.` };
+  }
+  const { margin } = pr.solve(sum_cm);
+  if (margin > pr.maxMargin75 + 0.01) {
+    // Hvor mye kabel som mangler for å nå 75 %-grensen — tallet brukeren faktisk kan handle på.
+    const needAt75_cm = pr.neededAtFloor_cm - 2 * pr.totalStrands * (pr.maxMargin75 - pr.floorMargin);
+    return { ok: false, edgeMargin_cm: pr.floorMargin, residual_cm: 0,
+      short: `${_stairLenTxt(Math.max(0, needAt75_cm - sum_cm))} for korte`,
+      reason: `Kablene er ${_stairLenTxt(Math.max(0, needAt75_cm - sum_cm))} for korte — ${margin.toFixed(1)} cm avstand fra sidene ville gitt under 75 % varmet bredde.` };
+  }
+  // Regel 15: marginen er snappet til hele mm — regn behovet PÅ NYTT ved den snappede marginen for
+  // å finne det virkelige (millimeterstore) restavviket, i stedet for å late som det er null.
+  const geo = generateStairCable({ ...stair, edgeMargin_cm: margin, cables: [{ productId: null }] });
+  return { ok: true, edgeMargin_cm: margin, reason: null,
+    residual_cm: Math.round((sum_cm - geo.totalCableLength_cm) * 100) / 100 };
+}
+
+// Lengde i meter med en desimal, eller cm når det er under en meter — «8 cm for lange» sier mer enn
+// «0.1 m for lange». Samme valg som _stairFitFromLengths gjør for sine advarsler.
+function _stairLenTxt(cm) {
+  const a = Math.abs(cm);
+  return a >= 100 ? (a / 100).toFixed(1) + ' m' : Math.round(a) + ' cm';
+}
+
 function _stairSolveExactCableSet(stair, opts) {
   opts = opts || {};
   // STEG 5 (Regel 18, Kenneth 19.08.2026): store trapper deles ofte i flere LIKE kabler for å
@@ -43566,21 +43822,14 @@ function _stairSolveExactCableSet(stair, opts) {
   });
   if (!cableProds.length) return { ok: false, reason: `Ingen kabler funnet for ${prefFamily} ${prefVoltage}V.` };
 
-  // Probe geometrien VED gulv-marginen: totalStrands (uavhengig av margin, Regel 7) og needed(gulv).
-  // cables:[{productId:null}] => ubegrenset kapasitet i _stairAllocateCables, altså hele, uklippet
-  // ruten (samme prinsipp som matte-auto sin idealLenCm-probe).
-  const probe = generateStairCable({ ...stair, edgeMargin_cm: floorMargin, cables: [{ productId: null }] });
-  const totalStrands = probe.runs.length;
-  const neededAtFloor_cm = probe.totalCableLength_cm;
-  if (totalStrands <= 0 || neededAtFloor_cm <= 0) return { ok: false, reason: 'Ingen geometri å beregne kabel for.' };
-
-  // Fornuftig margintak: strenglengden (trinnbredde - 2*margin) må forbli klart positiv OG
-  // sidemarginen skal ikke bli urealistisk bred. To grenser, strengeste vinner: halve smaleste
-  // flates bredde (geometrisk umulig forbi det), og +15 cm fra brukerens gulv (praktisk grense —
-  // et forslag som krever mer enn det bør heller avvises til fordel for et annet kabelsett, jf.
-  // sorteringen under som uansett foretrekker minst mulig marginøkning).
-  const minSurfW = Math.min(...(stair.surfaces || []).map(s => s.w_cm || stair.width_cm || 120));
-  const maxSaneMargin = Math.min(minSurfW / 2 - 1, floorMargin + 15);
+  // 101: probe + margin-løsning kommer nå fra _stairMarginProbe — ÉN kilde, delt med
+  // _stairFitFixedSet (manuelt kabelsett, Regel 20). Tallene og grensene er de samme som før.
+  const pr = _stairMarginProbe(stair);
+  const totalStrands = pr.totalStrands;
+  const neededAtFloor_cm = pr.neededAtFloor_cm;
+  if (!pr.ok) return { ok: false, reason: 'Ingen geometri å beregne kabel for.' };
+  const minSurfW = pr.minSurfW;
+  const maxSaneMargin = pr.maxSaneMargin;
 
   const lens = [...new Set(cableProds.map(p => p.cable_length_m))].sort((a, b) => a - b);
   // STEG 5 (Regel 18): et eksplisitt ønsket antall er et BRUKERKRAV, ikke noe søkerommet skal
@@ -43591,14 +43840,13 @@ function _stairSolveExactCableSet(stair, opts) {
   function tryCombo(combo) {
     const sum_cm = combo.reduce((a, b) => a + b, 0) * 100;
     if (sum_cm > neededAtFloor_cm + 0.01) return; // ville krevd margin UNDER brukerens gulv (Regel 12)
-    const exactMargin = floorMargin + (neededAtFloor_cm - sum_cm) / (2 * totalStrands);
-    if (exactMargin > maxSaneMargin + 0.01) return; // urealistisk bred margin — for stort avvik fra behovet
     // Regel 15 (Kenneth 19.08.2026, LÅST — overstyrer den tidligere fullpresisjons-tilnærmingen):
-    // et byggbart mål montøren faktisk kan måle opp slår et matematisk eksakt mål. Snapper til
-    // nærmeste hele millimeter — ALDRI under brukerens gulv (Regel 12), derav Math.max — og lar
-    // Regel 13s «eksakt kjede» gi et lite restavvik i stedet. Avviket regnes ut FØR retur, så
-    // panelet kan vise det i stedet for å late som om regnestykket fortsatt går opp på cm-nivå.
-    const margin = Math.max(floorMargin, Math.round(exactMargin * 10) / 10);
+    // et byggbart mål montøren faktisk kan måle opp slår et matematisk eksakt mål. pr.solve snapper
+    // til nærmeste hele millimeter — ALDRI under brukerens gulv (Regel 12) — og lar Regel 13s
+    // «eksakt kjede» gi et lite restavvik i stedet. Avviket regnes ut FØR retur, så panelet kan
+    // vise det i stedet for å late som om regnestykket fortsatt går opp på cm-nivå.
+    const { exactMargin, margin } = pr.solve(sum_cm);
+    if (exactMargin > maxSaneMargin + 0.01) return; // urealistisk bred margin — for stort avvik fra behovet
     candidates.push({ lens: combo, sum_cm, margin, exactMargin });
   }
   if (wantEqualCount && stair.equalCableLengths !== false) {
@@ -43641,9 +43889,8 @@ function _stairSolveExactCableSet(stair, opts) {
     } else {
       const L1 = fitting[fitting.length - 1];
       const sum_cm = L1 * 100;
-      const exactMargin = floorMargin + (neededAtFloor_cm - sum_cm) / (2 * totalStrands);
-      const margin = Math.max(floorMargin, Math.round(exactMargin * 10) / 10);
-      const maxMargin = Math.min(minSurfW * STAIR_SINGLE_MAX_MARGIN_FRAC, minSurfW / 2 - 1);
+      const { margin } = pr.solve(sum_cm);
+      const maxMargin = pr.maxMargin75;
       const prod1 = toProduct(L1);
       if (!prod1) {
         singleReason = 'Internt avvik: fant ikke produkt for én-kabel-lengden.';
@@ -43960,6 +44207,143 @@ function _stairRegressionTest() {
   return { ok: allOk, results };
 }
 
+// 101 (Regel 20) — regresjonstest for MANUELT kabelsett. Kjøres fra konsollen:
+// _stairManualSetRegressionTest(). Samme syntetiske katalog og samme «rør ikke lagring»-oppsett som
+// _stairRegressionTest (084). Låser to ting:
+//   A) at Forslag gir NØYAKTIG samme svar etter at margin-matematikken ble delt ut i
+//      _stairMarginProbe/_stairFitFixedSet (Test 1 i prompt 101) — for tre trappeformer, inkl. en
+//      med repos,
+//   B) at et fast, brukervalgt sett løser sidemarginen som Forslag gjør, og sier klart fra når det
+//      ikke går opp (for langt: Regel 11 — for kort: Regel 19s 75 %-grense).
+function _stairManualSetRegressionTest() {
+  const saved = { stairs: S.stairs, sel: S.ui.selectedStairId, prods: HEATING_PRODUCTS.slice(), cats: PRODUCT_CATEGORIES.slice(),
+    nextStair: S.counters.nextStairId, undoLen: _undoStack.length, autosave: window._performAutoSave };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  try {
+    window._performAutoSave = async () => {};
+    const LENS = [5, 10, 15, 20, 25, 30, 35, 40.1, 45, 49.7, 55.3, 60, 70, 78.7, 89.1, 98, 106.9, 128.2, 139.9];
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push({ id: 9800, module_type: 'cable', name: 'TESTKABEL' });
+    HEATING_PRODUCTS.length = 0;
+    LENS.forEach((L, i) => HEATING_PRODUCTS.push({ id: 98000 + i, category_id: 9800, active: true, product_family: 'InSnow 30T',
+      name: `InSnow 30T ${Math.round(L * 30)}W ${L}m`, cable_length_m: L, watt_per_m: 30, voltage: 230 }));
+    const pidFor = L => (HEATING_PRODUCTS.find(p => Math.abs(p.cable_length_m - L) < 0.001) || {}).id;
+    const mk = (width, steps, edge, extra) => {
+      S.counters.nextStairId = 998001;
+      const st = _createStairObj({ name: 'TEST', width_cm: width, step_depth_cm: 32, step_height_cm: 16, step_count: steps,
+        edgeMargin_cm: edge, stepCC_cm: 10, cableSpacing_cm: 10, riserOffset_cm: 2, noseOffset_cm: 2, ...(extra || {}) });
+      S.stairs = [st]; S.ui.selectedStairId = st.id;
+      return st;
+    };
+    const setOf = p => p.products.map(x => x.length_m).sort((a, b) => a - b).join('+');
+    const sigOf = props => props.map(p => setOf(p) + '@' + p.edgeMargin_cm + '/' + (p.marginResidual_cm || 0) + '/' + p.runsPerStep).join(' | ');
+
+    // ═══ A · Forslag uendret (Test 1) — tre former, låste fasitverdier ════════════════════
+    // Verdiene er målt ETTER utflyttingen og var identiske FØR den (kjørt mot 64876ef).
+    const A1 = '70@12.4/1.6/4 | 25+49.7@5/-2/4';
+    const A2 = '78.7@8.4/-2/4 | 10+70@6.8/0/4';
+    const A3 = '45@10.8/0.8/4';
+    const withLanding = { landing_position: 'top', landing_depth_cm: 120, landingCC_cm: 10, landingMargin_cm: 5 };
+    const gotA1 = sigOf(_generateStairProposals(mk(240, 8, 5)));
+    const gotA2 = sigOf(_generateStairProposals(mk(210, 10, 5)));
+    const gotA3 = sigOf(_generateStairProposals(mk(180, 4, 5, withLanding)));
+    check('A1: 8 trinn 240 cm, gulv 5', A1, gotA1 === A1, gotA1);
+    check('A2: 10 trinn 210 cm, gulv 5', A2, gotA2 === A2, gotA2);
+    check('A3: 4 trinn + repos, 180 cm, gulv 5', A3, gotA3 === A3, gotA3);
+
+    // ═══ B · _stairFitFixedSet — fast sett løser marginen som Forslag ═════════════════════
+    let st = mk(240, 8, 5);
+    const probe = _stairMarginProbe(st);
+    // Forslag A ovenfor valgte 70 m og løste 12,4 cm. Samme sett gjennom hjelperen MÅ gi samme tall.
+    const fit70 = _stairFitFixedSet(st, [pidFor(70)]);
+    check('B1: 70 m gir samme margin som Forslag A', 12.4, fit70.ok && Math.abs(fit70.edgeMargin_cm - 12.4) < 0.001, fit70.edgeMargin_cm);
+    // For langt: lengste kabel (139,9 m) er mye mer enn behovet ved gulvet.
+    const tooLong = _stairFitFixedSet(st, [pidFor(139.9)]);
+    check('B2: for langt sett avvises (Regel 11)', false, tooLong.ok === false, tooLong.ok);
+    check('B2b: sier «for lange»', true, /for lange/.test(tooLong.reason || ''), tooLong.reason);
+    check('B2c: marginen faller tilbake på gulvet', 5, tooLong.edgeMargin_cm === 5, tooLong.edgeMargin_cm);
+    // For kort: 20 m krever langt mer enn 12,5 % kantavstand på en 240 cm trapp.
+    const tooShort = _stairFitFixedSet(st, [pidFor(20)]);
+    check('B3: for kort sett avvises (Regel 19, 75 %)', false, tooShort.ok === false, tooShort.ok);
+    check('B3b: sier «for korte»', true, /for korte/.test(tooShort.reason || ''), tooShort.reason);
+    // Blandet sett av ULIKE lengder.
+    const mixIds = [pidFor(10), pidFor(20), pidFor(40.1)];
+    const fitMix = _stairFitFixedSet(st, mixIds);
+    const expMix = Math.max(5, Math.round((5 + (probe.neededAtFloor_cm - 7010) / (2 * probe.totalStrands)) * 10) / 10);
+    check('B4: blandet sett løser margin med samme formel', expMix, fitMix.ok && fitMix.edgeMargin_cm === expMix, fitMix.edgeMargin_cm);
+    check('B4b: margin snappet til hele mm (Regel 15)', true, fitMix.ok && Math.abs(fitMix.edgeMargin_cm * 10 - Math.round(fitMix.edgeMargin_cm * 10)) < 1e-9, fitMix.edgeMargin_cm);
+
+    // ═══ C · Kabellista i panelet ER stair.cables ════════════════════════════════════════
+    st = mk(240, 8, 5);
+    _setStairDesiredCableCount(3);
+    check('C1: tre rader', 3, st.cables.length === 3, st.cables.length);
+    _setStairCableRow(0, mixIds[0]); _setStairCableRow(1, mixIds[1]); _setStairCableRow(2, mixIds[2]);
+    check('C2: hver rad sitt produkt', mixIds.join(','), st.cables.map(c => c.productId).join(',') === mixIds.join(','), st.cables.map(c => c.productId).join(','));
+    check('C3: rad 1 speiles til cableProductId', mixIds[0], st.cableProductId === mixIds[0], st.cableProductId);
+    check('C4: sidemarginen justert av settet', expMix, st.edgeMargin_cm === expMix, st.edgeMargin_cm);
+    check('C5: brukerens gulv urørt (084)', 5, st.edgeMarginMin_cm === 5, st.edgeMarginMin_cm);
+    check('C6: egne farger per kabel', 3, new Set(st.cables.map(c => c.color)).size === 3, new Set(st.cables.map(c => c.color)).size);
+    const rows = _stairProductRows(st);
+    check('C7: _stairProductRows gir tre ULIKE produkter', '10,20,40.1',
+      rows.map(r => r.productLength_m).join(',') === '10,20,40.1', rows.map(r => r.productLength_m).join(','));
+    // Hele settet legges ut (70,1 m), og det som står igjen udekket er kun mm-snappingens restavvik
+    // (Regel 15: ett snapp = 2 x strenger x 1 mm, her 6,4 cm) — ikke en hale av uvarmet trapp.
+    check('C8: hele settet er lagt ut', 7010, Math.abs(st.coveredCableLength_cm - 7010) < 0.5, st.coveredCableLength_cm);
+    check('C8b: udekket rest er under ett mm-snapp', true, (st.totalCableLength_cm - st.coveredCableLength_cm) <= 2 * probe.totalStrands * 0.1 + 0.01,
+      Math.round((st.totalCableLength_cm - st.coveredCableLength_cm) * 10) / 10);
+    check('C9: lik CC på alle flater', 1, (() => { const by = {}; for (const r of st.runs) (by[r.surfaceIdx] ||= []).push(r.pos_cm);
+      const ccs = Object.values(by).map(a => { a.sort((x, y) => x - y); return a.length > 1 ? Math.round(Math.abs(a[1] - a[0]) * 100) : null; }).filter(v => v != null);
+      return new Set(ccs).size; })() === 1, 'se CC-sett');
+    // «＋ Legg til kabel» kopierer siste rad; ✕ fjerner
+    _addStairCableRow();
+    check('C10: Legg til kabel kopierer siste produkt', 4, st.cables.length === 4 && st.cables[3].productId === mixIds[2], st.cables.length);
+    _removeStairCableRow(3);
+    check('C11: ✕ fjerner raden', 3, st.cables.length === 3, st.cables.length);
+    check('C12: «Antall kabler» følger antall rader', 3, st.desiredCableCount === 3, st.desiredCableCount);
+
+    // ═══ D · Et VALGT FORSLAG skal ikke bli refittet ═════════════════════════════════════
+    st = mk(240, 8, 5);
+    const props = _generateStairProposals(st); st.proposals = props;
+    _applyStairProposal(st, props[0]);
+    const marginAfterProposal = st.edgeMargin_cm;
+    _setStairStepCC(st.stepCC_cm);          // no-op-setter: skal ikke røre marginen
+    _regenerateStairCable(st);
+    check('D1: forslagets margin står (manualFit av)', marginAfterProposal, st.edgeMargin_cm === marginAfterProposal, st.edgeMargin_cm);
+    check('D2: manualFit null når settet er et forslag', null, st.manualFit === null, st.manualFit);
+    // Bytter brukeren én kabel, er det et manuelt sett — men «Tilbakestill» virker fortsatt.
+    _setStairCableRow(0, pidFor(60));
+    check('D3: selectedProposal nullstilt av manuelt bytte', null, st.selectedProposal === null, st.selectedProposal);
+    check('D4: lastProposal husker forslaget', true, !!st.lastProposal, !!st.lastProposal);
+    _resetStairToProposal();
+    check('D5: Tilbakestill gir forslagets sett tilbake', props[0].products.map(p => p.id).join(','),
+      st.cables.map(c => c.productId).join(',') === props[0].products.map(p => p.id).join(','), st.cables.map(c => c.productId).join(','));
+    check('D6: Tilbakestill gir forslagets margin tilbake', marginAfterProposal, st.edgeMargin_cm === marginAfterProposal, st.edgeMargin_cm);
+
+    // ═══ E · Soner urørt ════════════════════════════════════════════════════════════════
+    st = mk(240, 16, 5);
+    st.segments = [
+      { type: 'steps', width_cm: 240, stepDepth_cm: 32, stepHeight_cm: 16, stepCount: 8, zone: 1 },
+      { type: 'steps', width_cm: 240, stepDepth_cm: 32, stepHeight_cm: 16, stepCount: 8, zone: 2 },
+    ];
+    _regenerateStairCable(st);
+    check('E1: manualFit av i sone-modus', null, st.manualFit === null, st.manualFit);
+    check('E2: én kabel per sone', 2, (st.cables || []).length === 2, (st.cables || []).length);
+    check('E3: sonene har egne marginer', true, (st.cables || []).every(c => c.edgeMargin_cm > 0), (st.cables || []).map(c => c.edgeMargin_cm).join(','));
+  } catch (e) {
+    results.push({ name: 'UNNTAK', ok: false, expected: '-', got: String(e && e.stack || e) });
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(...saved.cats);
+    S.stairs = saved.stairs; S.ui.selectedStairId = saved.sel; S.counters.nextStairId = saved.nextStair;
+    _undoStack.length = saved.undoLen;
+    window._performAutoSave = saved.autosave;
+    _invalidateStairCache(); renderSidebar(); updateCtxBar(); render(); _updateStairSettingsPanel();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_stairManualSetRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 // 098 — regresjonstest for sidevisningens speiling. Kjøres fra konsollen: _stairSideRegressionTest().
 // For trapper med/uten repos, begge byggeretninger, snudd kabelstart og flere kabler skal start- og
 // sluttprikken i sidevisningen ligge på SAMME fysiske kant som i planen: brøken «avstand fra
@@ -44072,6 +44456,9 @@ function _applyStairProposal(stair, proposal) {
     }));
   }
   stair.selectedProposal = proposal;
+  // 101: husk forslaget selv om brukeren etterpå bytter en kabel manuelt (som nullstiller
+  // selectedProposal, Regel 20) — «Tilbakestill» skal fortsatt kunne ta ham tilbake hit.
+  stair.lastProposal = proposal;
   _regenerateStairCable(stair);
   _invalidateStairCache();
   renderSidebar(); updateCtxBar(); render();
@@ -44100,6 +44487,10 @@ function _stairPreviewProposal(stairId, idx) {
       // gjenopprettes her også, ellers overlever den en avbrutt forhåndsvisning.
       edgeMargin_cm: stair.edgeMargin_cm,
       edgeMarginMin_cm: stair.edgeMarginMin_cm,   // 084: gulvet (rørt av ingen forslag, men snapshotet er komplett)
+      // 101: en avbrutt forhåndsvisning skal heller ikke etterlate seg et forslag som «valgt».
+      desiredCableCount: stair.desiredCableCount,
+      selectedProposal: stair.selectedProposal || null,
+      lastProposal: stair.lastProposal || null,
     }));
   }
   _applyStairProposal(stair, stair.proposals[idx]);
@@ -44133,7 +44524,8 @@ function _stairCancelPreview(stairId) {
   Object.assign(stair, { cables: ps.cables, stepCC_cm: ps.stepCC_cm, landingCC_cm: ps.landingCC_cm,
     cableSpacing_cm: ps.cableSpacing_cm, cableProductId: ps.cableProductId,
     noseOffset_cm: ps.noseOffset_cm, riserOffset_cm: ps.riserOffset_cm,
-    edgeMargin_cm: ps.edgeMargin_cm, edgeMarginMin_cm: ps.edgeMarginMin_cm });
+    edgeMargin_cm: ps.edgeMargin_cm, edgeMarginMin_cm: ps.edgeMarginMin_cm,
+    desiredCableCount: ps.desiredCableCount, selectedProposal: ps.selectedProposal, lastProposal: ps.lastProposal });
   delete stair._prePreviewState;
   delete stair._activeProposalIdx;
   _regenerateStairCable(stair);
@@ -44423,6 +44815,24 @@ function _regenerateStairCable(stair) {
     stair.cables = Array.from({ length: n }, (_, i) => ({
       index: i, productId: stair.cableProductId, color: STAIR_CABLE_COLORS[i % STAIR_CABLE_COLORS.length]
     }));
+  }
+  // 101 (Regel 20, Kenneth 19.10.2026): MANUELT kabelsett — sidemarginen er justeringsvariabelen,
+  // nøyaktig slik Forslag gjør det (Regel 12/15, samme formel via _stairFitFixedSet). ETT sted, så
+  // marginen også følger med når brukeren senere endrer et mål (maks CC, dybdemargin, trinnbredde,
+  // eller sitt eget gulv) — de setterne kaller alle hit.
+  // Gjelder bare når settet IKKE kommer fra et valgt forslag: et forslag har allerede løst sin egen
+  // margin, og de to grensene er ikke identiske (én-kabel-forslaget bruker 75 %-taket, flerkabel-
+  // settet +15 cm-taket), så et gyldig forslag skal ikke kunne avvises her. Soner løses per sone i
+  // _stairSolveZones (102 utvider det) og røres ikke.
+  if (!zoneRanges && !stair.selectedProposal && !stair.noCable) {
+    const ids = (stair.cables || []).map(c => c.productId);
+    stair.manualFit = (ids.length && ids.every(id => id != null)) ? _stairFitFixedSet(stair, ids) : null;
+    // Går settet ikke opp (Regel 11: for langt, kan ikke kortes — eller for kort), beholdes marginen
+    // PÅ GULVET og utlegget tegnes som før, med grunnen vist rødt i panelet. edgeMarginMin_cm
+    // (brukerens gulv, 084) røres aldri.
+    if (stair.manualFit) stair.edgeMargin_cm = stair.manualFit.ok ? stair.manualFit.edgeMargin_cm : _stairFloorMargin(stair);
+  } else {
+    stair.manualFit = null;
   }
   const layout = generateStairCable(stair);
   stair.runs = layout.runs;
@@ -61721,7 +62131,10 @@ function _ctxBarItems() {
         const totalLen = (stair.totalCableLength_cm / 100).toFixed(1);
         cableInfo = parts.join(' | ') + ` | Total: ${totalLen} m \u00b7 ${totalW} W \u00b7 ${density} W/m\u00b2${warnIco}`;
       } else {
-        const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+        // 101: én kabel leses fra kabelsettet (stair.cables[0]) — ikke stair.cableProductId, som
+        // bare er et speil av rad 1 og kunne bli stående fra et tidligere valg.
+        const row0 = _stairProductRows(stair)[0] || null;
+        const prod = row0 ? row0.product : null;
         const lenM = (stair.totalCableLength_cm / 100).toFixed(1);
         const totalW = prod?.watt_per_m ? Math.round((stair.totalCableLength_cm / 100) * prod.watt_per_m) : 0;
         cableInfo = `${prod ? esc(prod.name) : 'Ingen kabel'} \u00b7 ${lenM} m \u00b7 ${totalW} W \u00b7 ${density} W/m\u00b2${warnIco}`;
@@ -67182,9 +67595,11 @@ function _projectUsedProductIds() {
   for (const m of (S.mats || []))   if (m.productId != null) ids.add(m.productId);
   for (const mp of (S.matPaths || [])) if (mp.productId != null) ids.add(mp.productId);
   for (const p of (S.plates || [])) if (p.productId != null) ids.add(p.productId);
+  // 101 (Regel 20, «én kilde»): kabelsettet via _stairProductRows — ikke cables[] OG
+  // cableProductId hver for seg (sistnevnte er bare et speil av rad 1 og kunne dra med seg et
+  // produkt som ikke lenger ligger i trappa).
   for (const st of (S.stairs || [])) {
-    if (Array.isArray(st.cables)) st.cables.forEach(c => { if (c && c.productId != null) ids.add(c.productId); });
-    if (st.cableProductId != null) ids.add(st.cableProductId);
+    for (const r of _stairProductRows(st)) if (r.productId != null) ids.add(r.productId);
   }
   for (const ab of (S.aluboard || [])) {
     for (const it of _aluboardRoomItems(ab.roomId)) if (it.product && it.product.id != null) ids.add(it.product.id);
@@ -67334,14 +67749,18 @@ function _expPreviewStair(stairId) {
   const area = document.getElementById('exp-preview-area');
   if (!area) return;
   const imgData = _renderStairToImage(stair);
-  const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p=>p.id===stair.cableProductId) : null;
+  // 101 (Regel 20, «én kilde»): ALLE kablene i settet, ikke bare den første — et blandet sett
+  // viste før «Produkt: <første kabel>» og en effekt regnet med første kabels W/m.
+  const rows = _stairProductRows(stair);
   const totalLen = (stair.totalCableLength_cm||0)/100;
-  const totalW = prod?.watt_per_m ? Math.round(totalLen*prod.watt_per_m) : 0;
+  const totalW = _stairTotalWatts(stair);
+  const prodHtml = rows.filter(r=>r.product).map(r =>
+    `<div>${rows.length>1?_esc(r.label)+': ':'Produkt: '}${_esc(r.product.name)} (${r.productLength_m} m)${r.product.el_no?' · El.nr: '+_esc(r.product.el_no):''}</div>`).join('');
   area.innerHTML = `<div style="text-align:center;width:100%">
     <img src="${imgData}" style="max-width:100%;max-height:50vh;border-radius:8px;border:1px solid var(--border)">
     <div style="margin-top:12px;text-align:left;font-size:12px;color:var(--text);max-width:500px;margin-left:auto;margin-right:auto">
       <div style="font-weight:600;font-size:14px;margin-bottom:6px">${_esc(stair.name||'Trapp')}</div>
-      ${prod?`<div>Produkt: ${_esc(prod.name)} ${prod.el_no?'· El.nr: '+prod.el_no:''}</div>`:''}
+      ${prodHtml}
       <div>Kabel: ${totalLen.toFixed(1)} m · ${totalW} W · CC: ${(stair.stepCC_cm||stair.cableSpacing_cm||8).toFixed(1)} cm</div>
     </div>
   </div>`;
@@ -67483,7 +67902,7 @@ function _expPreviewSection(kind) {
       if (c.vende && c.cnt.vende > 0) addP(c.vende.id, 0, 'Plate (Aluboard)');
       if (c.cable) addP(c.cable.id, 0, 'Kabel (Aluboard)');
     });
-    (S.stairs || []).forEach(st => { if (st.cables && st.cables.length) st.cables.forEach(c => addP(c.productId || st.cableProductId, 0, 'Varmekabel (trapp)')); else if (st.cableProductId) addP(st.cableProductId, 0, 'Varmekabel (trapp)'); });
+    (S.stairs || []).forEach(st => { for (const r of _stairProductRows(st)) addP(r.productId, 0, 'Varmekabel (trapp)'); });   // 101: én kilde
     const _entries = Object.entries(mat).map(([pid, info]) => ({ info, pr: HEATING_PRODUCTS.find(p => p.id === +pid) }));
     const _th = `<tr style="color:var(--muted);font-size:11px;text-transform:uppercase"><th style="text-align:left;padding:0 8px 4px 0">Produkt</th><th style="text-align:left;padding:0 8px 4px">Antall</th><th style="text-align:left;padding:0 8px 4px">Enhet</th><th style="text-align:left;padding:0 8px 4px">El.nr</th><th style="text-align:left;padding:0 8px 4px">Lev.art.nr</th></tr>`;
     let _inner = '';
@@ -68671,13 +69090,13 @@ async function exportPDF(opts) {
       doc.text('Samlet kabel: ' + _setFit.availableLength_m.toFixed(1) + ' m' + (_setFit.label ? '   |   ' + _setFit.label : ''), M, y);
       y += 6;
     } else {
-      // Fallback for no breakdown data
-      const prod = stair.cableProductId ? HEATING_PRODUCTS.find(p => p.id === stair.cableProductId) : null;
+      // Fallback for no breakdown data — 101: én linje PER kabel i settet (stair.cables), ikke
+      // første kabel for hele trappa.
       doc.text('Total kabellengde: ' + ((stair.totalCableLength_cm||0)/100).toFixed(1) + ' m', M, y); y += 4;
-      if (prod) {
-        const totalW = prod.watt_per_m ? Math.round((stair.totalCableLength_cm||0)/100 * prod.watt_per_m) : 0;
-        doc.text('Produkt: ' + (prod.name||'—') + ' — ' + totalW + ' W', M, y); y += 4;
-        if (prod.el_no) { doc.text('El.nr: ' + prod.el_no + '  |  Art.nr: ' + (prod.article_no||'—'), M, y); y += 4; }
+      for (const r of _stairProductRows(stair)) {
+        if (!r.product) continue;
+        doc.text(r.label + ': ' + (r.product.name||'—') + ' (' + r.productLength_m + ' m) — ' + r.watt + ' W', M, y); y += 4;
+        if (r.product.el_no) { doc.text('El.nr: ' + r.product.el_no + '  |  Art.nr: ' + (r.product.article_no||'—'), M, y); y += 4; }
       }
     }
   }
@@ -69053,24 +69472,15 @@ async function exportPDF(opts) {
     if (p?.watt_per_m2) matList[k].watt += p.watt_per_m2 * (pl.width_cm * pl.length_cm) / 10000;
   }
   // Stairs
+  // 101 (Regel 20, «én kilde»): én rad per fysisk kabel fra _stairProductRows — et blandet sett
+  // (ulike lengder) ble før vist som første kabel ganger antall i enkelte utganger.
   for (const stair of (S.stairs || [])) {
-    if (stair.cables && stair.cables.length > 0) {
-      stair.cables.forEach(c => {
-        const pid = c.productId || stair.cableProductId;
-        if (!pid) return;
-        if (!matList[pid]) matList[pid] = { type: 'Kabel (trapp)', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
-        matList[pid].count++;
-        matList[pid].totalLen += c.length_cm || 0;
-        const p = HEATING_PRODUCTS.find(pr => pr.id === pid);
-        if (p?.watt_per_m) matList[pid].watt += p.watt_per_m * (c.length_cm || 0) / 100;
-      });
-    } else if (stair.cableProductId) {
-      const k = stair.cableProductId;
-      if (!matList[k]) matList[k] = { type: 'Kabel (trapp)', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
-      matList[k].count++;
-      matList[k].totalLen += stair.totalCableLength_cm || 0;
-      const p = HEATING_PRODUCTS.find(pr => pr.id === k);
-      if (p?.watt_per_m) matList[k].watt += p.watt_per_m * (stair.totalCableLength_cm || 0) / 100;
+    for (const r of _stairProductRows(stair)) {
+      if (r.productId == null) continue;
+      if (!matList[r.productId]) matList[r.productId] = { type: 'Kabel (trapp)', count: 0, totalLen: 0, areaM2: 0, watt: 0 };
+      matList[r.productId].count++;
+      matList[r.productId].totalLen += r.laidLength_m * 100;
+      matList[r.productId].watt += r.watt;
     }
   }
   // Aluboard (Varmecomfort platesystem) — rette + vende plater + valgt FLXHEAT-kabel
@@ -76557,14 +76967,8 @@ function _collectMaterialItems() {
       const watt = p.watt_per_m ? lenM * p.watt_per_m : 0;
       items.push({ product: p, kind: 'Kabel (trapp)', roomName: stairName, floorName: '', qtyStr: lenM.toFixed(1)+' m', count: 1, areaM2: 0, lenM, watt });
     };
-    if (stair.cables && stair.cables.length > 0) {
-      stair.cables.forEach(c => {
-        const p = c.productId ? HEATING_PRODUCTS.find(pr => pr.id === c.productId) : (stair.cableProductId ? HEATING_PRODUCTS.find(pr => pr.id === stair.cableProductId) : null);
-        pushStair(p, (c.length_cm||0)/100);
-      });
-    } else if (stair.cableProductId) {
-      pushStair(HEATING_PRODUCTS.find(pr => pr.id === stair.cableProductId), (stair.totalCableLength_cm||0)/100);
-    }
+    // 101 (Regel 20, «én kilde»): én linje per fysisk kabel, lest fra _stairProductRows.
+    for (const r of _stairProductRows(stair)) pushStair(r.product, r.laidLength_m);
   });
   return items;
 }
