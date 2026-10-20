@@ -22,4 +22,17 @@ valgte.
 
 ## 105 · Avstand sider brukes nøyaktig
 
+1. **Migreringen:** jeg lot `edgeMarginMin_cm` (gulvet fra 102) beholde sin gamle betydning og la den
+   låste verdien i et NYTT felt, `edgeMargin_cm`. Gamle prosjekter oppfører seg derfor nøyaktig som
+   før. Et gammelt gulv vises i feltet merket «(min)», og blir låst først når du redigerer det. OK?
+2. **Terskel på 5 cm for «udekket løp».** Mm-snappingen av marginen (Regel 15) etterlater alltid et
+   restavvik — målt 0,4–1,4 cm i auto-løste soner. Uten en terskel ville hver eneste sone fått en
+   stiplet 1-cm-stump. Jeg valgte 5 cm. Si fra om du vil ha den et annet sted.
+3. **Sidevisningen tegner udekkede løp som en liten rød strek** (ett løp er bare et punkt i profil).
+   Planen og PDF-en tegner dem i full lengde. OK, eller vil du ha noe tydeligere i sidevisningen?
+4. **75 %-grensen:** koden er på plass (gul merknad), men på en 210 cm bred trapp kan du ikke nå
+   under 75 % — feltet er begrenset til 20 cm, som gir 81 %. Skal maksgrensen heves for låst avstand?
+5. **Trappenivået (uten soner) har fortsatt bare gulv-modellen (084).** Forslag, ikke bygget: samme
+   låst/auto-felt på trappa, slik at «Avstand sider» der også kan brukes nøyaktig. Vil du ha det?
+
 ## 106 · Kabelvalg: produktgruppe og flere kabler per sone

@@ -4,6 +4,62 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 105 — Trapp: avstand fra sidene i en sone — tomt = auto, tall = låst nøyaktig (Regel 22) (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Jeg ser også at det ikke skjer noe endring når jeg reduserer avstand til sider
+nærmere enn 6 cm. Det bør kunne gå. Da skal kabel bli for kort i enden, og det må vises.»
+
+**STEG 0 (målt).**
+(0.1) Bekreftet. Feltet var et GULV. Tastet 9, 7, 5 og 3 cm i sone 2 — løst avstand ble **15,7 cm i
+alle fire tilfellene**, fordi løserens eget svar allerede lå over gulvet. Riktig etter Regel 12, men
+ikke det Kenneth ville ha.
+(0.2) En for kort kabel ble **ikke tegnet i det hele tatt**: `_stairAllocateCables` stoppet når
+kapasiteten tok slutt og kastet resten (`continue`). Målt på sone 3 med 20 m mot et behov på 48,9 m:
+trinn 5–6 fikk fire løp, trinn 7 fikk to, og trinn 8–10 fikk **null** — uten en strek på tegningen.
+PDF-en viste samme: bare gruppene som faktisk ble lagt.
+(0.3) `zoneSettings[z].edgeMarginMin_cm` leses tre steder: `_stairSurfSettings` (visning),
+`_stairZoneSubStair` (sonens gulv til løseren) og sonepanelets felt. Verken PDF eller venstremeny
+leser det direkte — de leser den LØSTE verdien på `stair.cables[zi].edgeMargin_cm`.
+
+**Migreringsvalget.** `edgeMarginMin_cm` beholder sin gamle betydning («gulv»), og den LÅSTE verdien
+får et nytt felt, `zoneSettings[z].edgeMargin_cm`. Prosjekter laget før 105 oppfører seg derfor
+nøyaktig som før — målt (test H13/H14). Et gammelt gulv vises fortsatt i feltet, merket «(min)»;
+først når brukeren redigerer feltet, blir avstanden låst, og det gamle gulvet ryddes bort.
+
+**Endringen.**
+1. **To tilstander, ett felt.** Tomt = auto (plassholderen viser hva auto landet på, «auto: 15.7»).
+   Tall = låst: brukes nøyaktig, og en «↩ Tilbake til auto-avstand»-knapp tømmer det. Låst felt har
+   hengelås og accent-ramme.
+2. **`_stairFitLockedMargin`** — med låst avstand løses ingen margin. Behovet regnes ved den låste
+   verdien, og avviket vurderes med `_stairFitFromLengths` (≤ 2 % passer, 2–5 % gul, > 5 % rød).
+   AUTO-kabel velger den i familien som er nærmest behovet, helst **kortere** (Regel 11).
+3. **Det synes.** `_stairAllocateCables` bærer nå ut de delene kabelen ikke rakk (`uncoveredRuns`)
+   i stedet for å kaste dem. De tegnes **stiplet rødt** i planen, i sidevisningen og i PDF-en.
+   Terskel 5 cm, så mm-snappingens restavvik (Regel 15, målt 0,4–1,4 cm) ikke blir til falske
+   «udekkede løp».
+4. Panelet sier «Kabelen er X m for kort — Y løp dekkes ikke», PDF-ens trappeside det samme per
+   sone, og venstremenyens sonerad får ⚠ ved gul OG rød (før bare rød) pluss 🔒 når avstanden er låst.
+5. 75 %-grensen (Regel 19) gjelder ikke en låst avstand — under 75 % varmet bredde er en gul merknad.
+
+**Målt resultat** (sone 2 = repos, behov 28,0 m ved 5 cm):
+
+| oppsett | avstand | kabel | status |
+|---|---|---|---|
+| auto | 15,7 cm | 25 m | 🟢 Passer, 0 udekkede |
+| låst 5 cm, manuell 25 m | **5,0 cm** | 25 m | 🔴 3,0 m for kort — **2 løp** stiplet rødt |
+| låst 9 cm, manuell 25 m | **9,0 cm** | 25 m | 🔴 1,9 m for kort — 1 løp |
+| låst 20 cm, manuell 25 m | **20,0 cm** | 25 m | 🟡 1,2 m for lang |
+| låst 20 cm, AUTO-kabel | 20,0 cm | **20 m** (nærmeste kortere) | — |
+| tomt igjen | 15,7 cm | 25 m | som før 105 |
+
+Angre, lagre og åpne på nytt: begge holder (målt). **Trapper uten soner er urørt.**
+
+**Ny test:** `_stairZoneRegressionTest102` fikk seksjon H (61 påstander totalt) — auto, «et gulv under
+auto-svaret flytter ingenting» (selve 105-klagen), låst brukes nøyaktig, for kort gir udekkede løp,
+for lang gir gul, auto-kabel med låst avstand velger nærmeste kortere, og migreringen fra 102.
+
+---
+
 ## 104 — Trapp: hver sone legges nedenfra og opp (Regel 14 per sone) (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Trappen er bygd nedenfra og opp. Da starter kabel nederst i sone 1. Men i sone 2,
