@@ -4,6 +4,48 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 103 — Trapp: Kenneths svar på 101/102; lite overskudd er «Passer» med merknad; dobbelt produktnavn bort; åtte røde sjekker målt (20.10.2026, `main`, ikke pushet)
+
+**Del A.** Kenneths svar på alle 14 spørsmålene fra 101 og 102 er skrevet inn under hvert spørsmål i
+`docs/trapp/prompter/SPØRSMÅL.md`. To av dem krevde endring (101/1 og 101/6); resten var bekreftelser.
+
+**Del B.1 — én regel for overskudd (101/1).** `_stairFitFixedSet` ga `ok:false` straks settet var
+lengre enn behovet ved gulvet — også for 8 cm av 70 m (0,1 %). Panelet ble rødt rett over en grønn
+«Passer»-linje: **to regler for samme sak.** Overskudd vurderes nå med `_stairFitFromLengths`,
+den samme funksjonen «Samlet behov / Samlet kabel» alt brukte:
+
+| Overskudd | Før 103 | Etter 103 |
+|---|---|---|
+| ≤ 2 % | rød «for lange» | `ok:true`, «Passer», dempet merknad «X til overs» |
+| 2–5 % | rød «for lange» | `ok:true`, gul merknad «X til overs» |
+| > 5 % | rød | rød (uendret) |
+
+Marginen står på gulvet i alle tre tilfellene — den kan ikke gå lenger ned (Regel 12). «For kort»
+(75 %-grensen, Regel 19) er uendret og fortsatt rød. Gjelder både manuelt kabelsett (101) og kabel
+per sone (102), siden begge går gjennom `_stairFitFixedSet`. Ny linje under Regel 20 i spec-en.
+
+**Del B.2 — dobbelt produktnavn (101/6).** Linja over kabellista gjentok det lista alt viste
+(«InSnow 30T 2100W 70m 70m»). Den vises nå bare når det ikke finnes noen kabel («Ingen kabel valgt»).
+Samme dobling i sonens eget panel («… 25m (25 m)») er fjernet.
+
+**Målt resultat.** Frydenbø Trapp 1 med 70 m-kabelen: 8 cm over behovet = 0,11 % → «🟢 Passer» med
+dempet merknad, ikke rødt. Samme trapp med 78,7 m (11,2 % over) → fortsatt rød. Tester utvidet:
+`_stairManualSetRegressionTest` fikk B2d–B2l (≤ 2 % passer med merknad, like over 5 % fortsatt rød,
+2–5 % gul på en trapp med gulv 4 der 78,7 m er 4,24 % over), `_stairZoneRegressionTest102` fikk
+C8–C13 (lite overskudd i en sone er merknad, ikke feil). 42 + 36 påstander, alle grønne.
+`_cableGeoSuite()` grønn, 142 rader, uendret mot baselinjen (Del B rører ikke rommotoren).
+
+**Del C — måling, ingen retting.** De røde sjekkene i `_cableGeometryRegressionTest` er **åtte**,
+ikke tre som 102-loggen sa (min egen `.slice(0, 3)`). En egen kjøring med bare de åtte tar under
+15 s mot batteriets 127 s, og halveringen i en egen `git worktree` fant commiten for hver enkelt:
+083 (`e13d2b9`) tok én, 088 (`5c929ef`) tok fire, 088b (`b11dc9e`) tok to, 089 (`a365c70`) tok én.
+Sju er **utdaterte påstander** (de låser tall fra før den speilvendte y-aksen ble rettet, og før
+Rom 5-fixturet ble hentet på nytt); én er en **ekte forverring** (`077: uten biblioteket legges det
+fortsatt ut` — 083s harde kaskadefilter bryter fail-open-regelen). Full tabell med målt grunnlag i
+`docs/kabel/STATUS.md` §44, forslag til retting i `SPØRSMÅL.md` under «103». Ingenting er rettet.
+
+---
+
 ## 102 — Trapp: hver sone som eget rom — velg sone, bytt kabel, se sonens egne mål (19.10.2026, `main`, ikke pushet)
 
 Kenneth 19.10.2026: «Den fyller seg ut automatisk når jeg setter soner, det er bra. Men jeg ønsker
@@ -67,8 +109,11 @@ tomt felt gir det gamle tilbake.
 
 **Ny regresjonstest:** `_stairZoneRegressionTest102()` (30 sjekker). `_stairRegressionTest`,
 `_stairSideRegressionTest` og `_stairManualSetRegressionTest` er fortsatt grønne, sammen med 22
-andre batterier. `_cableGeometryRegressionTest` har tre gamle, røde sjekker (romkabel-geometri) —
+andre batterier. `_cableGeometryRegressionTest` har gamle, røde sjekker (romkabel-geometri) —
 nøyaktig de samme på `b47a65d`, altså ikke rørt av 102.
+⚠ **Rettet i 103:** her sto det «tre» røde sjekker. Det er **åtte**. Feilen var min — jeg skrev ut
+bare `results.filter(!ok).slice(0, 3)` og leste de tre som kom ut som hele listen. Full måling av
+alle åtte, med commiten som gjorde hver enkelt rød, står i `docs/kabel/STATUS.md` §44.
 
 ---
 

@@ -2258,3 +2258,50 @@ vet jeg ikke. Heap mellom bitene: 20 MB flatt. «Balling» oppsto ikke i noen av
 referansen 181 → **132 ms** · vegg 2 +1 861 → **328–548 ms** · vegg 4 +2 1119 → **387 ms**.
 Forstyrrede utlegg er RASKERE enn før, fordi 079d sin ti-trinns nedstigning ikke lenger kjøres når
 099 har funnet et hullfritt trinn.
+
+---
+
+## §44 · De røde sjekkene i `_cableGeometryRegressionTest` — målt, ikke gjettet (20.10.2026, prompt 103)
+
+**Først en korreksjon av min egen rapport.** Endringsloggen for 102 sier «tre gamle, røde sjekker».
+Det var feil, og feilen var min: jeg skrev ut `results.filter(!ok).slice(0, 3)` og leste de tre som
+kom ut som «tre røde». Det er **åtte**. Batteriet har 127 påstander på `ffb8db7` og bruker 127 s.
+
+### Metode
+
+En egen kjøring med KUN de åtte påstandene (samme fixtures, samme oppsett, samme uttrykk) gjør det
+samme på **0,4–15 s** i stedet for 127 s. Halveringen gikk i en egen `git worktree`
+(`../arqely-bisect`) på port 4300, med en egen liten statisk server — de gamle `serve-varmeplan.js`
+mangler `.json`-MIME (lagt til i 065), så serveren måtte være uavhengig av commiten som testes.
+Produktkatalogen ligger bare i skyen bak innlogging, og en annen port er en annen origin: katalogen
+ble derfor hentet fra den innloggede fanen og lagt som en fil worktreen serverte. **Arbeidskopien
+ble ikke rørt.** Worktreen er fjernet.
+
+Nedre grense: `20c14a1` (082) — alle åtte grønne, like-for-like med samme kjøring.
+
+### De åtte
+
+| # | Påstand | Fixture | Forventet | Faktisk (`ffb8db7`) | Ble rød i | Type | Målt grunnlag |
+|---|---|---|---|---|---|---|---|
+| 1 | `076 rom5: geometrien er 5,698 m² netto` | rom5 | 5,698 m² | **5,711 m²** | `a365c70` (089 delvis) | **(b) utdatert påstand** | Commiten heter «Rom 5-fixturet hadde drevet fra virkeligheten — hentet paa nytt». Fixturens eget navn er «Bad 5,71 m²», og `da17f9a` (090b) sier «fasiten var maalt paa et rom som ikke finnes». Påstanden låser det gamle, feil rommet. |
+| 2 | `081: vannrett hører på OPP/NED` | rom5 | tl starter høyere enn bl | **tl y=−1035, bl y=−841** (byttet om) | `5c929ef` (088) | **(b)** | `w2s(0,−1040).y = −1485`, `w2s(0,−836).y = −1179` — **world-y øker nedover**, så −1040 ER toppen. 088 er nettopp fiksen av den speilvendte aksen. Påstandens kommentar («rommets topp er −836») er den gamle, speilvendte troen. |
+| 3 | `081: vannrett tl starter nær taket` | rom5 | y > −860 | **y = −1035** | `5c929ef` (088) | **(b)** | Samme måling som #2. −1035 ER nær taket etter 088. |
+| 4 | `081: vannrett bl starter nær gulvet` | rom5 | y < −1020 | **y = −841** | `5c929ef` (088) | **(b)** | Samme måling som #2. |
+| 5 | `081: panelet oppgir avstanden i cm` | rom5 | linje som matcher `/^Start: \d+ cm fra /` | **«geo · ønsket øvre venstre · start 124 cm fra hjørnet»** + «⚠ Loddrett kan ikke starte oppe til venstre i dette rommet — nærmeste er 124 cm unna.» | `b11dc9e` (088b) | **(b)** | Opplysningen er der — to ganger, og tydeligere enn før. Bare ordlyden er endret; påstanden regexer en tekst som ikke finnes lenger. |
+| 6 | `082 600W: starten når øvre venstre hjørne` | rom5 | ≤ 40 cm | **189 cm** | `b11dc9e` (088b) | **(b), men med en reell UX-kostnad** | 088b heter «valgt retning er hard - hjoernet bytter den aldri». Hjørnerunden kan ikke lenger snu retningen for å nå hjørnet. Påstanden låser en oppførsel 088b bevisst fjernet — men at 600W ikke lenger når hjørnet er en ekte endring Kenneth bør se. |
+| 7 | `077: uten biblioteket legges det fortsatt ut` | rom5, clipper av | kabelobjekt | **null** | `e13d2b9` (083) | **(a) ekte forverring** | 083 heter «låst regel: start i valgt hjørne (≤ 40 cm) går foran dekning og fasit-CC, **filter på kaskadenivå**». Uten clipper finnes ingen kandidat som passerer filteret, og kaskaden gir `null`. Det bryter fail-open-regelen (077/060): uten biblioteket SKAL det legges ut, bare merket som tilnærmet. |
+| 8 | `074b badHakk 41 m: dekningen holder seg (≥ 85 %)` | badHakk41, `v`/`tr` | ≥ 85 % | **63,3 %** (CC 9,06, 0 hull, 41,01 m) | `5c929ef` (088) | **(b)** | `baseline.json` (`1422d23 + 099`) har `badHakk41\|v\|tr` = **cc 9.06 · dek 63.3 · hull 0 · gyldig true** — altså er 63,3 % den AKSEPTERTE tilstanden for den raden, og `_cableGeoSuite()` er grønn på den. Etter 088 peker `tr` på et annet fysisk hjørne; det gamle resultatet (CC 13,81 · 94,9 %) finnes fortsatt, under `tl`/`br`. Påstanden sammenligner to ulike hjørner. |
+
+### Hva dette betyr
+
+Sju av åtte er **(b)**: påstander som låser tall eller ordlyd fra før 088/089 rettet henholdsvis den
+speilvendte y-aksen og et fixture som hadde drevet fra virkeligheten. De målte utleggene er ikke
+dårligere — de er målt mot et annet hjørne, et annet rom eller en annen tekst.
+
+Den ene som er **(a)** er #7: `077 fail-open`. 083s harde kaskadefilter gjorde at et rom uten
+polygonbiblioteket ikke får noe utlegg i det hele tatt. Det er den eneste av de åtte som peker på en
+regel som faktisk er brutt.
+
+**Ingenting er rettet her** — verken motoren eller forventningene. Forslag til retting står i
+`docs/trapp/prompter/SPØRSMÅL.md` under «103». Kenneth avgjør.
+
