@@ -4,6 +4,140 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 108 — Flytt rom: alt innhold følger med (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Når jeg flytter et rom med produkter og hindringer i, så ønsker jeg at alt
+flyttes. Slik det er nå så flyttes kun rommet og produktene står igjen. Går det an uten konsekvens
+for noe annet?»
+
+Svaret er ja: en flytting er en ren forskyvning. Alt flyttes like langt, ingenting regnes om, og
+utlegget blir bit-for-bit det samme — bare et annet sted.
+
+### STEG 0.1 — inventar (lest i koden, verifisert i en kjørende økt)
+
+| Samling | `roomId`? | Koordinatfelt | Fløt med FØR | Nå |
+|---|---|---|---|---|
+| `rooms` (selve rommet) | — | `points[]`, `walls[]`, `cardPos` | punkter ja, `cardPos` nei | ja |
+| `room.dims` | via rommet | `p1`, `p2` (`wnx/wny/offset` er invariante) | **nei** | ja |
+| `hindrings` | ja | `points[]` | ja | ja |
+| `zones` | ja | `points[]` | **nei** | ja |
+| `strips` | ja | `pos_cm`/`start_cm` (akse fra `direction`), `labelPos` | ja (uten `labelPos`) | ja |
+| `foilFree` | ja | `cx_cm`, `cy_cm` | **nei** | ja |
+| `mats` | ja | `x_cm`, `y_cm`, **`runStarts[]`**, `labelPos` | **nei** | ja |
+| `matPaths` | ja | `start`, `labelPos` (`offX/offY` er relative) | **nei** | ja |
+| `plates` | ja | `x_cm`, `y_cm` | **nei** | ja |
+| `aluboard` | ja | *ingen* — utlegget avledes av rommet | n/a | n/a (eksplisitt tom i tabellen) |
+| `cables` | ja | `runs[]`, `connections[].path`, `pathEls[].pts`, `centerline`, `start`, `end`, `labelPos`, `commonStartPt`, `zoneBounds`, `leadRun`, `cells[].bounds`, `_geomDefects[].at` | **nei — ble generert på nytt** | ja, forskjøvet |
+| `stairs` | nei — `partId` | — | n/a | n/a (hører til en del, ikke et rom) |
+| `floatingDims` | **nei** — `floorId`/`partId` | `p1`, `p2` | n/a | n/a (utenfor; se merknad) |
+| `groups` | nei — `stripIds` | — | n/a | følger stripene |
+| `documentation` | `roomId` som nøkkel | ingen geometri | n/a | n/a |
+
+`mats.runStarts[]` er den lumske: det er **absolutte** verdenskoordinater langs mattas egen akse
+(romform-klippet av `autoFillMatSerpentine`). Glemmes de, blir en klippet matte liggende igjen selv
+om `x_cm/y_cm` flytter seg.
+
+### STEG 0.2 — endret kabelen seg av en flytting?
+
+Ja, men ikke geometrien. Målt:
+- **Geometrien er forskyvnings-invariant.** L-rom, seks forskyvninger (137/−52, 3/7, −11/23,
+  55/55, 1/1, 250/−130): identisk lengde, identisk c/c, identisk antall senterlinje-punkter,
+  startpunkt forskjøvet nøyaktig dx/dy i alle seks.
+- **Men brukerens valg gikk tapt.** `autoFillCable` leser de globale innstillingene på nytt og
+  `Object.assign` overskriver hvert felt den ferske kabelen har. Målt: `startCorner` 'tr' → 'bl'
+  etter en ren flytting, og `direction` 'v' → 'h' når `S.varmefolie.direction` var endret i
+  mellomtiden. Å forskyve i stedet for å regenerere er derfor strengt bedre.
+
+### STEG 0.3 — andre flytteveier
+
+Ingen. Piltastene flytter en markert **stripe** eller **fri folie**, aldri et rom.
+«Rett opp etter vegg» (`startBgStraighten`) retter opp **bakgrunnsbildet**, ikke et rom. Det finnes
+ingen kopier/lim-inn av rom. Flyttehåndtaket (X-pil, Y-pil, senter-⊕) er den ene veien, og alle tre
+inngangene deler samme kode.
+
+### STEG 0.4 — angre
+
+`pushUndo` dekker alle samlingene i tabellen. ⚠ `S.floatingDims` mangler fortsatt helt i
+`pushUndo`/`undo` — kjent hull fra før, men de har `floorId`/`partId` og ikke `roomId`, så de er
+utenfor 108. Det finnes heller ingen `redo()` i appen i det hele tatt — «gjør om» kunne derfor ikke
+testes.
+
+⚠ Konsekvens for all ny kode her: `pushUndo` klonér bare ETT nivå for de fleste samlingene
+(`{...m}`), så snapshotet deler `runStarts`/`labelPos`/`pathEls`-objektene med den levende
+tilstanden. Derfor **erstatter** forskyvningen alltid feltene med nye objekter — aldri muterer i
+plass — ellers ville angre vært en stille no-op.
+
+### Endringen
+
+1. **`_ROOM_TRANSLATE_SPEC`** — én tabell over samling → koordinatfelt. En ny samling trenger én ny
+   linje, ingenting annet.
+2. **`_snapshotRoomForMove` / `_applyRoomMoveSnapshot` / `_translateRoomContents`** — flyttingen
+   skrives alltid som «startbilde + delta», aldri «legg til litt mer», så rutenett-snappingen ikke
+   akkumulerer avrundingsfeil gjennom et langt drag.
+3. **Drag-koden har mistet sine egne løkker.** De separate hindring- og stripe-løkkene i
+   flytte-grenen er borte; begge ligger nå i tabellen sammen med resten.
+4. **Kablene forskyves** ved en flytting i stedet for å genereres på nytt. `autoFillCable` ved
+   slipp beholdes KUN for rotasjon.
+5. **Veggene forskyves i stedet for å bygges på nytt.** ⚠ MÅLT: `compWalls(rm.points)` kjørte i
+   HVER mousemove-frame under et flytte-drag og nullstilte alt brukeren har satt per vegg —
+   `thicknessCm` 12 → 0, label «Yttervegg nord» → «Vegg 1», `side` 'in' → 'out', usikkert-flagget
+   true → false, og vegg-id 29 → 33 (som gjør `S.ui.selectedWallId` foreldet midt i draget). En
+   forskyvning endrer bare endepunktene; lengde og vinkel er invariante.
+6. Cacher invalideres og `markDirty` kalles ved slipp.
+
+### Test
+
+Ny **`_roomMoveRegressionTest()`** — 42 sjekker, ett av hver samling, forskjøvet 137/−52:
+hvert koordinatfelt forskjøvet nøyaktig, felt som IKKE skal røres (`runLengths`, `offX/offY`,
+vegglengde/vinkel, kabelens lengde/cc/retning/startCorner) uendret, nabo-rommet bit-for-bit urørt,
+og fram-og-tilbake gir nøyaktig utgangspunktet. **Vaksinen er kjørt:** fjernes én samling fra
+`_ROOM_TRANSLATE_SPEC` blir testen rød for alle sju (mats, matPaths, plates, foilFree, cables,
+zones, hindrings) — 2 til 12 røde sjekker hver — og grønn igjen når linja settes tilbake.
+
+Ekte drag gjennom lerret-hendelsene, med rom + kabel (valgt retning og hjørne) + frihånds-matte +
+folie + plate + fri folie + hindring + sone + mål:
+
+| | delta | resultat |
+|---|---|---|
+| Fritt drag (senter-⊕) | 136,80 / −52,42 | alt følger, kabel lik lengde/cc/retning, `startCorner` 'tr' beholdt |
+| X-låst pil | 136,80 / 0 | alt følger |
+| Y-låst pil | 0 / −52,42 | alt følger |
+| Rutenett-snap PÅ | 150 / −50 | alt følger SAMME snappede delta |
+
+Angre: tilbake til nøyaktig tilstanden før flyttingen. Lagre + åpne på nytt: alle koordinater
+identiske. Andre rom urørt i alle kjøringene.
+
+Batterier (alle grønne, 331 sjekker): `_roomMoveRegressionTest` (42), `_matPathClickRegressionTest`
+(28), `_matFreeRegressionTest` (13), `_matRegressionTest` (2), `_matZoneRegressionTest` (4),
+`_foilRegressionTest` (9), `_cableSkewRegressionTest` (16), `_cableZoneRegressionTest` (33),
+`_stairRegressionTest` (24), `_stairManualSetRegressionTest` (42), `_stairZoneRegressionTest102`
+(77), `_stairSideRegressionTest` (25). **`_cableGeoSuite()`: `ok: true`, 142 rader, ingen `feil`,
+ingen `endret`, ingen `nye`, ingen `borte`** — altså bit-for-bit samme fasit som før (66,5 s).
+
+### SPØRSMÅL — rotasjon (målt, IKKE bygget)
+
+Rotert et rom med én av hver samling: **rommet, hindringene og stripene roterer med. Mattene,
+frihånds-mattene, platene, den frie folien, sonene og rommets mållinjer står igjen.** Kablene
+genereres på nytt fra det roterte rommet.
+
+Rotasjon er en annen sak enn flytting, og den har en reell modellbegrensning: matter og plater er
+akse-justerte rektangler (`rotation_deg` kjenner bare 0 og 90), og en frihånds-matte er en
+akse-justert serpentin. En vilkårlig vinkel har de ingen representasjon for. Selv stripene, som
+roterer i dag, roterer bare sitt *posisjonspunkt* — de tegnes fortsatt akse-justert, så ved en
+skrå vinkel havner de feil i forhold til rommet.
+
+Mitt forslag, i prioritert rekkefølge:
+1. **Rotér innholdet stivt sammen med rommet ved 90°-steg**, og la 90° være det eneste rotasjons-
+   trinnet håndtaket tilbyr som standard (det er det montøren faktisk bruker). Da er alt
+   representerbart: matter/plater bytter `rotation_deg` 0 ↔ 90, frihånds-mattas `moves[].axis`
+   bytter `h` ↔ `v`, og alle punkter roteres om ankeret.
+2. **Ved en fri vinkel: advar i stedet for å miste innhold.** Enten blokkér rotasjonen når rommet
+   har akse-bundet innhold, eller si tydelig fra at utlegget må legges på nytt etterpå — og rotér
+   i det minste punktene (soner, hindringer, mållinjer, kabler) som faktisk tåler det.
+3. **Stripenes nåværende halv-rotasjon bør rettes samtidig** — den er misvisende i dag.
+
+Ikke bygget. Si fra hvis du vil ha punkt 1.
+
 ## 107 — Frihånds-matte: klikket «hang seg» (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Jeg har nettopp lagt ut en EcoMat 60T for frihånd i et rom. Det skjer
