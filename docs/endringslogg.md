@@ -4,6 +4,70 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 104 — Trapp: hver sone legges nedenfra og opp (Regel 14 per sone) (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Trappen er bygd nedenfra og opp. Da starter kabel nederst i sone 1. Men i sone 2,
+så starter repos i motsatt retning slik at kabelendene på sone 1 og sone 2 møtes og ligger et trinn
+fra hverandre.»
+
+**STEG 0 (målt på 4 trinn / repos / 6 trinn, tre soner, bygd nedenfra).** Tabellen under er verdens-y;
+**større y = lenger NED** (`w2s` måler det, se 103).
+
+| sone | flater | start | slutt | nedenfra og opp? |
+|---|---|---|---|---|
+| 1 (trinn 1–4) | 0–3 | flate 0, y=418 | flate 3, y=302 | ✅ |
+| 2 (repos) | 4 | flate 4, **y=185** | flate 4, **y=295** | ❌ **motsatt** |
+| 3 (trinn 5–10) | 5–10 | flate 5, y=178 | flate 10, y=2 | ✅ |
+
+Sone 1 slutter ved y=302 og sone 2 starter ved y=185 — **117 cm unna, i motsatt ende**. Sone 2
+slutter ved y=295, rett ved der sone 1 sluttet. Nøyaktig det Kenneth så.
+
+**Årsak: rutingen, ikke markørene.** Promptens to hypoteser var (a) omvendt emisjon i sone-grenen
+eller (b) feil gjetning i markørkoden. Målt: ingen av dem — feilen lå i `generateStairCable` sin
+posisjonsformel:
+```
+const pos = (isLanding || startFromTop) ? (depthStart + ri*CC) : (depthEnd - ri*CC);
+```
+`isLanding` tvang reposet til å telle fra motsatt kant av et trinn. Kommentaren begrunnet det med
+«Repos har ingen retningspreferanse (symmetrisk landingMargin)» — og **den premissen er feil**:
+marginen er symmetrisk, men retningen kabelen traverserer flaten i er det ikke.
+
+**Gjelder også uten soner.** Målt på samme trapp uten soner: kabelen gjorde to hopp på 117 cm over
+reposet i stedet for én gjennomgående kjede. Soner gjorde bare feilen synlig, som to kabelender ved
+siden av hverandre.
+
+**Endringen.** Én betingelse, som nå leser begge flaggene som bestemmer hvilken vei kjeden går:
+```
+const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
+const enterAtLargePos = bottomUp !== startFromTop;
+const pos = enterAtLargePos ? (depthEnd - ri*CC) : (depthStart + ri*CC);
+```
+`buildDirection` er samme flagg sidevisningen alt bruker (`_stairSideX`). Et repos følger nå samme
+regel som et trinn, i alle fire kombinasjonene av `buildDirection` × «Kabelstart: Topp».
+
+**Målt resultat** (avstand mellom der kabelen forlater én flate og møter den neste, innenfor hver
+kabel — et sonebytte er en ny, fysisk atskilt kabel og telles ikke):
+
+| oppsett | før | etter |
+|---|---|---|
+| bunn, med soner | K1 4,4,4 · **K2–K3 117 cm fra hverandre** | K1 4,4,4 · K2 · K3 4,4,4,4,4 |
+| bunn, uten soner | 4,4,4,**117**,**117**,4,4 | 4,4,4,7,7,4,4 |
+| bunn + «Kabelstart: Topp» | — | 4,4,4 · K2 · 4,4,4,4,4 |
+| `buildDirection:'top'` | **56 cm på hvert trinn** | 4,4,4 · K2 · 4,4,4,4,4 |
+
+Strengantall, CC og total kabellengde er **uendret** i alle oppsett (10 036,8 cm med soner,
+10 970 cm uten) — bare rekkefølgen flatene traverseres i endret seg.
+
+**Én kilde for start/slutt.** Plan, sidevisning og PDF hadde tre ordrette kopier av «hvilken vei går
+kabelen». Plan-tegningen og PDF-ens plan leser nå `_stairCableEndpoints` (098), som sidevisningen
+alt gjorde — to kopier mindre å holde i synk.
+
+**Ny test:** `_stairZoneRegressionTest102` fikk seksjon F (47 påstander totalt): hver sone starter i
+sin nedre halvdel og slutter i den øvre, sone 1→2 og 2→3 møtes innenfor 15 cm, og «Kabelstart: Topp»
+snur alle sonene likt. Vaksinetestet — med den gamle repos-retningen blir 5 av dem røde.
+
+---
+
 ## 103 — Trapp: Kenneths svar på 101/102; lite overskudd er «Passer» med merknad; dobbelt produktnavn bort; åtte røde sjekker målt (20.10.2026, `main`, ikke pushet)
 
 **Del A.** Kenneths svar på alle 14 spørsmålene fra 101 og 102 er skrevet inn under hvert spørsmål i

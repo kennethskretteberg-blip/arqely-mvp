@@ -39408,37 +39408,13 @@ function _drawStairPlan(stair) {
     // bygde stair.runs/connections i) og ta FØRSTE/SISTE segment som faktisk har cableIdx===ci —
     // ikke bare første/siste RUN, som ikke lenger er entydig eid av én kabel.
     if (S.view.zoom > 0.1) {
-      const endpoints = {}; // ci -> { start:{x,y}, end:{x,y} }
-      // Regel 9: gå flatene i den FAKTISKE rekkefølgen kabelen traverserer dem (stair.runs sin egen
-      // emisjonsrekkefølge), ikke en fast 0..N-1-antakelse — STEG 2 (valgfri snuing) kan gjøre
-      // rekkefølgen omvendt, og en fast antakelse her fant K1 på feil trinn (motoren hadde allerede
-      // rutet riktig; kun denne markør-koden gjettet feil rekkefølge på nytt).
-      const surfVisitOrder = [];
-      const seenSurf = new Set();
-      for (const r of stair.runs) { if (!seenSurf.has(r.surfaceIdx)) { seenSurf.add(r.surfaceIdx); surfVisitOrder.push(r.surfaceIdx); } }
-      for (const si of surfVisitOrder) {
-        const surf = surfs[si];
-        for (const run of (runsBySurf[si] || [])) {
-          // Segmentene er alltid sortert på start_cm — men kabelen kan gå strengen fra HØYRE mot
-          // VENSTRE (isGoingRight===false), så «inn»-enden av et segment er da end_cm, ikke
-          // start_cm. Uten dette havner grønn/rød prikk på feil side for enhver høyre-mot-venstre-streng.
-          const segsInTravelOrder = run.isGoingRight ? run.segments : [...run.segments].reverse();
-          for (const seg of segsInTravelOrder) {
-            const inX = run.isGoingRight ? seg.start_cm : seg.end_cm;
-            const outX = run.isGoingRight ? seg.end_cm : seg.start_cm;
-            const pt = { x: ox + surf.x_cm + inX, y: oy + surf.y_cm + run.pos_cm };
-            const pt2 = { x: ox + surf.x_cm + outX, y: oy + surf.y_cm + run.pos_cm };
-            if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: pt, end: pt2 };
-            else endpoints[seg.cableIdx].end = pt2;
-          }
-        }
-        const conn = (stair.connections || []).find(c => c.fromSurf === si);
-        if (conn) {
-          for (const seg of (conn.segments || [{ cableIdx: conn.cableIdx }])) {
-            if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: null, end: null }; // sjeldent: kabel starter midt i et opptrinn
-          }
-        }
-      }
+      // 104: ÉN kilde for start/slutt per kabel — _stairCableEndpoints (098), den samme
+      // sidevisningen og PDF-en alt leser. Her lå en ordrett KOPI av samme algoritme; to kopier av
+      // «hvilken vei går kabelen» er nøyaktig det som lar plan og sidevisning drive fra hverandre.
+      const _eps = _stairCableEndpoints(stair);
+      const _pt = (e) => e && surfs[e.si] ? { x: ox + e.x_cm, y: oy + surfs[e.si].y_cm + e.pos_cm } : null;
+      const endpoints = {};
+      for (const ci of Object.keys(_eps)) endpoints[ci] = { start: _pt(_eps[ci].start), end: _pt(_eps[ci].end) };
       const nCables = Math.max(1, (stair.cables || []).length);
       for (let ci = 0; ci < nCables; ci++) {
         const ep = endpoints[ci];
@@ -43545,8 +43521,32 @@ function generateStairCable(stair) {
       // Regel 14: bunn-start teller NEDOVER fra depthEnd (nesen, ri=0) mot depthStart (riser-siden,
       // ri=N-1) for trinn. Topp-start (STEG 2) speiler dette: ri=0 møter kabelen ved RISER-siden
       // (depthStart) og teller OPPOVER mot nesen (depthEnd), som er der trinnet forlates videre
-      // nedover. Repos har ingen retningspreferanse (symmetrisk landingMargin) — uendret uansett.
-      const pos = (isLanding || startFromTop) ? (depthStart + ri * actualCC) : (depthEnd - ri * actualCC);
+      // nedover.
+      // ⚠ 104 (Kenneth 20.10.2026, MÅLT): her sto `(isLanding || startFromTop)`, med begrunnelsen
+      // «Repos har ingen retningspreferanse (symmetrisk landingMargin) — uendret uansett». Den
+      // premissen er feil. MARGINEN er symmetrisk, men RETNINGEN kabelen traverserer flaten i er
+      // det ikke: et repos må møtes i den enden kabelen kommer fra, og forlates i den enden den
+      // skal videre. Målt på en trapp 4 trinn / repos / 6 trinn (bunn-start): trinn 3 sluttet ved
+      // y=302 (sin øvre kant, mot reposet), reposet startet ved y=185 — 117 cm unna, i motsatt
+      // ende — og sluttet ved y=295, rett ved der trinn 3 sluttet. Deretter startet trinn 5 ved
+      // y=178, 117 cm fra der reposet sluttet. To lange hopp i stedet for én gjennomgående kjede.
+      // Med soner (102) ble dette synlig som at sone 1 og sone 2 fikk kabelendene sine ved siden
+      // av hverandre — nøyaktig det Kenneth meldte. Et repos følger nå samme regel som et trinn.
+      //
+      // Regelen bak begge: kabelen skal MØTE flaten i den enden FORRIGE flate i kjeden ligger, og
+      // forlate den i den enden NESTE flate ligger. Hvilken ende det er, avhenger av to ting:
+      //   · buildDirection — 'bottom' legger segs[0] NEDERST (størst y), 'top' legger den ØVERST.
+      //     Samme flagg som sidevisningen alt bruker (_stairSideX sin `bottomUp`).
+      //   · cableStartFromTop — snur hvilken vei kjeden besøker flatene (surfOrder over).
+      // Målt på 4 trinn / repos / 6 trinn, som avstand mellom der kabelen forlater én flate og
+      // møter den neste (små tall = sammenhengende kjede):
+      //     buildDirection 'bottom':  før 4,4,4,117,117,4,…   etter 4,4,4,7,7,4,…
+      //     buildDirection 'top':     før 56,56,56,33,33,56,… etter 4,4,4,7,7,4,…
+      // 'top'-trapper hadde altså 56 cm hopp på HVERT trinn fra før — et eget, eldre avvik som
+      // denne ene betingelsen rydder opp i samtidig, uten å røre strengantall, CC eller marginer.
+      const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
+      const enterAtLargePos = bottomUp !== startFromTop;
+      const pos = enterAtLargePos ? (depthEnd - ri * actualCC) : (depthStart + ri * actualCC);
       pieces.push({ kind: 'run', surfaceIdx: si, pos_cm: pos, xStart, xEnd, len_cm: runLength, isGoingRight: (ri % 2 === 0) });
       totalLen += runLength;
     }
@@ -44862,19 +44862,54 @@ function _stairZoneRegressionTest102() {
     _stairPruneZoneSettings(st);
     check('E1: sone 3 sine innstillinger ryddet', false, !(st.zoneSettings || {})['3'], Object.keys(st.zoneSettings || {}).join(','));
     check('E2: sone 1 sine innstillinger står', 7, (st.zoneSettings || {})['1'] && st.zoneSettings['1'].stepCC_cm === 7, JSON.stringify(st.zoneSettings));
+    // ═══ F · 104 (Regel 14 per sone): hver sone legges NEDENFRA og opp ═══════════════════
+    // «Nederst» er flaten med STØRST world-y — world-y øker nedover på skjermen (målt i 103,
+    // via w2s). Sjekken går på _stairCableEndpoints, den ene kilden plan, sidevisning og PDF
+    // leser, så en markør som drifter fra rutingen fanges her.
+    const zoneStartEnd = (stt) => {
+      const eps = _stairCableEndpoints(stt), rr = _stairZoneRanges(stt), sf = stt.surfaces;
+      return (rr || []).map((r, zi) => {
+        const e = eps[zi]; if (!e || !e.start || !e.end) return null;
+        const yAt = p => sf[p.si].y_cm + p.pos_cm;
+        // Sonens egne flater, laveste (største y) og høyeste (minste y) kant
+        let yLow = -Infinity, yHigh = Infinity;
+        for (let si = r.fromSurf; si <= r.toSurf; si++) { yLow = Math.max(yLow, sf[si].y_cm + sf[si].d_cm); yHigh = Math.min(yHigh, sf[si].y_cm); }
+        return { zone: r.zone, startY: yAt(e.start), endY: yAt(e.end), yLow, yHigh };
+      });
+    };
+    st = mkZoned();
+    for (const z of zoneStartEnd(st)) {
+      if (!z) { check('F: sone mangler endepunkt', 'endepunkt', false, 'null'); continue; }
+      // Starten skal ligge i sonens NEDRE halvdel, slutten i den ØVRE — altså nedenfra og opp.
+      const mid = (z.yLow + z.yHigh) / 2;
+      check(`F1 sone ${z.zone}: starter nederst (y > midt)`, '> ' + Math.round(mid), z.startY > mid, Math.round(z.startY));
+      check(`F2 sone ${z.zone}: slutter øverst (y < midt)`, '< ' + Math.round(mid), z.endY < mid, Math.round(z.endY));
+    }
+    // Reposet (sone 2) er den som var feil før 104: den startet i motsatt ende av sone 1.
+    const se = zoneStartEnd(st);
+    check('F3: sone 1 slutter og sone 2 starter ved samme kant (< 15 cm)', '< 15 cm',
+      Math.abs(se[0].endY - se[1].startY) < 15, Math.round(Math.abs(se[0].endY - se[1].startY)) + ' cm');
+    check('F4: sone 2 slutter og sone 3 starter ved samme kant (< 15 cm)', '< 15 cm',
+      Math.abs(se[1].endY - se[2].startY) < 15, Math.round(Math.abs(se[1].endY - se[2].startY)) + ' cm');
+    // «Kabelstart: Topp» snur ALLE sonene likt.
+    st = mkZoned(); st.cableStartFromTop = true; _regenerateStairCable(st);
+    for (const z of zoneStartEnd(st)) {
+      const mid = (z.yLow + z.yHigh) / 2;
+      check(`F5 sone ${z.zone}: toppstart snur sonen`, '< ' + Math.round(mid), z.startY < mid, Math.round(z.startY));
+    }
 
-    // ═══ F · trapp UTEN soner: byte for byte som før ═════════════════════════════════════
+    // ═══ G · trapp UTEN soner: byte for byte som før ═════════════════════════════════════
     S.counters.nextStairId = 998101;
     const plain = _createStairObj({ name: 'TESTFLAT', width_cm: 240, step_depth_cm: 32, step_height_cm: 16, step_count: 8,
       edgeMargin_cm: 5, stepCC_cm: 10, cableSpacing_cm: 10, riserOffset_cm: 2, noseOffset_cm: 2 });
     S.stairs = [plain]; S.ui.selectedStairId = plain.id;
     const ssP = _stairSurfSettings(plain, 0);
-    check('F1: uten soner gir _stairSurfSettings trappas egne verdier', '5/10/2/2',
+    check('G1: uten soner gir _stairSurfSettings trappas egne verdier', '5/10/2/2',
       ssP.edgeMargin_cm === 5 && ssP.stepCC_cm === 10 && ssP.noseOffset_cm === 2 && ssP.riserOffset_cm === 2,
       [ssP.edgeMargin_cm, ssP.stepCC_cm, ssP.noseOffset_cm, ssP.riserOffset_cm].join('/'));
-    check('F2: ingen sone funnet', null, ssP.zone === null, ssP.zone);
+    check('G2: ingen sone funnet', null, ssP.zone === null, ssP.zone);
     const propsP = _generateStairProposals(plain);
-    check('F3: forslagsmotoren uendret (70 m @ 12,4)', '70@12.4',
+    check('G3: forslagsmotoren uendret (70 m @ 12,4)', '70@12.4',
       propsP[0] && propsP[0].products.map(p => p.length_m).join('+') === '70' && Math.abs(propsP[0].edgeMargin_cm - 12.4) < 0.01,
       propsP[0] && propsP[0].products.map(p => p.length_m).join('+') + '@' + propsP[0].edgeMargin_cm);
   } catch (e) {
@@ -70979,24 +71014,12 @@ function _stairDrawToCanvas(stair, opts) {
     // et løp kan tilhøre to kabler ved en skjøt (Regel 11/STEG 2). Tegnet kun når punktets flate
     // faktisk er i DETTE båndet — samme prinsipp som forbindelsene over («arket deles»-bruddet).
     {
+      // 104: ÉN kilde — _stairCableEndpoints (098), den samme skjermen og sidevisningen leser.
+      // Her lå den tredje ordrette kopien av samme algoritme.
+      const _eps = _stairCableEndpoints(stair);
+      const _pt = (e) => e && surfs[e.si] ? { x: e.x_cm, y: surfs[e.si].y_cm + e.pos_cm, si: e.si } : null;
       const endpoints = {};
-      const surfVisitOrder = [];
-      const seenSurf = new Set();
-      for (const r of stair.runs) { if (!seenSurf.has(r.surfaceIdx)) { seenSurf.add(r.surfaceIdx); surfVisitOrder.push(r.surfaceIdx); } }
-      for (const si of surfVisitOrder) {
-        const sf = surfs[si];
-        for (const run of (runsBySurf[si] || [])) {
-          const segsInTravelOrder = run.isGoingRight ? run.segments : [...run.segments].reverse();
-          for (const seg of segsInTravelOrder) {
-            const inX = run.isGoingRight ? seg.start_cm : seg.end_cm;
-            const outX = run.isGoingRight ? seg.end_cm : seg.start_cm;
-            const pt = { x: sf.x_cm + inX, y: sf.y_cm + run.pos_cm, si };
-            const pt2 = { x: sf.x_cm + outX, y: sf.y_cm + run.pos_cm, si };
-            if (!endpoints[seg.cableIdx]) endpoints[seg.cableIdx] = { start: pt, end: pt2 };
-            else endpoints[seg.cableIdx].end = pt2;
-          }
-        }
-      }
+      for (const ci of Object.keys(_eps)) endpoints[ci] = { start: _pt(_eps[ci].start), end: _pt(_eps[ci].end) };
       const nCablesEp = Math.max(1, (stair.cables || []).length);
       c.font = 'bold ' + Math.max(9, Math.round(scale * 2.2)) + 'px sans-serif';
       const markerR = Math.max(3, scale * 0.5);
