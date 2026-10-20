@@ -36,3 +36,18 @@ valgte.
    låst/auto-felt på trappa, slik at «Avstand sider» der også kan brukes nøyaktig. Vil du ha det?
 
 ## 106 · Kabelvalg: produktgruppe og flere kabler per sone
+
+1. **Fargevalget:** sonen eier fargen, og kabel 2, 3 … i samme sone får en gradvis LYSERE nyanse av
+   den (sone 3 = grønn → K1 #30b050, K2 #6ac681). Valgt framfor helt egne farger per kabel fordi
+   soneinndelingen er det du skal se først på tegningen. Vil du heller ha egne farger?
+2. **Gruppebytte med rader i lista:** radene flyttes til NÆRMESTE lengde i den nye gruppen
+   (25 m → 25,5 m i 400 V). Finnes ingen kabler i gruppen, går sonen til auto. OK?
+3. **Etiketten på start-/sluttmarkøren** er nå «S1», «S2» … per sone, og «K1», «K2» innenfor en sone
+   som har flere kabler. Før sto det «K1…K4» på tvers av soner, som ga «K4» for sone 3s andre kabel.
+4. **Sidefunn jeg rettet uten å spørre:** tegningen hentet kabelfargen med et indeksoppslag i en
+   global liste — og PDF-en hadde sin EGEN liste med bare tre farger. Med to kabler i sone 3 ble den
+   andre tegnet i sone 1s oransje. Fargen leses nå fra kabelen selv, ett sted.
+5. **«Antall kabler»-feltet** finnes bare på trappenivå (uten soner). I sonen legger du til og
+   fjerner rader direkte. Vil du ha et talfelt i sonen også?
+6. **Auto er fortsatt ÉN kabel per sone** (`maxCables: 1`), som prompten sa. Skal auto kunne foreslå
+   to kabler i en sone når én ikke rekker?

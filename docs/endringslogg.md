@@ -4,6 +4,57 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 106 — Trapp: kabelvalg — produktgruppe først, fullt produktnavn, flere kabler per sone (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Når man skal endre til en kabel manuelt, bør man kunne først velge
+produktgruppe: InSnow 30T 230V eller InSnow 400V. Så bør listen komme opp med "InSnow 30T 3000W
+100m". Man kan fint ha et valg for antall kabler også … En knapp for "tilbake til auto" er fint.»
+
+**STEG 0 (målt).**
+(0.1) Elleve steder antok **én kabel per sone** — at `stair.cables[zi]` ER sone `zi`:
+`_stairZoneInfo`, `_stairSurfSettings`, `_stairSolveZones`, sone-grenen i `generateStairCable`,
+sonevelgeren, sammendragsradene, venstremenyens `_stairSoneRowsHtml`, `_stairCableLengthBreakdown`
+sin etikett, `_stairSoneGeometryBlocks` og regresjonstesten. Alle leser nå `zone` i stedet for
+indeksen, via de nye `_stairZoneCables`/`_stairZoneProductIds`.
+(0.2) Åtte produktgrupper finnes (InFloor 10T/17T 230V, InSnow 20T/30T/40T i 230V og 400V).
+`product.name` er **alltid** «\<familie\> \<W\>W \<lengde\>m», og 400 V-familiene bærer «400V» i
+selve familienavnet — så den gamle etiketten `familie + ' ' + volt + 'V'` ga «InSnow 30T 400V 400V».
+Rettet i den felles gruppe-velgeren.
+
+**Endringen.**
+1. **Produktgruppe først.** Nytt nedtrekk øverst i kabeldelen, både i sonepanelet og i
+   trappepanelet, fra samme kilde (`_stairCableGroups`). Sonens gruppe lagres i
+   `zoneSettings[z].preferredFamily/preferredVoltage`; tomt = trappas gruppe. Auto i sonen søker i
+   sonens gruppe.
+2. **Kabelliste med fullt navn.** `_stairCableListHtml` er **én** komponent, brukt av både sonen og
+   trappa uten soner (101). Etiketten er `product.name` — «InSnow 30T 750W 25m» — der det før sto
+   «25m · 750W». K-nummer, farge, ✕, «＋ Legg til kabel» og «↩ Tilbake til auto».
+3. **Flere kabler per sone.** `zoneSettings[z].productIds = [...]`; 102s `productId` leses som
+   `[productId]`, så gamle prosjekter er uendret (målt, I12/I13). `stair.cables` har nå **én
+   oppføring per kabel** med `zone`, `zoneCableIdx` og `zoneCableCount`. Sone-grenen sender alle
+   sonens kapasiteter til samme `_stairAllocateCables`, så skjøten mellom to kabler i samme sone
+   følger Regel 11/13 — målt: K2 starter **innenfor 1 cm** av der K1 slutter, midt i et trinn.
+4. **Farger:** sonen eier fargen, og kabel 2, 3 … i samme sone får en gradvis lysere nyanse
+   (`_stairZoneCableColor`). Soneinndelingen er det man skal se først.
+5. **Sidefunn, målt og rettet:** tegningen hentet kabelfargen med et **indeksoppslag** i en global
+   liste (`STAIR_CABLE_COLORS[seg.cableIdx]`, og i PDF-en en lokal liste med bare **tre** farger).
+   Med to kabler i sone 3 ble den andre tegnet i sone 1s oransje, og markøren het «K4».
+   Fargen leses nå fra kabelen selv (`_stairCableColorAt`), og etiketten er «S1/S2» per sone og
+   «K1/K2» innenfor en sone med flere.
+6. Venstremenyens sonerad viser «2 kabler · 1350 W», PDF-ens Regel 17-blokk «Sone 3 · K1» og
+   «Sone 3 · K2» med hvert sitt el.nr/art.nr, og materialliste/XLSX får begge via `_stairProductRows`.
+
+**Målt resultat.** Sone 3 (6 trinn, behov 45,0 m) med 25 m + 20 m: begge lagt (25,0 + 20,0 m),
+margin 13,0 cm — **samme som auto fant for én 45 m-kabel** — status 🟢 Passer, sone 1 og 2 uendret.
+«Tilbake til auto» gir bit-identisk samme utlegg som før 106. Gruppebytte til «InSnow 30T 400V»
+flytter begge radene til nærmeste lengde (25 → 25,5 m).
+
+**Ny test:** `_stairZoneRegressionTest102` fikk seksjon I (77 påstander totalt) — flere kabler per
+sone, skjøten, at sonen fortsatt går nedenfra og opp (104), «tilbake til auto», migreringen fra 102,
+gruppe per sone og at etiketten ikke dobler spenningen.
+
+---
+
 ## 105 — Trapp: avstand fra sidene i en sone — tomt = auto, tall = låst nøyaktig (Regel 22) (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Jeg ser også at det ikke skjer noe endring når jeg reduserer avstand til sider
