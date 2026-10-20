@@ -4,6 +4,62 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 107 — Frihånds-matte: klikket «hang seg» (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Jeg har nettopp lagt ut en EcoMat 60T for frihånd i et rom. Det skjer
+ingenting når jeg trykker i canvas … hvis jeg går inn på rommet og trykker på matten som er lagt
+ut med frihånd, så henger den seg.» F5 hjalp.
+
+**STEG 0 (målt, ikke antatt).** Kjørt mot Kenneths eget prosjekt «Varmematter 60W» (to
+frihånds-matter, EcoMat 60T, 9 og 8 baner, 26,2 m og 16,0 m), lastet inn som ren tilstand med
+`_performAutoSave` stubbet — ingen skyskriving.
+(0.1) Fanen var **aldri** låst. JS-tråden svarte hele tiden; symptomet var at matta hang fast i
+markøren og at klikkene ikke lenger gjorde det de skulle.
+(0.2) Ingen ledd var tungt: `_matFreeCatalog`, `_matFreeUsableAreaM2`, `_matFreeCoveredAreaM2` og
+`_matPathMoveValid` alle **< 1 ms**, `_matPathPanel` 0,3 ms, `render()` 7–13 ms, én `mousemove`
+under drag 0,5–1 ms (snitt 1,1 ms over 20), og **hele mousedown (klikk → valgt matte → panel)
+9–28 ms**. `_matFreeSplitPlan` ble målt separat over totalCm 100–30 000 cm: ≤ 0,1 ms for alle
+realistiske banelengder (de 19 EcoMat-rullene 2–30 m). Hypotesen «tung eller uendelig beregning»
+er **avkreftet med tall**.
+(0.3) Ingen unntak — hverken `error`- eller `unhandledrejection`-lytteren fanget noe.
+(0.4) Ikke matte-spesifikt: samme oppførsel på begge mattene og på et syntetisk fikstur.
+(0.5) **Rotårsaken, reprodusert:** `mousedown` på en frihånds-matte starter umiddelbart en
+flytting (`_matDragging=true`, `_matDragKind='matpath'`). Avslutningen — inkludert
+tilbakestillingen av en ugyldig posisjon — lå **kun** i mouseup-håndtereren, og den var registrert
+på `canvas` alene. `mouseleave` rører med vilje ikke drag-tilstanden. Et museslipp som landet et
+annet sted (sidepanelet, verktøylinja, ctxbar-en oppå lerretet, utenfor vinduet) nådde derfor
+ingenting: `_matDragging` ble stående `true`, hver senere `mousemove` flyttet matta videre, og
+`mp.start` ble aldri tilbakestilt. Reprodusert med et ekte drag sluppet over sidepanelet, bekreftet
+visuelt (matta følger markøren, tegnet rød «⚠ ugyldig plassering»).
+(0.6) **Symptom 1, egen årsak:** `_applyCycleSelection` rydder `S.ui.selectedMatPathId` for alle
+andre typer — men typer med en egen nedfallsgren (rom, stripe, matte, hindring …) går aldri
+gjennom den ved idx 0. Målt i Kenneths prosjekt: etter at matta var valgt, viste ctxbar-en **og**
+høyrepanelet fortsatt «Frihånds-matte» etter et klikk rett på rommet, så romnes egen verktøylinje
+(+Produkt) aldri kom tilbake — «jeg får ikke mulighet til å velge rom, produkt eller opprette nytt
+rom», ordrett.
+
+**Endringen.**
+1. Mouseup-håndtereren er **navngitt** (`_canvasMouseUp`) i stedet for inline på `canvas` — ingen
+   endring i innholdet, slik at reservene under kjører nøyaktig samme avslutning.
+2. Ny `window`-reserve: et slipp som ikke traff lerretet kjører samme avslutning. Gatet på
+   `_canvasDragActive()`, slik at et hvilket som helst klikk i verktøylinja **aldri** kan falle ned
+   i kaskadens hale, der `wbw`/`rect`/`hindring` lager geometri av et museslipp.
+3. `blur` og `Escape` avslutter også et pågående lerret-drag, via samme vei.
+4. Fall-gjennom-grenen i klikk-syklingen rydder nå `S.ui.selectedMatPathId` på samme sted og etter
+   samme regel som `S.ui.selectedBg` allerede ble ryddet.
+
+**Test.** Ny `_matPathClickRegressionTest()` — 20 sjekker gjennom de **ekte** hendelsene (ingen
+direkte funksjonskall): klikk → panel på 5,1 ms (krav < 50), slipp utenfor lerretet / `blur` /
+`Escape` avslutter draget og tilbakestiller posisjonen, matta følger ikke musa etterpå, og et annet
+objekt kan velges. Grønn. Kjørt i tillegg: `_matFreeRegressionTest` (13), `_matRegressionTest` (2),
+`_matZoneRegressionTest` (4), `_foilRegressionTest` (9), `_cableSkewRegressionTest` (16),
+`_cableZoneRegressionTest` (33), `_stairRegressionTest` (24), `_stairManualSetRegressionTest` (42),
+`_stairZoneRegressionTest102` (77), `_stairSideRegressionTest` (25) — alle grønne.
+`_cableGeometryRegressionTest` er asynkron og ble ikke ferdig innen økta (rører ingen
+lerret-hendelser) — ikke brukt som bevis.
+
+---
+
 ## 106 — Trapp: kabelvalg — produktgruppe først, fullt produktnavn, flere kabler per sone (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Når man skal endre til en kabel manuelt, bør man kunne først velge
