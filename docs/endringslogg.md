@@ -58,6 +58,49 @@ objekt kan velges. Grønn. Kjørt i tillegg: `_matFreeRegressionTest` (13), `_ma
 `_cableGeometryRegressionTest` er asynkron og ble ikke ferdig innen økta (rører ingen
 lerret-hendelser) — ikke brukt som bevis.
 
+### 107 del 2 — labelen dekket matta (samme runde)
+
+Kenneth: «ja, ta label-dekker-matta også».
+
+**STEG 0 (målt på nytt, med produktkatalogen lastet).** Ved den zoomen prosjektet ÅPNER på
+(`fitAll` → 0,287):
+- 29 % og 37 % av de to frihånds-mattenes baner ligger under mattas egen label
+- 17 % av rommenes samlede gulvflate (214 av 1288 prøvepunkter) ligger under en matte-label
+- labelen måler 236×45 px og endrer seg **ikke** når man zoomer ut (pikselgulvet `LABEL_MIN_PX`),
+  mens matta krymper — ved zoom 0,3 er label-arealet 0,33–0,53× hele mattas bbox; zoomet inn er
+  den nede i 1–5 %
+
+⚠ **Rettelse til min egen første rapport:** påstanden «ingen klikkbar flate ved zoom 0,9+» var
+FEIL. Den sonden hadde knekt innramming, så matta lå utenfor lerretet og alle prøvepunkter ble
+silt bort. Tallene over er målt på nytt med riktig innramming. Problemet er reelt, men det er et
+utzoomet-problem, ikke et «alltid»-problem.
+
+**Årsaken.** Alle fire label-typene (kabel, matte-rektangel, frihånds-matte, folie) svelger
+klikket helt — «klikk LÅSER labelen; lag-syklingen kjøres aldri». For en folie-stripe er labelen
+liten mot objektet; for en frihånds-matte dekker den en tredjedel, og da er hverken matta eller
+rommet under nåbart med musa.
+
+**Endringen (én delt regel, ikke fire kopier).** `_labelStepsAside()`: FØRSTE trykk på en label
+oppfører seg bit-for-bit som før (låser + kan dras). Et REPETERT, rent trykk på samme punkt —
+samme toleranse (`CYCLE_TOL_PX`) og samme «forrige trykk dro ikke»-test (`_pressMoved`) som
+klikk-syklingen selv bruker — lar labelen tre til side, og klikket fortsetter ned til syklingen:
+matte → rom → matte, med 1/N-merket synlig. Et slikt gjennomfall **velger kun** (`_cycleSkipDrag`),
+starter aldri et drag, så et uhell kan ikke flytte geometri. Minnet nullstilles så snart et trykk
+ikke traff noen label, så førstegangs-oppførselen er i behold. Label-drag i én bevegelse (trykk →
+flytt → slipp) virker uendret.
+
+I tillegg: «Truly empty grid — clear ALL selections» manglet `selectedMatPathId` — målt: etter et
+klikk på tomt lerret sto ctxbar-en fortsatt på «Frihånds-matte». Rettet. (`selectedFoilFreeId`
+mangler fortsatt i samme liste — samme hull, bevisst ikke rørt denne runden.)
+
+**Målt etter** med ekte museklikk på Kenneths prosjekt, samme punkt tre ganger: trykk 1 → label
+låst; trykk 2 → «🟫 Frihånds-matte» i ctxbar; trykk 3 → «Rom · +Produkt · +Hindring · +Sone» —
+altså nøyaktig den verktøylinja han ikke fikk fram. Ingen drag startet underveis.
+
+**Test.** `_matPathClickRegressionTest()` utvidet til 28 sjekker (KRAV 6: label låses ved første
+trykk, matta nås ved andre, rommet ved tredje, gjennomfall starter aldri drag, labelen låses igjen
+etter et trykk utenfor, og label-drag i én bevegelse virker fortsatt). Alle 11 batterier grønne.
+
 ---
 
 ## 106 — Trapp: kabelvalg — produktgruppe først, fullt produktnavn, flere kabler per sone (20.10.2026, `main`, ikke pushet)
