@@ -4,6 +4,97 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 109 — Listevisning: slett kalkyle-produktet i et tegnet rom (20.10.2026, `main`, ikke pushet)
+
+Kenneth 20.10.2026: «Vi må ha en slette-knapp for produkter som er lagt inn i listevisning etter
+at rommet er tegnet opp … Hvis jeg i ettertid går inn på canvas og tegner inn et nytt produkt i
+samme rom, så kommer rommet opp med to produkter. Jeg ønsker å gå inn på liste og slette det
+første produktet jeg la inn.»
+
+### STEG 0.1 — ble begge talt? Ja.
+
+Målt på et rom 500×400: kabel valgt i lista (InSnow 20T 370 W), deretter en ekte matte tegnet på
+lerretet (EcoMat 60T).
+
+| | Kun kalkyle | Etter tegnet matte |
+|---|---|---|
+| `_listRoomDrawnState` | `label` | `drawn` (raden låses) |
+| Installert effekt | 370 W | **1270 W** (900 matte + 370 kalkyle) |
+| Materialliste | 1 linje | **3 linjer**: kalkyle-kabel 18,2 m · 364 W, DENS reservekabel 18,2 m · 0 W, matta |
+| «Bestilles» | 2 stk (1 + 1 reserve) | 2 stk (1 + 1 reserve) — fortsatt kalkylens |
+| `_projectKalkyleStatus` | «Kalkyle — ikke detaljprosjektert» | 0 kalkyle / 1 tegnet |
+
+PDF-ens spesifikasjonstabell bygges av `_roomProductRows` og effekten av `_roomRatedEffectW` —
+nøyaktig de to funksjonene som ga 3 rader og 1270 W over. Begge produktene telles altså også i
+PDF-en. Og forsiden sier ikke lenger at noe er en kalkyle, mens kalkyle-produktet fortsatt
+bestilles: det er den stille delen.
+
+### STEG 0.2 — fantes det en vei ut?
+
+Nei, ikke fra lista. Raden er låst når rommet er «drawn» — ingen produktvelger, ingen knapp.
+Den ENESTE veien i dag er å velge «kun label»-kabelen på **lerretet** og trykke Slett i ctxbar-en
+(`deleteCable`) — og den lar `room.listModType/listCount` bli stående. «Tøm rom» tar ALT, også
+det tegnede (målt: `_roomProductCount` = 3).
+
+### STEG 0.3 — hva bærer kalkylen?
+
+`labelOnly`-kabler, `labelOnly`-matter, de AUTO-genererte reservene av disse (reserven av en
+`labelOnly`-kabel er selv `labelOnly` — `_syncReserveCables` sprer hovedkabelen), og
+`room.listModType` / `listCount` / `listMix`. `room.listFamily` er bare forvalget i
+klasse-nedtrekket og røres bevisst ikke.
+
+### Endringen
+
+1. **`_roomProductRows` merker kalkyle-rader** (`row.kalkyle`) og gir dem sin EGEN nøkkel — samme
+   grunn som reserven alltid har hatt det: uten den smeltet en kalkyle-kabel og en tegnet kabel av
+   samme produkt sammen til «2 stk», og da kan ingen flate skille dem.
+2. **`_listClearKalkyle(roomId)`** — den ene operasjonen. Filteret er `labelOnly`, så et tegnet
+   utlegg kan aldri rammes (reserven av en TEGNET kabel lages av `_offsetCableClone` og er aldri
+   `labelOnly`). Ett `pushUndo` før, cacher invalideres, `markDirty`. `_listClearKalkyleConfirm`
+   er bekreftelsen lista og sidepanelet kaller.
+3. **Lista**: i en låst rad med kalkyle deles produktcella i to linjer — `TEGNET …` og
+   `KALKYLE … 🗑 Slett` — og statuscella får `⚠ N produkter (kalkyle + tegnet)`.
+4. **Sidepanelet**: «kun label»-kabler og -matter får et gult **K**-merke og samme 🗑 når rommet
+   også har et tegnet utlegg. Bonus: en `labelOnly`-matte sto her som «NaN×NaN cm» — den viser nå
+   sitt lagrede areal.
+5. **Varselet**: når et ekte utlegg legges i et rom som har kalkyle, kommer en toast med
+   «[Fjern kalkylen] [Behold begge]». Den blokkerer ikke, og ingenting fjernes automatisk.
+   ⚠ Hvorfor ÉN sjekk og ikke et kall per utleggsmotor: det finnes 20+ steder som pusher et
+   tegnet produkt. En liste med kallsteder er nøyaktig «to lister som må holdes i synk»-fella
+   108 og `ROOM_PRODUCT_KEYS` ryddet bort. Det som skal varsles er en TILSTAND, og den sjekkes
+   i `renderSidebar()` — som hver eneste utleggsvei allerede kaller til slutt. Billig vakt først:
+   uten `labelOnly` noe sted koster sjekken to array-skann.
+
+### Test
+
+Ny **`_listKalkyleClearRegressionTest()`** — 32 sjekker, inkludert kalkyle-matte + tegnet kabel
+(motsatt vei), frihånds-matte som det tegnede produktet, nabo-rom urørt, og vaksinen: en TEGNET
+kabel av SAMME produkt som kalkylen overlever slettingen.
+
+Målt i den ekte listevisningen, på raden:
+
+| | Før | Etter 🗑 |
+|---|---|---|
+| Produktcelle | `TEGNET EcoMat 60T 0.5×30m` + `KALKYLE InSnow 20T 370W 18.2m 🗑` | `EcoMat 60T 0.5×30m` |
+| Status | `⚠ 3 produkter (kalkyle + tegnet)` + `● Tegnet` | `● Tegnet` |
+| Installert | 1270 W | **900 W** |
+| Bestilles | 2 stk (1 + 1 reserve) | **1 stk** |
+| Materialliste | 3 linjer | **1 linje** |
+| Toppteksten | 1 tegnet · 0 kun label | 1 tegnet · 0 kun label |
+
+Angre: alt tilbake (1270 W, 2 kabler, `listModType` 'cable', `listCount` 1). ⚠ Det finnes ingen
+`redo()` i appen, så «gjør om» kunne ikke testes (samme funn som i 108). Avbryt i bekreftelsen
+fjerner ingenting. Rom uten tegnet utlegg: `state=label`, ingen kollisjon, ingen 🗑, og
+produktvelgeren står som før.
+
+Batterier (alle grønne, 538 sjekker): `_listevisningRegressionTest` (54 — 059/061),
+`_listKalkyleClearRegressionTest` (32), `_geoRegressionTest` (24), `_nyttProsjektRegressionTest`
+(25), `_kundeforslagRegressionTest` (85), `_roomMoveRegressionTest` (42),
+`_matPathClickRegressionTest` (28), `_matFreeRegressionTest` (13), `_matRegressionTest` (2),
+`_matZoneRegressionTest` (4), `_foilRegressionTest` (9), `_cableSkewRegressionTest` (16),
+`_cableZoneRegressionTest` (33), `_stairRegressionTest` (24), `_stairManualSetRegressionTest`
+(42), `_stairZoneRegressionTest102` (77), `_stairSideRegressionTest` (25).
+
 ## 108 — Flytt rom: alt innhold følger med (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Når jeg flytter et rom med produkter og hindringer i, så ønsker jeg at alt

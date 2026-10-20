@@ -13418,14 +13418,18 @@ function _roomProductRows(room) {
   // rader, ikke én rad med «Ant 7». Nøkkelen for folie er productId + lengde. lengthM rundes til
   // ÉN DESIMAL I METER — samme presisjon som vises — FØR gruppering, slik at 3,24 m og 3,19 m
   // ikke ender som to rader som begge står oppført som «3,2 m».
-  const add = (p, kind, w, lengthM, areaM2, count, keySuffix) => {
+  // 109: `kalkyle` = raden kommer fra et «kun label»-produkt (valgt i listevisningen), ikke fra
+  // et tegnet utlegg. Den får sin EGEN nøkkel av samme grunn som reserven har det: uten den ville
+  // en kalkyle-kabel og en tegnet kabel av SAMME produkt smeltet sammen til «2 stk», og da kan
+  // ingen flate skille dem — heller ikke slett-knappen lista nå trenger.
+  const add = (p, kind, w, lengthM, areaM2, count, keySuffix, kalkyle) => {
     if (!p) return;
     // 025: reserven får sin EGEN rad, rett ved siden av hovedkabelen (samme produkt). Uten en
     // egen nøkkel ville de smeltet sammen til «2 stk» med dobbel W.
     const key = kind === 'Folie' ? (p.id + '|' + lengthM)
-              : (p.id + (keySuffix || '') + (kind === 'Reservekabel' ? '|reserve' : ''));
+              : (p.id + (keySuffix || '') + (kind === 'Reservekabel' ? '|reserve' : '') + (kalkyle ? '|kalkyle' : ''));
     let e = map.get(key);
-    if (!e) { e = { product: p, kind, count: 0, effectWRaw: 0, lengthM, areaM2: 0 }; map.set(key, e); }
+    if (!e) { e = { product: p, kind, count: 0, effectWRaw: 0, lengthM, areaM2: 0, kalkyle: !!kalkyle }; map.set(key, e); }
     e.count += (count == null ? 1 : count);
     e.effectWRaw += (w || 0);
     e.areaM2 += (areaM2 || 0);
@@ -13436,11 +13440,14 @@ function _roomProductRows(room) {
     const w = p ? (p.total_effect_w || ((p.cable_length_m || 0) * (p.watt_per_m || 0)) || ((c.totalLength_cm / 100) * (p.watt_per_m || 0))) : 0;
     // 025: reserven har 0 W (ikke tilkoblet) — W-cellen viser da «—» og Σ W er fortsatt
     // romtotalen. Antall/lengde/art.nr er som en vanlig kabel, så den bestilles.
-    add(p, c.reserve ? 'Reservekabel' : 'Kabel', c.reserve ? 0 : w, p ? (p.cable_length_m ?? null) : null, 0);
+    add(p, c.reserve ? 'Reservekabel' : 'Kabel', c.reserve ? 0 : w, p ? (p.cable_length_m ?? null) : null, 0, null, null, !!c.labelOnly);
   }
   for (const m of _matsForRoom(room.id)) {
     const p = HEATING_PRODUCTS.find(pr => pr.id === m.productId);
-    add(p, 'Matte', _matRatedW(p, m), null, (m.width_cm * _matLaidLengthCm(m)) / 10000);
+    // 109: en «kun label»-matte har ingen geometri — arealet er det lagrede `_loAreaM2`, ikke
+    // bredde × lagt lengde (som er NaN for den).
+    const areaM2 = m.labelOnly ? (m._loAreaM2 || 0) : (m.width_cm * _matLaidLengthCm(m)) / 10000;
+    add(p, 'Matte', _matRatedW(p, m), null, areaM2, null, null, !!m.labelOnly);
   }
   // 097 · FRIHÅNDSMATTE. Samme kilde materiallista alltid har brukt (`_matFreeCatalog(mp).segments`),
   // og samme `kind: 'Matte'` — ellers ville Gruppe/Type i Romoversikten fått en egen, ny verdi for
@@ -13469,7 +13476,7 @@ function _roomProductRows(room) {
     add(it.product, it.kind, it.effectW, it.meters || null, 0, it.count, '|alu');
   }
   return [...map.values()]
-    .map(e => ({ product: e.product, kind: e.kind, count: e.count,
+    .map(e => ({ product: e.product, kind: e.kind, count: e.count, kalkyle: e.kalkyle,
                  effectW: Math.round(e.effectWRaw), effectWRaw: e.effectWRaw,
                  lengthM: e.lengthM, areaM2: e.areaM2,
                  elNr: e.product ? (e.product.el_no || null) : null,
@@ -17408,6 +17415,193 @@ function _roomMoveRegressionTest() {
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_roomMoveRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// ═══ 109 · SLETT KALKYLE-PRODUKTET I ET TEGNET ROM — REGRESJONSTEST ═══════════════════════
+// Fasiten for Kenneths scenario: kabel valgt i lista, matte tegnet på lerretet etterpå.
+function _listKalkyleClearRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const saved = {
+    rooms: S.rooms, strips: S.strips, foilFree: S.foilFree, cables: S.cables, mats: S.mats,
+    matPaths: S.matPaths, plates: S.plates, aluboard: S.aluboard, zones: S.zones, hindrings: S.hindrings,
+    floors: S.floors, activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId,
+    selectedRoomId: S.ui.selectedRoomId, selectedCableId: S.ui.selectedCableId, selectedMatId: S.ui.selectedMatId,
+    autoSave: window._performAutoSave, toast: window._showToast, collisionToast: window._showKalkyleCollisionToast,
+    undoLen: (typeof _undoStack !== 'undefined' && _undoStack) ? _undoStack.length : null,
+  };
+  window._performAutoSave = () => Promise.resolve();
+  window._showToast = () => {};
+  let toastCount = 0, toastRoom = null;
+  window._showKalkyleCollisionToast = (rid) => { toastCount++; toastRoom = rid; };
+
+  const RID = 909109, OTHER = 909110;
+  try {
+    HEATING_PRODUCTS.length = 0;
+    const CAB = { id: 996001, category_id: 9700, active: true, product_family: 'InSnow 30T', name: 'InSnow 30T 1000W 33m',
+      voltage: 230, cable_length_m: 33, watt_per_m: 30, total_effect_w: 1000, min_wall_margin_mm: 50 };
+    const MAT = { id: 996002, category_id: 9800, active: true, product_family: 'EcoMat 60T', name: 'EcoMat 60T 0,5x10m',
+      voltage: 230, watt_per_m2: 60, mat_area_m2: 5, mat_width_mm: 500, mat_total_length_mm: 10000,
+      mat_cc_mm: 120, mat_cut_interval_mm: 240, min_wall_margin_mm: 50, min_gap_mm: 0, total_effect_w: 300 };
+    HEATING_PRODUCTS.push(CAB, MAT);
+
+    const pts = [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 400 }, { x: 0, y: 400 }];
+    const op  = [{ x: 800, y: 0 }, { x: 1100, y: 0 }, { x: 1100, y: 300 }, { x: 800, y: 300 }];
+    S.rooms = [
+      { id: RID,   floorId: null, partId: null, name: 'Bad',  points: pts.map(p => ({ ...p })), walls: [], area: Math.abs(compArea(pts)), dims: [], reserveCable: true },
+      { id: OTHER, floorId: null, partId: null, name: 'Gang', points: op.map(p => ({ ...p })),  walls: [], area: Math.abs(compArea(op)),  dims: [] },
+    ];
+    for (const r of S.rooms) r.walls = compWalls(r.points);
+    S.floors = []; S.ui.activeFloorId = null; S.ui.activePartId = null; _rebuildActiveFloorRoomIds();
+    S.cables = []; S.mats = []; S.matPaths = []; S.plates = []; S.aluboard = []; S.foilFree = []; S.strips = []; S.zones = []; S.hindrings = [];
+
+    // ── 1) Kalkyle lagt inn fra lista ──────────────────────────────────────────────────────
+    _listSetRoomProduct(RID, 'cable', CAB.id, 1);
+    _listSetRoomProduct(OTHER, 'cable', CAB.id, 1);   // nabo-rom med SIN EGEN kalkyle
+    const room = S.rooms[0], other = S.rooms[1];
+    check('Lista la inn kalkyle-kabel + reserve', '2 objekter, state=label',
+      _listKalkyleCount(RID) === 2 && _listRoomDrawnState(RID) === 'label', { n: _listKalkyleCount(RID), state: _listRoomDrawnState(RID) });
+    const wKunKalkyle = _roomRatedEffectW(room);
+    check('Effekt med kun kalkyle', '1000 W', wKunKalkyle === 1000, wKunKalkyle);
+
+    // ── 2) Ekte matte tegnet i samme rom ───────────────────────────────────────────────────
+    S.mats.push({ id: 5101, roomId: RID, productId: MAT.id, x_cm: 30, y_cm: 40, width_cm: 50, length_cm: 300,
+      num_runs: 2, gap_cm: 0, rotation_deg: 0 });
+    _invalidateMatCache && _invalidateMatCache();
+    check('Rommet er nå «drawn»', 'drawn', _listRoomDrawnState(RID) === 'drawn', _listRoomDrawnState(RID));
+    check('Kollisjonen oppdages', 'true', _listHasKalkyleCollision(RID) === true, _listHasKalkyleCollision(RID));
+    const wBegge = _roomRatedEffectW(room);
+    check('BEGGE telles i effekten (dokumentert feil før 109)', '1000 + 300 = 1300 W', wBegge === 1300, wBegge);
+
+    // Produktradene — den delte kilden PDF og materiallista leser.
+    const rows = _roomProductBreakdown(room);
+    const kalkRows = rows.filter(r => r.kalkyle), drawnRows = rows.filter(r => !r.kalkyle);
+    check('Kalkyle-radene er merket i den delte kilden', '2 kalkyle (kabel + reserve), 1 tegnet',
+      kalkRows.length === 2 && drawnRows.length === 1, { kalkyle: kalkRows.map(r => r.kind), tegnet: drawnRows.map(r => r.kind) });
+    check('Kalkyle- og tegnet-rad smelter ALDRI sammen', 'egne rader',
+      rows.length === 3, rows.map(r => r.kind + (r.kalkyle ? '(K)' : '')));
+
+    // ── 3) Varselet ────────────────────────────────────────────────────────────────────────
+    toastCount = 0; toastRoom = null; _kalkyleWarned.clear();
+    _kalkyleCollisionScan();
+    check('Varselet kommer én gang for rommet', '1 gang, riktig rom', toastCount === 1 && toastRoom === RID, { toastCount, toastRoom });
+    _kalkyleCollisionScan();
+    check('Varselet gjentas ikke ved neste render', 'fortsatt 1', toastCount === 1, toastCount);
+
+    // ── 4) Radens to linjer ────────────────────────────────────────────────────────────────
+    const rowHtml = _listDrawnRowHtml(room, false);
+    check('Raden viser både Tegnet og Kalkyle', 'begge ordene i cella',
+      /Tegnet<\/span>/.test(rowHtml) && /Kalkyle<\/span>/.test(rowHtml), null);
+    check('Raden har en slett-knapp for kalkylen', '_listClearKalkyleConfirm(' + RID + ')',
+      rowHtml.indexOf('_listClearKalkyleConfirm(' + RID + ')') > -1, null);
+    check('Statuscella varsler om to produkter', '⚠ … (kalkyle + tegnet)',
+      /⚠ 3 produkter \(kalkyle \+ tegnet\)/.test(rowHtml) && /● Tegnet/.test(rowHtml), null);
+    check('Raden for et rom UTEN kalkyle har ingen slett-knapp', 'ingen knapp',
+      _listDrawnRowHtml(other, false).indexOf('_listClearKalkyleConfirm') === -1, null);
+
+    // ── 5) Selve slettingen ────────────────────────────────────────────────────────────────
+    const undoFoer = _undoStack.length;
+    const naboFoer = _listKalkyleCount(OTHER);
+    const n = _listClearKalkyle(RID);
+    check('Slettingen fjernet kalkyle-kabel OG reserve', '2', n === 2, n);
+    check('Ingen labelOnly igjen i rommet', '0', _listKalkyleCount(RID) === 0, _listKalkyleCount(RID));
+    check('Ingen reservekabel igjen i rommet', '0',
+      (S.cables || []).filter(c => c.roomId === RID).length === 0, (S.cables || []).filter(c => c.roomId === RID).length);
+    check('Det TEGNEDE utlegget står igjen', '1 matte, ikke labelOnly',
+      S.mats.filter(m => m.roomId === RID && !m.labelOnly).length === 1, S.mats.filter(m => m.roomId === RID).length);
+    check('Effekten er nå bare det tegnede', '300 W', _roomRatedEffectW(room) === 300, _roomRatedEffectW(room));
+    check('Radens eget valg er nullstilt', 'listModType/listCount/listMix = null',
+      room.listModType === null && room.listCount === null && room.listMix === null,
+      { t: room.listModType, c: room.listCount, m: room.listMix });
+    check('Rommet er fortsatt «drawn»', 'drawn', _listRoomDrawnState(RID) === 'drawn', _listRoomDrawnState(RID));
+    check('Nabo-rommets kalkyle er URØRT', 'uendret (' + naboFoer + ')',
+      naboFoer > 0 && _listKalkyleCount(OTHER) === naboFoer, _listKalkyleCount(OTHER));
+    check('Materiallista har bare det tegnede for rommet', '1 linje',
+      _collectMaterialItems().filter(i => i.roomName === 'Bad').length === 1,
+      _collectMaterialItems().filter(i => i.roomName === 'Bad').map(i => i.kind));
+
+    // ── 6) Angre ───────────────────────────────────────────────────────────────────────────
+    check('Slettingen la ETT angre-steg', '+1', _undoStack.length === undoFoer + 1, _undoStack.length - undoFoer);
+    undo();
+    check('Angre gir kalkylen tilbake', '2 objekter, 1300 W',
+      _listKalkyleCount(RID) === 2 && _roomRatedEffectW(S.rooms.find(r => r.id === RID)) === 1300,
+      { n: _listKalkyleCount(RID), w: _roomRatedEffectW(S.rooms.find(r => r.id === RID)) });
+    check('Angre gir radens valg tilbake', 'cable / 1',
+      S.rooms.find(r => r.id === RID).listModType === 'cable' && S.rooms.find(r => r.id === RID).listCount === 1,
+      { t: S.rooms.find(r => r.id === RID).listModType, c: S.rooms.find(r => r.id === RID).listCount });
+
+    // ── 7) Tegnet KABEL + kalkyle-MATTE (motsatt vei av scenarioet over) ───────────────────
+    S.cables = []; S.mats = []; S.matPaths = [];
+    S.rooms.find(r => r.id === RID).reserveCable = false;
+    _listSetRoomProduct(RID, 'mat', MAT.id, 1);
+    S.cables.push({ id: 5201, roomId: RID, productId: CAB.id, direction: 'v', spacing_cm: 20, startCorner: 'bl',
+      totalLength_cm: 3300, runs: [{ pos_cm: 50, segments: [{ start_cm: 20, end_cm: 380 }] }], connections: [] });
+    _invalidateCableCache && _invalidateCableCache();
+    check('Kalkyle-MATTE + tegnet KABEL oppdages', 'drawn + 1 kalkyle',
+      _listRoomDrawnState(RID) === 'drawn' && _listKalkyleCount(RID) === 1, { state: _listRoomDrawnState(RID), n: _listKalkyleCount(RID) });
+    _listClearKalkyle(RID);
+    check('Kalkyle-matta borte, tegnet kabel igjen', '0 matter, 1 kabel',
+      S.mats.filter(m => m.roomId === RID).length === 0 && S.cables.filter(c => c.roomId === RID).length === 1,
+      { mats: S.mats.filter(m => m.roomId === RID).length, cables: S.cables.filter(c => c.roomId === RID).length });
+
+    // ── 8) Frihånds-matte som det tegnede produktet ───────────────────────────────────────
+    S.cables = []; S.mats = []; S.matPaths = [];
+    S.matPaths.push({ id: 5301, roomId: RID, productId: MAT.id, start: { x: 60, y: 350 }, offX: 0, offY: 0,
+      moves: [{ axis: 'h', dir: 1, len: 200, conn: 'first', side: 1 }], gapCm: 0, centered: false });
+    _listSetRoomProduct(RID, 'cable', CAB.id, 1);
+    check('Frihånds-matte teller som tegnet', 'drawn + 1 kalkyle',
+      _listRoomDrawnState(RID) === 'drawn' && _listKalkyleCount(RID) === 1, { state: _listRoomDrawnState(RID), n: _listKalkyleCount(RID) });
+    _listClearKalkyle(RID);
+    check('Frihånds-matta er urørt etter slettingen', '1 matPath, 0 kabler',
+      (S.matPaths || []).filter(mp => mp.roomId === RID).length === 1 && S.cables.filter(c => c.roomId === RID).length === 0,
+      { mp: (S.matPaths || []).filter(mp => mp.roomId === RID).length, cab: S.cables.filter(c => c.roomId === RID).length });
+
+    // ── 9) Rom UTEN tegnet utlegg: lista virker som før ───────────────────────────────────
+    S.matPaths = []; S.cables = []; S.mats = [];
+    _listSetRoomProduct(RID, 'cable', CAB.id, 2);
+    check('Kalkyle alene: state=label, ingen kollisjon, ingen slett-knapp i raden', 'label / false / ingen knapp',
+      _listRoomDrawnState(RID) === 'label' && _listHasKalkyleCollision(RID) === false
+      && _listDrawnRowHtml(S.rooms.find(r => r.id === RID), false).indexOf('_listClearKalkyleConfirm') === -1,
+      { state: _listRoomDrawnState(RID), kollisjon: _listHasKalkyleCollision(RID) });
+    check('Kalkyle alene: antallet fra lista står uendret', '2 kabler (count=2, reserve av)',
+      _listKalkyleCount(RID) === 2
+      && (S.cables || []).filter(c => c.roomId === RID && c.labelOnly && !c.reserve).length === 2,
+      _listKalkyleCount(RID));
+
+    // ── 10) Vaksinen: uten labelOnly-filteret ville det tegnede forsvunnet ────────────────
+    S.cables = []; S.mats = []; S.matPaths = [];
+    S.rooms.find(r => r.id === RID).reserveCable = false;
+    _listSetRoomProduct(RID, 'cable', CAB.id, 1);
+    S.cables.push({ id: 5401, roomId: RID, productId: CAB.id, direction: 'v', spacing_cm: 20, startCorner: 'bl',
+      totalLength_cm: 3300, runs: [{ pos_cm: 50, segments: [{ start_cm: 20, end_cm: 380 }] }], connections: [] });
+    _invalidateCableCache && _invalidateCableCache();
+    const foerAlt = S.cables.filter(c => c.roomId === RID).length;
+    _listClearKalkyle(RID);
+    const etterAlt = S.cables.filter(c => c.roomId === RID);
+    check('Tegnet kabel av SAMME produkt som kalkylen overlever', 'kun den tegnede igjen',
+      foerAlt === 2 && etterAlt.length === 1 && !etterAlt[0].labelOnly && (etterAlt[0].runs || []).length === 1,
+      { foer: foerAlt, etter: etterAlt.map(c => ({ id: c.id, labelOnly: !!c.labelOnly, runs: (c.runs || []).length })) });
+  } catch (err) {
+    results.push({ name: 'Uventet feil under testen', ok: false, expected: 'ingen', got: String((err && err.message) || err) });
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = saved.rooms; S.strips = saved.strips; S.foilFree = saved.foilFree; S.cables = saved.cables;
+    S.mats = saved.mats; S.matPaths = saved.matPaths; S.plates = saved.plates; S.aluboard = saved.aluboard;
+    S.zones = saved.zones; S.hindrings = saved.hindrings; S.floors = saved.floors;
+    S.ui.activeFloorId = saved.activeFloorId; S.ui.activePartId = saved.activePartId;
+    S.ui.selectedRoomId = saved.selectedRoomId; S.ui.selectedCableId = saved.selectedCableId; S.ui.selectedMatId = saved.selectedMatId;
+    try { _rebuildActiveFloorRoomIds(); } catch (e) {}
+    window._performAutoSave = saved.autoSave; window._showToast = saved.toast;
+    window._showKalkyleCollisionToast = saved.collisionToast;
+    _kalkyleWarned.clear();
+    if (saved.undoLen != null && _undoStack) _undoStack.length = Math.min(_undoStack.length, saved.undoLen);
+    try { _invalidateCableCache(); _invalidateMatCache(); } catch (e) {}
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_listKalkyleClearRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
   return { ok: allOk, results };
 }
 
@@ -55062,6 +55256,9 @@ function renderSidebar() {
 
   document.getElementById('sb-tree').innerHTML=h;
   document.getElementById('sb-rooms').textContent=S.rooms.length;
+  // 109: ett sted sjekkes «rommet har både tegnet utlegg og kalkyle-produkt» — hver utleggsvei
+  // ender her. Billig vakt inni: uten `labelOnly` noe sted koster den to array-skann.
+  if (typeof _kalkyleCollisionScan === 'function') _kalkyleCollisionScan();
   _updateSidebarHeaderActions();
   _updateSearchVisibility();
   _renderDetailPanel(S.ui.selectedRoomId);
@@ -55803,11 +56000,17 @@ function _renderDetailPanel(roomId) {
       // (romeffekt, Romoversikt, Bestilles, materialliste) har hatt den riktig siden 025; det var
       // bare denne lista som ikke sa det. Wattverdien utelates for reserven, og raden merkes.
       const res = !!c.reserve;
-      return `<div class="strip-item${csel}"${res ? ' title="Reservekabel — ligger klar, men er ikke tilkoblet. Teller i materiallista, ikke i effekten."' : ''}
+      // 109: en «kun label»-kabel sto her som en helt vanlig kabel — ingenting fortalte at den
+      // kommer fra listevisningen og ikke fra en tegning. Den merkes nå, og når rommet OGSÅ har
+      // et tegnet utlegg får hovedkabelen en slett-knapp (samme `_listClearKalkyle` som lista).
+      const kalk = !!c.labelOnly;
+      const kalkDel = (kalk && !res && _listHasKalkyleCollision(roomId))
+        ? ` <button onclick="event.stopPropagation();_listClearKalkyleConfirm(${roomId})" title="Fjern kalkyle-produktet — det tegnede utlegget røres ikke" style="cursor:pointer;background:transparent;border:none;color:#e5484d;font-size:12px;padding:0 2px">\u{1F5D1}</button>` : '';
+      return `<div class="strip-item${csel}"${res ? ' title="Reservekabel — ligger klar, men er ikke tilkoblet. Teller i materiallista, ikke i effekten."' : (kalk ? ' title="Kalkyle — produkt valgt i listevisningen, ikke et tegnet utlegg. Teller i effekt, materialliste og PDF."' : '')}
         onclick="selectCable(${c.id});event.stopPropagation()">
         <span class="strip-ico">〰</span>
-        <span class="strip-nm">${cnm}${res ? ' <span style="color:var(--dim,#9aa0aa);font-weight:600">· reserve</span>' : ''}</span>
-        <span class="strip-len">${clen} m${res ? ' · <span style="color:var(--dim,#9aa0aa)">0 W</span>' : (cwatt ? ' · ' + cwatt + 'W' : '')}</span>
+        <span class="strip-nm">${_kalkyleBadge(kalk)}${cnm}${res ? ' <span style="color:var(--dim,#9aa0aa);font-weight:600">· reserve</span>' : ''}</span>
+        <span class="strip-len">${clen} m${res ? ' · <span style="color:var(--dim,#9aa0aa)">0 W</span>' : (cwatt ? ' · ' + cwatt + 'W' : '')}${kalkDel}</span>
       </div>`;
     }).join('');
 
@@ -55817,11 +56020,19 @@ function _renderDetailPanel(roomId) {
       const mp = HEATING_PRODUCTS.find(p => p.id === m.productId);
       const mnm = mp ? esc(mp.name) : 'Matte';
       const watt = _matRatedW(mp, m); // rated power of the physical mat (not per-run geometry)
-      return `<div class="strip-item${msel}"
+      // 109: en «kun label»-matte har ingen width_cm/length_cm — raden sto som «NaN×NaN cm».
+      // Den viser nå sitt lagrede areal, og merkes som kalkyle på samme måte som kabelen over.
+      const kalk = !!m.labelOnly;
+      const mal = kalk
+        ? ((m._loAreaM2 || 0).toFixed(2).replace('.', ',') + ' m\u00b2')
+        : (Math.round(m.width_cm) + '\u00d7' + Math.round(m.length_cm) + ' cm');
+      const kalkDel = (kalk && _listHasKalkyleCollision(roomId))
+        ? ` <button onclick="event.stopPropagation();_listClearKalkyleConfirm(${roomId})" title="Fjern kalkyle-produktet — det tegnede utlegget røres ikke" style="cursor:pointer;background:transparent;border:none;color:#e5484d;font-size:12px;padding:0 2px">\u{1F5D1}</button>` : '';
+      return `<div class="strip-item${msel}"${kalk ? ' title="Kalkyle — produkt valgt i listevisningen, ikke et tegnet utlegg. Teller i effekt, materialliste og PDF."' : ''}
         onclick="selectMat(${m.id});event.stopPropagation()">
         <span class="strip-ico">\u{1F7EB}</span>
-        <span class="strip-nm">${mnm}</span>
-        <span class="strip-len">${Math.round(m.width_cm)}\u00d7${Math.round(m.length_cm)} cm \u00b7 ${watt}W</span>
+        <span class="strip-nm">${_kalkyleBadge(kalk)}${mnm}</span>
+        <span class="strip-len">${mal} \u00b7 ${watt}W${kalkDel}</span>
       </div>`;
     }).join('');
 
@@ -64606,6 +64817,158 @@ function _listRoomCount(roomId){
 // 061: dette er LIKE-modus. Den er motparten til `_listSetRoomProductMix` og eier derfor
 // nullstillingen av `room.listMix` — ett sted, så ingen vei kan etterlate et rom som sier
 // «blandet» i modellen mens kablene er like.
+// ═══ 109 · KALKYLE-PRODUKTET I ET TEGNET ROM ══════════════════════════════════════════════
+// Kenneth 20.10.2026: «Vi må ha en slette-knapp for produkter som er lagt inn i listevisning
+// etter at rommet er tegnet opp … Jeg ønsker å gå inn på liste og slette det første produktet
+// jeg la inn.»
+//
+// STEG 0 (MÅLT, ikke antatt). Rom 500×400, kabel valgt i lista, deretter en EKTE matte tegnet
+// på lerretet:
+//   · _listRoomDrawnState: 'label' → 'drawn' (raden låses, produktcella viser begge)
+//   · Installert effekt: 370 W → **1270 W** (900 W matte + 370 W kalkyle-kabel) — BEGGE telles
+//   · Materiallista fikk tre linjer: kalkyle-kabelen (18,2 m · 364 W), DENS reservekabel
+//     (18,2 m · 0 W) og matta. PDF-ens spesifikasjon leser samme kilde (_roomProductRows), så
+//     den teller likt.
+//   · _projectKalkyleStatus slo om til «0 kalkyle / 1 tegnet» — forsiden sier altså IKKE lenger
+//     at noe er en kalkyle, mens kalkyle-produktet fortsatt bestilles. Det er den stille delen.
+// STEG 0.2: den ENESTE veien til å fjerne kalkylen i dag er å velge «kun label»-kabelen på
+//   lerretet og trykke Slett i ctxbar-en (`deleteCable`) — den finnes ikke i lista i det hele
+//   tatt, og den lar `room.listModType/listCount` bli stående. «Tøm rom» tar ALT, også det
+//   tegnede (målt: _roomProductCount = 3).
+// STEG 0.3: kalkylen bæres av `labelOnly`-kabler, `labelOnly`-matter, de AUTO-genererte
+//   reservene av disse (en reserve av en labelOnly-kabel er selv `labelOnly` — `_syncReserveCables`
+//   sprer hovedkabelen), og `room.listModType` / `listCount` / `listMix`.
+//   `room.listFamily` er BARE forvalget i klasse-nedtrekket og røres bevisst ikke.
+
+/** 109 · «K»-merket foran et kalkyle-produkt i sidepanelets varmeliste. */
+function _kalkyleBadge(on){
+  return on ? '<span title="Kalkyle \u2014 valgt i listevisningen, ikke tegnet" style="display:inline-block;font-size:9px;font-weight:700;color:#eab308;border:1px solid #eab308;border-radius:3px;padding:0 3px;margin-right:4px;line-height:1.4">K</span>' : '';
+}
+
+/** 109 · Rommets kalkyle-produkter, gruppert som produkt → antall. Hovedkabler/matter uten
+ *  reservene (reservene er en følge, ikke et valg). */
+function _listKalkyleRows(roomId){
+  const map = new Map();
+  const add = (productId, kind) => {
+    const p = HEATING_PRODUCTS.find(x => x.id === productId);
+    const key = productId + '|' + kind;
+    const e = map.get(key) || { product: p || null, kind, count: 0 };
+    e.count++; map.set(key, e);
+  };
+  for (const c of (S.cables || [])) if (c.roomId === roomId && c.labelOnly && !c.reserve) add(c.productId, 'Kabel');
+  for (const m of (S.mats || []))   if (m.roomId === roomId && m.labelOnly)              add(m.productId, 'Matte');
+  return [...map.values()];
+}
+/** Antall kalkyle-objekter i rommet, reservene medregnet (det er dette som faktisk slettes). */
+function _listKalkyleCount(roomId){
+  return (S.cables || []).filter(c => c.roomId === roomId && c.labelOnly).length
+       + (S.mats   || []).filter(m => m.roomId === roomId && m.labelOnly).length;
+}
+/** «2 × InSnow 30T 3000W 100m» — brukt av lista, sidepanelet og varselet. */
+function _listKalkyleText(roomId){
+  const rows = _listKalkyleRows(roomId);
+  if (!rows.length) return '';
+  return rows.map(r => (r.count > 1 ? r.count + ' × ' : '') + (r.product ? r.product.name : r.kind)).join(' + ');
+}
+/** 109 · Rommet har BÅDE et tegnet utlegg og et kalkyle-produkt. */
+function _listHasKalkyleCollision(roomId){
+  return _listKalkyleCount(roomId) > 0 && _listRoomDrawnState(roomId) === 'drawn';
+}
+
+/**
+ * 109 · Fjern KUN kalkylen fra et rom. Den ene veien — lista, sidepanelet og varselet kaller
+ * alle denne; ingen av dem har sin egen kopi av filtreringen.
+ * Rører ALDRI et tegnet utlegg: filteret er `labelOnly`, og en reserve av en TEGNET kabel lages
+ * av `_offsetCableClone` og er derfor aldri `labelOnly`.
+ * Returnerer antall fjernede objekter (0 = ingenting å gjøre, ingen undo-steg lagt).
+ */
+/** 109 · Brukerens bekreftelse før kalkylen fjernes. Lista og sidepanelet kaller DENNE;
+ *  `_listClearKalkyle` er selve operasjonen (og den eneste som rører data). */
+function _listClearKalkyleConfirm(roomId){
+  const n = _listKalkyleCount(roomId); if (!n) return;
+  const txt = _listKalkyleText(roomId);
+  if (!confirm('Fjerne kalkyle-produktet fra rommet?\n\n' + txt + '\n\nDet tegnede utlegget beholdes.')) return;
+  _listClearKalkyle(roomId);
+}
+
+function _listClearKalkyle(roomId){
+  const room = (S.rooms || []).find(r => r.id === roomId);
+  const n = _listKalkyleCount(roomId);
+  if (!room || !n) return 0;
+  const txt = _listKalkyleText(roomId);
+  pushUndo();
+  S.cables = (S.cables || []).filter(c => !(c.roomId === roomId && c.labelOnly));
+  S.mats   = (S.mats   || []).filter(m => !(m.roomId === roomId && m.labelOnly));
+  // Radens eget valg nullstilles sammen med objektene — ellers ville lista vist et produktvalg
+  // som ikke lenger finnes noe sted.
+  room.listModType = null; room.listCount = null; room.listMix = null;
+  if (S.ui && S.ui.selectedCableId != null && !(S.cables || []).some(c => c.id === S.ui.selectedCableId)) S.ui.selectedCableId = null;
+  if (S.ui && S.ui.selectedMatId   != null && !(S.mats   || []).some(m => m.id === S.ui.selectedMatId))   S.ui.selectedMatId = null;
+  _kalkyleWarned.delete(roomId);
+  // _invalidateCableCache kjører _syncReserveCables, som rydder reserver uten hovedkabel.
+  _invalidateCableCache && _invalidateCableCache();
+  _invalidateMatCache && _invalidateMatCache();
+  if (typeof renderSidebar === 'function') renderSidebar();
+  if (typeof updateCtxBar === 'function') updateCtxBar();
+  // Lista bygges om bare hvis den faktisk står åpen — `renderListModule` (ikke `_showListModule`,
+  // som også VISER overlayet) så et kall fra lerretet aldri kan dra opp listevisningen.
+  { const lm = document.getElementById('list-module');
+    if (lm && lm.style.display !== 'none' && typeof renderListModule === 'function') renderListModule(); }
+  if (typeof render === 'function') render();
+  if (typeof markDirty === 'function') markDirty();
+  if (typeof _showToast === 'function') _showToast('Kalkyle fjernet: ' + txt, 'success');
+  return n;
+}
+
+// ── Varsel når et ekte utlegg legges oppå en kalkyle ────────────────────────────────────────
+// ⚠ Hvorfor ikke et kall per utleggsmotor: det finnes 20+ steder som pusher et tegnet produkt
+// (grep S.mats/S.strips/S.plates/S.matPaths/S.aluboard .push). En liste med kallsteder er
+// nøyaktig den «to lister som må holdes i synk»-fella 108 og ROOM_PRODUCT_KEYS ryddet bort. Det
+// som skal varsles er en TILSTAND — «rommet har både tegnet og kalkyle» — og den sjekkes derfor
+// ett sted, i `renderSidebar()`, som hver eneste utleggsvei allerede kaller til slutt.
+// Billig vakt først: har prosjektet ingen `labelOnly` i det hele tatt (vanligste tilfellet),
+// koster sjekken to array-skann og stopper — samme mønster som `_syncAllReserveCables`.
+let _kalkyleWarned = new Set();
+function _kalkyleCollisionScan(){
+  if (!S.rooms || !S.rooms.length) return;
+  const harKalkyle = (S.cables || []).some(c => c.labelOnly) || (S.mats || []).some(m => m.labelOnly);
+  if (!harKalkyle) { if (_kalkyleWarned.size) _kalkyleWarned.clear(); return; }
+  for (const room of S.rooms) {
+    if (room.listDraft || room._zoneId != null) continue;
+    if (!_listHasKalkyleCollision(room.id)) { _kalkyleWarned.delete(room.id); continue; }
+    if (_kalkyleWarned.has(room.id)) continue;
+    _kalkyleWarned.add(room.id);
+    _showKalkyleCollisionToast(room.id);
+  }
+}
+// Egen toast fordi `_showToast` er ren tekst (textContent) — og den skal den forbli: romnavn og
+// produktnavn er brukerdata og skal aldri bli HTML.
+function _showKalkyleCollisionToast(roomId){
+  const room = (S.rooms || []).find(r => r.id === roomId); if (!room) return;
+  const txt = _listKalkyleText(roomId); if (!txt) return;
+  const old = document.getElementById('kalkyle-collision-toast'); if (old) old.remove();
+  const el = document.createElement('div');
+  el.id = 'kalkyle-collision-toast';
+  el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#f59e0b;color:#0d0e10;'
+    + 'padding:10px 14px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;max-width:90vw;'
+    + 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;box-shadow:0 4px 14px rgba(0,0,0,.35)';
+  const msg = document.createElement('span');
+  msg.textContent = '⚠ ' + (room.name || 'Rommet') + ' har også et kalkyle-produkt (' + txt + ').';
+  const bFjern = document.createElement('button');
+  bFjern.textContent = 'Fjern kalkylen';
+  bFjern.style.cssText = 'cursor:pointer;background:#0d0e10;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:700';
+  bFjern.onclick = () => { el.remove(); _listClearKalkyle(roomId); };
+  const bBehold = document.createElement('button');
+  bBehold.textContent = 'Behold begge';
+  bBehold.style.cssText = 'cursor:pointer;background:transparent;color:#0d0e10;border:1px solid rgba(13,14,16,.45);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600';
+  bBehold.onclick = () => el.remove();
+  el.append(msg, bFjern, bBehold);
+  document.body.appendChild(el);
+  // Varselet blokkerer ikke og fjerner ingenting av seg selv — det forsvinner etter en stund,
+  // og merket i lista/sidepanelet står igjen som den varige påminnelsen.
+  setTimeout(() => { if (el.isConnected) { el.style.opacity = '0'; el.style.transition = 'opacity .4s'; setTimeout(() => el.remove(), 400); } }, 12000);
+}
+
 function _listSetRoomProduct(roomId, modType, productId, count){
   const room=S.rooms.find(r=>r.id===roomId); if(!room) return;
   count=Math.max(1, Math.min(16, (parseInt(count,10)||1)));
@@ -66078,11 +66441,26 @@ function _listDrawnRowHtml(room, showEnv){
   let typeCell, prodCell, statusCell;
   if(state==='drawn'){
     // LÅST: produktkolonnen viser tallene, ingen piler. Lista erstatter aldri et tegnet utlegg.
+    // 109: men rommet kan ha BÅDE et tegnet utlegg og et kalkyle-produkt fra lista. Da deles
+    // cella i to linjer, og bare kalkyle-linja får en slett-knapp — det tegnede røres aldri her.
     const bd=_roomProductBreakdown(room);
-    const txt=bd.length ? bd.map(v=>(v.count>1?v.count+'× ':'')+(v.product?v.product.name:'—')).join(' + ') : '—';
-    typeCell=`<span style="color:var(--dim,#9aa0aa)">${esc(bd[0]&&bd[0].kind?bd[0].kind:(modType==='mat'?'Matte':'Kabel'))}</span>`;
-    prodCell=`<span title="Tegnet utlegg — endres på lerretet">${esc(txt)}</span>`;
-    statusCell=`<span style="color:#22c55e;font-weight:600" title="Rommet har et ekte utlegg">● Tegnet</span>`
+    const bdDrawn=bd.filter(v=>!v.kalkyle), bdKalk=bd.filter(v=>v.kalkyle);
+    const line=v=>(v.count>1?v.count+'× ':'')+(v.product?v.product.name:'—');
+    const txtDrawn=bdDrawn.length ? bdDrawn.map(line).join(' + ') : '—';
+    typeCell=`<span style="color:var(--dim,#9aa0aa)">${esc(bdDrawn[0]&&bdDrawn[0].kind?bdDrawn[0].kind:(bd[0]&&bd[0].kind?bd[0].kind:(modType==='mat'?'Matte':'Kabel')))}</span>`;
+    if(bdKalk.length){
+      prodCell=`<div style="display:flex;flex-direction:column;gap:3px;line-height:1.35">`
+        + `<span title="Tegnet utlegg — endres på lerretet"><span style="color:var(--dim,#9aa0aa);font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;margin-right:5px">Tegnet</span>${esc(txtDrawn)}</span>`
+        + `<span title="Produkt valgt i lista — ikke tegnet. Teller i effekt, materialliste og PDF."><span style="color:#eab308;font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;margin-right:5px">Kalkyle</span>${esc(_listKalkyleText(rid))}`
+        + ` <button onclick="event.stopPropagation();_listClearKalkyleConfirm(${rid})" title="Fjern kalkyle-produktet — det tegnede utlegget røres ikke" style="cursor:pointer;background:transparent;border:1px solid var(--border,#2a2d36);border-radius:5px;color:#e5484d;font-size:11px;padding:1px 7px;margin-left:6px">\u{1F5D1} Slett</button></span>`
+        + `</div>`;
+    } else {
+      prodCell=`<span title="Tegnet utlegg — endres på lerretet">${esc(txtDrawn)}</span>`;
+    }
+    statusCell=(bdKalk.length
+        ? `<span style="color:#eab308;font-weight:600" title="Rommet har både et tegnet utlegg og et kalkyle-produkt — begge telles i effekt, materialliste og PDF">\u26A0 ${bdDrawn.length+bdKalk.length} produkter (kalkyle + tegnet)</span><br>`
+        : '')
+      + `<span style="color:#22c55e;font-weight:600" title="Rommet har et ekte utlegg">● Tegnet</span>`
       + ` <button onclick="event.stopPropagation();_listOpenOnCanvas(${rid})" title="Bytt til lerretet og velg rommet" style="cursor:pointer;background:transparent;border:1px solid var(--border,#2a2d36);border-radius:5px;color:var(--dim,#9aa0aa);font-size:11px;padding:2px 7px;margin-left:6px">Endre på lerretet</button>`;
   } else {
     typeCell=sel2('type',`<option value="cable"${modType==='cable'?' selected':''}>Kabel</option><option value="mat"${modType==='mat'?' selected':''}>Matte</option>`,78);
@@ -68909,6 +69287,9 @@ function _restoreProject(data) {
   // As svar på Bs rom. `_restoreProject` er det ENE punktet alle ti innlastingsveiene går
   // gjennom (fil, versjon, gjenoppretting, konvertering, sky, presentasjon), så det er her
   // nullstillingen hører hjemme — ikke spredt på elleve steder som setter _supabaseProjectId.
+  // 109: samme grunn — «dette rommet har allerede fått kalkyle-varselet» hører til prosjektet
+  // som var åpent, og skal ikke bære over til det neste.
+  if (typeof _kalkyleWarned !== 'undefined' && _kalkyleWarned) _kalkyleWarned.clear();
   _kundeLinkCache = null;
   // 044: forslagslenka har sin egen cache og sitt eget panel — samme nullstilling her, ellers
   // ville forrige prosjekts forslag kunne vises mot dette prosjektets rom.
