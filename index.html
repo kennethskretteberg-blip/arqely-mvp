@@ -41072,7 +41072,9 @@ function _setStairEdgeMargin(val) {
 function _setStairLandingMargin(val) {
   const stair = S.stairs.find(s => s.id === S.ui.selectedStairId);
   if (!stair) return;
-  const cm = Math.max(1, Math.min(20, parseFloat(val) || 5));
+  // 112: ikke lenger et fast 20 cm-tak — bare det geometriske (se _stairMaxLandingMarginCm).
+  const tak = _stairMaxLandingMarginCm(stair);
+  const cm = Math.round(Math.max(1, Math.min(tak, parseFloat(val) || 5)) * 10) / 10;
   if (cm === stair.landingMargin_cm) return;
   pushUndo();
   stair.landingMargin_cm = cm;
@@ -41614,7 +41616,7 @@ function _renderStairSettingsPanel(stairId) {
       ${surfs.some(s => s.type === 'landing') ? `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <span>Dybdemargin repos</span>
         <span style="display:flex;align-items:center;gap:3px">
-          <input type="number" min="1" max="20" step="0.5" value="${stair.landingMargin_cm ?? 5}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairLandingMargin(this.value)" onclick="event.stopPropagation()">
+          <input type="number" min="1" max="${_stairMaxLandingMarginCm(stair)}" step="0.5" value="${stair.landingMargin_cm ?? 5}" style="width:48px;text-align:center;background:var(--surface2);border:1px solid var(--brd);border-radius:4px;color:var(--text);padding:2px;font-size:11px;font-family:'IBM Plex Mono',monospace" onchange="_setStairLandingMargin(this.value)" onclick="event.stopPropagation()">
           <span style="font-size:10px;color:var(--dim)">cm</span>
         </span>
       </div>` : ''}
@@ -45141,9 +45143,24 @@ function _stairFloorMargin(stair) {
 // 75 %-regelen (STAIR_SINGLE_MAX_MARGIN_FRAC) gjelder bevisst IKKE her: den styrer hva MOTOREN får
 // velge, mens et tall brukeren taster er brukerens valg og brukes nøyaktig (105/Regel 22).
 function _stairMaxEdgeMarginCm(surfaces, fallbackW) {
-  const ws = (surfaces || []).map(f => f.w_cm || fallbackW || 120).filter(w => w > 0);
-  const minW = ws.length ? Math.min(...ws) : (fallbackW || 120);
-  return Math.max(1, Math.round((minW / 2 - 1) * 10) / 10);
+  return _stairHalfMinusOne((surfaces || []).map(f => f.w_cm || fallbackW || 120), fallbackW);
+}
+
+// Halve den minste flata, minus 1 cm — den delte kjernen i begge margintakene under.
+function _stairHalfMinusOne(values, fallback) {
+  const v = (values || []).filter(x => x > 0);
+  const min = v.length ? Math.min(...v) : (fallback || 120);
+  return Math.max(1, Math.round((min / 2 - 1) * 10) / 10);
+}
+
+// 112 (Kenneth 21.10.2026): «ta bort maks på avstand foran/bak repos også». Samme resonnement som
+// 111, men målt på DYBDEN: reposets dybdemargin spises foran OG bak av samme flate
+// (usableDepth = d_cm - 2 × margin i _stairSurfSettings). Passerer den halve dybden, blir
+// usableDepth null og flata faller STILLE ut av utlegget (`if (usableDepth < 0.5) continue` i
+// generateStairCable). Taket følger det GRUNNESTE reposet i trappa.
+function _stairMaxLandingMarginCm(stair) {
+  const ds = ((stair && stair.surfaces) || []).filter(f => f.type === 'landing').map(f => f.d_cm);
+  return _stairHalfMinusOne(ds, (stair && stair.landing_depth_cm) || 120);
 }
 
 // Flatene som hører til ett sonenummer. Tåler at sonen er delt i flere blokker (110).
@@ -45721,6 +45738,26 @@ function _stairRegressionTest() {
       check('13: 40 cm går inn i en sone', 40, _stairZoneSettings(bred, 2).edgeMargin_cm === 40, _stairZoneSettings(bred, 2).edgeMargin_cm);
       _setStairZoneEdgeMargin(2, 9999);
       check('14: sonen klemmes til SITT eget tak', 49, _stairZoneSettings(bred, 2).edgeMargin_cm === 49, _stairZoneSettings(bred, 2).edgeMargin_cm);
+    }
+    // 112 (Kenneth 21.10.2026): samme for «Dybdemargin repos» (landingMargin_cm) — det faste
+    // 20 cm-taket er borte, og det geometriske følger det GRUNNESTE reposet (halve dybden - 1).
+    {
+      const medRepos = mk(210, 6, 5);
+      medRepos.segments = [
+        { type: 'steps', width_cm: 210, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 6 },
+        { type: 'landing', width_cm: 210, depth_cm: 140 },
+        { type: 'landing', width_cm: 210, depth_cm: 90 },
+      ];
+      medRepos.landingMargin_cm = 5;
+      S.stairs = [medRepos]; S.ui.selectedStairId = medRepos.id;
+      _regenerateStairCable(medRepos);
+      const reposLøp = () => medRepos.runs.filter(r => (medRepos.surfaces[r.surfaceIdx] || {}).type === 'landing').length;
+      check('15: taket følger grunneste repos (90/2-1), ikke 20', 44, _stairMaxLandingMarginCm(medRepos) === 44, _stairMaxLandingMarginCm(medRepos));
+      _setStairLandingMargin(25);
+      check('16: 25 cm går inn (klagen i 112)', 25, medRepos.landingMargin_cm === 25, medRepos.landingMargin_cm);
+      _setStairLandingMargin(9999);
+      check('17: over taket klemmes til taket', 44, medRepos.landingMargin_cm === 44, medRepos.landingMargin_cm);
+      check('18: begge repos har fortsatt løp ved taket', true, reposLøp() > 0, reposLøp());
     }
   } catch (e) {
     results.push({ name: 'UNNTAK', ok: false, expected: '-', got: String(e && e.stack || e) });
