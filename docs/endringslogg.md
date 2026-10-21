@@ -4,6 +4,55 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 120 — Trapp: alle soner starter på samme side som sone 1, «Antall kabler» i sonen, auto 2 kabler når 1 ikke holder, låst/auto også på trappenivå (21.10.2026, `main`, ikke pushet)
+
+Kenneths svar på SPØRSMÅL fra serie 104/105/106 (skrevet inn i `docs/serie-104/SPØRSMÅL.md`).
+
+### STEG 0 (målt med syntetisk katalog, samme fixturer som `_stairZoneRegressionTest102`)
+
+- **104/1 Startside:** alle soner startet ALT fra venstre (104-trappa: V/V/V, også med «Kabelstart: Topp») —
+  sonens første flate har ingen innkommende forbindelse, så tegningen begynner fra venstre. Men
+  paritetskjeden (`prevExitRight`) løp videre over sonegrensen. Med oddetall strenger (CC 13 → N=3 per
+  trinn, to trinn-soner 3+5) ga det ett SIDEBRUDD inne i sone 2: flate 3 forlot til høyre, flate 4 ble
+  møtt fra venstre (`3:V>H 4:V>H 5:H>V …`). Kostnaden ved å tvinge samme side: **0 cm** — forbindelsen over
+  sonegrensen tilhører ingen kabel, og sonens strenger er like lange uansett side (4850 cm før og etter).
+- **105/5 Låst på trappenivå:** `edgeMarginMin_cm` (084) er gulvet for Forslag, `edgeMargin_cm` det løste
+  utlegget. «Låst» for Forslag må bety: behovet regnes ved den låste avstanden, settene rangeres på passform,
+  ingen margin-løsning. `_stairFitLockedMargin` (105) gjør akkurat det for et gitt sett.
+- **106/6 Auto i sonen:** `_stairSolveZones` → `_stairSolveExactCableSet(subStair, { maxCables: 1 })`. Når
+  ingen enkeltkabel holder, er svaret `{ ok:false, reason: 'Ingen kombinasjon … dekker behovet …' }`, og sonen
+  får feil. Grensen for én kabel i sonen er `maxSaneMargin` (gulv + 15 cm / halve flata), ikke 75 %.
+
+### Endring
+
+- **`generateStairCable`:** ved sonegrense nullstilles `prevExitRight` (neste sone starter fra venstre, som
+  kjeden selv). A/B-bryter `window._stair120Av` for vaksinetesten.
+- **`_setStairZoneCableCount(zoneNo, val)`** + tallfelt «Antall kabler» i sonepanelet over kabellista.
+- **`_stairSolveZones`:** auto prøver `maxCables: 2` når én kabel feiler; `zoneResults[].autoTo`,
+  `_stairZoneInfo().autoTo`, panelet: «Auto: 2 kabler (én rakk ikke)».
+- **Trappenivå:** `stair.edgeMarginLocked_cm` (null = auto = som før). `_stairLockedMargin`, `_stairFloorMargin`
+  returnerer låst verdi, `_setStairEdgeMarginLock(on)`, `_setStairEdgeMargin('')` = lås av, 🔒/🔓 ved feltet.
+  `_regenerateStairCable`: låst → `edgeMargin_cm` = låst og manuelt sett vurderes med `_stairFitLockedMargin`.
+  `_stairSolveLockedCableSet(stair)`: Forslag ved låst avstand — bare settet varierer, rangert på passform
+  (≤ 2 % / 2–5 % / > 5 %), A = best, B = annet sett (aldri samme sett to ganger — målt og rettet). Forslagskortet
+  får «🔒 Avstand sider låst X cm · Y for kort/til overs». `_stairZoneSubStair` nuller låsen (arves som gulv).
+- **Sidefunn, rettet:** med «Kabelstart: Topp» slapp sonefilteret i `generateStairCable` forbindelsen over
+  sonegrensen (3 → 2, høyere til lavere flate) inn i den NEDRE sonen (`fromSurf >= from && toSurf <= to`
+  antok fromSurf < toSurf). Sonen fikk et opptrinn som ikke er dens og forrige sones utgangsside som inngang
+  — J5 var rød på det. Begge ender må ligge i sonen (`min/max`). 104-trappa med Topp: nå bit-identisk med Bunn
+  (3000 / 2500 / 4500 cm, 10 036,8 totalt).
+- Spec: Regel 21 (samme startside, Antall kabler, auto 2), Regel 22 (gjelder trappenivå).
+- `_stairZoneRegressionTest102` seksjon J: 29 nye påstander (77 → 106). J1 er vaksinert (bryteren gir 1 brudd).
+
+### Målt etter
+
+- 3+5-trappa (CC 13): sone 2 `3:V>H 4:H>V 5:V>H 6:H>V 7:V>H`, 0 sidebrudd, 4850 cm. 104-trappa 10 036,8 cm.
+- Sone med behov > 139,9 m (20 trinn × 250 cm): auto gir 55,3 + 139,9 m, panelet sier «Auto: 2 kabler».
+- Trapp 240 × 8 trinn, låst 6 cm: Forslag A = 25 + 49,7 m (62 cm til overs), B = 70 m (4,1 m for kort, rødt);
+  manuelt 70 m: «Kabelen er 4,1 m for kort — 2 løp dekkes ikke», stiplet rødt. Lås av: 70 m @ 12,4 som før.
+
+---
+
 ## 119 — Presentasjon: produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer, vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes ved nytt utlegg (21.10.2026, `main`, ikke pushet)
 
 Kenneths svar på SPØRSMÅL fra serie 116/117/118 (svarene står under hvert spørsmål i
