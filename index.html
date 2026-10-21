@@ -2098,7 +2098,7 @@ body.kunde-maal #minimap-widget{display:none !important}
       <button class="file-btn" onclick="_showVersionHistory()" title="Versjonshistorikk" data-ic="history"></button>
       <button class="file-btn" onclick="openProject()" title="Åpne prosjekt" data-ic="folder-open"></button>
       <button class="file-btn" onclick="_showExportDialog()" title="Eksporter PDF" data-ic="file-text"></button>
-      <button class="file-btn" onclick="_exportMaterialListXLSX()" title="Materialliste (Excel)" data-ic="table"></button>
+      <button class="file-btn" onclick="exportMaterialListXLSXGuarded()" title="Materialliste (Excel)" data-ic="table"></button>
       <button class="file-btn btn-visma-paste" style="display:none" onclick="_showVismaPasteDialog()" title="Kopier til Visma" data-ic="clipboard"></button>
       <button class="file-btn btn-gbao10" style="display:none" onclick="_showGbao10ExportDialog()" title="Eksporter fil til Visma" data-ic="download"></button>
       <button class="file-btn" data-modules="indoor" onclick="_wfSendToMonter()" title="Send til montør" data-ic="send"></button>
@@ -8888,7 +8888,7 @@ function _drawRoomTexture(room, spec) {
 
 // ── Steg 3: delelenke (?present=<token>) + PDF ─────────────────────────────
 function _presentDownloadPDF() {
-  if (typeof exportPDF === 'function') exportPDF();
+  if (typeof exportPDFGuarded === 'function') exportPDFGuarded();
   else _showToast && _showToast('PDF-eksport er ikke tilgjengelig.');
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66642,8 +66642,8 @@ function _renderListModuleDrawn(el, part){
     <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} ${omr} · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W${totHeated>0?` · dekket ${totHeated.toFixed(1)} m² (${totCovPct} %)`:''}</div>
     <div style="flex:1"></div>
     ${nEmpty ? `<button style="${prim}" onclick="_listGrovprosjekterAlle()" title="Foreslå produkt og antall for alle ${omr} uten produkt">${IC('zap',14)} Grovprosjekter alle (${nEmpty})</button>` : ''}
-    <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
-    <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
+    <button style="${btn}" onclick="exportPDFGuarded()">Romoversikt (PDF)</button>
+    <button style="${btn}" onclick="exportMaterialListXLSXGuarded()">Materialliste (Excel)</button>
     ${_orgHasErpFormat('visma_paste') ? `<button style="${btn}" onclick="_showVismaPasteDialog()">Kopier til Visma</button>` : ''}
     ${_orgHasErpFormat('gbao10') ? `<button style="${btn}" onclick="_showGbao10ExportDialog()">Eksporter fil til Visma</button>` : ''}
   </div>
@@ -66685,8 +66685,8 @@ function renderListModule(){
     <div style="font-size:12px;color:var(--dim,#9aa0aa)">${rooms.length} rom · ${totNet.toFixed(1)} m² · ${Math.round(totW)} W</div>
     <div style="flex:1"></div>
     <button style="${btn}" onclick="_pdfImportStart()">Importer tegning (PDF)</button>
-    <button style="${btn}" onclick="exportPDF()">Romoversikt (PDF)</button>
-    <button style="${btn}" onclick="_exportMaterialListXLSX()">Materialliste (Excel)</button>
+    <button style="${btn}" onclick="exportPDFGuarded()">Romoversikt (PDF)</button>
+    <button style="${btn}" onclick="exportMaterialListXLSXGuarded()">Materialliste (Excel)</button>
     ${_orgHasErpFormat('visma_paste') ? `<button style="${btn}" onclick="_showVismaPasteDialog()">Kopier til Visma</button>` : ''}
     ${_orgHasErpFormat('gbao10') ? `<button style="${btn}" onclick="_showGbao10ExportDialog()">Eksporter fil til Visma</button>` : ''}
   </div>`;
@@ -70856,7 +70856,294 @@ function _runExportPDF() {
   S.project.freeText = opts.freeText;
   if (typeof _scheduleAutoSave === 'function') _scheduleAutoSave();
   document.getElementById('export-dialog').style.display = 'none';
-  exportPDF(opts);
+  exportPDFGuarded(opts);
+}
+
+// ══ 113 · ÉN VAKT RUNDT EKSPORTENE (Kenneth 21.10.2026) ═══════════════════════════════════
+// «Print PDF funker ikke» — ingen dialog, ingen nedlasting, ingen melding. MÅLT: exportPDF er
+// `async` og ble kalt uten `await`/`catch` fra ALLE fire kallstedene, så et unntak ble et
+// UHÅNDTERT promise. Bare konsollen sa fra, og den ser ingen bruker. En ReferenceError innført
+// 20.10 (105) kunne dermed ligge ute i to døgn mens knappen bare så død ut.
+//
+// Vakten er ÉN funksjon, og hvert kallsted går gjennom den — PDF og XLSX likt, så den neste
+// eksportfeilen heller ikke kan bli stille.
+async function _runExport(hva, fn) {
+  try {
+    await fn();
+    return true;
+  } catch (e) {
+    // Full stack i konsollen, med prefiks så den er lett å be om og lett å finne.
+    console.error('[PDF] ' + hva + '-eksport feilet:', e);
+    const kort = (e && e.message) ? String(e.message).slice(0, 120) : 'ukjent feil';
+    if (typeof _showToast === 'function') {
+      _showToast(hva + ' kunne ikke lages: ' + kort + '. Prøv igjen, eller send skjermbilde av konsollen.', 'error');
+    }
+    return false;
+  }
+}
+// De to inngangene resten av appen skal bruke. Kall ALDRI exportPDF/_exportMaterialListXLSX
+// direkte fra en knapp — da er vi tilbake til det stille unntaket.
+function exportPDFGuarded(opts) { return _runExport('PDF', () => exportPDF(opts)); }
+function exportMaterialListXLSXGuarded() { return _runExport('Materiallista', () => _exportMaterialListXLSX()); }
+
+// 113 — regresjonstest som FAKTISK lager PDF-en. Kjøres fra konsollen: _pdfExportSmokeTest().
+// Kjører hele exportPDF med doc.save stubbet (ingen nedlasting) og tilbehørsvinduet automatisk
+// besvart, på én fixture per prosjekttype fra STEG 0.2. Krav: ingen unntak, minst én side per
+// valgt seksjon, og sideantallet logges. Til slutt en VAKSINE: en innført feil skal gjøre testen
+// rød — ellers måler den ingenting.
+function _pdfExportSmokeTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const saved = {
+    rooms: S.rooms, strips: S.strips, foilFree: S.foilFree, cables: S.cables, mats: S.mats,
+    matPaths: S.matPaths, plates: S.plates, aluboard: S.aluboard, zones: S.zones, hindrings: S.hindrings,
+    stairs: S.stairs, floors: S.floors, project: S.project, counters: { ...S.counters },
+    activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId, selectedStairId: S.ui.selectedStairId,
+    prods: HEATING_PRODUCTS.slice(), cats: PRODUCT_CATEGORIES.slice(),
+    autoSave: window._performAutoSave, toast: window._showToast, modal: window.showAccessoriesModal,
+    branding: window._pdfBranding, jsPDF: window.jspdf && window.jspdf.jsPDF,
+    soneBlocks: window._stairSoneGeometryBlocks,
+    undoLen: (typeof _undoStack !== 'undefined' && _undoStack) ? _undoStack.length : null,
+  };
+  let sistSideantall = null, sisteToast = null;
+  try {
+    window._performAutoSave = () => Promise.resolve();
+    window._showToast = (m) => { sisteToast = m; };
+    window.showAccessoriesModal = () => Promise.resolve({ items: [] });
+    window._pdfBranding = () => Promise.resolve(null);   // ingen nettverk, ingen org-logo
+    const EkteJsPDF = saved.jsPDF;
+    // Stubb KUN save: dokumentet bygges helt ferdig, men ingen fil lastes ned.
+    window.jspdf.jsPDF = function (...a) {
+      const d = new EkteJsPDF(...a);
+      d.save = function () { sistSideantall = d.internal.getNumberOfPages(); return d; };
+      return d;
+    };
+
+    const CAT_CABLE = { id: 9700, module_type: 'cable', name: 'TESTKABEL' };
+    const CAT_MAT   = { id: 9800, module_type: 'mat',   name: 'TESTMATTE' };
+    const CAB = { id: 996001, category_id: 9700, active: true, product_family: 'InSnow 30T',
+      name: 'InSnow 30T 1000W 33m', voltage: 230, cable_length_m: 33, watt_per_m: 30,
+      total_effect_w: 1000, min_wall_margin_mm: 50 };
+    const CAB2 = { ...CAB, id: 996003, name: 'InSnow 30T 600W 20m', cable_length_m: 20, total_effect_w: 600 };
+    const CAB3 = { ...CAB, id: 996004, name: 'InSnow 30T 1500W 50m', cable_length_m: 50, total_effect_w: 1500 };
+    const MAT = { id: 996002, category_id: 9800, active: true, product_family: 'EcoMat 60T',
+      name: 'EcoMat 60T 0,5x10m', voltage: 230, watt_per_m2: 60, mat_area_m2: 5, mat_width_mm: 500,
+      mat_total_length_mm: 10000, mat_cc_mm: 120, mat_cut_interval_mm: 240,
+      min_wall_margin_mm: 50, min_gap_mm: 0, total_effect_w: 300 };
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(CAT_CABLE, CAT_MAT);
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(CAB, CAB2, CAB3, MAT);
+
+    const RID = 991301;
+    const rect = (x, y, w, h) => [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+    const mkRoom = (id, navn, pts, extra) => Object.assign(
+      { id, floorId: null, partId: null, name: navn, points: pts.map(p => ({ ...p })),
+        walls: compWalls(pts), area: Math.abs(compArea(pts)), dims: [] }, extra || {});
+    const tomState = () => {
+      S.rooms = []; S.cables = []; S.mats = []; S.matPaths = []; S.plates = []; S.aluboard = [];
+      S.foilFree = []; S.strips = []; S.zones = []; S.hindrings = []; S.stairs = []; S.floors = [];
+      S.ui.activeFloorId = null; S.ui.activePartId = null; S.ui.selectedStairId = null;
+      S.project = { name: 'PDF-RØYKTEST', parts: [], revision: 0, lastExportedAt: null, createdAt: Date.now() };
+      if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+      _invalidateCableCache && _invalidateCableCache();
+      _invalidateMatCache && _invalidateMatCache();
+      _invalidateStairCache && _invalidateStairCache();
+    };
+    const mkStair = (navn) => {
+      S.counters.nextStairId = 991400;
+      const st = _createStairObj({ name: navn, width_cm: 210, step_depth_cm: 30, step_height_cm: 17,
+        step_count: 10, edgeMargin_cm: 5, stepCC_cm: 10, landingCC_cm: 10, cableSpacing_cm: 10 });
+      st.x_cm = 0; st.y_cm = 0;
+      st.segments = [
+        { type: 'steps', width_cm: 210, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 4, zone: 1 },
+        { type: 'landing', width_cm: 210, depth_cm: 120, zone: 2 },
+        { type: 'steps', width_cm: 210, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 6, zone: 3 },
+      ];
+      st.cables = []; st.selectedProposal = null; st.lastProposal = null; st.desiredCableCount = null;
+      S.stairs = [st]; S.ui.selectedStairId = st.id;
+      _regenerateStairCable(st);
+      return st;
+    };
+
+    // Én full eksport. Returnerer { ok, sider, feil } — kaster ALDRI, så alle fixtures kjøres.
+    const kjør = async () => {
+      sistSideantall = null;
+      const opts = { cover: true, summary: true, rooms: S.rooms.map(r => r.id),
+        stairs: (S.stairs || []).map(s => s.id), roomTable: true, stairTable: true,
+        materialList: true, pricing: false, discount: 0, showDGDB: false, docs: false,
+        signature: false, freeText: '' };
+      // Minst én side per valgt seksjon: forside + sammendrag + én side per rom og per trapp.
+      const minSider = 1 + 1 + opts.rooms.length + opts.stairs.length;
+      try {
+        await exportPDF(opts);
+        return { ok: true, sider: sistSideantall, minSider };
+      } catch (e) {
+        return { ok: false, feil: (e && e.message) || String(e), stack: e && e.stack, minSider };
+      }
+    };
+
+    // Fixtures — én per type fra STEG 0.2. Hver bygger state og returnerer en etikett.
+    const fixtures = [
+      ['innendørs rom med kabel', () => {
+        tomState();
+        S.rooms = [mkRoom(RID, 'Bad', rect(0, 0, 500, 400))];
+        S.cables = [{ id: 991501, roomId: RID, productId: CAB.id, direction: 'v', spacing_cm: 20,
+          startCorner: 'bl', totalLength_cm: 3300,
+          runs: [{ pos_cm: 50, segments: [{ start_cm: 20, end_cm: 380 }] }], connections: [] }];
+        _invalidateCableCache && _invalidateCableCache();
+      }],
+      ['trapp med soner og FLERE kabler i én sone (106)', () => {
+        tomState();
+        const st = mkStair('Trapp soner');
+        _setStairZoneProductIds(st, 3, [CAB2.id, CAB3.id]);
+      }],
+      ['trapp med LÅST avstand og udekkede løp (105)', () => {
+        tomState();
+        const st = mkStair('Trapp låst');
+        _setStairZoneProductIds(st, 2, [CAB2.id]);   // for kort for reposet
+        _setStairZoneEdgeMargin(2, 5);               // låst => kabelen blir for kort, og det skal SYNES
+      }],
+      ['rom med kalkyle + tegnet produkt (109)', () => {
+        tomState();
+        S.rooms = [mkRoom(RID, 'Gang', rect(0, 0, 400, 300))];
+        _listSetRoomProduct(RID, 'cable', CAB.id, 1);          // kalkyle (labelOnly)
+        S.mats.push({ id: 991601, roomId: RID, productId: MAT.id, x_cm: 20, y_cm: 20,
+          w_cm: 50, l_cm: 300, rot: 0 });                      // tegnet produkt oppå
+        _invalidateMatCache && _invalidateMatCache();
+      }],
+      ['rom med frihånds-matte', () => {
+        tomState();
+        S.rooms = [mkRoom(RID, 'Stue', rect(0, 0, 500, 400))];
+        S.counters.nextMatPathId = 991700;
+        S.matPaths = [{ id: 991701, roomId: RID, productId: MAT.id, start: { x: 60, y: 350 },
+          offX: 0, offY: 0, moves: [{ axis: 'h', dir: 1, len: 200, conn: 'first', side: 1 }],
+          gapCm: 0, centered: false }];
+        _invalidateMatCache && _invalidateMatCache();
+      }],
+      ['listedel (Hurtig prosjektering)', () => {
+        tomState();
+        S.project.parts = [{ id: 991800, name: 'Hurtig prosjektering', type: 'list', moduleType: 'list' }];
+        S.ui.activePartId = 991800;
+        S.rooms = [mkRoom(RID, 'Kjeller', rect(0, 0, 600, 500), { partId: 991800, listDraft: true })];
+        _listSetRoomProduct(RID, 'cable', CAB.id, 2);
+      }],
+    ];
+
+    // Testen er synkron utad (som de andre batteriene), men exportPDF er async — kjør sekvensielt
+    // og returner promiset. Kalleren kan `await` det; konsollen viser resultatet selv.
+    return (async () => {
+      const sideLogg = {};
+      for (const [navn, bygg] of fixtures) {
+        bygg();
+        const r = await kjør();
+        sideLogg[navn] = r.ok ? r.sider : ('FEIL: ' + r.feil);
+        if (!r.ok) console.error('[PDF] røyktest «' + navn + '» kastet:', r.stack || r.feil);
+        check('«' + navn + '»: ingen unntak', 'ok', r.ok, r.ok ? 'ok' : r.feil);
+        check('«' + navn + '»: minst én side per valgt seksjon', '>= ' + r.minSider,
+          r.ok && r.sider >= r.minSider, r.sider);
+      }
+      console.log('[PDF] sideantall per fixture:', sideLogg);
+
+      // ── Avviksteksten havner på RIKTIG kabel (113) ──────────────────────────────────────
+      // Rettingen byttet `[ci]` (udefinert) med `[sb.cableIdx]`. At unntaket er borte beviser ikke
+      // at indeksen treffer riktig — her merkes hver kabel med sin EGEN tekst, og rekkefølgen i
+      // dokumentet må vise at hver sone-blokk fikk nettopp sin. Fixturen har en sone med TO kabler
+      // (106), nettopp tilfellet der et feilaktig indeksoppslag ville vært synlig.
+      {
+        fixtures[1][1]();
+        const st = S.stairs[0];
+        st.cables.forEach((c, i) => { c.error = 'MARKØR-' + i; });
+        const EkteJsPDF2 = saved.jsPDF, tekster = [];
+        window.jspdf.jsPDF = function (...a) {
+          const d = new EkteJsPDF2(...a);
+          const ekte = d.text.bind(d);
+          d.text = function (t, ...rest) { if (typeof t === 'string') tekster.push(t); return ekte(t, ...rest); };
+          d.save = function () { sistSideantall = d.internal.getNumberOfPages(); return d; };
+          return d;
+        };
+        await exportPDF({ cover: false, summary: false, rooms: [], stairs: [st.id], roomTable: false,
+          stairTable: false, materialList: false, pricing: false, discount: 0, showDGDB: false,
+          docs: false, signature: false, freeText: '' });
+        const rekke = tekster.filter(t => /^Sone |^! MARKØR-/.test(t));
+        // Hver sone-overskrift skal følges umiddelbart av SIN EGEN markør, i kabel-rekkefølge.
+        const markører = rekke.filter(t => t.startsWith('! MARKØR-')).join(',');
+        const fasit = st.cables.map((_, i) => '! MARKØR-' + i).join(',');
+        check('avviksteksten følger riktig kabel (ikke bare «kaster ikke»)', fasit,
+          markører === fasit, markører);
+        check('…og hver sone-overskrift følges av sin egen', true,
+          rekke.length === st.cables.length * 2 && rekke.every((t, i) => i % 2 === 0 ? t.startsWith('Sone') : t.startsWith('! MARKØR-')),
+          rekke);
+      }
+
+      // ── Revisjonen telles BARE ved vellykket eksport (113) ──────────────────────────────
+      {
+        fixtures[0][1]();
+        S.project.revision = 7;
+        await kjør();
+        check('revisjon telles opp ved vellykket eksport', 8, S.project.revision === 8, S.project.revision);
+        // Tving fram en feil midt i byggingen: revisjonen skal stå stille.
+        const ekteBlocks = window._stairSoneGeometryBlocks;
+        fixtures[1][1]();
+        S.project.revision = 7;
+        window._stairSoneGeometryBlocks = () => { throw new ReferenceError('ci is not defined'); };
+        const feilet = await kjør();
+        window._stairSoneGeometryBlocks = ekteBlocks;
+        check('en eksport som feiler teller IKKE opp revisjonen', 7,
+          !feilet.ok && S.project.revision === 7, { ok: feilet.ok, rev: S.project.revision });
+        // …og vakten gjør feilen synlig i stedet for å svelge den.
+        sisteToast = null;
+        window._stairSoneGeometryBlocks = () => { throw new ReferenceError('ci is not defined'); };
+        const vaktOk = await _runExport('PDF', () => exportPDF({ cover: true, summary: true,
+          rooms: [], stairs: (S.stairs || []).map(s => s.id), roomTable: true, stairTable: true,
+          materialList: true, pricing: false, discount: 0, showDGDB: false, docs: false,
+          signature: false, freeText: '' }));
+        window._stairSoneGeometryBlocks = ekteBlocks;
+        check('vakten returnerer false ved feil', false, vaktOk === false, vaktOk);
+        check('vakten viser toast med årsaken', true,
+          /^PDF kunne ikke lages: ci is not defined\./.test(sisteToast || ''), sisteToast);
+      }
+
+      // ── VAKSINE: en innført feil MÅ gjøre testen rød ────────────────────────────────────
+      // Uten denne kan røyktesten være grønn fordi den ikke måler noe.
+      {
+        const ekteBlocks = window._stairSoneGeometryBlocks;
+        fixtures[1][1]();
+        window._stairSoneGeometryBlocks = () => { throw new ReferenceError('ci is not defined'); };
+        const syk = await kjør();
+        window._stairSoneGeometryBlocks = ekteBlocks;
+        check('VAKSINE: innført feil fanges (testen ville blitt rød)', false, syk.ok === false, syk.ok);
+        // Og den samme fixturen er grønn igjen når feilen fjernes.
+        const frisk = await kjør();
+        check('VAKSINE: grønn igjen uten feilen', true, frisk.ok === true, frisk.ok || frisk.feil);
+      }
+
+      const allOk = results.every(r => r.ok);
+      console[allOk ? 'log' : 'error'](`_pdfExportSmokeTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+      return { ok: allOk, results, sideLogg };
+    })().finally(() => {
+      Object.assign(S, { rooms: saved.rooms, strips: saved.strips, foilFree: saved.foilFree,
+        cables: saved.cables, mats: saved.mats, matPaths: saved.matPaths, plates: saved.plates,
+        aluboard: saved.aluboard, zones: saved.zones, hindrings: saved.hindrings, stairs: saved.stairs,
+        floors: saved.floors, project: saved.project });
+      Object.assign(S.counters, saved.counters);
+      S.ui.activeFloorId = saved.activeFloorId; S.ui.activePartId = saved.activePartId;
+      S.ui.selectedStairId = saved.selectedStairId;
+      HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+      PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(...saved.cats);
+      window._performAutoSave = saved.autoSave; window._showToast = saved.toast;
+      window.showAccessoriesModal = saved.modal; window._pdfBranding = saved.branding;
+      window.jspdf.jsPDF = saved.jsPDF; window._stairSoneGeometryBlocks = saved.soneBlocks;
+      if (saved.undoLen != null) _undoStack.length = saved.undoLen;
+      if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+      _invalidateCableCache && _invalidateCableCache();
+      _invalidateMatCache && _invalidateMatCache();
+      _invalidateStairCache && _invalidateStairCache();
+      try { renderSidebar(); updateCtxBar(); render(); } catch (e) {}
+    });
+  } catch (e) {
+    results.push({ name: 'UNNTAK (oppsett)', ok: false, expected: '-', got: String(e && e.stack || e) });
+    console.error('_pdfExportSmokeTest: FEILET', results);
+    return Promise.resolve({ ok: false, results });
+  }
 }
 
 // ─── PDF EXPORT ──────────────────────────────────────────────
@@ -71094,12 +71381,13 @@ async function exportPDF(opts) {
   };
 
   // ── Revision counter (incremented per export) ──
+  // 113: tallet må være kjent TIDLIG (det står på forsiden og i bunnteksten på hver side), men det
+  // SKRIVES først når doc.save faktisk har gått. Før 113 ble det skrevet her oppe, så en eksport
+  // som kastet underveis talte opp revisjonen likevel — målt: 4 → 5 på en PDF som aldri ble laget.
   if (!S.project) S.project = {};
   if (typeof S.project.revision !== 'number') S.project.revision = 0;
   const prevExportAt = S.project.lastExportedAt || null;
-  S.project.revision += 1;
-  S.project.lastExportedAt = Date.now();
-  const rev = S.project.revision;
+  const rev = S.project.revision + 1;
 
   // STEG 1 (Kenneth 19.08.2026): bunnteksten ble tidligere stemplet TO GANGER per side — én gang
   // her, inkrementelt per side mens dokumentet ble bygget, og én gang til i «Final footer pass»
@@ -71983,7 +72271,11 @@ async function exportPDF(opts) {
         doc.text('Trinn: ' + sb.stepsLength_m + ' m   |   Repos: ' + (sb.reposLength_m > 0 ? sb.reposLength_m + ' m' : '—') + '   |   Lagt: ' + sb.assignedLength_m + ' m   |   Kabellengde: ' + (sb.productLength_m > 0 ? sb.productLength_m + ' m' : '—'), M, y);
         y += 4.5;
         // 105 (Regel 22): avviket sies i utskriften også — rødt når det er over 5 %, gult 2-5 %.
-        const _sbCab = (stair.cables || [])[ci];
+        // 113: sto `[ci]` — en indeks som ALDRI har finnes i denne løkka (`for (const sb of
+        // _soneBlocks)`, uendret siden før 105). ReferenceError, og hele exportPDF stoppet der.
+        // Kabelindeksen bæres av blokka selv (`cableIdx`, satt av _stairCableLengthBreakdown og
+        // spredt videre av _stairSoneGeometryBlocks).
+        const _sbCab = (stair.cables || [])[sb.cableIdx];
         if (_sbCab && (_sbCab.error || _sbCab.note)) {
           const rod = !!_sbCab.error;
           doc.setTextColor(rod ? 200 : 170, rod ? 50 : 120, rod ? 50 : 20);
@@ -72650,6 +72942,9 @@ async function exportPDF(opts) {
   // Save — 015: varmeplan_{kunde}_{merking}_{ÅÅÅÅMMDD-TTMM}_{initialer}_P{nr}_rev{N}.pdf, samme
   // navnebygger (`_docFileName`) som Visma-fila. Se _exportFileName over.
   doc.save(_exportFileName('Varmeplan', 'pdf', rev));
+  // 113: FØRST nå er eksporten et faktum — da, og bare da, telles revisjonen opp.
+  S.project.revision = rev;
+  S.project.lastExportedAt = Date.now();
 
   // STEG 5: en priset PDF er et tilbud → flytt under_arbeid → tilbud_sendt.
   // Kun-dokumentasjon-eksport (uten prising) rører ikke status. Betinget update

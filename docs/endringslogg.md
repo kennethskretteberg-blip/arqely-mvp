@@ -4,6 +4,107 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 113 — PDF: «Skriv ut / PDF» gjorde ingenting (21.10.2026, `main`, ikke pushet)
+
+Kenneth 21.10.2026: «Print PDF funker ikke.» Ingen dialog, ingen nedlasting, ingen melding —
+i nettleseren og i den installerte Windows-appen.
+
+### STEG 0 — hva kastet, og hvor
+
+Kenneths trappeprosjekt (`Varmekabel i trapp`, 21.10) lastet på localhost, `exportPDF` kalt med
+`doc.save` stubbet og tilbehørsvinduet automatisk besvart:
+
+```
+ReferenceError: ci is not defined
+    at exportPDF (index.html:71986)
+```
+
+Linja:
+
+```js
+const _sbCab = (stair.cables || [])[ci];   // ci har ALDRI finnes i denne scopen
+```
+
+Løkka rundt er `for (const sb of _soneBlocks)` — en `for…of` uten indeks, uendret siden før
+feilen ble innført. `ci` var aldri deklarert noe sted i `exportPDF`.
+
+**Commiten som brakk det:** `3eb4500` (105, 20.10) — «avstand sider i sone … for kort kabel
+tegnes stiplet rødt og står i panel/PDF». Linja ble lagt inn i en løkke den ikke passet i.
+098 (17.10) verifiserte sidene og var grønn; feilen kom to dager etter.
+
+### Hvem var rammet
+
+Linja ligger i trappeseksjonen, innenfor `if (_soneBlocks.length > 0)` — altså enhver trapp med
+et kabelutlegg. Målt på `2687b9d` mot seks ekte prosjekter:
+
+| Prosjekt | Før rettingen | Etter |
+|---|---|---|
+| Varmekabel i trapp (trapp) | **FEIL: ci is not defined** | OK, 11 sider |
+| Test Kenneth (trapp) | **FEIL: ci is not defined** | OK, 7 sider |
+| Bad | OK, 5 sider | OK, 5 sider |
+| Varmekabel 60W | OK, 8 sider | OK, 8 sider |
+| Varmematter 60W (EcoMat) | OK, 8 sider | OK, 8 sider |
+| P307691/Ektvedt | OK, 7 sider | OK, 7 sider |
+
+Nøyaktig Kenneths avgrensning: alle trappeprosjekter, ingen andre.
+
+### Rettingen
+
+Kabelindeksen bæres allerede av blokka selv — `cableIdx`, satt av
+`_stairCableLengthBreakdown` og spredt videre av `_stairSoneGeometryBlocks`:
+
+```js
+const _sbCab = (stair.cables || [])[sb.cableIdx];
+```
+
+At unntaket forsvinner beviser ikke at indeksen treffer riktig. Målt med en unik markørtekst per
+kabel på en trapp der ÉN sone har to kabler (106):
+
+```
+Sone 2 · K1   ! MARKØR-kabel-0-sone-2-k0
+Sone 2 · K2   ! MARKØR-kabel-1-sone-2-k1
+Sone 1        ! MARKØR-kabel-2-sone-1-k0
+```
+
+Hver sone-blokk får sin egen kabels avvikstekst. Dette er låst som egen sjekk i røyktesten.
+
+### Ingen stille unntak igjen
+
+`exportPDF` er `async` og ble kalt uten `await`/`catch` fra alle fire kallstedene — et unntak ble
+et uhåndtert promise, og brukeren så absolutt ingenting. Ny felles vakt `_runExport(hva, fn)`:
+
+* toast: «PDF kunne ikke lages: &lt;kort melding&gt;. Prøv igjen, eller send skjermbilde av konsollen.»
+* full stack i konsollen med prefikset `[PDF]`
+* alle sju kallstedene går nå gjennom `exportPDFGuarded` / `exportMaterialListXLSXGuarded`
+
+**Revisjonstelleren** ble talt opp tidlig i funksjonen — målt 4 → 5 på en PDF som aldri ble laget.
+Tallet regnes fortsatt ut tidlig (det står på forsiden og i bunnteksten på hver side), men
+`S.project.revision` og `lastExportedAt` SKRIVES først rett etter at `doc.save` har gått.
+
+### Test
+
+`_pdfExportSmokeTest()` — 20 sjekker. Kjører hele `exportPDF` med `doc.save` stubbet og
+tilbehørsvinduet besvart, på én fixture per type:
+
+| Fixture | Sider |
+|---|---|
+| innendørs rom med kabel | 5 |
+| trapp med soner og FLERE kabler i én sone (106) | 9 |
+| trapp med LÅST avstand og udekkede løp (105) | 9 |
+| rom med kalkyle + tegnet produkt (109) | 5 |
+| rom med frihånds-matte | 5 |
+| listedel (Hurtig prosjektering) | 3 |
+
+Krav per fixture: ingen unntak, og minst én side per valgt seksjon (forside + sammendrag + én
+per rom og per trapp). I tillegg: riktig kabel-mapping, revisjonen telles kun ved suksess,
+vakten returnerer `false` og viser toasten.
+
+**Vaksine:** feilen ble gjeninnført i kilden, og testen ble rød på nøyaktig de to
+trappe-fixturene. Røyktesten har i tillegg en innebygd vaksine som injiserer en feil hver gang
+den kjører, slik at en test som ikke måler noe ikke kan stå grønn.
+
+---
+
 ## 109 — Listevisning: slett kalkyle-produktet i et tegnet rom (20.10.2026, `main`, ikke pushet)
 
 Kenneth 20.10.2026: «Vi må ha en slette-knapp for produkter som er lagt inn i listevisning etter
