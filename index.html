@@ -1255,6 +1255,34 @@ body.kunde-maal #minimap-widget{display:none !important}
 .cust-search-results{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 30px rgba(20,40,60,.18);max-height:240px;overflow-y:auto;overflow-x:hidden;z-index:10;left:0;right:0;top:calc(100% + 6px);padding:5px}
 .cust-search-results>div{border-radius:8px;border-bottom:none !important}
 
+/* 110 · Trappebyggeren: flytt segmenter (dra/piler) og sett inn hvor som helst.
+   Innsettingsstripa mellom radene er normalt en tynn strek; ved hover (eller mens et segment
+   dras) vokser den og viser ＋-knappene. Under et drag vokser ALLE stripene, slik at
+   slippmålet er like lett å treffe som en radhøyde.
+   ⚠ MÅLT: `--brd` (brukt 118 steder i denne fila, bl.a. i trappebyggerens egen markup) er ALDRI
+   definert — `var(--brd)` er ugyldig, og hele deklarasjonen den står i faller bort. Først da
+   stripa ble usynlig ble det synlig. Farger her bruker derfor `--border`, som finnes.
+   Ingen transition på høyde/bakgrunn: de bærer DRAG-TILSTAND, ikke pynt — en overgang som ikke
+   rekker å fullføre gjør innsettingslinja usynlig. */
+.sb-gap{position:relative;height:10px}
+.sb-gap-line{position:absolute;left:0;right:0;top:4px;height:2px;border-radius:2px;background:transparent}
+.sb-gap-btns{position:absolute;inset:0;display:none;align-items:center;justify-content:center;gap:6px}
+.sb-gap:hover,.sb-dragging .sb-gap{height:24px}
+.sb-gap:hover .sb-gap-btns,.sb-dragging .sb-gap:hover .sb-gap-btns{display:flex}
+.sb-gap:hover .sb-gap-line{top:11px}
+.sb-dragging .sb-gap .sb-gap-line{top:11px;background:var(--border,#3a3f4a)}
+.sb-gap-btns button{padding:2px 8px;border-radius:5px;border:1px dashed var(--border,#3a3f4a);background:var(--bg);color:var(--text);cursor:pointer;font-size:11px;line-height:1.4}
+.sb-gap-btns button:hover{border-color:#4ea8ff;color:#4ea8ff}
+/* Må slå .sb-dragging-regelen over (0,3,0) — derfor .sb-gap.sb-gap-drop, ikke bare .sb-gap-drop. */
+.sb-gap.sb-gap-drop .sb-gap-line{background:#4ea8ff;height:3px;top:10px}
+.sb-gap.sb-gap-drop .sb-gap-btns{display:none!important}
+.sb-grip{cursor:grab;color:var(--muted);font-size:13px;line-height:1;padding:0 2px;user-select:none}
+.sb-grip:active{cursor:grabbing}
+.sb-seg-dragging{opacity:.45}
+.sb-move-btn{background:none;border:1px solid transparent;border-radius:4px;color:var(--muted);cursor:pointer;font-size:10px;line-height:1;padding:2px 3px}
+.sb-move-btn:hover:not(:disabled){border-color:var(--border,#3a3f4a);color:var(--text)}
+.sb-move-btn:disabled{opacity:.3;cursor:default}
+
 @media print{
   #topbar,#sidebar,#sidebar-resizer,#ctxbar,#zoom-badge,#wbw-panel,#draw-dim-panel,
   #room-workflow-panel,.widget-el,#color-menu,#new-project-screen,.modal-backdrop,
@@ -44098,6 +44126,14 @@ function _migrateStairToSegments(stair) {
   stair.landingMargin_cm = stair.landingMargin_cm ?? 5;
 }
 
+// 110 · Dybden en segmentliste legger beslag på i planen. Samme uttrykk som flatene faktisk
+// legges ut etter (under) — ett sted, så de to aldri kan komme til ulikt svar.
+function _stairSegsTotalDepthCm(segs) {
+  let d = 0;
+  for (const seg of (segs || [])) d += (seg.type === 'steps') ? seg.stepCount * seg.stepDepth_cm : (seg.depth_cm || 0);
+  return d;
+}
+
 /** Generate surfaces from segment-based model. Falls back to legacy if no segments.
  *
  * buildDirection styrer HVOR forste segment (segs[0]) plasseres, mens surfaces-arrayet
@@ -44118,8 +44154,7 @@ function _generateStairSurfaces(stair) {
   if (!segs || !segs.length) return [];
 
   const bottomUp = (stair.buildDirection || 'bottom') !== 'top';
-  let totalDepth = 0;
-  for (const seg of segs) totalDepth += (seg.type === 'steps') ? seg.stepCount * seg.stepDepth_cm : (seg.depth_cm || 0);
+  const totalDepth = _stairSegsTotalDepthCm(segs);
 
   const surfs = [];
   let buildOff = 0;   // langs byggeretningen (segs[0] forst = kabelstart / trinn 1)
@@ -46073,6 +46108,211 @@ function _stairZoneRegressionTest102() {
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_stairZoneRegressionTest102: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// 110 (Kenneth 21.10.2026) — regresjonstest for FLYTT og SETT INN i trappebyggeren. Kjøres fra
+// konsollen: _stairBuilderMoveRegressionTest110(). Låser: (A) _stairBuilderMoveSeg + indeks-remap,
+// (B) ▲/▼ i BEGGE byggeretninger, (C) innsetting hvor som helst + arv fra nærmeste nabo,
+// (D) ＋-knappene legger til i den enden lista VISER, (E) varsel ved delt sone og hull,
+// (F) lagring: ankerkanten står i ro, runsPerStep tømt, valgt forslag degradert, (G) angre.
+function _stairBuilderMoveRegressionTest110() {
+  const saved = { stairs: S.stairs, sel: S.ui.selectedStairId, nextStair: S.counters.nextStairId,
+    undoLen: _undoStack.length, autosave: window._performAutoSave,
+    segs: _stairBuilderSegs, dir: _stairBuilderDir, newIdx: _stairBuilderNewIdx,
+    editId: _stairBuilderEditingId, anchor: _stairBuilderAnchorSeg };
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  // Kenneths eksempel: 10 trinn i bunn, 1 repos ovenfor, 6 trinn på topp.
+  const KENNETH = () => [
+    { type: 'steps', width_cm: 120, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 10 },
+    { type: 'landing', width_cm: 120, depth_cm: 140 },
+    { type: 'steps', width_cm: 120, stepDepth_cm: 28, stepHeight_cm: 16, stepCount: 6 },
+  ];
+  const form = () => _stairBuilderSegs.map(g => g.type === 'steps' ? `T${g.stepCount}` : `R${g.depth_cm}`).join('-');
+  try {
+    window._performAutoSave = async () => {};
+    _stairBuilderEditingId = null;
+
+    // ═══ A · _stairBuilderMoveSeg og indeks-remappen ═════════════════════════════════════
+    _stairBuilderSegs = KENNETH(); _stairBuilderDir = 'bottom'; _stairBuilderNewIdx = 1;
+    check('A1: utgangsform', 'T10-R140-T6', form() === 'T10-R140-T6', form());
+    _stairBuilderMoveSeg(0, 2);
+    check('A2: flytt første til siste', 'R140-T6-T10', form() === 'R140-T6-T10', form());
+    check('A3: «· nytt»-markøren fulgte segmentet sitt', 0, _stairBuilderNewIdx === 0, _stairBuilderNewIdx);
+    _stairBuilderMoveSeg(2, 0);
+    check('A4: og tilbake igjen', 'T10-R140-T6', form() === 'T10-R140-T6', form());
+    check('A5: markøren er tilbake på sin rad', 1, _stairBuilderNewIdx === 1, _stairBuilderNewIdx);
+    check('A6: flytt til egen plass er en no-op', false, _stairBuilderMoveSeg(1, 1) === false, _stairBuilderMoveSeg(1, 1));
+    check('A7: indeks utenfor lista avvises', false, _stairBuilderMoveSeg(9, 0) === false, null);
+    check('A8: remap — uberørt rad før flyttingen', 0, _stairBuilderRemapIdx(0, 1, 2) === 0, _stairBuilderRemapIdx(0, 1, 2));
+    check('A9: remap — rad som skyves opp', 1, _stairBuilderRemapIdx(2, 1, 2) === 1, _stairBuilderRemapIdx(2, 1, 2));
+
+    // ═══ B · ▲/▼ i BEGGE byggeretninger ═════════════════════════════════════════════════
+    // Lista er byggerekkefølgen i begge retninger (STEG 0.1), så «opp» er alltid mot array-indeks 0.
+    for (const dir of ['bottom', 'top']) {
+      _stairBuilderSegs = KENNETH(); _stairBuilderDir = dir; _stairBuilderNewIdx = null;
+      const di = _stairBuilderDisplayIdxs();
+      check(`B1 (${dir}): rad 0 er segs[0]`, 0, di[0] === 0, di[0]);
+      _stairBuilderNudgeSeg(di[0], 1);      // ▼ på øverste rad
+      check(`B2 (${dir}): ▼ på øverste rad byttet de to første`, 'R140-T10-T6', form() === 'R140-T10-T6', form());
+      _stairBuilderNudgeSeg(0, -1);         // ▲ på øverste rad — skal ikke gjøre noe
+      check(`B3 (${dir}): ▲ på øverste rad er en no-op`, 'R140-T10-T6', form() === 'R140-T10-T6', form());
+      _stairBuilderNudgeSeg(2, 1);          // ▼ på nederste rad — skal ikke gjøre noe
+      check(`B4 (${dir}): ▼ på nederste rad er en no-op`, 'R140-T10-T6', form() === 'R140-T10-T6', form());
+      _stairBuilderNudgeSeg(0, 1);
+      check(`B5 (${dir}): ▼ igjen`, 'T10-R140-T6', form() === 'T10-R140-T6', form());
+    }
+    // Draget bruker SAMME hjelper: gapPos er plassen mellom radene.
+    _stairBuilderSegs = KENNETH(); _stairBuilderDir = 'bottom';
+    const fakeDrop = (from, gapPos) => { _stairBuilderDragIdx = from;
+      _stairBuilderGapDrop({ preventDefault() {}, stopPropagation() {} }, gapPos); };
+    fakeDrop(1, 0);
+    check('B6: dra repos til stripa over første rad', 'R140-T10-T6', form() === 'R140-T10-T6', form());
+    fakeDrop(0, 3);
+    check('B7: dra det til stripa under siste rad', 'T10-T6-R140', form() === 'T10-T6-R140', form());
+    fakeDrop(2, 1);
+    check('B8: dra det tilbake til midten', 'T10-R140-T6', form() === 'T10-R140-T6', form());
+
+    // ═══ C · sett inn hvor som helst + arv fra NÆRMESTE nabo (STEG 0.3) ══════════════════
+    _stairBuilderSegs = KENNETH(); _stairBuilderDir = 'bottom';
+    _stairBuilderInsertSeg('landing', 0);
+    check('C1: repos nederst', 'R140-T10-R140-T6', form() === 'R140-T10-R140-T6', form());
+    check('C2: «· nytt» står på den nye raden', 0, _stairBuilderNewIdx === 0, _stairBuilderNewIdx);
+    check('C3: arvet dybde fra nærmeste repos', 140, _stairBuilderSegs[0].depth_cm === 140, _stairBuilderSegs[0].depth_cm);
+    check('C4: arvet bredde fra naboen', 120, _stairBuilderSegs[0].width_cm === 120, _stairBuilderSegs[0].width_cm);
+    _stairBuilderSegs = KENNETH();
+    _stairBuilderInsertSeg('landing', 1);
+    check('C5: repos midt i, rett over de 10 nederste trinnene', 'T10-R140-R140-T6', form() === 'T10-R140-R140-T6', form());
+    _stairBuilderSegs = KENNETH();
+    _stairBuilderInsertSeg('landing', 3);
+    check('C6: repos øverst', 'T10-R140-T6-R140', form() === 'T10-R140-T6-R140', form());
+    // Trinn arver dybde, høyde og antall fra NÆRMESTE trinn — ikke fra det siste i lista.
+    _stairBuilderSegs = KENNETH();
+    _stairBuilderInsertSeg('steps', 3);     // øverst, nærmeste trinn er T6 (28/16)
+    check('C7: trinn øverst arver fra T6-segmentet', '28/16/6',
+      `${_stairBuilderSegs[3].stepDepth_cm}/${_stairBuilderSegs[3].stepHeight_cm}/${_stairBuilderSegs[3].stepCount}` === '28/16/6',
+      `${_stairBuilderSegs[3].stepDepth_cm}/${_stairBuilderSegs[3].stepHeight_cm}/${_stairBuilderSegs[3].stepCount}`);
+    _stairBuilderSegs = KENNETH();
+    _stairBuilderInsertSeg('steps', 0);     // nederst, nærmeste trinn er T10 (30/17)
+    check('C8: trinn nederst arver fra T10-segmentet', '30/17/10',
+      `${_stairBuilderSegs[0].stepDepth_cm}/${_stairBuilderSegs[0].stepHeight_cm}/${_stairBuilderSegs[0].stepCount}` === '30/17/10',
+      `${_stairBuilderSegs[0].stepDepth_cm}/${_stairBuilderSegs[0].stepHeight_cm}/${_stairBuilderSegs[0].stepCount}`);
+    // Et repos uten noe repos i nærheten faller tilbake på 120 cm.
+    _stairBuilderSegs = [{ type: 'steps', width_cm: 95, stepDepth_cm: 30, stepHeight_cm: 17, stepCount: 3 }];
+    _stairBuilderInsertSeg('landing', 1);
+    check('C9: repos uten nabo-repos får 120 cm', 120, _stairBuilderSegs[1].depth_cm === 120, _stairBuilderSegs[1].depth_cm);
+    check('C10: …men arver bredden fra trinnet', 95, _stairBuilderSegs[1].width_cm === 95, _stairBuilderSegs[1].width_cm);
+    check('C11: innsetting utenfor lista klemmes inn i den', 2, (_stairBuilderInsertSeg('steps', 99), _stairBuilderSegs.length) === 3 && _stairBuilderNewIdx === 2, _stairBuilderNewIdx);
+
+    // ═══ D · ＋-knappene legger til i den enden lista VISER ══════════════════════════════
+    for (const dir of ['bottom', 'top']) {
+      _stairBuilderSegs = KENNETH(); _stairBuilderDir = dir;
+      _stairBuilderAddSeg('landing');
+      const di = _stairBuilderDisplayIdxs();
+      check(`D1 (${dir}): den nye raden er den SISTE i lista`, di.length - 1,
+        di.indexOf(_stairBuilderNewIdx) === di.length - 1, di.indexOf(_stairBuilderNewIdx));
+    }
+
+    // ═══ E · varsel ved delt sone og hull ════════════════════════════════════════════════
+    _stairBuilderSegs = KENNETH(); _stairBuilderDir = 'bottom';
+    _stairBuilderSegs[0].zone = 1; _stairBuilderSegs[1].zone = 2; _stairBuilderSegs[2].zone = 1;
+    check('E1: sone 1 delt i to gir varsel', true, /^Sone 1 er delt i to/.test(_stairBuilderZoneWarnings()[0] || ''), _stairBuilderZoneWarnings());
+    _stairBuilderMoveSeg(2, 1);   // flytt tilbake: 1,1,2
+    check('E2: flyttet tilbake — varselet er borte', 0, _stairBuilderZoneWarnings().length === 0, _stairBuilderZoneWarnings());
+    _stairBuilderInsertSeg('landing', 1);   // nytt segment uten sone = hull
+    check('E3: nytt segment i en sonet trapp gir hull-varsel', true,
+      _stairBuilderZoneWarnings().some(m => /mangler sone/.test(m)), _stairBuilderZoneWarnings());
+    _stairBuilderSetZone(1, '1');
+    check('E4: sone satt på den nye raden — varselet er borte', 0, _stairBuilderZoneWarnings().length === 0, _stairBuilderZoneWarnings());
+    _stairBuilderSegs = KENNETH();
+    check('E5: trapp UTEN soner varsler aldri', 0, _stairBuilderZoneWarnings().length === 0, _stairBuilderZoneWarnings());
+
+    // ═══ F · lagring: trappa hopper ikke, foreldet tilstand ryddes ══════════════════════
+    // Invarianten er den samme uansett hvor segmentet settes inn: INGEN flate som alt fins skal
+    // flytte seg i planen — fotavtrykket vokser i den enden endringen skjedde.
+    const mkStair = (dir) => {
+      S.counters.nextStairId = 997001;
+      const st = _createStairObj({ name: 'TEST110', width_cm: 120, step_depth_cm: 30, step_height_cm: 17, step_count: 10 });
+      st.segments = KENNETH(); st.buildDirection = dir; st.x_cm = 0; st.y_cm = 500;
+      st.dims = [{ id: 9901, p1: { x: 0, y: 20 }, p2: { x: 0, y: 50 }, wnx: 1, wny: 0, offset: 5 }];
+      S.stairs = [st]; S.ui.selectedStairId = st.id;
+      _regenerateStairCable(st);
+      return st;
+    };
+    for (const dir of ['bottom', 'top']) {
+      for (const hvor of ['nederst', 'øverst']) {
+        const st = mkStair(dir);
+        const verdenFør = st.surfaces.map(f => st.y_cm + f.y_cm);
+        const dimFør = st.y_cm + st.dims[0].p1.y;
+        // Åpne den EKTE modalen, slik ankeret settes der det faktisk settes.
+        showStairEditModal(st.id);
+        // «nederst»/«øverst» er i lista slik den vises = byggerekkefølgen (STEG 0.1).
+        const at = hvor === 'nederst' ? 0 : _stairBuilderSegs.length;
+        _stairBuilderInsertSeg('landing', at);
+        _confirmEditStairSegments();
+        // Det nye reposet legger seg på plass `at`, så flate-indeksene etter den forskyves én.
+        const skift = at === 0 ? 1 : 0;
+        const verdenEtter = st.surfaces.map(f => st.y_cm + f.y_cm);
+        const flyttet = verdenFør.map((y, i) => Math.abs(verdenEtter[i + skift] - y)).filter(d => d > 1e-9);
+        check(`F1 (${dir}, ${hvor}): ingen av de gamle flatene flyttet seg`, 0, flyttet.length === 0, flyttet);
+        check(`F2 (${dir}, ${hvor}): brukerens mållinje ble stående`, dimFør,
+          Math.abs((st.y_cm + st.dims[0].p1.y) - dimFør) < 1e-9, st.y_cm + st.dims[0].p1.y);
+        check(`F3 (${dir}, ${hvor}): reposet ligger der det ble satt inn`, 'landing',
+          st.segments[at === 0 ? 0 : st.segments.length - 1].type === 'landing',
+          st.segments[at === 0 ? 0 : st.segments.length - 1].type);
+      }
+    }
+    // Foreldet tilstand: låst strengantall + valgt forslag fra den GAMLE formen.
+    {
+      const st = mkStair('bottom');
+      st.runsPerStep = 3;
+      st.selectedProposal = { runsPerStep: 3, stepCC: 10, products: [], edgeMargin_cm: 7 };
+      showStairEditModal(st.id);
+      _stairBuilderUpd(0, 'stepDepth_cm', 50);   // dypere trinn => geometrien krever flere strenger
+      _confirmEditStairSegments();
+      check('F4: runsPerStep-cachen er tømt', null, st.runsPerStep === null, st.runsPerStep);
+      check('F5: valgt forslag degradert til lastProposal', null,
+        st.selectedProposal === null && st.lastProposal != null, [st.selectedProposal, !!st.lastProposal]);
+      const nTrinn1 = st.runs.filter(r => r.surfaceIdx === 0).length;
+      const geoN = _stairRunCount(50 - 2 - 2, Math.min(st.stepCC_cm || 10, STAIR_MAX_CC_CM)).N;
+      check('F6: strengantallet følger geometrien igjen', geoN, nTrinn1 === geoN, nTrinn1);
+      // Et lagret navn uten formendring skal IKKE rydde noe.
+      st.runsPerStep = 4; st.selectedProposal = { runsPerStep: 4, products: [] };
+      const yFør = st.y_cm;
+      showStairEditModal(st.id);
+      _confirmEditStairSegments();
+      check('F7: uendret form rører ingenting', '4/true/' + yFør,
+        `${st.runsPerStep}/${!!st.selectedProposal}/${st.y_cm}` === '4/true/' + yFør,
+        `${st.runsPerStep}/${!!st.selectedProposal}/${st.y_cm}`);
+    }
+
+    // ═══ G · angre gir den gamle trappa tilbake ═════════════════════════════════════════
+    {
+      const st = mkStair('bottom');
+      const formFør = JSON.stringify(st.segments), yFør = st.y_cm;
+      showStairEditModal(st.id);
+      _stairBuilderInsertSeg('landing', 1);
+      _confirmEditStairSegments();
+      check('G1: endringen slo inn', 4, S.stairs[0].segments.length === 4, S.stairs[0].segments.length);
+      undo();
+      check('G2: angre gav den gamle formen tilbake', formFør, JSON.stringify(S.stairs[0].segments) === formFør, JSON.stringify(S.stairs[0].segments));
+      check('G3: …og den gamle plasseringen', yFør, S.stairs[0].y_cm === yFør, S.stairs[0].y_cm);
+    }
+  } catch (e) {
+    results.push({ name: 'UNNTAK', ok: false, expected: '-', got: String(e && e.stack || e) });
+  } finally {
+    S.stairs = saved.stairs; S.ui.selectedStairId = saved.sel; S.counters.nextStairId = saved.nextStair;
+    _undoStack.length = saved.undoLen; window._performAutoSave = saved.autosave;
+    _stairBuilderSegs = saved.segs; _stairBuilderDir = saved.dir;
+    _stairBuilderNewIdx = saved.newIdx; _stairBuilderEditingId = saved.editId;
+    _stairBuilderAnchorSeg = saved.anchor;
+    _stairBuilderDragIdx = null; _stairBuilderFocusAfter = null;
+    const bgEl = document.getElementById('stair-modal-bg'); if (bgEl) bgEl.remove();
+    _invalidateStairCache(); renderSidebar(); updateCtxBar(); render(); _updateStairSettingsPanel();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_stairBuilderMoveRegressionTest110: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
   return { ok: allOk, results };
 }
 
@@ -56597,6 +56837,8 @@ let _stairBuilderNewIdx = null; // index of the just-added segment, for the "new
 let _stairBuilderJustAdded = false; // one-shot: scroll/focus the new segment only right after adding it,
                                      // not on every re-render (e.g. toggling build direction)
 let _stairBuilderEditingId = null; // STEG 7: null = bygger ny trapp, ellers id-en til trappa som redigeres
+let _stairBuilderAnchorSeg = null; // 110: segmentet som låser trappas plassering i planen (objekt-referanse
+                                   // inn i _stairBuilderSegs, satt når modalen åpnes)
 const STAIR_BUILDER_DEFAULT_STEP_COUNT = 1;
 const STAIR_MAX_ZONES = 4; // matcher STAIR_CABLE_COLORS-paletten
 
@@ -56624,6 +56866,7 @@ function showStairBuilderModal() {
   _stairBuilderDir = 'bottom';
   _stairBuilderNewIdx = null;
   _stairBuilderEditingId = null;
+  _stairBuilderAnchorSeg = null;   // 110: en ny trapp er ikke plassert ennå, ingenting å holde i ro
   _renderStairBuilderModal();
 }
 
@@ -56639,7 +56882,35 @@ function showStairEditModal(stairId) {
   _stairBuilderDir = stair.buildDirection || 'bottom';
   _stairBuilderNewIdx = null;
   _stairBuilderEditingId = stairId;
+  // 110: ankeret for plasseringen i planen — segmentet som ligger først NÅ. Holdes på
+  // objekt-identitet, så det følger segmentet gjennom flyttinger og innsettinger (se
+  // _confirmEditStairSegments). Kopien over er min egen, så referansen kan ikke lekke ut.
+  _stairBuilderAnchorSeg = _stairBuilderSegs[0] || null;
   _renderStairBuilderModal();
+}
+
+// DEL A (spec-trapp-navn-oversikt.md, Kenneth 28.08.2026): segment-listens HTML var bakt inn i
+// _renderStairBuilderModal, som gjorde det umulig å oppdatere BARE segmentlista uten å rive og
+// bygge hele modalen på nytt (og med den, tømme navn/produkt/CC-feltene — se _stairBuilderRefreshSegs
+// under). Trukket ut uendret slik at begge kan bruke den.
+// 110 (Kenneth 21.10.2026) · ÉN kilde for rekkefølgen segmentlista vises i, slik at både pilene,
+// draget og ＋-stripene regner likt. MÅLT i STEG 0.1: lista ble SNUDD for «Ovenfra og ned», og da
+// havnet segmentet som ligger NEDERST i planen (y=160 cm) øverst i lista — under overskriften
+// «SEGMENTER (topp → bunn)», og motsatt vei av sidevisningen rett under, som tegner segs[0]
+// øverst for nettopp den retningen. Lista er BYGGEREKKEFØLGEN: rad 0 er alltid segs[0] (der
+// kabelen starter), og bare etiketten snur. Da peker ▲/▼ og draget samme vei som sidevisningen,
+// og «＋ Trinn»/«＋ Repos» nederst legger til i den enden brukeren ser dem i.
+// Visningsposisjon == array-indeks; alt som regner om går gjennom denne ene hjelperen.
+function _stairBuilderDisplayIdxs() { return _stairBuilderSegs.map((_, i) => i); }
+
+// Innsettingsstripe mellom to rader (og før første / etter siste). Dobbelt bruk: ＋-knappene ved
+// hover, og slippmålet med innsettingslinje under et drag. `gapPos` er posisjonen i LISTA slik den
+// vises — med identitets-mappingen over er det samme tall som array-indeksen det settes inn på.
+function _stairBuilderGapHtml(gapPos) {
+  return `<div class="sb-gap" data-gap="${gapPos}" ondragover="_stairBuilderGapOver(event)" ondragleave="_stairBuilderGapLeave(event)" ondrop="_stairBuilderGapDrop(event,${gapPos})">
+    <div class="sb-gap-line"></div>
+    <div class="sb-gap-btns"><button type="button" onclick="_stairBuilderInsertSeg('steps',${gapPos})" title="Sett inn trinn her">＋ Trinn</button><button type="button" onclick="_stairBuilderInsertSeg('landing',${gapPos})" title="Sett inn repos her">＋ Repos</button></div>
+  </div>`;
 }
 
 // DEL A (spec-trapp-navn-oversikt.md, Kenneth 28.08.2026): segment-listens HTML var bakt inn i
@@ -56649,19 +56920,25 @@ function showStairEditModal(stairId) {
 function _stairBuilderSegListHtml() {
   let segListHtml = '';
   const segs = _stairBuilderSegs;
-  // Display order: if buildDirection is 'top', show reversed (top segment first visually)
-  const displaySegs = _stairBuilderDir === 'top' ? [...segs].reverse() : segs;
-  const displayIdxs = _stairBuilderDir === 'top' ? displaySegs.map((_,i) => segs.length - 1 - i) : displaySegs.map((_,i) => i);
+  const displayIdxs = _stairBuilderDisplayIdxs();
 
-  for (let di = 0; di < displaySegs.length; di++) {
-    const seg = displaySegs[di];
+  for (let di = 0; di < displayIdxs.length; di++) {
     const realIdx = displayIdxs[di];
+    const seg = segs[realIdx];
     const isOnly = segs.length === 1;
     // STEG 4: fremhev segmentet som nettopp ble lagt til (arv gjør at det ofte er identisk med
     // naboen, så det er lett å redigere feil rad uten en tydelig markør).
     const isNew = realIdx === _stairBuilderNewIdx;
     const cardBorder = isNew ? '1px solid #4ea8ff' : '1px solid var(--brd)';
     const cardShadow = isNew ? ';box-shadow:0 0 0 1px #4ea8ff' : '';
+    // 110: drahåndtak + ▲/▼. Bare håndtaket er draggable — hele kortet ville gjort tallfeltene
+    // inni umulige å merke/redigere. ▲/▼ er vanlige <button>-er, så de er fokuserbare og
+    // betjenes med tastatur uten noe eget opplegg.
+    const grip = isOnly ? '' : `<span class="sb-grip" draggable="true" ondragstart="_stairBuilderDragStart(event,${realIdx})" ondragend="_stairBuilderDragEnd(event)" title="Dra for å flytte">⠿</span>`;
+    const moveBtns = isOnly ? '' : `<span style="display:inline-flex;flex-direction:column;gap:1px">
+            <button type="button" class="sb-move-btn" id="stair-mv-${realIdx}-up" onclick="_stairBuilderNudgeSeg(${realIdx},-1)"${di === 0 ? ' disabled' : ''} title="Flytt opp" aria-label="Flytt segmentet opp">▲</button>
+            <button type="button" class="sb-move-btn" id="stair-mv-${realIdx}-down" onclick="_stairBuilderNudgeSeg(${realIdx},1)"${di === displayIdxs.length - 1 ? ' disabled' : ''} title="Flytt ned" aria-label="Flytt segmentet ned">▼</button>
+          </span>`;
     // STEG 7 (Soner, Kenneth 19.08.2026: gjenbruk denne listen, ikke bygg ny UI): «Sone»-velger
     // per rad. En sone er alltid ett eller flere HELE segmenter — vil brukeren dele et sone-skille
     // midt i et flertrinns-segment, må segmentet først deles i byggeren (samme ＋/✕-knapper som
@@ -56669,11 +56946,12 @@ function _stairBuilderSegListHtml() {
     let zoneOpts = `<option value=""${seg.zone == null ? ' selected' : ''}>Auto</option>`;
     for (let zn = 1; zn <= STAIR_MAX_ZONES; zn++) zoneOpts += `<option value="${zn}"${seg.zone === zn ? ' selected' : ''}>Sone ${zn}</option>`;
     const zoneSelectHtml = `<select onchange="_stairBuilderSetZone(${realIdx},this.value)" style="padding:3px 4px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:11px" title="Sone (overstyrer automatisk kabeldeling)">${zoneOpts}</select>`;
+    segListHtml += _stairBuilderGapHtml(di);
     if (seg.type === 'steps') {
-      segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px;margin-bottom:6px${cardShadow}">
+      segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px${cardShadow}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="font-weight:600;font-size:13px;color:var(--text)"><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Trinn${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span>
-          <span style="display:flex;align-items:center;gap:6px">${zoneSelectHtml}${isOnly ? '' : `<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>`}</span>
+          <span style="font-weight:600;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px">${grip}<span><svg class="ic ic-ruler" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M3 16.5 16.5 3l4.5 4.5L7.5 21z"/><path d="M9 10l1.5 1.5M12 7l1.5 1.5M6 13l1.5 1.5M15 4l1.5 1.5"/></svg> Trinn${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span></span>
+          <span style="display:flex;align-items:center;gap:6px">${moveBtns}${zoneSelectHtml}${isOnly ? '' : `<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button>`}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
           <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" oninput="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
@@ -56683,10 +56961,10 @@ function _stairBuilderSegListHtml() {
         </div>
       </div>`;
     } else if (seg.type === 'landing') {
-      segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px;margin-bottom:6px${cardShadow}">
+      segListHtml += `<div data-seg-idx="${realIdx}" style="background:var(--surface2);border:${cardBorder};border-radius:8px;padding:10px 12px${cardShadow}">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="font-weight:600;font-size:13px;color:var(--text)">⬜ Repos${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span>
-          <span style="display:flex;align-items:center;gap:6px">${zoneSelectHtml}<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button></span>
+          <span style="font-weight:600;font-size:13px;color:var(--text);display:flex;align-items:center;gap:6px">${grip}<span>⬜ Repos${isNew ? ' <span style="color:#4ea8ff;font-weight:600;font-size:11px">· nytt</span>' : ''}</span></span>
+          <span style="display:flex;align-items:center;gap:6px">${moveBtns}${zoneSelectHtml}<button onclick="_stairBuilderRemoveSeg(${realIdx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px" title="Fjern">✕</button></span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px">
           <label style="color:var(--muted)">Bredde (cm)<br><input type="number" value="${seg.width_cm}" min="40" max="500" oninput="_stairBuilderUpd(${realIdx},'width_cm',+this.value)" style="width:100%;padding:5px;border-radius:5px;border:1px solid var(--brd);background:var(--bg);color:var(--text);font-size:12px"></label>
@@ -56695,6 +56973,7 @@ function _stairBuilderSegListHtml() {
       </div>`;
     }
   }
+  segListHtml += _stairBuilderGapHtml(displayIdxs.length);
   return segListHtml;
 }
 
@@ -56746,6 +57025,9 @@ function _renderStairBuilderModal() {
         <button onclick="_stairBuilderAddSeg('steps')" style="flex:1;padding:7px;border-radius:6px;border:1px dashed var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">＋ Trinn</button>
         <button onclick="_stairBuilderAddSeg('landing')" style="flex:1;padding:7px;border-radius:6px;border:1px dashed var(--brd);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px">＋ Repos</button>
       </div>
+
+      <!-- 110: gult varsel ved delt sone / hull — blokkerer ikke «Lagre» -->
+      <div id="stair-builder-zone-warn" style="margin-bottom:12px">${_stairBuilderZoneWarnHtml()}</div>
 
       <!-- Side-view preview -->
       <div id="stair-builder-preview" style="background:var(--surface2);border:1px solid var(--brd);border-radius:8px;padding:10px;margin-bottom:12px;text-align:center">
@@ -56815,7 +57097,20 @@ function _stairBuilderRefreshSegs() {
   if (segsEl) segsEl.innerHTML = _stairBuilderSegListHtml();
   const confirmBtn = document.querySelector('#stair-modal-bg button[onclick="_confirmAddStair()"]');
   if (confirmBtn) confirmBtn.disabled = _stairBuilderSegs.length === 0;
+  const warnEl = document.getElementById('stair-builder-zone-warn');
+  if (warnEl) warnEl.innerHTML = _stairBuilderZoneWarnHtml();   // 110: delt sone / hull
   _stairBuilderRefreshPreviewStats();
+  // 110: lista bygges på nytt av en flytting, så ▲/▼-fokuset må settes tilbake på segmentet som
+  // ble flyttet — ellers kan tastaturbrukeren bare trykke én gang. Havnet segmentet i enden, er
+  // knappen i den retningen deaktivert; da tar den motsatte over fokus.
+  if (_stairBuilderFocusAfter) {
+    const { idx, dir } = _stairBuilderFocusAfter;
+    _stairBuilderFocusAfter = null;
+    const same = document.getElementById(`stair-mv-${idx}-${dir}`);
+    const other = document.getElementById(`stair-mv-${idx}-${dir === 'up' ? 'down' : 'up'}`);
+    const target = (same && !same.disabled) ? same : (other && !other.disabled ? other : same);
+    if (target) target.focus();
+  }
   // STEG 4: scroll the just-added segment into view and focus its Antall field — one-shot, so
   // a later refresh (e.g. toggling build direction) doesn't keep stealing focus back to it.
   if (_stairBuilderJustAdded && _stairBuilderNewIdx != null) {
@@ -56845,34 +57140,175 @@ function _stairBuilderUpd(segIdx, key, val) {
 function _stairBuilderSetZone(segIdx, val) {
   if (!_stairBuilderSegs[segIdx]) return;
   _stairBuilderSegs[segIdx].zone = val === '' ? null : parseInt(val, 10);
+  // 110: ... men varselet om delt sone / hull må oppdateres, det er nettopp dette feltet som styrer det.
+  const warnEl = document.getElementById('stair-builder-zone-warn');
+  if (warnEl) warnEl.innerHTML = _stairBuilderZoneWarnHtml();
 }
 
-function _stairBuilderAddSeg(type) {
-  // Arv fra siste TRINN-segment i lista (ikke siste segment generelt, som kan være et repos uten
-  // disse feltene) — bredde, antall, dybde og høyde. Repos arver bredde fra siste trinn-segment og
-  // dybde fra forrige repos, hvis noen finnes. Standarden (STAIR_BUILDER_DEFAULT_STEP_COUNT) gjelder
-  // derfor i praksis kun det aller første segmentet i en helt ny trapp.
-  let lastSteps = null, lastLanding = null;
-  for (let i = _stairBuilderSegs.length - 1; i >= 0; i--) {
-    const s = _stairBuilderSegs[i];
-    if (!lastSteps && s.type === 'steps') lastSteps = s;
-    if (!lastLanding && s.type === 'landing') lastLanding = s;
-    if (lastSteps && lastLanding) break;
+// ══ 110 · FLYTT OG SETT INN SEGMENTER (Kenneth 21.10.2026) ════════════════════════════════
+// «10 stk trinn i bunn, 1 stk repos ovenfor, 6 stk trinn på topp ... Da ønsker jeg å sette inn et
+// repos til og plassere det enten nederst, midt i eller til slutt.» Før 110 kunne et segment bare
+// legges til på SLUTTEN av arrayen (push), og ikke flyttes i det hele tatt.
+
+// Arv ved innsetting (STEG 0.3): NÆRMESTE nabo, ikke «siste i lista» — et segment som settes inn
+// midt i skal se ut som naboene sine, ikke som toppen av trappa. Søket går utover fra
+// innsettingspunktet og foretrekker raden FØR (over i lista) ved like avstand.
+function _stairBuilderNearestSeg(atIdx, pred) {
+  const segs = _stairBuilderSegs;
+  for (let d = 0; d < segs.length; d++) {
+    const before = atIdx - 1 - d;
+    if (before >= 0 && pred(segs[before])) return segs[before];
+    const after = atIdx + d;
+    if (after < segs.length && pred(segs[after])) return segs[after];
   }
-  const w = lastSteps ? lastSteps.width_cm : 120;
+  return null;
+}
+
+// Sett inn et nytt segment på en gitt plass i lista. `atIdx` er array-indeksen det havner PÅ
+// (0 = helt først, segs.length = helt sist) — ＋-stripene sender inn sin egen posisjon.
+function _stairBuilderInsertSeg(type, atIdx) {
+  const segs = _stairBuilderSegs;
+  const at = Math.max(0, Math.min(atIdx | 0, segs.length));
+  // Bredde fra nærmeste nabo uansett type — en trapp er like bred hele veien i praksis.
+  const nb = _stairBuilderNearestSeg(at, s => s.width_cm > 0);
+  const w = nb ? nb.width_cm : 120;
+  let seg;
   if (type === 'steps') {
-    _stairBuilderSegs.push({
-      type: 'steps', width_cm: w,
-      stepDepth_cm: lastSteps ? lastSteps.stepDepth_cm : 30,
-      stepHeight_cm: lastSteps ? lastSteps.stepHeight_cm : 17,
-      stepCount: lastSteps ? lastSteps.stepCount : STAIR_BUILDER_DEFAULT_STEP_COUNT,
-    });
+    const nbs = _stairBuilderNearestSeg(at, s => s.type === 'steps');
+    seg = { type: 'steps', width_cm: w,
+      stepDepth_cm: nbs ? nbs.stepDepth_cm : 30,
+      stepHeight_cm: nbs ? nbs.stepHeight_cm : 17,
+      stepCount: nbs ? nbs.stepCount : STAIR_BUILDER_DEFAULT_STEP_COUNT };
   } else {
-    _stairBuilderSegs.push({ type: 'landing', width_cm: w, depth_cm: lastLanding ? lastLanding.depth_cm : 120 });
+    const nbl = _stairBuilderNearestSeg(at, s => s.type === 'landing');
+    seg = { type: 'landing', width_cm: w, depth_cm: nbl ? nbl.depth_cm : 120 };
   }
-  _stairBuilderNewIdx = _stairBuilderSegs.length - 1;
+  segs.splice(at, 0, seg);
+  _stairBuilderNewIdx = at;
   _stairBuilderJustAdded = true;
   _stairBuilderRefreshSegs();
+}
+
+// «＋ Trinn»/«＋ Repos» nederst: legg til på slutten av lista SLIK DEN VISES. Med
+// _stairBuilderDisplayIdxs (identitet) er det array-enden i begge byggeretninger — før 110 var
+// lista snudd for «Ovenfra og ned», og da havnet den nye raden i motsatt ende av knappen.
+function _stairBuilderAddSeg(type) { _stairBuilderInsertSeg(type, _stairBuilderSegs.length); }
+
+// Indeksen k etter at segmentet på `from` er flyttet til `to`. Samme bokholderi som
+// _stairBuilderRemoveSeg gjør for sletting, bare for en flytting.
+function _stairBuilderRemapIdx(k, from, to) {
+  if (k === from) return to;
+  let k2 = k > from ? k - 1 : k;
+  if (k2 >= to) k2++;
+  return k2;
+}
+
+// DEN ENE flyttehjelperen — både ▲/▼ og draget går gjennom den. Begge indeksene er
+// ARRAY-indekser; omregningen fra lista skjer i _stairBuilderNudgeSeg / _stairBuilderGapDrop.
+// `to` er indeksen segmentet skal ende på i det FERDIGE arrayet.
+function _stairBuilderMoveSeg(fromRealIdx, toRealIdx) {
+  const segs = _stairBuilderSegs;
+  const n = segs.length;
+  if (!(fromRealIdx >= 0 && fromRealIdx < n)) return false;
+  const to = Math.max(0, Math.min(toRealIdx | 0, n - 1));
+  if (to === fromRealIdx) return false;
+  const [seg] = segs.splice(fromRealIdx, 1);
+  segs.splice(to, 0, seg);
+  // «· nytt»-markøren følger segmentet sitt, den skal ikke henge igjen på raden som overtok plassen.
+  if (_stairBuilderNewIdx != null) _stairBuilderNewIdx = _stairBuilderRemapIdx(_stairBuilderNewIdx, fromRealIdx, to);
+  _stairBuilderRefreshSegs();
+  return true;
+}
+
+// ▲/▼: flytt ÉN rad i lista slik den vises. `delta` er -1 (opp) / +1 (ned) i VISNINGEN.
+function _stairBuilderNudgeSeg(realIdx, delta) {
+  const displayIdxs = _stairBuilderDisplayIdxs();
+  const di = displayIdxs.indexOf(realIdx);
+  const dj = di + delta;
+  if (di < 0 || dj < 0 || dj >= displayIdxs.length) return;
+  const to = displayIdxs[dj];
+  // Lista bygges på nytt av flyttingen, så fokus må settes tilbake på knappen brukeren står på —
+  // ellers kan ▲ bare trykkes én gang med tastaturet.
+  _stairBuilderFocusAfter = { idx: to, dir: delta < 0 ? 'up' : 'down' };
+  _stairBuilderMoveSeg(realIdx, to);
+}
+
+// ── Drag-and-drop. Bare drahåndtaket (⠿) er draggable: hele kortet draggable ville gjort
+// tallfeltene inni umulige å merke og redigere. Slippmålene er ＋-stripene mellom radene, som
+// vokser og viser en tydelig innsettingslinje mens et drag er i gang (klassen .sb-dragging).
+let _stairBuilderDragIdx = null;
+let _stairBuilderFocusAfter = null;
+
+function _stairBuilderDragStart(e, realIdx) {
+  _stairBuilderDragIdx = realIdx;
+  try {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', 'stair-seg:' + realIdx);
+  } catch (_) {}
+  const card = e.currentTarget.closest('[data-seg-idx]');
+  if (card) {
+    card.classList.add('sb-seg-dragging');
+    try { e.dataTransfer.setDragImage(card, 24, 18); } catch (_) {}
+  }
+  const list = document.getElementById('stair-builder-segs');
+  if (list) list.classList.add('sb-dragging');
+}
+
+function _stairBuilderDragEnd() {
+  _stairBuilderDragIdx = null;
+  const list = document.getElementById('stair-builder-segs');
+  if (list) list.classList.remove('sb-dragging');
+  document.querySelectorAll('#stair-builder-segs .sb-gap-drop').forEach(el => el.classList.remove('sb-gap-drop'));
+  document.querySelectorAll('#stair-builder-segs .sb-seg-dragging').forEach(el => el.classList.remove('sb-seg-dragging'));
+}
+
+function _stairBuilderGapOver(e) {
+  if (_stairBuilderDragIdx == null) return;   // et annet drag (fil, produkt) — ikke vårt bord
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  e.currentTarget.classList.add('sb-gap-drop');
+}
+function _stairBuilderGapLeave(e) { e.currentTarget.classList.remove('sb-gap-drop'); }
+
+function _stairBuilderGapDrop(e, gapPos) {
+  if (_stairBuilderDragIdx == null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const from = _stairBuilderDragIdx;
+  _stairBuilderDragEnd();
+  // gapPos er plassen MELLOM radene (0 = over første, n = under siste). Flyttes segmentet nedover,
+  // faller målindeksen én plass fordi segmentet selv tas ut av lista før det settes inn igjen.
+  _stairBuilderMoveSeg(from, gapPos > from ? gapPos - 1 : gapPos);
+}
+
+// ── Soner må henge sammen (102: _stairSolveZones grupperer SAMMENHENGENDE flater per sone).
+// En flytting kan dele en sone (sone 1, sone 2, sone 1), og et nytt segment i en sonet trapp lager
+// et hull (ny rad = «Auto»). Ingen av dem blokkeres — varselet står i modalen før «Lagre», og
+// trappepanelet viser feilen etterpå som før.
+function _stairBuilderZoneWarnings() {
+  const segs = _stairBuilderSegs;
+  if (!segs.some(s => s.zone != null)) return [];
+  const blocks = new Map();   // sonenummer -> antall SAMMENHENGENDE blokker
+  let prev;
+  for (let i = 0; i < segs.length; i++) {
+    const z = segs[i].zone == null ? null : segs[i].zone;
+    if ((i === 0 || z !== prev) && z != null) blocks.set(z, (blocks.get(z) || 0) + 1);
+    prev = z;
+  }
+  const msgs = [];
+  for (const z of [...blocks.keys()].sort((a, b) => a - b)) {
+    const n = blocks.get(z);
+    if (n > 1) msgs.push(`Sone ${z} er delt i ${n === 2 ? 'to' : n + ' deler'} — sonene må henge sammen`);
+  }
+  const hull = segs.filter(s => s.zone == null).length;
+  if (hull) msgs.push(`${hull === 1 ? 'Ett segment mangler' : hull + ' segmenter mangler'} sone — alle segmenter må ha en sone når soner er i bruk`);
+  return msgs;
+}
+
+function _stairBuilderZoneWarnHtml() {
+  const msgs = _stairBuilderZoneWarnings();
+  if (!msgs.length) return '';
+  return `<div style="background:color-mix(in srgb,#e8b23a 16%,transparent);border:1px solid #e8b23a;border-radius:8px;padding:8px 10px;font-size:11px;color:var(--text);line-height:1.5">⚠ ${msgs.map(esc).join('<br>⚠ ')}</div>`;
 }
 
 function _stairBuilderRemoveSeg(idx) {
@@ -57004,8 +57440,53 @@ function _confirmEditStairSegments() {
   if (!stair) return;
   pushUndo();
   if (nameEl) stair.name = nameEl.value.trim() || stair.name || 'Trapp';
+  const prevSegsJson = JSON.stringify(stair.segments || []);
+  const prevDir = stair.buildDirection || 'bottom';
+  const prevDepth = _stairSegsTotalDepthCm(stair.segments);
   stair.segments = JSON.parse(JSON.stringify(_stairBuilderSegs));
   stair.buildDirection = _stairBuilderDir;
+  const formEndret = prevSegsJson !== JSON.stringify(stair.segments) || prevDir !== (stair.buildDirection || 'bottom');
+  if (formEndret) {
+    // 110/STEG 0.1 — TRAPPA SKAL IKKE HOPPE. stair.y_cm er ØVRE kant av planutsnittet i BEGGE
+    // byggeretninger, mens flatene legges ut fra samlet dybde (_generateStairSurfaces). MÅLT: med
+    // «Nedenfra og opp» flyttet ALLE eksisterende flater seg 100 cm nedover da et 100 cm repos ble
+    // lagt til på slutten — trappa hoppet. Men «hold den nederste kanten i ro» er IKKE nok alene:
+    // MÅLT at den regelen i stedet flytter hele trappa 140 cm oppover når et repos settes inn
+    // NEDERST (kravet «trappa hopper ikke ved innsetting nederst»). Begge ender kan holdes samtidig
+    // ved å feste ett punkt i stedet for en kant:
+    //
+    //   ANKERET er segmentet som lå FØRST i lista da modalen ble åpnet (_stairBuilderAnchorSeg,
+    //   holdt på objekt-identitet, så det følger segmentet gjennom flyttinger). Det står helt i ro.
+    //   Dybde som kommer til PÅ GULVSIDEN av ankeret skyver fotavtrykket utover den gamle kanten;
+    //   dybde over ankeret skyver bare den delen av trappa som ligger over.
+    //
+    // Er ankeret slettet, faller vi tilbake på den gamle, enkle regelen (hold ankerkanten i ro).
+    // Ren omrokkering endrer ikke samlet dybde, og da røres plasseringen ikke i det hele tatt.
+    const dDepth = _stairSegsTotalDepthCm(stair.segments) - prevDepth;
+    if (dDepth !== 0) {
+      const aIdx = _stairBuilderAnchorSeg ? _stairBuilderSegs.indexOf(_stairBuilderAnchorSeg) : -1;
+      const dybdeUnderAnker = aIdx > 0 ? _stairSegsTotalDepthCm(_stairBuilderSegs.slice(0, aIdx)) : 0;
+      const skyv = (stair.buildDirection || 'bottom') !== 'top'
+        ? dybdeUnderAnker - dDepth    // bunnen er ankerkanten: ny dybde vokser oppover
+        : -dybdeUnderAnker;           // toppen er ankerkanten: den står alt stille av seg selv
+      if (skyv !== 0) {
+        stair.y_cm += skyv;
+        // Brukerens egne mållinjer ligger i trappe-LOKALE koordinater (087) — kompenser dem, så de
+        // blir stående på geometrien de måler i stedet for å bli dratt med origo.
+        for (const d of (stair.dims || [])) { d.p1.y -= skyv; d.p2.y -= skyv; }
+      }
+    }
+    // 110/STEG 0.2 — RYDD DET FORELDEDE. MÅLT: runsPerStep ble stående etter en formendring
+    // (trinndybde 30 → 50 cm beholdt 3 strenger der geometrien krever 6 — faktisk CC 23 cm, langt
+    // over den harde grensen STAIR_MAX_CC_CM). Alle andre settere (_setStairStepCC,
+    // _setStairFrontBackOffset, …) nullstiller cachen; nettopp denne veien gjorde det ikke.
+    stair.runsPerStep = null;
+    // Et valgt forslag er løst for den GAMLE formen, og så lenge det står sperrer det
+    // margin-reberegningen i _regenerateStairCable (manualFit = null, edgeMargin_cm beholdt).
+    // Degrader til lastProposal — nøyaktig som et manuelt kabelbytte gjør (101/Regel 20), så
+    // «↩ Tilbakestill» fortsatt virker — og la marginen løses på nytt for den nye formen.
+    if (stair.selectedProposal) { stair.lastProposal = stair.selectedProposal; stair.selectedProposal = null; }
+  }
   _regenerateStairCable(stair);
   _invalidateStairCache();
   renderSidebar(); updateCtxBar(); render();
