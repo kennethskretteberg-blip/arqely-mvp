@@ -7,7 +7,7 @@ Ingen av promptene var kjørt fra før (sjekket med `git log --oneline -15`).
 |---|---|---|
 | 119 | `b547ea7` | Produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer, vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes selv |
 | 120 | `bca0959` | Alle soner starter på samme side som sone 1, «Antall kabler» i sonen, auto 2 kabler når 1 ikke holder, låst/auto også på trappenivå |
-| 121 | (se under) | Fail-open uten polygonbibliotek gjenopprettet, 7 utdaterte påstander oppdatert, rask variant av batteriet |
+| 121 | `6fba3a4` | Fail-open uten polygonbibliotek gjenopprettet, 7 utdaterte påstander oppdatert, rask variant av batteriet |
 
 ---
 
