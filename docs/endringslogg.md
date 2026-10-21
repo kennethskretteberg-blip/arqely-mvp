@@ -4,6 +4,67 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 119 — Presentasjon: produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer, vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes ved nytt utlegg (21.10.2026, `main`, ikke pushet)
+
+Kenneths svar på SPØRSMÅL fra serie 116/117/118 (svarene står under hvert spørsmål i
+`docs/serie-116/SPØRSMÅL.md`).
+
+### STEG 0 (målt på forslagslenka til «Vestre Hals 43», bare lest)
+
+- **116/3 Produktmål:** de tre kjedene (`_drawStripDimChainForRoom`/`Cable`/`Mat`) tegnes i
+  `drawAllDimAnnotations` på rommets egne brytere `stripDimSnap`/`cableDimSnap`/`matDimSnap`
+  (lagret i prosjektet). Rommet i Vestre Hals hadde `stripDimSnap: true` → hele foliekjeden
+  («3.2 cm», «871.8 cm», «2.5 cm», sidekjeden) sto i forslagslenka. PDF-en slår bryterne på selv
+  (`_pdfMode`, :74018) — den var allerede utenfor.
+- **116/4 Hover:** `_presentHover` (mousemove i `S.ui.present`) byttet rom ved hover i ren
+  presentasjon, gated bare på `_forslagAktiv()`. Klikk-veien fantes allerede i `_canvasMouseUp`
+  (tap uten drag → `_presentRoomAt`).
+- **116/5 Forhåndsvalg:** `_presentForhaandsvalgtRom` filtrerte på `_roomOnActiveFloor`; etasjebyttet
+  fra 117/4 lå som fire linjer inne i `_presentPanelVelgRom`. `_presentEnter` kalte `fitAll()` FØR
+  forhåndsvalget.
+- **118/1 Vegg-tabellen:** `_kundeRevRender(groups)` leste `_kundeLinkCache` for navn/dato/kommentar/
+  `answer.points`/`axisBalance`, og knappene gikk til `_kundeApplyRoom`/`_kundeApplyAll`/
+  `_kundeBrukKundePunkter`/`_kundeRejectAnswer` + `_kundeNyeRomHtml()` — alle bundet til mållenka.
+  Avkryssingen lå alt i `_kundeRevState.picked` og `_kundeApplyWalls(groups, onlyPicked)` fantes.
+  Det som måtte bli argument: `k` (svaret) og knappenes mål.
+- **118/5 Felles kanal:** alle plasseringsveiene ender i `renderSidebar()` (109 brukte den samme).
+  `_clearRoomProductCollections` fjernet alt merket, men manuell plassering og frihånds-matte rydder
+  ikke først.
+
+### Endring
+
+- **`_presentProduktMaalSkjult()`** — presentasjon/forslagslenke uten `_pdfMode` og uten annen
+  kundemodus → `drawAllDimAnnotations` hopper over de tre produktkjedene etter at veggmålene er tegnet.
+  Rommets brytere røres ikke; editor, PDF og mållenka er uendret.
+- **`_presentHover`** setter bare markøren. Testen G som krevde `_forslagAktiv()`-gaten er snudd til
+  «kilden nevner ikke `presentRoomId`».
+- **`_presentRomIEtasjerekkefolge()`** + **`_presentByttTilRommetsEtasje(roomId)`** (delt med romlista).
+  `_presentEnter`: forhåndsvalg → etasjebytte → `fitAll`.
+- **`_kundeRevRender(groups, ctx)`**: `ctx = { forslag, k }` i `_kundeRevState.ctx`. Med ctx: tittel «Mål
+  fra kunden (forslagssvar)», ingen «Avvis svaret», ingen nye-rom-blokk, knappene går til
+  `_forslagRevBrukAlle/Rom/Punkter`. Uten ctx: bit-identisk mållenke-oppførsel.
+- **`_forslagArbeidInnMaal()`** åpner vinduet (var: arbeidet inn alt). `_forslagRevBruk*` →
+  `_kundeApplyWalls`/`_kundeBrukKundePunkter` → `_forslagMaalEtterInnarbeiding(beroerte)` (merke +
+  protokollrad `roomId:'maal'`, rom slås sammen ved flere innarbeidinger). Målblokka får «Vis målene»
+  etter innarbeiding.
+- **UTLEGG-merket:** `utleggMerkeSig = _roomProduktSignatur(roomId)` (id-ene i alle `ROOM_PRODUCT_KEYS`)
+  settes med merket; `_utleggMerkeRydd()` i `renderSidebar` fjerner merket når signaturen avviker.
+  Merker uten signatur (før 119) står til de klikkes bort.
+- Test L i `_kundeforslagRegressionTest` var rød på HEAD i editoren (grønn i en levende lenke): seksjon
+  C etterlot en fast `#_fors-bunn`. L kaller nå `_forslagRenderBunn()` selv.
+
+### Målt etter
+
+- Forslagslenka: foliekjeden borte, veggmål (blå) står. Ren presentasjon («Varmematter 60W», 5 rom):
+  hover over rom 4 → valgt rom fortsatt 2, markør peker; klikk → 4.
+- Kenneths side (Vestre Hals, lest med stubbet lagring): vinduet med tre vegger, én krysset bort,
+  «Arbeid inn valgte mål» → vegg 1/2 = 454/204 (kundens tall), vegg 3 fulgte geometrien (215 → 203,
+  slik «Blir»-kolonnen viste) — ikke kundens 205. UTLEGG-merke satt; én ny folie + `renderSidebar` →
+  merket borte.
+- `_kundeforslagRegressionTest` 189/189 (33 nye: M/119 + seksjon N), `_kundelenkeRegressionTest` 328/328.
+
+---
+
 ## 118 — Forslagslenke: «Endre mål» / «Lås mål», mål følger med i svaret, «Arbeid inn målene» hos Kenneth (21.10.2026, `main`, ikke pushet)
 
 Kenneth 21.10.2026: «Bør være knapp: Endre mål — da blir veggene valgbare og kan flyttes. Når kunde

@@ -7982,11 +7982,30 @@ function _presentClearSelections() {
 // første rommet. Returnerer id eller null. `_presentAutoValgt` holder hjelpelinja i kortet til
 // kunden selv har valgt et annet rom.
 let _presentAutoValgt = false;
+// 119 (Kenneth 21.10.2026, svar 116/5): forhåndsvalget ser på ALLE etasjer — etasjerekkefølge
+// (`S.floors`), så romrekkefølge — og `_presentEnter` bytter til rommets etasje. Før: bare
+// aktiv etasje, så et prosjekt med tom første etasje åpnet på et rom uten produkter.
+function _presentRomIEtasjerekkefolge() {
+  const alle = _presentDrawnRooms();
+  const ut = [];
+  for (const f of (S.floors || [])) for (const r of alle) if (r.floorId === f.id) ut.push(r);
+  for (const r of alle) if (!ut.includes(r)) ut.push(r);   // rom uten etasje til slutt
+  return ut;
+}
 function _presentForhaandsvalgtRom() {
-  const rom = _presentDrawnRooms().filter(r => _roomOnActiveFloor(r));
+  const rom = _presentRomIEtasjerekkefolge();
   const med = rom.find(r => _presentRoomProduct(r));
   const valgt = med || rom[0] || null;
   return valgt ? valgt.id : null;
+}
+// Rom i en annen etasje: bytt etasje, ellers er rommet usynlig på lerretet (117/4, nå delt
+// med forhåndsvalget). Returnerer true når etasjen ble byttet.
+function _presentByttTilRommetsEtasje(roomId) {
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r || r.floorId == null || r.floorId === S.ui.activeFloorId) return false;
+  if (!(S.floors || []).some(f => f.id === r.floorId)) return false;
+  S.ui.activeFloorId = r.floorId;
+  return true;
 }
 // ⚠ RETTET 030: `_presentEnter()` satte UBETINGET `presentPublic = false`, og begge de
 // offentlige inngangene (`?present=` og `?kunde=`) setter flagget FØR de kaller hit — altså ble
@@ -8005,12 +8024,15 @@ function _presentEnter(offentlig) {
   const det = document.getElementById('present-detail'); if (det) det.style.display = 'none';
   canvas.style.cursor = 'grab';
   resizeCanvas();   // canvas-wrap er nå full bredde (sidebar/topbar skjult)
-  fitAll();         // vis hele prosjektet
-  // 116: et rom er valgt fra første sekund — hele planen vises fortsatt (fitAll over), med det
+  // 116: et rom er valgt fra første sekund — hele planen vises fortsatt (fitAll under), med det
   // valgte rommet uthevet og detaljene synlige. Gjelder ren presentasjon OG forslagslenke
   // (`_forslagStart` tegner kortet på nytt når forslagslaget er lastet).
+  // 119: forhåndsvalget kan ligge i en annen etasje — bytt FØR fitAll, så planen som vises er
+  // den rommet ligger i.
   S.ui.presentRoomId = _presentForhaandsvalgtRom();
   _presentAutoValgt = S.ui.presentRoomId != null;
+  _presentByttTilRommetsEtasje(S.ui.presentRoomId);
+  fitAll();         // vis hele prosjektet
   _presentRenderDetail();
   render();
 }
@@ -8038,22 +8060,13 @@ function _presentRoomAt(e) {
   }
   return null;
 }
+// 119 (Kenneth 21.10.2026, svar 116/4): klikk-styring i ALLE kundevisninger. Hover setter bare
+// markøren og rører aldri valget — rommet velges med klikk/tap i tegningen (`_canvasMouseUp`)
+// eller i romlista (`_presentPanelVelgRom`). Før (043/116) byttet hover rom i ren presentasjon;
+// bare forslagslenka var klikk-styrt.
 function _presentHover(e) {
   const r = _presentRoomAt(e);
-  const id = r ? r.id : null;
-  canvas.style.cursor = id != null ? 'pointer' : 'grab';
-  // ⚠ 043: i forslagsmodus VELGES rommet med klikk. Kortet har piler, et tallfelt og en
-  // kommentarboks — det kan ikke bytte rom hver gang musa beveger seg. Hover setter fortsatt
-  // markøren, men rører ikke valget.
-  if (_forslagAktiv()) return;
-  // 116: å flytte musa UT av et rom nuller ikke lenger valget — da ville det forhåndsvalgte
-  // rommet forsvunnet ved første musebevegelse. Et annet rom bytter; tomt gulv lar det stå.
-  if (id != null && id !== S.ui.presentRoomId) {
-    S.ui.presentRoomId = id;
-    _presentAutoValgt = false;
-    _presentRenderDetail();
-    markDirty();
-  }
+  canvas.style.cursor = r ? 'pointer' : 'grab';
 }
 // Finn det dominerende produktet i et rom (kabel → folie → matte → plate).
 function _presentRoomProduct(room) {
@@ -8947,10 +8960,7 @@ function _presentPanelRom() {
 function _presentPanelVelgRom(id) {
   const r = S.rooms.find(x => x.id === id);
   if (!r) return;
-  // Rom i en annen etasje: bytt etasje, ellers er rommet usynlig på lerretet.
-  if (r.floorId != null && r.floorId !== S.ui.activeFloorId && (S.floors || []).some(f => f.id === r.floorId)) {
-    S.ui.activeFloorId = r.floorId;
-  }
+  _presentByttTilRommetsEtasje(id);   // 117/4, delt med forhåndsvalget (119)
   S.ui.presentRoomId = id;
   _presentAutoValgt = false;
   fitRoom(id);   // «akkurat som klikk i tegningen» — og zoomer til det (prompt 117)
@@ -11965,13 +11975,21 @@ function openKundeReviewPanel() {
   _kundeRevRender(groups);
 }
 
-function _kundeRevRender(groups) {
-  groups = groups || _kundeAnswerByRoom();
-  const k = _kundeLinkCache;
+// 119 (Kenneth 21.10.2026, svar 118/1): samme vindu for mål i et FORSLAGSSVAR. `ctx` er
+// `{ forslag: true, k: { id, answer, answered_by_name, answered_at } }` og ligger i
+// `_kundeRevState.ctx`, så avkryssing (`_kundeRevPick` → `_kundeRevRender()`) og
+// re-tegningen etter «Bruk» (`_kundeFinishApply`) finner tilbake til samme svar. Uten ctx er
+// alt som før: mållenkas cache, mållenkas knapper. Det som er bundet til mållenka og derfor
+// byttes ut i ctx-modus: kilden til `k`, «Avvis svaret», nye-rom-blokka og knappenes mål
+// (`_forslagRevBruk*` i stedet for `_kundeApply*`).
+function _kundeRevRender(groups, ctx) {
+  ctx = ctx || (_kundeRevState && _kundeRevState.ctx) || null;
+  const k = ctx ? ctx.k : _kundeLinkCache;
+  groups = groups || _kundeAnswerByRoom(ctx ? k.answer : undefined);
   document.getElementById('kunde-rev-ov')?.remove();
   const ov = document.createElement('div');
   ov.id = 'kunde-rev-ov';
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2100;display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:' + (ctx ? 2150 : 2100) + ';display:flex;align-items:center;justify-content:center;padding:20px';
 
   const hvem = k.answered_by_name ? esc(k.answered_by_name) : 'kunden';
   const nar = k.answered_at ? new Date(k.answered_at).toLocaleDateString('nb-NO', {day:'numeric',month:'long'}) : '';
@@ -12051,8 +12069,8 @@ function _kundeRevRender(groups) {
         <span style="font-size:11px;color:var(--dim)">${prev ? (compArea(room.points)/10000).toFixed(1).replace('.',',') + ' → ' + (prev.areaCm2/10000).toFixed(1).replace('.',',') + ' m²' : ''}</span>
         <span style="flex:1"></span>
         ${punktModus
-          ? `<button class="snap-chip on" onclick="_kundeBrukKundePunkter(${room.id})">Bruk kundens rom</button>`
-          : `<button class="snap-chip" onclick="_kundeApplyRoom(${room.id})">Bruk</button>`}
+          ? `<button class="snap-chip on" onclick="${ctx ? '_forslagRevBrukPunkter' : '_kundeBrukKundePunkter'}(${room.id})">Bruk kundens rom</button>`
+          : `<button class="snap-chip" onclick="${ctx ? '_forslagRevBrukRom' : '_kundeApplyRoom'}(${room.id})">Bruk</button>`}
       </div>
       ${punktModus ? `<div style="padding:6px 10px;font-size:11px;color:#f0b232;border-top:1px solid var(--border)">
         ⚠ Kunden flyttet hjørner — hele rommet brukes. Målene under er resultatet, ikke noe du kan
@@ -12077,24 +12095,24 @@ function _kundeRevRender(groups) {
 
   ov.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(760px,96vw);max-height:90vh;display:flex;flex-direction:column">
     <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
-      <div><div style="font-size:16px;font-weight:700;color:var(--text)">Svar fra kunde</div>
+      <div><div style="font-size:16px;font-weight:700;color:var(--text)">${ctx ? 'Mål fra kunden (forslagssvar)' : 'Svar fra kunde'}</div>
         <div style="font-size:11px;color:var(--dim)">${hvem}${nar?' · '+nar:''}</div></div>
       <span style="flex:1"></span>
       <button onclick="document.getElementById('kunde-rev-ov').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1">&times;</button>
     </div>
     <div style="padding:14px 18px;overflow:auto;flex:1">
       ${komm ? `<div style="padding:8px 10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text);margin-bottom:14px;white-space:pre-wrap">${esc(komm)}</div>` : ''}
-      ${_kundeNyeRomHtml()}
+      ${ctx ? '' : _kundeNyeRomHtml()}
       ${rows}
       <div style="font-size:11px;color:var(--dim)">Tegningen endres først når du trykker Bruk. Ctrl+Z angrer hele innarbeidingen i ett steg.</div>
     </div>
     <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center">
-      <button onclick="_kundeRejectAnswer()" style="padding:8px 14px;background:none;border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Avvis svaret</button>
+      ${ctx ? '' : `<button onclick="_kundeRejectAnswer()" style="padding:8px 14px;background:none;border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Avvis svaret</button>`}
       <span style="flex:1"></span>
       <button onclick="document.getElementById('kunde-rev-ov').remove()" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer">Lukk</button>
       ${harVegger && !punktSvar ? `
-      <button onclick="_kundeApplyAll(true)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">Bruk valgte mål</button>
-      <button onclick="_kundeApplyAll(false)" style="padding:8px 18px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">Bruk alle mål</button>` : ''}
+      <button onclick="${ctx ? '_forslagRevBrukAlle' : '_kundeApplyAll'}(true)" style="padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer">${ctx ? 'Arbeid inn valgte mål' : 'Bruk valgte mål'}</button>
+      <button onclick="${ctx ? '_forslagRevBrukAlle' : '_kundeApplyAll'}(false)" style="padding:8px 18px;background:var(--accent);border:none;border-radius:8px;font-size:12px;font-weight:600;color:#0d0e10;cursor:pointer">${ctx ? 'Arbeid inn alle mål' : 'Bruk alle mål'}</button>` : ''}
     </div></div>`;
   document.body.appendChild(ov);
 }
@@ -22323,8 +22341,10 @@ function _kundeforslagRegressionTest() {
     check('G: artikkelnummer er gatet på presentPublic (spec regel 2)', true,
       /article_no && !\(S\.ui && S\.ui\.presentPublic\)/.test(kilde), 'ugatet');
     checkIkke('G: kortet viser ikke pris', /pris|price|kr\b/i.test(kilde), 'prisfelt funnet');
-    check('G: hover bytter ikke rom i forslagsmodus (kortet er interaktivt)', true,
-      /if \(_forslagAktiv\(\)\) return;/.test(_kildeUtenKommentarer(_presentHover)), 'hover overstyrer valget');
+    // 119 (116/4): hover rører aldri valget — i NOEN kundevisning. Kilden skal ikke engang
+    // nevne presentRoomId lenger (043 gated på forslag; 116 nullet ikke; 119 tok resten).
+    checkIkke('G: hover bytter ikke rom i noen kundevisning (119: klikk-styring overalt)',
+      /presentRoomId/.test(_kildeUtenKommentarer(_presentHover)), 'hover rører valget');
     check('G: merkene tegnes fra render(), ikke som hale i drawRooms', true,
       /drawForslagMerker\(\)/.test(_kildeUtenKommentarer(render))
       && !/drawForslagMerker/.test(_kildeUtenKommentarer(drawRooms)), 'feil sted');
@@ -22593,6 +22613,11 @@ function _kundeforslagRegressionTest() {
         _forslagState = { token: 't', status: 'open', note: '', orgName: 'Testfirma', valg: new Map(), navn: '', kommentar: '', sendt: false };
         check('L: panelet er aktivt i forslagslenka', true, _presentPanelAktiv() === true, _presentPanelAktiv());
         _presentRenderDetail();
+        // 119 (MÅLT): seksjon C (`_forslagPil` uten presentasjon) etterlater en fast #_fors-bunn i
+        // DOM-en, og `_presentRenderDetail` rører den ikke — sjekken under gjaldt derfor hvor
+        // testen ble kjørt (grønn i en levende forslagslenke, rød i editoren). Det som skal
+        // låses er at bunnlinje-tegneren IKKE lager elementet i panelmodus — så kall den.
+        _forslagRenderBunn();
         const pan = $('_present-panel');
         check('L: panelet finnes og er flex-søsken før lerretet i #content', true,
           !!pan && pan.parentElement && pan.parentElement.id === 'content' && pan.nextElementSibling && pan.nextElementSibling.id === 'canvas-wrap',
@@ -22726,14 +22751,20 @@ function _kundeforslagRegressionTest() {
         check('M: et rent mål-svar regnes som ubehandlet (åpner gjennomgangen)', true, _forslagMaalUbehandlet() && _forslagUbehandlede().length === 0, 'oversett');
         check('M: målblokka viser endringen og knappen', true,
           /Kunden har rettet målene/.test(_forslagMaalBlokkHtml(_forslagLinkCache)) && /Stue: vegg 1 500 → 512 cm/.test(_forslagMaalBlokkHtml(_forslagLinkCache)) && /Arbeid inn målene/.test(_forslagMaalBlokkHtml(_forslagLinkCache)), 'mangler');
-        _forslagArbeidInnMaal();   // synkron fram til DB-skrivingen — alt under måles før den
-        check('M: «Arbeid inn målene» endrer rommet som et mål-svar (vegg 1 = 512)', 512, lenM(S.rooms[0], 0) === 512, lenM(S.rooms[0], 0));
+        _forslagArbeidInnMaal();   // 119: åpner vegg-tabellen (mållenkas vindu) i stedet for å arbeide inn direkte
+        check('M/119: «Arbeid inn målene» åpner vegg-tabellen med forslagssvarets mål', true,
+          !!$('kunde-rev-ov') && /Arbeid inn alle mål/.test($('kunde-rev-ov').innerHTML) && /Mål fra kunden/.test($('kunde-rev-ov').innerHTML)
+          && $('kunde-rev-ov').querySelectorAll('input[type=checkbox]').length === 1 && !/Avvis svaret/.test($('kunde-rev-ov').innerHTML),
+          $('kunde-rev-ov') ? $('kunde-rev-ov').textContent.slice(0, 120) : 'intet vindu');
+        _forslagRevBrukAlle(false);   // synkron fram til DB-skrivingen — alt under måles før den
+        check('M: «Arbeid inn alle mål» endrer rommet som et mål-svar (vegg 1 = 512)', 512, lenM(S.rooms[0], 0) === 512, lenM(S.rooms[0], 0));
         check('M: rommet merkes «Utlegg må oppdateres»', true, S.rooms[0].utleggMaaOppdateres === true && /UTLEGG/.test(_utleggBadge(S.rooms[0])), S.rooms[0].utleggMaaOppdateres);
         check('M: protokollen er en egen rad (roomId maal), forslaget er IKKE merket ferdig', true,
           _forslagMaalInnarbeidet() && !_forslagMaalUbehandlet() && _forslagLinkCache.status === 'answered' && skrevet.length === 1 && !('status' in skrevet[0]), JSON.stringify(skrevet).slice(0, 120));
         check('M: målblokka sier Innarbeidet etterpå', true, /✓ Innarbeidet/.test(_forslagMaalBlokkHtml(_forslagLinkCache)), 'fortsatt knapp');
-        check('M: innarbeidingen er den eksisterende (ingen kopi)', true,
-          /_kundeApplyWalls\(groups, false\)/.test(String(_forslagArbeidInnMaal)) && /_kundeBrukKundePunkter\(r\.id, a\)/.test(String(_forslagArbeidInnMaal)) && /ikkeLukkLenke/.test(String(_kundeFinishApply)), 'egen vei');
+        check('M: innarbeidingen er den eksisterende (ingen kopi) — 119: vindu og knapper delt med mållenka', true,
+          /_kundeApplyWalls\(groups, !!bareValgte\)/.test(String(_forslagRevBrukAlle)) && /_kundeBrukKundePunkter\(r\.id, ctx\.k\.answer\)/.test(String(_forslagRevBrukPunkter))
+          && /_kundeRevRender\(groups, ctx\)/.test(String(_forslagArbeidInnMaal)) && /ikkeLukkLenke/.test(String(_kundeFinishApply)), 'egen vei');
         check('M: «Send svar» beholder mål-markøren', true, /roomId === 'maal'/.test(String(_forslagSendSvar)), 'markøren forsvinner ved sending');
         _clearRoomProductCollections(1, ['cables']);
         check('M: nytt utlegg fjerner merket', false, S.rooms[0].utleggMaaOppdateres === false, S.rooms[0].utleggMaaOppdateres);
@@ -22746,6 +22777,142 @@ function _kundeforslagRegressionTest() {
         S.ui.present = lagretM.present; S.view.zoom = lagretM.zoom; S.view.panX = lagretM.panX; S.view.panY = lagretM.panY;
         _ppTvingSmal = lagretM.tving; _ppApen = lagretM.apen;
         document.body.classList.toggle('kunde-maal', lagretM.klasse);
+        _presentPanelFjern();
+        $('kunde-rev-ov')?.remove(); _kundeRevState = null;
+      }
+    }
+
+    // ── N (119): produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer,
+    //            vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes ved nytt utlegg ──
+    {
+      const $ = id => document.getElementById(id);
+      const uK = f => String(f);
+      const lagretN = { present: S.ui.present, pdf: S.ui._pdfMode, zoom: S.view.zoom, panX: S.view.panX, panY: S.view.panY,
+        sched: _scheduleAutoSave, perform: _performAutoSave, db: _db, fors: _forslagLinkCache, siste: _forslagSisteCache,
+        cables: S.cables, mats: S.mats, matPaths: S.matPaths, roomAt: _presentRoomAt, auto: _presentAutoValgt,
+        cursor: canvas.style.cursor, rev: _kundeRevState, kl: _kundeLinkCache };
+      const lenN = (r, i) => Math.round(Math.hypot(r.points[(i + 1) % r.points.length].x - r.points[i].x, r.points[(i + 1) % r.points.length].y - r.points[i].y));
+      try {
+        _scheduleAutoSave = () => {}; _performAutoSave = async () => {};
+        S.rooms = [rom(1, 'Stue', 500, 320), rom(2, 'Bad', 300, 240, 560)];
+        for (const r of S.rooms) r.walls = compWalls(r.points);
+        S.cables = []; S.mats = []; S.matPaths = []; _kundeState = null;
+        // 1. Produktmål: skjult i presentasjon og forslagslenke, uansett rommets brytere.
+        S.rooms[0].stripDimSnap = true; S.rooms[0].cableDimSnap = true; S.rooms[0].matDimSnap = true;
+        S.ui.present = true; S.ui.presentPublic = true; S.ui.kundeMode = 'forslag'; S.ui._pdfMode = false;
+        check('N: produktmål skjules i forslagslenka', true, _presentProduktMaalSkjult() === true, _presentProduktMaalSkjult());
+        S.ui.kundeMode = null; S.ui.presentPublic = true;
+        check('N: ...og i ren presentasjon', true, _presentProduktMaalSkjult() === true, _presentProduktMaalSkjult());
+        check('N: ...uten å røre rommets egne brytere', true, S.rooms[0].stripDimSnap === true && S.rooms[0].cableDimSnap === true, 'bryter endret');
+        S.ui._pdfMode = true;
+        checkIkke('N: PDF-rendring viser produktmålene som før', _presentProduktMaalSkjult(), 'skjult i PDF');
+        S.ui._pdfMode = false; S.ui.kundeMode = 'maal';
+        checkIkke('N: mållenka er uendret (ikke gatet)', _presentProduktMaalSkjult(), 'skjult i mållenka');
+        S.ui.kundeMode = null; S.ui.present = false;
+        checkIkke('N: Kenneths egen visning (editoren) er uendret', _presentProduktMaalSkjult(), 'skjult i editoren');
+        check('N: tegneløkka hopper over de tre produktkjedene når gaten er på', true,
+          /_presentProduktMaalSkjult\(\)/.test(uK(drawAllDimAnnotations)) && /if \(_skjulProdukt\) continue;/.test(uK(drawAllDimAnnotations))
+          && uK(drawAllDimAnnotations).indexOf('_skjulProdukt) continue') < uK(drawAllDimAnnotations).indexOf('_drawStripDimChainForRoom')
+          && uK(drawAllDimAnnotations).indexOf('_presentDimsOn(room)') < uK(drawAllDimAnnotations).indexOf('_skjulProdukt) continue'), 'veggmålene må tegnes FØR hoppet, produktkjedene etter');
+        // 2. Klikk-styring: hover rører aldri valget — målt med et stubbet treff på rom 2.
+        S.ui.present = true; S.ui.presentPublic = true; S.ui.kundeMode = null; S.ui.presentRoomId = 1; _presentAutoValgt = true;
+        _presentRoomAt = () => S.rooms[1];
+        _presentHover({});
+        check('N: hover over et annet rom i ren presentasjon bytter IKKE rom (valget står på 1)', 1, S.ui.presentRoomId === 1 && _presentAutoValgt === true, S.ui.presentRoomId);
+        check('N: ...men markøren blir peker', 'pointer', canvas.style.cursor === 'pointer', canvas.style.cursor);
+        _presentRoomAt = () => null;
+        _presentHover({});
+        check('N: hover utenfor rom: valget står, markøren er hånd', '1/grab', S.ui.presentRoomId === 1 && canvas.style.cursor === 'grab', S.ui.presentRoomId + '/' + canvas.style.cursor);
+        _presentRoomAt = lagretN.roomAt;
+        check('N: klikk (tap uten drag) i tegningen velger fortsatt rom i _canvasMouseUp', true,
+          /S\.ui\.presentRoomId = r \? r\.id : null;/.test(uK(_canvasMouseUp)) && /_presentRoomAt\(e\)/.test(uK(_canvasMouseUp)), 'klikkveien borte');
+        // 3. Forhåndsvalg over etasjer: første etasje uten produkter, andre med.
+        S.floors = [{ id: 1, name: '1. etasje', order: 0, partId: 1 }, { id: 2, name: '2. etasje', order: 1, partId: 1 }];
+        S.rooms[1].floorId = 2;
+        S.ui.activeFloorId = 1;
+        S.cables = [{ id: 9, roomId: 2, productId: kab.id, runs: [], direction: 'v' }];
+        check('N: forhåndsvalget finner rommet med produkter i 2. etasje', 2, _presentForhaandsvalgtRom() === 2, _presentForhaandsvalgtRom());
+        check('N: ...og _presentEnter bytter til rommets etasje FØR fitAll', true,
+          _presentByttTilRommetsEtasje(2) === true && S.ui.activeFloorId === 2
+          && uK(_presentEnter).indexOf('_presentByttTilRommetsEtasje(S.ui.presentRoomId)') < uK(_presentEnter).indexOf('fitAll()'), S.ui.activeFloorId);
+        S.ui.activeFloorId = 1; S.cables = [];
+        check('N: uten produkter noe sted: første rom i første etasje', 1, _presentForhaandsvalgtRom() === 1, _presentForhaandsvalgtRom());
+        S.rooms[1].floorId = 2; S.rooms[0].floorId = 2;   // begge i 2. etasje, 1. etasje tom
+        check('N: tom første etasje: første rom i etasjerekkefølge', 1, _presentForhaandsvalgtRom() === 1 && _presentRomIEtasjerekkefolge()[0].id === 1, _presentForhaandsvalgtRom());
+        check('N: romlista bruker samme etasjebytte (117/4 delt med forhåndsvalget)', true, /_presentByttTilRommetsEtasje\(id\)/.test(uK(_presentPanelVelgRom)), 'egen kopi');
+        S.rooms[0].floorId = 1; S.rooms[1].floorId = 1; S.floors = [S.floors[0]]; S.ui.activeFloorId = 1;
+        // 4. Vegg-tabell per vegg i forslagssvar: tre endrede vegger, to krysses av.
+        S.ui.present = false; S.ui.kundeMode = null; _forslagState = null;
+        const skrevetN = [];
+        _db = { from: () => ({ update: (felt) => ({ eq: async () => { skrevetN.push(felt); return {}; } }) }) };
+        _forslagSisteCache = null; _kundeRevState = null;
+        _forslagLinkCache = { id: 'fy', status: 'answered', applied_result: [], answered_by_name: 'Kari Kunde',
+          answer: { rooms: [], maal: { geometryMode: 'walls', points: {}, walls: [
+            { roomId: 1, wallIdx: 0, lengthCm: 512, wasCm: 500 }, { roomId: 1, wallIdx: 1, lengthCm: 330, wasCm: 320 },
+            { roomId: 2, wallIdx: 0, lengthCm: 320, wasCm: 300 }] } } };
+        _forslagArbeidInnMaal();
+        const ovN = $('kunde-rev-ov');
+        check('N: vinduet er mållenkas (Vegg · Estimert · Kunde · Avvik · Blir · ☑), ett rom-kort per rom', true,
+          !!ovN && /Blir/.test(ovN.innerHTML) && /Estimert/.test(ovN.innerHTML) && ovN.querySelectorAll('input[type=checkbox]').length === 3
+          && /Kari Kunde/.test(ovN.innerHTML) && /Stue/.test(ovN.innerHTML) && /Bad/.test(ovN.innerHTML), ovN ? ovN.querySelectorAll('input[type=checkbox]').length + ' bokser' : 'intet vindu');
+        check('N: knappene er forslagets, ikke mållenkas', true,
+          /_forslagRevBrukAlle\(true\)/.test(ovN.innerHTML) && /_forslagRevBrukRom\(1\)/.test(ovN.innerHTML) && !/_kundeApplyAll/.test(ovN.innerHTML) && !/_kundeApplyRoom/.test(ovN.innerHTML) && !/Avvis svaret/.test(ovN.innerHTML), 'mållenkas knapper');
+        check('N: alle vegger er avkrysset fra start', 3, _kundeRevState && _kundeRevState.picked.size === 3, _kundeRevState && _kundeRevState.picked.size);
+        _kundeRevPick('2|0', false);   // Bad vegg 1 velges BORT
+        check('N: avkryssing tegner vinduet på nytt med samme svar (ctx i _kundeRevState)', true,
+          $('kunde-rev-ov') !== ovN && $('kunde-rev-ov').querySelectorAll('input[type=checkbox]').length === 3 && !$('kunde-rev-ov').querySelectorAll('input[type=checkbox]')[2].checked, 'mistet svaret');
+        _forslagRevBrukAlle(true);
+        check('N: «Arbeid inn valgte mål»: bare de to avkryssede veggene endres', '512/330/300',
+          lenN(S.rooms[0], 0) === 512 && lenN(S.rooms[0], 1) === 330 && lenN(S.rooms[1], 0) === 300,
+          lenN(S.rooms[0], 0) + '/' + lenN(S.rooms[0], 1) + '/' + lenN(S.rooms[1], 0));
+        check('N: bare Stue får UTLEGG-merket, med produkt-signatur', true,
+          S.rooms[0].utleggMaaOppdateres === true && typeof S.rooms[0].utleggMerkeSig === 'string' && !S.rooms[1].utleggMaaOppdateres, [S.rooms[0].utleggMaaOppdateres, S.rooms[1].utleggMaaOppdateres].join('/'));
+        check('N: protokollraden (roomId maal) har rommene, lenka er fortsatt answered, mållenka urørt', true,
+          _forslagMaalInnarbeidet() && _forslagAppliedResult().find(x => x.roomId === 'maal').rom.join() === '1' && _forslagLinkCache.status === 'answered'
+          && skrevetN.length === 1 && !('status' in skrevetN[0]) && _kundeLinkCache === lagretN.kl, JSON.stringify(skrevetN).slice(0, 100));
+        check('N: målblokka sier Innarbeidet og kan vise målene igjen', true,
+          /✓ Innarbeidet/.test(_forslagMaalBlokkHtml(_forslagLinkCache)) && /Vis målene/.test(_forslagMaalBlokkHtml(_forslagLinkCache)), 'ingen vei tilbake');
+        check('N: vinduet står og viser den gjenstående veggen (Bad) etter innarbeidingen', true, !!$('kunde-rev-ov') && /Bad/.test($('kunde-rev-ov').innerHTML), 'vinduet lukket');
+        // Punkt-modus: ett kort per rom med «Bruk kundens rom», ingen bunnknapper.
+        $('kunde-rev-ov')?.remove(); _kundeRevState = null;
+        S.rooms[1].utleggMaaOppdateres = false;
+        _forslagLinkCache = { id: 'fz', status: 'answered', applied_result: [],
+          answer: { rooms: [], maal: { geometryMode: 'points', walls: [],
+            points: { 2: [{ x: 560, y: 0 }, { x: 880, y: 0 }, { x: 880, y: 240 }, { x: 560, y: 240 }] } } } };
+        _forslagArbeidInnMaal();
+        check('N: punkt-modus: rommet samlet med «Bruk kundens rom», ingen vegg-knapper', true,
+          !!$('kunde-rev-ov') && /_forslagRevBrukPunkter\(2\)/.test($('kunde-rev-ov').innerHTML) && !/Arbeid inn alle mål/.test($('kunde-rev-ov').innerHTML), $('kunde-rev-ov') ? 'knapper feil' : 'intet vindu');
+        _forslagRevBrukPunkter(2);
+        check('N: «Bruk kundens rom» erstatter rommet og merker det', '320/true',
+          lenN(S.rooms[1], 0) === 320 && S.rooms[1].utleggMaaOppdateres === true && typeof S.rooms[1].utleggMerkeSig === 'string', lenN(S.rooms[1], 0) + '/' + S.rooms[1].utleggMaaOppdateres);
+        $('kunde-rev-ov')?.remove(); _kundeRevState = null;
+        // 5. UTLEGG-merket ryddes av seg selv ved nytt utlegg — kabel, matte, frihånds-matte.
+        S.rooms.push(rom(3, 'Kjøkken', 400, 300, 0)); S.rooms[2].points.forEach(p => p.y += 400); S.rooms[2].walls = compWalls(S.rooms[2].points);
+        for (const r of S.rooms) { r.utleggMaaOppdateres = true; r.utleggMerkeSig = _roomProduktSignatur(r.id); }
+        renderSidebar();
+        check('N: uten nytt utlegg står merkene', 3, S.rooms.filter(r => r.utleggMaaOppdateres).length === 3, S.rooms.filter(r => r.utleggMaaOppdateres).length);
+        S.cables.push({ id: 71, roomId: 1, productId: kab.id, runs: [], direction: 'v' });                 // kabel i Stue
+        S.mats.push({ id: 72, roomId: 2, productId: matte.id, x: 600, y: 20, w: 50, h: 200, direction: 'v' }); // matte i Bad
+        S.matPaths.push({ id: 73, roomId: 3, productId: matte.id, start: { x: 20, y: 420 }, offX: 0, offY: 0, pts: [] }); // frihånd i Kjøkken
+        renderSidebar();
+        check('N: nytt utlegg (kabel, matte, frihånds-matte) fjerner merket i alle tre rom', 0,
+          S.rooms.filter(r => r.utleggMaaOppdateres).length === 0 && S.rooms.every(r => r.utleggMerkeSig === undefined), S.rooms.filter(r => r.utleggMaaOppdateres).map(r => r.name).join(','));
+        // Et gammelt merke (før 119, uten signatur) står til det fjernes manuelt.
+        S.rooms[0].utleggMaaOppdateres = true; S.rooms[0].utleggMerkeSig = undefined;
+        S.cables.push({ id: 74, roomId: 1, productId: kab.id, runs: [], direction: 'v' });
+        renderSidebar();
+        check('N: merke uten signatur (satt før 119) står til det klikkes bort', true, S.rooms[0].utleggMaaOppdateres === true, S.rooms[0].utleggMaaOppdateres);
+        _clearRoomProductCollections(1, ['cables']);
+        check('N: _clearRoomProductCollections rydder fortsatt merket', false, S.rooms[0].utleggMaaOppdateres === false, S.rooms[0].utleggMaaOppdateres);
+        check('N: ryddingen bor i renderSidebar (felles kanal) og merket settes med signatur', true,
+          /_utleggMerkeRydd\(\)/.test(uK(renderSidebar)) && /utleggMerkeSig = _roomProduktSignatur/.test(uK(_forslagMaalEtterInnarbeiding)), 'ikke koblet');
+      } finally {
+        _scheduleAutoSave = lagretN.sched; _performAutoSave = lagretN.perform; _db = lagretN.db;
+        _forslagLinkCache = lagretN.fors; _forslagSisteCache = lagretN.siste; _kundeRevState = lagretN.rev;
+        _presentRoomAt = lagretN.roomAt; _presentAutoValgt = lagretN.auto; canvas.style.cursor = lagretN.cursor;
+        S.cables = lagretN.cables; S.mats = lagretN.mats; S.matPaths = lagretN.matPaths;
+        S.ui.present = lagretN.present; S.ui._pdfMode = lagretN.pdf; S.view.zoom = lagretN.zoom; S.view.panX = lagretN.panX; S.view.panY = lagretN.panY;
+        $('kunde-rev-ov')?.remove();
         _presentPanelFjern();
       }
     }
@@ -50062,11 +50229,23 @@ function _presentDimsOn(room) {
   for (const p of room.points) { if (p.x < mnx) mnx = p.x; if (p.x > mxx) mxx = p.x; if (p.y < mny) mny = p.y; if (p.y > mxy) mxy = p.y; }
   return Math.min(mxx - mnx, mxy - mny) * S.view.zoom * BASE_SCALE >= PRESENT_DIM_MIN_PX;
 }
+// 119 (Kenneth 21.10.2026, svar 116/3): produktmålene (målsatt folie/kabel/matte — «3.2 cm»,
+// «871.8 cm» i oransje) er Kenneths egne brytere (`room.stripDimSnap` m.fl., lagret i
+// prosjektet) og vises IKKE for kunden. MÅLT på «Vestre Hals 43»: rommet hadde
+// `stripDimSnap: true`, og hele foliekjeden sto i forslagslenka. Gjelder presentasjon og
+// forslagslenke; editoren, PDF-en (`_pdfMode` slår bryterne på selv) og mållenka er uendret.
+function _presentProduktMaalSkjult() {
+  if (!S.ui || !S.ui.present || S.ui._pdfMode) return false;
+  if (S.ui.kundeMode && S.ui.kundeMode !== 'forslag') return false;
+  return true;
+}
 function drawAllDimAnnotations() {
+  const _skjulProdukt = _presentProduktMaalSkjult();
   for (const room of S.rooms) {
     if (!_roomOnActiveFloor(room)) continue;
     if (room.dimSnap && room.walls && room.points) _drawDimAnnotationsForRoom(room);
     else if (room.walls && room.points && _presentDimsOn(room)) _drawDimAnnotationsForRoom(room, { bareVegger: true });
+    if (_skjulProdukt) continue;
     if (room.stripDimSnap && room.points) _drawStripDimChainForRoom(room);
     if (room.cableDimSnap && room.points) _drawCableDimChainForRoom(room);
     if (room.matDimSnap && room.points) _drawMatDimChainForRoom(room);
@@ -56141,7 +56320,7 @@ function _clearRoomProductCollections(roomId, keys) {
     S[key] = (S[key] || []).filter(x => !_rammes(x));
   }
   // 118: nytt utlegg på vei — merket «Utlegg må oppdateres» har gjort sitt.
-  { const _r = S.rooms.find(x => x.id === roomId); if (_r && _r.utleggMaaOppdateres) _r.utleggMaaOppdateres = false; }
+  { const _r = S.rooms.find(x => x.id === roomId); if (_r && _r.utleggMaaOppdateres) { _r.utleggMaaOppdateres = false; _r.utleggMerkeSig = undefined; } }
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
 }
 // DEL A (spec-varmetype-tegnet-rom-husket-klasse-ferdig-naer-handa.md, Kenneth 11.09.2026): «her
@@ -56409,6 +56588,9 @@ function renderSidebar() {
   // rooms, strips, etc.). Over-marking is cheap (1 render/frame) and prevents
   // missing edge cases.
   markDirty();
+  // 119 (118/5): UTLEGG-merket ryddes av seg selv når rommets produkter har endret seg siden
+  // merket ble satt — her, fordi alle plasseringsveiene ender i renderSidebar.
+  if (typeof _utleggMerkeRydd === 'function') _utleggMerkeRydd();
   if (typeof _renderSbProjInfo === 'function') _renderSbProjInfo();
   let h='';
   const hasParts = S.project.parts.length > 0;
@@ -85626,42 +85808,108 @@ function _forslagMaalBlokkHtml(k) {
     <div style="font-size:12px;font-weight:700;color:#f0b232">📐 Kunden har rettet målene</div>
     <div style="font-size:11.5px;margin-top:4px;line-height:1.5">${_forslagMaalLinjer(a).map(l => `<div>${esc(l)}</div>`).join('')}</div>
     <div style="margin-top:7px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      ${inn ? `<span style="font-size:11.5px;color:#22c55e;font-weight:600">✓ Innarbeidet${nar ? ' ' + nar : ''}</span>`
+      ${inn ? `<span style="font-size:11.5px;color:#22c55e;font-weight:600">✓ Innarbeidet${nar ? ' ' + nar : ''}</span>
+               <button onclick="event.stopPropagation();_forslagArbeidInnMaal()" style="padding:4px 9px;border:1px solid var(--border);border-radius:7px;background:none;color:var(--muted);font-size:11px;cursor:pointer">Vis målene</button>`
             : `<button onclick="event.stopPropagation();_forslagArbeidInnMaal()" style="padding:6px 12px;border:none;border-radius:7px;background:var(--accent);color:#0d0e10;font-size:12px;font-weight:600;cursor:pointer">Arbeid inn målene</button>`}
-      <span style="font-size:11px;color:var(--dim)">${inn ? 'Rommene er merket «Utlegg må oppdateres» til du har lagt ut på nytt.' : 'Rommene merkes «Utlegg må oppdateres». Ingen ny utlegging skjer av seg selv.'}</span>
+      <span style="font-size:11px;color:var(--dim)">${inn ? 'Rommene er merket «Utlegg må oppdateres» til de får nytt utlegg.' : 'Du velger vegg for vegg. Rommene merkes «Utlegg må oppdateres» — ingen ny utlegging skjer av seg selv.'}</span>
     </div></div>`;
 }
-async function _forslagArbeidInnMaal() {
+// 119 (Kenneth 21.10.2026, svar 118/1): «Arbeid inn målene» åpner mållenkas gjennomgangsvindu
+// (Vegg · Var · Kunden sier · Blir · ☑) med forslagssvarets mål som argument. 118 arbeidet inn
+// alt i ett klikk. Rom der kunden bare flyttet et hjørne får et kort med «Bruk kundens rom»
+// (én avkryssing for hele rommet, som i mållenka).
+function _forslagArbeidInnMaal() {
   const k = _forslagLinkCache || _forslagSisteCache;
   const a = k && k.answer && k.answer.maal;
-  if (!a || _kundeSkrivSperret()) return;
-  let beroerte = [];
+  if (!a) return;
+  const groups = _kundeAnswerByRoom(a);
   if (a.geometryMode === 'points') {
     for (const rid in (a.points || {})) {
       const r = S.rooms.find(x => String(x.id) === String(rid));
-      if (!r) continue;
-      _kundeBrukKundePunkter(r.id, a);
-      beroerte.push(r.id);
+      if (r && !groups.has(r.id)) groups.set(r.id, { room: r, walls: [] });
     }
-  } else {
-    const groups = _kundeAnswerByRoom(a);
-    const res = _kundeApplyWalls(groups, false);
-    _kundeFinishApply(res, groups, { ikkeLukkLenke: true });
-    beroerte = res.touched || [];
   }
-  for (const id of beroerte) { const r = S.rooms.find(x => x.id === id); if (r) r.utleggMaaOppdateres = true; }
+  if (!groups.size) { _showToast && _showToast('Målene gjelder rom som ikke finnes i prosjektet lenger', 'warn'); return; }
+  const ctx = { forslag: true, k: { id: k.id, answer: a, answered_by_name: k.answered_by_name, answered_at: k.answered_at } };
+  const linkId = 'forslag:' + k.id;
+  if (!_kundeRevState || _kundeRevState.linkId !== linkId) {
+    _kundeRevState = { linkId, picked: new Set(), ctx };
+    for (const [rid, g] of groups) for (const w of g.walls) _kundeRevState.picked.add(rid + '|' + w.wallIdx);
+  } else _kundeRevState.ctx = ctx;
+  _kundeRevRender(groups, ctx);
+}
+function _forslagRevCtx() {
+  const ctx = _kundeRevState && _kundeRevState.ctx;
+  if (!ctx || !ctx.forslag || _kundeSkrivSperret()) return null;
+  return ctx;
+}
+// Vegg-modus: bare avkryssede vegger (bareValgte) eller alle. Samme innarbeiding som mållenka.
+function _forslagRevBrukAlle(bareValgte) {
+  const ctx = _forslagRevCtx(); if (!ctx) return;
+  const groups = _kundeAnswerByRoom(ctx.k.answer);
+  const res = _kundeApplyWalls(groups, !!bareValgte);
+  _kundeFinishApply(res, groups, { ikkeLukkLenke: true });
+  if (res.applied) _forslagMaalEtterInnarbeiding(res.touched);
+}
+function _forslagRevBrukRom(roomId) {
+  const ctx = _forslagRevCtx(); if (!ctx) return;
+  const all = _kundeAnswerByRoom(ctx.k.answer);
+  const one = new Map();
+  if (all.has(roomId)) one.set(roomId, all.get(roomId));
+  const res = _kundeApplyWalls(one, true);
+  _kundeFinishApply(res, all, { ikkeLukkLenke: true });
+  if (res.applied) _forslagMaalEtterInnarbeiding(res.touched);
+}
+// Punkt-modus: hele rommet erstattes (033), som i mållenka.
+function _forslagRevBrukPunkter(roomId) {
+  const ctx = _forslagRevCtx(); if (!ctx) return;
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r) return;
+  const foer = JSON.stringify(r.points);
+  _kundeBrukKundePunkter(r.id, ctx.k.answer);
+  if (JSON.stringify(r.points) === foer) return;   // avvist (ugyldig geometri) — ingen protokoll
+  _forslagMaalEtterInnarbeiding([r.id]);
+  if (document.getElementById('kunde-rev-ov')) _kundeRevRender();
+}
+// Protokollen etter en innarbeiding: UTLEGG-merket (med produkt-signatur, 118/5) og raden
+// `{roomId:'maal', status:'innarbeidet'}` i applied_result. Flere innarbeidinger (to vegger nå,
+// én senere) slår rommene sammen i samme rad.
+async function _forslagMaalEtterInnarbeiding(beroerte) {
+  const k = _forslagLinkCache || _forslagSisteCache;
+  if (!k) return;
+  for (const id of beroerte) {
+    const r = S.rooms.find(x => x.id === id);
+    if (r) { r.utleggMaaOppdateres = true; r.utleggMerkeSig = _roomProduktSignatur(r.id); }
+  }
+  const gammel = _forslagAppliedResult().find(x => x && x.roomId === 'maal');
+  const rom = Array.from(new Set([...(gammel && Array.isArray(gammel.rom) ? gammel.rom : []), ...beroerte]));
   const liste = _forslagAppliedResult().filter(x => !(x && x.roomId === 'maal'));
   liste.push({ roomId: 'maal', status: 'innarbeidet', at: new Date().toISOString(),
-    by: (_currentProfile && _currentProfile.full_name) || (_currentUser && _currentUser.email) || null, rom: beroerte });
+    by: (_currentProfile && _currentProfile.full_name) || (_currentUser && _currentUser.email) || null, rom });
   k.applied_result = liste;
-  try { if (_db) await _db.from('kundelenker').update({ applied_result: liste }).eq('id', k.id); }
-  catch (e) { _showToast && _showToast('Målene er innarbeidet, men status kunne ikke lagres: ' + e.message, 'warn'); }
   if (typeof renderSidebar === 'function') renderSidebar();
   render();
   if (document.getElementById('fors-rev-ov')) _forslagRevRender();
+  try { if (_db) await _db.from('kundelenker').update({ applied_result: liste }).eq('id', k.id); }
+  catch (e) { _showToast && _showToast('Målene er innarbeidet, men status kunne ikke lagres: ' + e.message, 'warn'); }
 }
-// Merket i romlista. Fjernes når utlegget legges på nytt (`_clearRoomProductCollections`) eller
-// ved klikk på merket.
+// Merket i romlista. Fjernes når rommet får nytt utlegg (119: produkt-signaturen på merket
+// avviker fra rommets produkter nå — sjekkes i `renderSidebar`, den felles kanalen etter
+// enhver plassering), når `_clearRoomProductCollections` rydder, eller ved klikk på merket.
+function _roomProduktSignatur(roomId) {
+  return ROOM_PRODUCT_KEYS.map(k => (S[k] || []).filter(x => x.roomId === roomId).map(x => x.id).join(',')).join('|');
+}
+// Returnerer true når minst ett merke ble fjernet. Merker uten signatur (satt før 119) står
+// til de fjernes manuelt — vi vet ikke hva rommet hadde da.
+function _utleggMerkeRydd() {
+  let fjernet = false;
+  for (const r of S.rooms) {
+    if (!r.utleggMaaOppdateres || r.utleggMerkeSig == null) continue;
+    if (_roomProduktSignatur(r.id) === r.utleggMerkeSig) continue;
+    r.utleggMaaOppdateres = false; r.utleggMerkeSig = undefined; fjernet = true;
+  }
+  return fjernet;
+}
 function _utleggBadge(room) {
   if (!room || !room.utleggMaaOppdateres) return '';
   return ` <span onclick="event.stopPropagation();_utleggBadgeFjern(${room.id})" style="color:#f0b232;cursor:pointer;font-size:10px;font-weight:700" title="Kunden rettet målene — legg ut på nytt. Klikk for å fjerne merket.">UTLEGG</span>`;
@@ -85670,7 +85918,7 @@ function _utleggBadgeFjern(roomId) {
   const r = S.rooms.find(x => x.id === roomId);
   if (!r) return;
   pushUndo();
-  r.utleggMaaOppdateres = false;
+  r.utleggMaaOppdateres = false; r.utleggMerkeSig = undefined;
   renderSidebar();
 }
 
