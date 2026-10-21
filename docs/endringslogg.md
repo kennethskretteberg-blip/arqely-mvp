@@ -4,6 +4,37 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 121 — Kabelmotor: fail-open uten polygonbibliotek gjenopprettet (tilnærmet kandidat), 7 utdaterte påstander oppdatert med begrunnelse, rask variant av batteriet (21.10.2026, `main`, ikke pushet)
+
+Kenneths svar på SPØRSMÅL 103 (skrevet inn i `docs/trapp/prompter/SPØRSMÅL.md`). Full måling i
+`docs/kabel/STATUS.md` §45.
+
+### STEG 0
+
+- De åtte røde på `bca0959`: de samme åtte, 127 påstander, 30 s (§44 målte 127 s 20.10 — ikke forklart).
+- **`null` kom ikke fra hjørnefilteret** (§44s hypotese): `_cableFilterByCorner` kaster aldri alle.
+  Kandidatlista var TOM — uten clipper gir geo «ingen løsning», og 083 tok V6 ut av konkurransen.
+- `baseline.json`: `badHakk41|v|tr` 63,3 % (akseptert), `tl`/`br` 94,9 %. Bekreftet.
+
+### Endring
+
+- **Fail-open i `_autoFillCableImpl`** (inne i `if (!chosen)`, bare når `!_cblClipperReady()`): dagens
+  kaskade som tilnærmet kandidat — målt, merket `_geomApprox`/`_geomOk`/`_geomDefects`, panelet sier
+  «tilnærmet». Innenfor 074-dybdetelleren (ingen dialoger). Med clipper: bit-identisk (ny påstand).
+- **Sju påstander** oppdatert til målte verdier, hver med én kommentar om hvorfor og hvilken commit
+  (5,711 m² / topp = minst y / 088b-ordlyd / 600W starter ved nærmeste lovlige punkt og panelet
+  melder det / badHakk41 måles i `tl`).
+- **Rask variant:** `_cableGeometryQuickTest()` / `{ rask: true }` — utvalg av fixturer og de
+  seksjonene som bærer de åtte. Seksjonene i testen er gatet med `_vil(tag)`; uten `rask` kjører alt.
+
+### Målt etter
+
+- `_cableGeometryRegressionTest()` 132/132 (127 + 5 nye) på 30,0 s. Rask: 67/67 på 18,8 s.
+- `_cableGeoSuite()`: 142 rader, 0 feil, 0 endret, 0 nye, 0 borte (19,7 s). `_cableForstyrrelsesTest()`:
+  31 brudd, som sist målt (§38/§40: 31).
+
+---
+
 ## 120 — Trapp: alle soner starter på samme side som sone 1, «Antall kabler» i sonen, auto 2 kabler når 1 ikke holder, låst/auto også på trappenivå (21.10.2026, `main`, ikke pushet)
 
 Kenneths svar på SPØRSMÅL fra serie 104/105/106 (skrevet inn i `docs/serie-104/SPØRSMÅL.md`).

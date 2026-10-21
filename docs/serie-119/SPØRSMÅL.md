@@ -49,3 +49,20 @@
    ligge i sonen). Trapper uten soner er urørt.
 
 ## 121 · Kabelmotor-testene
+
+1. **Fail-open-årsaken var ikke hjørnefilteret.** §44 skrev «083s harde kaskadefilter … slipper ingen
+   tilnærmet kandidat gjennom». Målt: `_cableFilterByCorner` returnerer hele lista når ingen treffer
+   hjørnet — den kaster aldri alle. Det som ga `null` var at kandidatlista var TOM: uten clipper gir
+   geo «ingen løsning», og 083 (samme commit) tok V6 ut av konkurransen, så ingen kaskademotor ble
+   lagt i lista (skew bare for roterte rom). Fiksen ligger derfor der lista er tom (`if (!chosen)`),
+   ikke i filteret. Med clipper lastet er veien uendret (låst av en ny påstand).
+2. **Den tilnærmede kandidaten er dagens kaskade** (`_autoFillCableLegacy` via
+   `_cableLegacyInDirection`, innenfor 074-dybdetelleren så den ikke åpner dialoger). Den måles med
+   `_cableGeometryCheck` og merkes `_geomOk` ærlig (kan være ugyldig — det var den også før 083:
+   «v6/CC 14,14/ugyldig»). Panelet sier «Lagt uten polygonbiblioteket — kantene er tilnærmet».
+3. **Batteriet tok 30 s her, ikke 127 s** som §44 målte 20.10 — samme 127 påstander. Jeg vet ikke
+   om forskjellen er maskinen, nettleserens tilstand eller noe i koden siden `ffb8db7`; tallet står
+   som målt i dag.
+4. **Den raske variantens utvalg** er én fixture per motorfamilie (`_CABLE_GEO_RASK_FIXTURES`), valgt
+   så den holder seg under 20 s — se STATUS §45 for tidene per fixture. Vil du ha andre fixturer i
+   utvalget, er det én liste.

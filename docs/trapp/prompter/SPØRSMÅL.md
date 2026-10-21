@@ -123,6 +123,7 @@ Ingen. Felles innstilling (spørsmål 4 over), ikke lagret med prosjektet (som f
 1. **«Tre røde sjekker» var feil — det er ÅTTE.** Feilen var min: i 102-rapporten skrev jeg ut bare
    de tre første (`.slice(0, 3)`) og leste det som tre. Endringsloggen for 102 er rettet.
    Full måling i `docs/kabel/STATUS.md` §44.
+   **Svar (Kenneth 21.10):** (Tatt til etterretning.) Gjort i 121: STEG 0 kjørte de åtte på nytt på `bca0959` — fortsatt de samme åtte, 127 påstander.
 2. **Sju av åtte er utdaterte påstander, ikke dårligere utlegg.** De låser tall fra før 088 rettet
    den speilvendte y-aksen (målt: `w2s` gir mindre skjerm-y for world-y −1040, så −1040 ER toppen —
    testen tror det motsatte) og før 089 hentet Rom 5-fixturet på nytt fra det ekte prosjektet
@@ -130,18 +131,23 @@ Ingen. Felles innstilling (spørsmål 4 over), ikke lagret med prosjektet (som f
    `_cableGeometryRegressionTest` til de målte verdiene, med en kommentar om hvorfor — slik
    `_cableZoneRegressionTest` B ble oppdatert i 096 («en påstand som låser et design, må oppdateres
    når designet er det som endres»).
+   **Svar (Kenneth 21.10):** Ja, oppdater de sju til målte verdier med kommentar om hvorfor. Gjort i 121: #1 5,711 m² (089), #2–4 topp = minst y (088), #5 088b-ordlyd, #6 se 103/4, #8 flyttet til `tl` (103/5). Hver har én kommentar med commit.
 3. **Én er en ekte forverring: `077: uten biblioteket legges det fortsatt ut`.** 083 la inn et hardt
    filter på kaskadenivå («start i valgt hjørne går foran dekning»), og uten polygonbiblioteket
    finnes det da ingen kandidat som slipper gjennom — rommet får **ingen kabel**. Fail-open-regelen
    fra 077/060 sier at det skal legges ut, bare merket «tilnærmet». **Forslag til retting:** la
    hjørnefilteret slippe gjennom en tilnærmet kandidat når ingen eksakt finnes, i stedet for å
    returnere null. Dette er den eneste av de åtte som bør rettes i MOTOREN.
+   **Svar (Kenneth 21.10):** Ja, rett fail-open i motoren. Gjort i 121 — men årsaken var ikke hjørnefilteret: uten clipper gir geo «ingen løsning», og siden 083 er V6 ute av konkurransen, så kandidatlista var TOM og `_autoFillCableImpl` returnerte `null`. Nå går dagens kaskade gjennom som tilnærmet kandidat (merket `_geomApprox`, panelet sier «tilnærmet»), bare når biblioteket mangler. Med clipper er utlegget bit-identisk (ny påstand låser det).
 4. **`082: 600W når øvre venstre hjørne` (nå 189 cm) er en reell UX-endring.** 088b gjorde valgt
    retning hard — hjørnerunden kan ikke lenger snu retningen for å nå hjørnet. Panelet sier fra
    («start 124 cm fra hjørnet» + en advarsel). Vil du ha hjørnet tilbake på bekostning av retningen,
    eller er dagens oppførsel riktig?
+   **Svar (Kenneth 21.10):** Behold dagens oppførsel — valgt retning er hard (083/088b). Gjort i 121: påstanden låser nå «> 40 cm, fortsatt loddrett», og at panelet melder avstanden («start N cm fra hjørnet») og at hjørnet ikke nås («nærmeste er N cm unna»).
 5. **`074b badHakk41` måler mot feil hjørne.** `baseline.json` har samme rad som 63,3 % og grønn —
    det er den aksepterte tilstanden. Det gamle resultatet (CC 13,81 · 94,9 %) finnes fortsatt, under
    `tl`/`br`. **Forslag:** flytt påstanden til det hjørnet den egentlig gjaldt.
+   **Svar (Kenneth 21.10):** Ja, flytt påstanden. Gjort i 121: badHakk41 måles i `tl` (CC 13,81 · 94,9 %); badHakk 47 m står på `tr`. `tr` for badHakk41 (63,3 %) er den aksepterte raden i `baseline.json` og vaktes av `_cableGeoSuite()`.
 6. **Batteriet tar 127 s og har 127 påstander.** En kjøring med kun de åtte tar under 15 s. Vil du
    ha en «rask» variant permanent (f.eks. `_cableGeometryRegressionTest({ bare: [...] })`)?
+   **Svar (Kenneth 21.10):** Ja, rask variant permanent. Gjort i 121: `_cableGeometryRegressionTest({ rask: true })` / `_cableGeometryQuickTest()` — hovedløkka på ett utvalg fixturer (én per motorfamilie), alle seksjonene (inkl. de åtte). Dokumentert i STATUS §45.

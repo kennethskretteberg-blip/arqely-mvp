@@ -32189,6 +32189,33 @@ function _autoFillCableImpl(roomId, productId, opts) {
   // Ingen gyldig kandidat i noen retning → legg ut den beste likevel, MERKET (spec §5 / 070.3).
   const chosen = (best && best.chk.ok) ? best : (best || cands[0] || null);
   if (!chosen) {
+    // ─── 121 · FAIL-OPEN UTEN POLYGONBIBLIOTEKET (Kenneth 21.10.2026, svar 103/3) ──────────
+    // MÅLT (STEG 0): uten clipper gir geo «ingen løsning» (det lovlige området er bare
+    // tilnærmet), og siden 083 er V6 ute av konkurransen — kandidatlista er TOM, og rommet
+    // fikk ingen kabel i det hele tatt (`null`). 077/060-regelen sier det motsatte: uten
+    // biblioteket SKAL det legges ut, bare merket «tilnærmet». Veien er den samme som 077 tok:
+    // dagens kaskade (`_autoFillCableLegacy`), målt og merket. Gjelder BARE når biblioteket
+    // mangler — med clipper lastet er alt under uendret, og R-START er fortsatt hard.
+    // Kjøres innenfor dybdetelleren (074): ingen dialoger fra kaskaden.
+    if (!_cblClipperReady() && !(opts && opts._ingenFailOpen)) {
+      let l = null;
+      _cableSearchDepth++;
+      try { l = _cableLegacyInDirection(roomId, productId, opts, primary); }
+      catch (e) { l = null; }
+      finally { _cableSearchDepth--; }
+      if (l) {
+        const chk = _cableGeometryCheck(l, room);
+        l._geomApprox = true;
+        l._geomOk = !!(chk && chk.ok);
+        l._geomEngine = l._engine || 'kaskade';
+        l._geomDefects = (chk && chk.ok) ? null : ((chk && chk.hard) || []).map(d => ({ kind: d.kind, at: d.at, value: d.value, msg: d.msg }));
+        l._geomMetrics = chk ? chk.metrics : null;
+        l._startCornerWanted = wantCorner;
+        l._startCornerOffCm = _cableStartCornerOffCm(l, room, wantCorner);
+        room._cableNoSolution = geoNo || null;
+        return l;
+      }
+    }
     // Ingen motor ga i det hele tatt geometri. Ny motors begrunnelse er det eneste vi har.
     if (geoNo) { room._cableNoSolution = geoNo; }
     return null;
@@ -33808,7 +33835,13 @@ function _autoFillMixedCables(roomId, productIds, forcedDir) {
 //   · _cableGeometryRegressionTest()     — det store batteriet med alle sju motorene. BEHOLDES,
 //                                         men bare som manuell kjøring. Den er ikke en port:
 //                                         V6 er ute av konkurransen (083) og skal ikke kjøres
-//                                         der den ikke kan vinne.
+//                                         der den ikke kan vinne. Målt 21.10.2026: 132 påstander,
+//                                         30 s.
+//   · _cableGeometryQuickTest()          — 121: den RASKE varianten av det store batteriet
+//                                         (`{ rask: true }`): hovedløkka på én fixture per
+//                                         motorfamilie (_CABLE_GEO_RASK_FIXTURES) + seksjonene
+//                                         som bærer de åtte sjekkene fra STATUS §44
+//                                         (_CABLE_GEO_RASK_SEKSJONER). Målt: 67 påstander, 19 s.
 //
 // Dominans: en rad som er dårligere på et LÅST mål feiler. Bedre rader rapporteres, og
 // baselinjen oppdateres BARE med `_cableGeoSuite({ oppdaterBaseline: true })` — aldri av seg selv.
@@ -34156,9 +34189,21 @@ async function _cableForstyrrelsesTest(opts) {
 // ⚠ 095: DETTE ER IKKE EN PORT. Den kjører alle sju motorene × 17 fixtures × 2 retninger og
 // fullførte ikke på 13 minutter. Porten er `_cableGeoSuite()`. Denne beholdes for manuell
 // gjennomgang av motorkaskaden — V6-loggingen er nå bak `window._cableQuietV6`.
-async function _cableGeometryRegressionTest() {
+// 121 (svar 103/6): RASK VARIANT. Hovedløkka (alle fixturer × 2 retninger × før/etter-kaskade) er
+// det dyre; seksjonene (076/077/080/081/082/083b/088/074b …) koster sekunder. `rask: true` kjører
+// hovedløkka på ett utvalg — én fixture per motorfamilie — og alle seksjonene. Fullt batteri
+// uten argument, som før. `_cableGeometryQuickTest()` er det korte navnet.
+const _CABLE_GEO_RASK_FIXTURES = ['rektangel', 'skraa', 'rom5', 'badHakk41', 'rekt2kab', 'lRom'];
+const _CABLE_GEO_RASK_SEKSJONER = ['076', '080', '082', '077', '074b'];
+async function _cableGeometryQuickTest() { return _cableGeometryRegressionTest({ rask: true }); }
+async function _cableGeometryRegressionTest(opts) {
+  opts = opts || {};
   const results = [];
   const add = (name, ok, expected, got) => results.push({ name, ok: !!ok, expected, got });
+  const _t0 = performance.now();
+  // Rask variant: bare seksjonene som bærer de åtte fra §44 (081 ligger i 080-blokka) + hovedløkka
+  // på utvalget. Fullt batteri: alle.
+  const _vil = tag => !opts.rask || _CABLE_GEO_RASK_SEKSJONER.includes(tag);
   if (typeof _cableFixtures === 'undefined' || typeof _cableGeometryCheck !== 'function') {
     add('kontrollen og fixturene finnes', false, 'ja', 'nei');
     return { ok: false, results };
@@ -34167,7 +34212,8 @@ async function _cableGeometryRegressionTest() {
   const snap = _cableGallerySnapshotState();
   const quiet = window._showToast; window._showToast = function () {};
   try {
-    for (const key of Object.keys(_cableFixtures)) {
+    const _keys = opts.rask ? _CABLE_GEO_RASK_FIXTURES.filter(k => _cableFixtures[k]) : Object.keys(_cableFixtures);
+    for (const key of _keys) {
       const fx = _cableFixtures[key];
       for (const dir of ['v', 'h']) {
         // FØR: dagens kaskade alene.
@@ -34236,7 +34282,7 @@ async function _cableGeometryRegressionTest() {
     // ── 072 · badHakk i BEGGE retninger, med én kabel ────────────────────────────────────
     // Kenneths fasit: start øverst til høyre, og loddrett går via transittløpet forbi
     // veggstubben. Før 072 svarte loddrett «ingen løsning».
-    for (const dir of ['v', 'h']) {
+    if (_vil('072a')) for (const dir of ['v', 'h']) {
       const rom = _cableGalleryBuildScene(_cableFixtures.badHakk);
       S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: 'tr' });
       const cab = generateCableGeo(1, _cableFixtures.badHakk.productId, { direction: dir, startCorner: 'tr' });
@@ -34262,7 +34308,7 @@ async function _cableGeometryRegressionTest() {
     }
 
     // ── 072 · hindringsrom: transitten skal løse ÉN hindring ─────────────────────────────
-    for (const dir of ['v', 'h']) {
+    if (_vil('072b')) for (const dir of ['v', 'h']) {
       _cableGalleryBuildScene(_cableFixtures.enHindring);
       S.varmefolie = Object.assign({}, snap.vf, { direction: dir, dirExplicit: true, startCorner: 'bl' });
       const cab = generateCableGeo(1, _cableFixtures.enHindring.productId, { direction: dir, startCorner: 'bl' });
@@ -34275,7 +34321,7 @@ async function _cableGeometryRegressionTest() {
     // INNE i kandidatsøket, én gang per kjøring — og panelet, toasten og dialogen viste tre
     // forskjellige dekningstall fra tre forskjellige utlegg. Denne blokken låser at søket ikke
     // kan begynne å snakke igjen.
-    {
+    if (_vil('074')) {
       const rom = _cableGalleryBuildScene(_cableFixtures.badHakk41 || _cableFixtures.badHakk);
       rom.targetWm2 = 120;
       S.ui.selectedRoomId = rom.id;
@@ -34321,14 +34367,17 @@ async function _cableGeometryRegressionTest() {
     // ⚠ Denne blokken finnes fordi serien gikk i ring tre ganger: hver runde ble målt mot
     // badHakk og erklært grønn, mens Kenneths eget rom var ugyldig (STATUS §10.4). Rom 5 er nå
     // det faste testrommet, med den EKTE geometrien hentet fra prosjektet hans.
-    {
+    if (_vil('076')) {
       const rom = _cableGalleryBuildScene(_cableFixtures.rom5);
       S.ui.selectedRoomId = rom.id;
       S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'tr' });
       const cab = generateCableGeo(1, 23, { direction: 'v', startCorner: 'tr' });
       const gyldig = !!(cab && cab.ok !== false);
-      add('076 rom5: geometrien er 5,698 m² netto', Math.abs(roomAreas(rom).net / 10000 - 5.698) < 0.01,
-          '5,698 m²', (roomAreas(rom).net / 10000).toFixed(3) + ' m²');
+      // 121 (svar 103/2): 5,698 → 5,711 m². 089 (`a365c70`) hentet Rom 5-fixturet på nytt fra det
+      // ekte prosjektet («fixturet hadde drevet fra virkeligheten»); fixturens eget navn er «Bad
+      // 5,71 m²». Påstanden låste det gamle, feil rommet.
+      add('076 rom5: geometrien er 5,711 m² netto (089 hentet fixturet på nytt)', Math.abs(roomAreas(rom).net / 10000 - 5.711) < 0.01,
+          '5,711 m²', (roomAreas(rom).net / 10000).toFixed(3) + ' m²');
       add('076 rom5 700W loddrett: gir et utlegg', gyldig, 'kabelobjekt',
           gyldig ? 'ja' : ('ingen løsning: ' + (cab && cab.reason)));
       if (gyldig) {
@@ -34373,7 +34422,7 @@ async function _cableGeometryRegressionTest() {
     // ⚠ MÅLT: alle fire hjørnevalg ga identisk start, (972, −923). Kabelen bar `startCorner`
     // som en ren etikett, og `_geoScore` fikk `corner: wantCorner` inn — sammenligningen var
     // alltid sann. Her låses begge halvdelene: banen orienteres, og avviket sies fra om.
-    {
+    if (_vil('080')) {
       const start = {};
       for (const hj of ['bl', 'br', 'tl', 'tr']) {
         _cableGalleryBuildScene(_cableFixtures.rom5);
@@ -34402,12 +34451,16 @@ async function _cableGeometryRegressionTest() {
           mål[hj] = k && k.start ? +k.start.y.toFixed(0) : null;
         }
       }
-      add('081: vannrett hører på OPP/NED', vVann.tl != null && vVann.bl != null && vVann.tl > vVann.bl + 50,
-          'tl starter høyere enn bl', 'tl y=' + vVann.tl + ' bl y=' + vVann.bl);
-      add('081: vannrett tl starter nær taket', vVann.tl != null && vVann.tl > -860,
-          'y > -860 (rommets topp er -836)', 'y=' + vVann.tl);
-      add('081: vannrett bl starter nær gulvet', vVann.bl != null && vVann.bl < -1020,
-          'y < -1020 (rommets bunn er -1040)', 'y=' + vVann.bl);
+      // 121 (svar 103/2): world-y ØKER nedover på skjermen — `w2s(0,−1040).y = −1485` mot
+      // `w2s(0,−836).y = −1179` — så Rom 5s TOPP er y ≈ −1040 og gulvet y ≈ −836. 088 (`5c929ef`)
+      // rettet den speilvendte aksen; de gamle påstandene («rommets topp er −836») var troen fra
+      // før 088. Målt etter 088: tl y=−1035, bl y=−841.
+      add('081: vannrett hører på OPP/NED (088: topp = minst y)', vVann.tl != null && vVann.bl != null && vVann.tl < vVann.bl - 50,
+          'tl starter høyere (mindre y) enn bl', 'tl y=' + vVann.tl + ' bl y=' + vVann.bl);
+      add('081: vannrett tl starter nær taket', vVann.tl != null && vVann.tl < -1020,
+          'y < -1020 (rommets topp er -1040)', 'y=' + vVann.tl);
+      add('081: vannrett bl starter nær gulvet', vVann.bl != null && vVann.bl > -860,
+          'y > -860 (rommets gulv er -836)', 'y=' + vVann.bl);
       // Loddrett i DETTE rommet er låst av paritet (6 baner i øvre felt) — det skal ikke
       // påstås at den treffer hjørnet, men det skal STÅ i panelet hvor den havnet.
       _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
@@ -34417,8 +34470,10 @@ async function _cableGeometryRegressionTest() {
           '_startCornerOffCm satt', kt ? String(kt._startCornerOffCm) : 'ingen kabel');
       if (kt && kt._startCornerOffCm > 40) {
         const lj = _cableStatusLines(kt, S.rooms[0]).map(l => l.tekst);
-        add('081: panelet oppgir avstanden i cm', lj.some(l => /^Start: \d+ cm fra /.test(l)),
-            '«Start: N cm fra …»', lj.join(' | ').slice(0, 90));
+        // 121 (svar 103/2): ordlyden ble endret i 088b (`b11dc9e`) — opplysningen står to ganger
+        // («… · start 124 cm fra hjørnet» + advarselen «nærmeste er 124 cm unna»).
+        add('081: panelet oppgir avstanden i cm (088b-ordlyd)', lj.some(l => /start \d+ cm fra hjørnet/.test(l)),
+            '«… start N cm fra hjørnet»', lj.join(' | ').slice(0, 90));
       }
       // Poengleddet må lese det MÅLTE hjørnet, ikke det ønskede — ellers er det alltid sant.
       add('080: _geoScore får ikke `corner: wantCorner`',
@@ -34446,7 +34501,7 @@ async function _cableGeometryRegressionTest() {
     // ⚠ Dette er testen som manglet. Batteriene målte riktige tall mot FEIL hjørne og var
     // grønne hele tiden, fordi ingen av dem spurte hvor hjørnet havnet på skjermen.
     // `w2s` er fasiten: mindre skjerm-y er lenger opp, mindre skjerm-x er lenger til venstre.
-    {
+    if (_vil('088')) {
       _cableGalleryBuildScene(_cableFixtures.rom5);
       S.ui.selectedRoomId = 1;
       const rm = S.rooms[0];
@@ -34512,7 +34567,7 @@ async function _cableGeometryRegressionTest() {
     // skew-motorens baneformer. Kastet skjer i canvas-mousedown, så HELE klikk-kaskaden døde —
     // verken kabel, rom eller vegg lot seg velge. Feilen var usynlig i alle batteriene fordi
     // ingen av dem klikket på lerretet.
-    {
+    if (_vil('083b')) {
       _cableGalleryBuildScene(_cableFixtures.rom5);
       S.ui.selectedRoomId = 1;
       S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
@@ -34544,7 +34599,7 @@ async function _cableGeometryRegressionTest() {
     // når resultatet fortsatt er hullfritt, innenfor lengden og ikke koster mer enn 3
     // prosentpoeng dekning. ⚠ Uten dekningsvakten godtok den 8 prosentpoeng for en
     // hjørnegevinst som uansett ikke ble god (målt: 89,3 → 81,2 %).
-    {
+    if (_vil('082')) {
       const p10 = (HEATING_PRODUCTS.find(p => /10T 600W 60m/.test(p.name || '')) || {}).id;
       for (const [navn, pid] of [['600W', 22], ['700W', 23], ['10T 600W', p10]]) {
         if (!pid) continue;
@@ -34559,9 +34614,19 @@ async function _cableGeometryRegressionTest() {
         // prosentpoeng dekning. Runden kjører derfor bare på vinnerens EGEN CC og avviser alt
         // som gjør utlegget dårligere. Panelet oppgir avstanden i stedet. Venter på Kenneths
         // beslutning om prisen er verdt det.
-        if (navn === '600W') add('082 ' + navn + ': starten når øvre venstre hjørne',
-            ok && k._startCornerOffCm <= 40,
-            '<= 40 cm fra hjørnet', ok ? k._startCornerOffCm + ' cm' : 'ingen løsning');
+        // 121 (svar 103/4, Kenneth 21.10.2026): «Behold dagens oppførsel» — valgt retning er HARD
+        // (088b, `b11dc9e`): hjørnerunden kan ikke snu retningen for å nå hjørnet, så 600W loddrett
+        // starter ved nærmeste lovlige punkt (målt 189 cm) og panelet melder avstanden + at
+        // vannrett ville truffet. Før 088b låste påstanden «≤ 40 cm», altså retningsbyttet.
+        if (navn === '600W') {
+          add('082 ' + navn + ': loddrett kan ikke nå øvre venstre — starter ved nærmeste lovlige punkt (088b: retningen er hard)',
+              ok && k._startCornerOffCm > 40 && k.direction === 'v',
+              '> 40 cm, fortsatt loddrett', ok ? k._startCornerOffCm + ' cm, ' + k.direction : 'ingen løsning');
+          const lj6 = ok ? _cableStatusLines(k, S.rooms[0]).map(l => l.tekst) : [];
+          add('082 ' + navn + ': …og panelet melder avstanden og at hjørnet ikke nås',
+              lj6.some(l => /start \d+ cm fra hjørnet/.test(l)) && lj6.some(l => /nærmeste er \d+ cm unna/.test(l)),
+              '«start N cm fra hjørnet» + «nærmeste er N cm unna»', lj6.join(' | ').slice(0, 120));
+        }
         if (!ok) continue;
         add('082 ' + navn + ': avstanden til hjørnet er oppgitt', k._startCornerOffCm != null,
             '_startCornerOffCm satt', String(k._startCornerOffCm));
@@ -34586,7 +34651,7 @@ async function _cableGeometryRegressionTest() {
     // faller `_cableLegalRegion` tilbake på hjørnevis offset, ny motor finner ingen gyldig
     // kandidat i et rom med konkav stubbe, og V6 vinner alene — med 20 løp som krysser seg
     // selv. Målt: v6/CC 14,14/UGYLDIG uten biblioteket mot geo/CC 15,28/gyldig med.
-    {
+    if (_vil('077')) {
       const ekteReady = window._cblClipperReady;
       let utenCab = null, medCab = null;
       try {
@@ -34605,7 +34670,19 @@ async function _cableGeometryRegressionTest() {
           !!(medCab && medCab._geomOk && (medCab._geomEngine === 'geo')),
           'geo + gyldig', medCab ? ((medCab._geomEngine || '?') + (medCab._geomOk ? ' gyldig' : ' UGYLDIG')) : 'ingen kabel');
       // Uten biblioteket SKAL det fortsatt legges ut (fail-open som 060), men aldri stumt.
+      // 121: var rød fra 083 (V6 ut av konkurransen → tom kandidatliste → null). Nå går den
+      // tilnærmede kandidaten gjennom dagens kaskade, merket.
       add('077: uten biblioteket legges det fortsatt ut', !!utenCab, 'kabelobjekt', utenCab ? 'ja' : 'null');
+      add('077/121: fail-open-grenen er gatet på biblioteket (med clipper er veien uendret)',
+          /if \(!_cblClipperReady\(\) && !\(opts && opts\._ingenFailOpen\)\)/.test(String(_autoFillCableImpl))
+          && String(_autoFillCableImpl).indexOf('_cblClipperReady() && !(opts') > String(_autoFillCableImpl).indexOf('if (!chosen) {'),
+          'gren inne i `if (!chosen)`, gatet på _cblClipperReady', 'kilde');
+      add('077/121: med biblioteket er utlegget det samme med og uten grenen (bit-identisk)',
+          !!medCab && JSON.stringify((medCab.centerline || medCab.runs || []).slice(0, 400)) ===
+            JSON.stringify(((() => { _cableGalleryBuildScene(_cableFixtures.rom5); S.ui.selectedRoomId = 1;
+              S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'bl', wallMarginCm: 2.5 });
+              const u = _autoFillCableImpl(1, 22, { allowPartial: true, _ingenFailOpen: true }); return u && (u.centerline || u.runs || []); })() || []).slice(0, 400)),
+          'samme senterlinje', medCab ? (medCab._geomEngine + '/' + (medCab.centerline || []).length + ' pkt') : 'ingen kabel');
       if (utenCab) {
         add('077: …og det er MERKET som tilnærmet', !!utenCab._geomApprox,
             '_geomApprox satt', utenCab._geomApprox ? 'merket' : 'STUMT');
@@ -34645,7 +34722,7 @@ async function _cableGeometryRegressionTest() {
     // ── 076 · CC FLYTTES ALDRI FOR JEVNHETENS SKYLD ─────────────────────────────────────
     // Kenneths beslutning etter sparring. Kildesjekken er vakten: nabotrinn-søket skal ikke
     // kunne snike seg inn igjen uten at noen ser det.
-    {
+    if (_vil('076cc')) {
       const kGeo = _kildeUtenKommentarer(generateCableGeo);
       add('076: ingen leting etter et annet CC-trinn for jevnhetens skyld',
         !/_geoHoles > 0[\s\S]{0,400}?attempt\(dir, cc2/.test(kGeo), 'ikke til stede',
@@ -34665,11 +34742,15 @@ async function _cableGeometryRegressionTest() {
     // veggene — heller dra inn kabel fra vegg.» Transittbanen brukes bare på den ene siden av
     // hindringen, og lot et hull på 2 × CC stå midt i båndet over stubben. Cellen skyves nå én
     // bane, så hullet havner inntil veggen i stedet.
-    for (const [navn, key, pid] of [['badHakk 47 m', 'badHakk', 24], ['badHakk 41 m', 'badHakk41', 23]]) {
+    // 121 (svar 103/5): badHakk41 måles i hjørnet påstanden egentlig gjaldt. Etter 088 peker `tr`
+    // på et annet fysisk hjørne — `baseline.json` har `badHakk41|v|tr` = CC 9,06 · 63,3 % · 0 hull ·
+    // gyldig (den AKSEPTERTE tilstanden, `_cableGeoSuite()` er grønn på den). Det gamle resultatet
+    // (CC 13,81 · 94,9 %) ligger under `tl`/`br`. badHakk (47 m) står på `tr` som før.
+    if (_vil('074b')) for (const [navn, key, pid, hj] of [['badHakk 47 m', 'badHakk', 24, 'tr'], ['badHakk 41 m', 'badHakk41', 23, 'tl']]) {
       const rom = _cableGalleryBuildScene(_cableFixtures[key]);
       S.ui.selectedRoomId = rom.id;
-      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: 'tr' });
-      const cab = generateCableGeo(1, pid, { direction: 'v', startCorner: 'tr' });
+      S.varmefolie = Object.assign({}, snap.vf, { direction: 'v', dirExplicit: true, startCorner: hj });
+      const cab = generateCableGeo(1, pid, { direction: 'v', startCorner: hj });
       const gyldig = !!(cab && cab.ok !== false);
       add('074b ' + navn + ': loddrett gir et gyldig utlegg', gyldig, 'gyldig',
           gyldig ? 'ja' : 'ingen løsning');
@@ -34711,7 +34792,7 @@ async function _cableGeometryRegressionTest() {
     }
 
     // ── 074 · for kort kabel: forslaget skal være LENGRE, i samme serie ──────────────────
-    {
+    if (_vil('074k')) {
       const fxK = _cableFixtures.kabelForKort;
       const rom = _cableGalleryBuildScene(fxK);
       S.ui.selectedRoomId = rom.id;
@@ -34727,7 +34808,7 @@ async function _cableGeometryRegressionTest() {
     }
 
     // ── 072 · kontrollen ved åpning merker, men endrer ALDRI ────────────────────────────
-    {
+    if (_vil('072c')) {
       const rom = _cableGalleryBuildScene(_cableFixtures.badHakk);
       S.varmefolie = Object.assign({}, snap.vf, { direction: 'h', dirExplicit: true, startCorner: 'bl' });
       // Et utlegg som VET vi bryter noe: skew sitt, som ligger 4,2 cm inn i kantsonen.
@@ -34758,8 +34839,10 @@ async function _cableGeometryRegressionTest() {
     _cableGalleryRestoreState(snap);
   }
   const ok = results.every(r => r.ok);
-  if (!ok) console.error('_cableGeometryRegressionTest: FEILET', results.filter(r => !r.ok));
-  return { ok, results };
+  const ms = Math.round(performance.now() - _t0);
+  if (!ok) console.error('_cableGeometryRegressionTest' + (opts.rask ? ' (rask)' : '') + ': FEILET', results.filter(r => !r.ok));
+  else console.log('_cableGeometryRegressionTest' + (opts.rask ? ' (rask)' : '') + ': BESTÅTT · ' + results.length + ' påstander · ' + (ms / 1000).toFixed(1) + ' s');
+  return { ok, results, ms, rask: !!opts.rask };
 }
 
 function _cableSkewRegressionTest() {

@@ -2305,3 +2305,59 @@ regel som faktisk er brutt.
 **Ingenting er rettet her** — verken motoren eller forventningene. Forslag til retting står i
 `docs/trapp/prompter/SPØRSMÅL.md` under «103». Kenneth avgjør.
 
+---
+
+## §45 · 121 — fail-open uten polygonbiblioteket gjenopprettet, de sju påstandene oppdatert, rask variant (21.10.2026)
+
+Kenneths svar på §44 (`docs/trapp/prompter/SPØRSMÅL.md`, 103): oppdater de sju, rett fail-open i
+motoren, behold hard retning, flytt badHakk41-påstanden, rask variant permanent.
+
+### STEG 0
+
+- **0.1** De åtte på `bca0959`: fortsatt nøyaktig de samme åtte, 127 påstander — men **30 s**, ikke
+  127 s som §44 målte 20.10. Samme maskin og nettleser; jeg har ikke funnet hvorfor.
+- **0.2 Hvor `null` kommer fra — §44 bommet på mekanismen.** §44 skrev «083s harde kaskadefilter
+  slipper ingen tilnærmet kandidat gjennom». Målt: `_cableFilterByCorner` returnerer hele lista når
+  ingen treffer hjørnet — den kaster aldri alle. Det som ga `null` var `if (!chosen) return null` i
+  `_autoFillCableImpl`, fordi kandidatlista var **tom**: uten clipper gir `generateCableGeo` «ingen
+  løsning» (lovlig område tilnærmet), og 083 (samme commit `e13d2b9`) tok V6 ut av konkurransen —
+  skew legges bare i lista for roterte rom. Før 083 lå V6-kandidaten der (ugyldig, men til stede), og
+  det var den «tilnærmede kandidaten» 077 slapp gjennom. «Tilnærmet» merkes i dag med
+  `cable._geomApprox` → panellinja «Lagt uten polygonbiblioteket — kantene er tilnærmet».
+- **0.3** `baseline.json` (`1422d23 + 099`): `badHakk41|v|tr` = cc 9,06 · dek 63,3 · hull 0 · gyldig;
+  `tl` og `br` = cc 13,81 · dek 94,9. Bekreftet.
+
+### Fail-open (motoren)
+
+I `_autoFillCableImpl`, inne i `if (!chosen)`, og bare når `!_cblClipperReady()`: dagens kaskade
+(`_cableLegacyInDirection`, innenfor 074-dybdetelleren så ingen dialog åpnes) måles med
+`_cableGeometryCheck`, merkes `_geomApprox`, `_geomOk` (ærlig — kan være ugyldig, som før 083),
+`_geomDefects`, `_startCornerOffCm`, og returneres. Med clipper lastet er veien uendret: ny påstand
+`077/121: med biblioteket er utlegget det samme med og uten grenen` låser senterlinja bit for bit
+(`opts._ingenFailOpen` kjører forbi grenen). R-START, R-VEGG, R-ENDE er ikke rørt.
+
+### De sju påstandene
+
+| # | påstand | før | nå | hvorfor (commit) |
+|---|---|---|---|---|
+| 1 | 076 rom5 areal | 5,698 m² | **5,711 m²** | 089 `a365c70` hentet fixturet på nytt |
+| 2 | 081 OPP/NED | tl > bl + 50 | **tl < bl − 50** | 088 `5c929ef`: world-y øker nedover, topp = minst y |
+| 3 | 081 tl nær taket | y > −860 | **y < −1020** | samme |
+| 4 | 081 bl nær gulvet | y < −1020 | **y > −860** | samme |
+| 5 | 081 panel-linja | `/^Start: N cm fra /` | **`/start N cm fra hjørnet/`** | 088b `b11dc9e` ny ordlyd |
+| 6 | 082 600W hjørnet | ≤ 40 cm | **> 40 cm, fortsatt loddrett + panelet melder avstand og «nærmeste er N cm unna»** | 088b: retningen er hard (Kenneth 103/4) |
+| 8 | 074b badHakk41 dekning | `tr` ≥ 85 % | **`tl` ≥ 85 %** (94,9) | 088 flyttet hjørnene; `tr` = 63,3 % er baselinjens aksepterte rad |
+
+### Rask variant
+
+`_cableGeometryRegressionTest({ rask: true })` = `_cableGeometryQuickTest()`. Hovedløkka på
+`_CABLE_GEO_RASK_FIXTURES` (rektangel, skraa, rom5, badHakk41, rekt2kab, lRom — én per motorfamilie),
+og bare seksjonene i `_CABLE_GEO_RASK_SEKSJONER` (076, 080 — der 081 ligger —, 082, 077, 074b).
+Målt per seksjon alene: 080 6,8 s · 082 4,5 s · 076 3,8 s · 077 2,0 s · 088 1,9 s · 072b 1,6 s ·
+resten < 0,5 s. Hovedløkka med alle 20 fixturer koster bare ~8 s — det var seksjonene (21 s) som bar
+tiden. **Rask: 67 påstander, 18,8 s. Fullt: 132 påstander (127 + 5 nye), 30,0 s, helt grønt.**
+
+### Portene
+
+`_cableGeoSuite()`: **142 rader, 0 feil, 0 bedre, 0 endret, 0 nye, 0 borte** — 19,7 s (én blokk, uten
+ballingen §38 beskrev). `_cableForstyrrelsesTest()`: **31 brudd**, 1 hoppet, 67,9 s — ikke verre enn sist.
