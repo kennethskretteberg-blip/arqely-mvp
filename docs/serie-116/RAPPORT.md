@@ -4,7 +4,8 @@ Kjørt 21.10.2026 på `main`, fra `ecb71c4` (115). **Ikke pushet.** Én commit p
 
 | # | commit | hva |
 |---|---|---|
-| 116 | (se under) | Forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» |
+| 116 | `70feed0` | Forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» |
+| 117 | (se under) | Ett venstre panel; skuff på mobil |
 
 Ingen av promptene var kjørt fra før (sjekket med `git log --oneline -15`).
 
@@ -36,5 +37,46 @@ nå valget stå; hover over et annet rom bytter som før.
 ### Batterier
 
 - `_kundeforslagRegressionTest()` — 99/99 grønne (14 nye i seksjon K)
+- `_kundelenkeRegressionTest()` — 330/330 grønne
+
+---
+
+## 117 — ett venstre panel
+
+### STEG 0 — elementene før (forslagslenka «Vestre Hals 43»)
+
+| element | desktop | 390 px |
+|---|---|---|
+| Topplinje: navn, «Prosjektert av … for … · dato» | 58 px, øverst over lerretet | 92 px |
+| Detaljkort: produkt, effekt, flateeffekt, spenning, motstand, toppgulv, «Hva synes du?» | 320 px, høyre | bunnark, 522 av 844 px |
+| Bunnlinje: «0 rom OK · 0 forslag», Send | 59 px nederst | 67 px |
+
+Kan 032-panelet gjenbrukes? **Monteringen ja** — `_kundeMonterBar` setter panelet inn som
+flex-søsken før `#canvas-wrap` (PC) eller som fast bunnark (mobil), og lerretet følger av seg selv.
+**Innholdet nei** — vegg-tabellen er mål-spesifikk. Det er delt mekanisme, ikke delt markup.
+
+### Etter
+
+Ett panel på 320 px (`#_present-panel`): Prosjekt → Rom → Valgt rom (+ Hva synes du) → [plass for
+Endre mål] → fot med «1 av 1 rom vurdert» og blå Send. Lerretet er 1120 px bredt (var 1440 med
+tre ting oppå). Topplinje, kort og bunnlinje finnes ikke i panelmodus. Mobil: skuff på 69 px lukket
+(valgt rom + Send + ▲), 658 px åpen. Trykk og sveip på hodet er målt med berøring i Playwright.
+
+### Skjermbilder
+
+- Før: [desktop](skjermbilder/116-etter-desktop.png) · [390 px](skjermbilder/116-etter-mobil.png) (tilstanden etter 116)
+- Etter, desktop: [ved åpning](skjermbilder/117-etter-desktop.png) ·
+  [med ett valg](skjermbilder/117-etter-desktop-valgt.png) ·
+  [ren presentasjon](skjermbilder/117-etter-ren-presentasjon-desktop.png)
+- Etter, 390 px: [skuff lukket](skjermbilder/117-etter-mobil-lukket.png) ·
+  [skuff åpen](skjermbilder/117-etter-mobil-apen.png) ·
+  [lukket med valg (blå Send)](skjermbilder/117-etter-mobil-lukket-valgt.png) ·
+  [åpen med valg](skjermbilder/117-etter-mobil-apen-valgt.png)
+
+### Batterier
+
+- `_kundeforslagRegressionTest()` — 124/124 grønne (25 nye i seksjon L: panel som flex-søsken,
+  kortet og bunnlinja borte, romliste med areal/produkt, listeklikk velger + zoomer, foten tegnes
+  alene ved tastetrykk, skuff lukket/åpen, ren presentasjon uten Send, mållenka urørt)
 - `_kundelenkeRegressionTest()` — 330/330 grønne
 

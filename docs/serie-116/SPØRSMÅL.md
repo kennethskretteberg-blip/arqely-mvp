@@ -20,4 +20,18 @@
 
 ## 117 · Venstre panel
 
+1. **Mållenka (`?kunde=`) er ikke lagt over på det nye panelet.** Prompten sa «gjerne». Den er en
+   editor med vegg-tabell, og 118 skal bruke maskineriet hennes inne i forslagslenka — jeg lot den
+   stå urørt for å holde risikoen nede. Si fra om du vil ha samme skall der også.
+2. **Innlogget presentasjon** (din egen «Presentasjon»-knapp) bruker også panelet. Del lenke / PDF /
+   Avslutt ligger øverst i Prosjekt-seksjonen i stedet for i topplinja.
+3. **Klikk i lista zoomer til rommet** (`fitRoom`), som prompten ba om. «Vis hele planen» øverst i
+   romlista tar deg tilbake. Klikk i tegningen zoomer ikke (som før).
+4. **Flere etasjer:** romlista grupperer per etasje, og klikk på et rom i en annen etasje bytter
+   etasje. Presentasjonen hadde ingen etasjevelger fra før.
+5. **Mobil-terskelen** er 760 px (prompten). Knappestørrelsene inne i kortet følger fortsatt
+   `_kundeErSmal()` (< 900 px eller berøringsskjerm), så et nettbrett får PC-panel med store knapper.
+6. Den svarte stripa øverst i mobil-skjermbildene er plantegningens eget PDF-bilde (målt: pikslene
+   er tegnet av `drawBgImage`), ikke panelet. Topplinja dekket den før.
+
 ## 118 · Endre mål / Lås mål

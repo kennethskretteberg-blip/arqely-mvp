@@ -4,6 +4,45 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 117 — Presentasjon: ett venstre panel (romliste, valgt rom, Hva synes du, Send); skuff på mobil (21.10.2026, `main`, ikke pushet)
+
+Kenneth 21.10.2026: «Kanskje alt skulle stått i en venstre bar slik som vi har i Varmeplan-appen?
+Da er alt samlet.»
+
+### STEG 0 — tre steder å se (målt på forslagslenka til «Vestre Hals 43»)
+
+| element | desktop 1440 | 390 px |
+|---|---|---|
+| Topplinje `#present-bar` (navn, avsender, dato) | 58 px øverst, over lerretet | 92 px |
+| Detaljkort `#present-detail` (produkt, effekt, Hva synes du) | 320 px fast til høyre | bunnark som dekket 522 av 844 px |
+| Bunnlinje `#_fors-bunn` (teller + Send) | 59 px nederst | 67 px |
+
+Mållenkas 032-panel er flex-søsken til `#canvas-wrap` i `#content` på PC (lerretet tar resten via
+`flex:1`, ResizeObserver kaller `resizeCanvas`) og et fast bunnark på mobil. Monteringen
+(`_kundeMonterBar`) gjenbrukes rett av; innholdet (vegg-tabellen) er spesielt for mål og deles ikke.
+
+### Endring
+
+- **`#_present-panel`** (`_presentPanelRender`, 320 px): Prosjekt (navn, avsender; KPI-ene fra
+  topplinja i ren presentasjon; Del lenke/PDF/Avslutt når innlogget) → Rom (alle tegnede rom med
+  areal og produkt, gruppert per etasje ved flere; valgt rom uthevet; ✓/! fra kundens valg; «Vis
+  hele planen») → Valgt rom (samme `_presentRoomDetailHtml`, med «Hva synes du?» i forslagslenka)
+  → tom `#_pp-maal` for 118 → fot med «n av N rom vurdert» og blå Send (116).
+- Topplinje, detaljkort og bunnlinje er borte i panelmodus (`_presentPanelAktiv()` = presentasjon
+  eller forslagslenke; mållenka `?kunde=` beholder sitt eget panel). `_presentRenderDetail` og
+  `_forslagRenderBunn` er dispatchere: den første bygger panelet, den andre bare foten (fokusregelen
+  — `_forslagKomm` kaller den for hver tast).
+- Klikk i lista = `_presentPanelVelgRom`: velger, bytter etasje ved behov, `fitRoom`, ruller til
+  detaljene. Klikk i tegningen ruller lista til rommet og åpner skuffen på mobil.
+- **Mobil (< 760 px):** skuff nederst. Lukket (69 px): valgt rom + Send + ▲. Åpen (maks 78 vh):
+  hele panelet. Trykk veksler, sveip opp/ned åpner/lukker.
+- `_kundeforslagRegressionTest` seksjon L (25 sjekker). 124/124 grønne; `_kundelenkeRegressionTest`
+  330/330.
+
+Skjermbilder: `docs/serie-116/skjermbilder/117-*.png`.
+
+---
+
 ## 116 — Presentasjon: forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» (21.10.2026, `main`, ikke pushet)
 
 Kenneth 21.10.2026: «Jeg ønsker at et rom allerede er valgt når presentasjonen åpner. Det er ikke
