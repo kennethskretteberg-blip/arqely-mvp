@@ -4,6 +4,44 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 116 — Presentasjon: forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» (21.10.2026, `main`, ikke pushet)
+
+Kenneth 21.10.2026: «Jeg ønsker at et rom allerede er valgt når presentasjonen åpner. Det er ikke
+lett å forstå at man skal trykke på et rom for å få opp detaljer. Jeg ønsker også at målene på alle
+veggene er synlig i presentasjonen. […] Send forslag-knappen nederst bør være BLÅ slik at den synes.»
+
+### STEG 0 — målt på forslagslenka til «Vestre Hals 43» (lest, ikke sendt)
+
+| | før |
+|---|---|
+| Valgt rom ved åpning | `S.ui.presentRoomId = null` (`_presentEnter` nuller det); `#present-detail` har `display:none` |
+| Veggmål | styres KUN av `room.dimSnap` (Kenneths «Målsett rom», lagret i prosjektet). I prosjektet: `false` → ingen veggmål. Bare foliekjeden (`stripDimSnap`) vistes |
+| «Send forslag» | dempet: `--surface2`/`--dim`; aktiv: `--accent` = **turkis** (#0891b2 lyst / #22d3ee mørkt) med mørk tekst |
+
+Ren presentasjon på desktop var i tillegg hover-drevet: `_presentHover` satte `presentRoomId = null`
+straks musa forlot et rom — et forhåndsvalg ville forsvunnet ved første musebevegelse.
+
+### Endring
+
+- **Forhåndsvalgt rom** (`_presentForhaandsvalgtRom`): første rom med produkter på aktiv etasje, i
+  `S.rooms`-rekkefølge; ellers første rom. Settes i `_presentEnter` etter `fitAll()` — hele planen
+  vises, rommet er uthevet, kortet er åpent. `_forslagStart` tegner kortet på nytt når forslagslaget
+  er lastet (det ble tegnet før `_forslagState` fantes, uten «Hva synes du?»). Hjelpelinja «Trykk på
+  et annet rom i tegningen for å se det.» står i kortet til kunden selv har valgt et annet rom
+  (`_presentAutoValgt`). Hover utenfor et rom nuller ikke lenger valget.
+- **Mål på alle vegger** (`_presentDimsOn`): i presentasjon/forslagslenke tegnes veggmålene for alle
+  tegnede rom, uten hindringsmål (`{ bareVegger: true }`), **uten å skrive `dimSnap`** i rommet.
+  Tetthet: ved liten zoom (rommets korteste side < `PRESENT_DIM_MIN_PX` = 120 px) vises bare det
+  valgte rommets mål. PDF-rendring (`_pdfMode`) og mål-/tegnelenka holdes utenfor.
+- **Blå Send**: `var(--info)` + hvit tekst når det er noe å sende (samme på bekreftelsens «Send»);
+  dempet som før ellers.
+- `_kundeforslagRegressionTest` seksjon K (14 sjekker). 99/99 grønne; `_kundelenkeRegressionTest`
+  330/330.
+
+Skjermbilder: `docs/serie-116/skjermbilder/116-*.png`. Spørsmål: `docs/serie-116/SPØRSMÅL.md`.
+
+---
+
 ## 113 — PDF: «Skriv ut / PDF» gjorde ingenting (21.10.2026, `main`, ikke pushet)
 
 Kenneth 21.10.2026: «Print PDF funker ikke.» Ingen dialog, ingen nedlasting, ingen melding —
