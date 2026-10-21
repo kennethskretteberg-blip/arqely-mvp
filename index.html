@@ -5031,6 +5031,7 @@ function render() {
   drawPlates();
   drawAluboard();
   drawStairs();
+  drawForslagMaalDemping();   // 118: dempede produkter i rom kunden har rettet målene på
   if (S.ui.dropPreviewStrip) { drawDropPreview(); drawStripGapLine(); }
   else if (_stripDragging || _sgDragging) drawStripGapLine();
   if (S.ui.dropPreviewMat) drawDropPreviewMat();
@@ -5044,7 +5045,7 @@ function render() {
   drawKundeValgtHjorne(); // 033: rav sirkel på valgt hjørne
   drawKundeFastEnde();    // 035: hengelås ved enden som står fast
   // 033: hjørne-gizmoen, men ikke rom-gizmoen — `drawTransformGizmo` er stengt i kundemodus.
-  if (S.ui.kundeMode === 'maal' && S.ui.selectedVertexIdx != null) drawVertexGizmo();
+  if (_kundeMaalAktiv() && S.ui.selectedVertexIdx != null) drawVertexGizmo();
   if (S.ui.selectedWallId) drawMoveArrows();
   drawHoveredWallHighlight();
   if (S.ui.wallThicknessMode) drawWallThicknessOverlay();
@@ -8083,8 +8084,11 @@ function _presentRoomDetailHtml(room) {
   } else {
     rows.push(row('Produkt', '<span style="color:var(--dim)">ikke plassert</span>'));
   }
-  rows.push(row('Installert effekt', installedW + ' W'));
-  if (flateeffekt > 0) rows.push(row('Flateeffekt', Math.round(flateeffekt) + ' W/m²'));
+  // 118: rom kunden har rettet målene på — tallene gjelder utlegget FØR endringen.
+  const _maalEndret = (typeof _forslagMaalRomEndret === 'function') && _forslagMaalRomEndret(room.id);
+  const _foer = _maalEndret ? ' <span style="color:var(--dim);font-weight:400;font-size:11px">(før endring)</span>' : '';
+  rows.push(row('Installert effekt' + _foer, installedW + ' W'));
+  if (flateeffekt > 0) rows.push(row('Flateeffekt' + _foer, Math.round(flateeffekt) + ' W/m²'));
   if (stats.cableCcCm > 0) {   // 016: ⚠ når over produsentens anbefalte maks
     const _ccw = _roomCcOverWarn(room);
     rows.push(row('c/c-avstand', stats.cableCcCm.toFixed(1) + ' cm' +
@@ -8100,6 +8104,7 @@ function _presentRoomDetailHtml(room) {
   return `<div style="font-size:15px;font-weight:700;margin-bottom:6px;border-left:4px solid ${room.color || '#4fa2b8'};padding-left:10px">${esc(room.name || 'Rom')}</div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:10px">${(room.area / 10000).toFixed(2)} m²${rt ? ' · ' + esc(rt.label) : ''}</div>
     ${_presentAutoValgt ? '<div style="font-size:11.5px;color:var(--dim);margin:-4px 0 10px;line-height:1.4">Trykk på et annet rom i tegningen for å se det.</div>' : ''}
+    ${_maalEndret ? '<div style="font-size:11.5px;color:#f0b232;margin:-4px 0 10px;padding:6px 8px;border:1px solid rgba(240,178,50,.5);border-radius:7px;line-height:1.4">Utlegget oppdateres etter at målene er bekreftet.</div>' : ''}
     <div style="font-size:13px">${rows.join('')}</div>
     ${compat}
     ${_forslagKortHtml(room)}`;
@@ -8316,6 +8321,10 @@ async function _forslagStart(token) {
     navn: '',
     kommentar: '',
     sendt: d.status === 'answered',
+    // 118: «Kunden kan rette mål» er PÅ med mindre lenka er laget med innstillingen av
+    // (lagres i `note`, ingen ny kolonne). `modus` = målmodus akkurat nå (mellom «Endre mål»
+    // og «Lås mål»).
+    maal: { kan: !/innstilling:maal=av/.test(d.note || ''), modus: false },
   };
   S.ui.kundeMode = 'forslag';
   document.body.classList.add('kunde-forslag');
@@ -8727,8 +8736,10 @@ function _forslagRenderBunn() {
 }
 
 function _forslagSendModal() {
+  // 118: målmodus må være låst først — ellers sendes en halvferdig rettelse.
+  if (_forslagMaalModus()) { _showToast && _showToast('Trykk «Lås mål» først', 'warn'); return; }
   const t = _forslagTelling();
-  if (!(t.ok + t.forslag)) return;
+  if (!(t.ok + t.forslag) && !_forslagMaalHarEndringer()) return;
   document.getElementById('_fors-ov')?.remove();
   const ov = document.createElement('div');
   ov.id = '_fors-ov';
@@ -8774,7 +8785,12 @@ function _forslagPayload() {
     }
     rooms.push(rad);
   }
-  return { rooms, comment: (_forslagState.kommentar || '').trim() || undefined };
+  const ut = { rooms, comment: (_forslagState.kommentar || '').trim() || undefined };
+  // 118: kundens målrettelser følger med i SAMME svar — nøyaktig mållenkas eget svarformat
+  // (`_kundeBuildAnswer`: walls, points, geometryMode, axisBalance), så Kenneths side arbeider
+  // det inn med den eksisterende innarbeidingen. Utelates når ingenting er endret.
+  if (_forslagMaalHarEndringer()) ut.maal = _kundeBuildAnswer();
+  return ut;
 }
 
 async function _forslagSend() {
@@ -8953,12 +8969,14 @@ function _presentPanelFotHtml() {
   if (!_forslagAktiv()) return '';
   const t = _forslagTelling();
   const n = _presentDrawnRooms().length;
-  const noe = (t.ok + t.forslag) > 0;
+  const maalEndret = _forslagMaalHarEndringer();   // 118
+  const noe = (t.ok + t.forslag) > 0 || maalEndret;
   const sendt = _forslagState.sendt;
   return `<div style="display:flex;align-items:center;gap:12px">
     <div style="flex:1;min-width:0;font-size:12.5px;line-height:1.35">
       <b>${t.ok + t.forslag}</b> <span style="color:var(--dim)">av ${n} rom vurdert</span>
       ${t.forslag ? `<span style="color:var(--dim)"> · ${t.forslag} forslag</span>` : ''}
+      ${maalEndret ? `<span style="color:#f0b232"> · mål rettet</span>` : ''}
       ${sendt ? '<br><span style="color:#22c55e;font-size:11.5px">✓ Sendt — du kan sende på nytt om du ombestemmer deg</span>'
               : '<br><span style="color:var(--dim);font-size:11.5px">Velg et rom og si hva du synes</span>'}
     </div>
@@ -9026,7 +9044,171 @@ function _presentPanelKroppHtml() {
       ${room ? _presentRoomDetailHtml(room)
              : '<div style="font-size:12px;color:var(--dim)">Velg et rom i lista eller i tegningen.</div>'}
     </div>
-    <div class="pp-sec" id="_pp-maal" style="display:none"></div>`;
+    ${(_forslagAktiv() && _forslagMaalKan()) ? `<div class="pp-sec" id="_pp-maal">${_forslagMaalHtml(false)}</div>` : '<div class="pp-sec" id="_pp-maal" style="display:none"></div>'}`;
+}
+
+// ═══ 118 · ENDRE MÅL / LÅS MÅL I FORSLAGSLENKA ══════════════════════════════════════════
+// Kenneth 21.10.2026: «Bør være knapp: Endre mål — da blir veggene valgbare og kan flyttes. Når
+// kunde har flyttet vegger, må hen trykke på "Lås mål". Så kan man fylle inn "hva synes du om"
+// som vanlig og velge "send forslag".» Avklart: produktene dempes i endrede rom; ingen ny
+// utlegging hos kunden.
+//
+// STEG 0.1 (målt): mållenkas maskineri er gatet 13 steder på `S.ui.kundeMode === 'maal'` og på
+// `_kundeState` (edits, vertexDelta, fixedEnd, original). Den eneste antakelsen om S er at
+// originalen tas vare på (`_kundeLagreOriginal`) og at rom har `points`/`walls`. I forslagslenka
+// er S hele prosjektet (med produkter) — `_kundeRebuildRoomMedHjorner` bygger `walls` om med
+// `compWalls` (vegginnstillinger er visuelle her, ingenting lagres), og produktene blir liggende
+// der de lå → de dempes (`drawForslagMaalDemping`). Gatene er samlet i `_kundeMaalAktiv()`;
+// `_kundeRenderBar` tegner panelet i stedet for #_kunde-bar. Ingen kopi av maskineriet.
+function _forslagMaalKan() { return !!(_forslagState && _forslagState.maal && _forslagState.maal.kan); }
+function _forslagMaalModus() { return !!(_forslagAktiv() && _forslagState.maal && _forslagState.maal.modus); }
+function _forslagMaalStart() {
+  if (!_forslagAktiv() || !_forslagMaalKan()) return;
+  if (!_kundeState) {
+    _kundeState = { token: _forslagState.token, mode: 'forslag', note: '', orgName: _forslagState.orgName,
+      askedWalls: [], edits: new Map(), vertexDelta: {}, fixedEnd: {}, name: '', comment: '' };
+    _kundeLagreOriginal();   // fasiten alt regnes fra — Kenneths geometri slik lenka ble åpnet
+  }
+  _forslagState.maal.modus = true;
+  // ⚠ MÅLT 21.10.2026: et ekte drag på 14 cm flyttet ingenting — `S.snap.grid` var PÅ i det fulle
+  // prosjektet (50 cm rutenett), så forskyvningen rundet til null. Mållenkas minimale S har aldri
+  // hatt snap. Av i målmodus, tilbake ved «Lås mål». Hjørner og naboer rundes uansett til hele cm
+  // (045/_kundeGizmoSlipp).
+  if (_forslagState.maal.snapFoer == null) _forslagState.maal.snapFoer = !!(S.snap && S.snap.grid);
+  if (S.snap) S.snap.grid = false;
+  document.body.classList.add('kunde-maal');   // 030/032: stenger #wip, minikart o.l. (CSS)
+  _kundeKobleBeroring();
+  if (typeof canvas !== 'undefined' && canvas) canvas.style.cursor = 'default';
+  if (_presentPanelSmal()) _ppApen = false;    // tegningen må være synlig for å dra i vegger
+  _presentRenderDetail();
+  render();
+}
+function _forslagMaalLaas() {
+  if (!_forslagState || !_forslagState.maal) return;
+  _forslagState.maal.modus = false;
+  if (S.snap && _forslagState.maal.snapFoer != null) { S.snap.grid = _forslagState.maal.snapFoer; _forslagState.maal.snapFoer = null; }
+  S.ui.selectedWallId = null; S.ui.selectedVertexIdx = null; S.ui.selectedRoomId = null;
+  if (_kundeState) _kundeState.selIdx = null;
+  document.body.classList.remove('kunde-maal');
+  if (typeof canvas !== 'undefined' && canvas) canvas.style.cursor = 'grab';
+  _presentRenderDetail();
+  render();
+}
+// Endringene som finnes nå: [{ roomId, tekst, angre }]. Regnes fra `_kundeState` hver gang.
+function _forslagMaalEndringer() {
+  if (!_kundeState || !_kundeState.original) return [];
+  const ut = [];
+  for (const [key, cm] of _kundeState.edits) {
+    const [rid, idx] = key.split('|');
+    const room = S.rooms.find(r => String(r.id) === rid);
+    if (!room || !(cm > 0)) continue;
+    const i = parseInt(idx, 10);
+    const o = _kundeState.original.get(room.id);
+    const n = o ? o.points.length : 0;
+    const var0 = o ? Math.round(Math.hypot(o.points[(i + 1) % n].x - o.points[i].x, o.points[(i + 1) % n].y - o.points[i].y)) : 0;
+    // `_kundeGizmoSlipp` skriver naboenes lengder også når de ikke endret seg — ingen endring å vise.
+    if (Math.round(cm) === var0) continue;
+    ut.push({ roomId: room.id, tekst: `${room.name || 'Rom'}: vegg ${i + 1} ${var0} → ${Math.round(cm)} cm`,
+              angre: `_kundeTilbakestillVegg(${room.id},${i})` });
+  }
+  const vd = _kundeState.vertexDelta || {};
+  for (const rid in vd) for (const vi in vd[rid]) {
+    const d = vd[rid][vi];
+    if (!d || (Math.abs(d.dx) < 0.01 && Math.abs(d.dy) < 0.01)) continue;
+    const room = S.rooms.find(r => String(r.id) === rid);
+    if (!room) continue;
+    ut.push({ roomId: room.id, tekst: `${room.name || 'Rom'}: hjørne ${parseInt(vi, 10) + 1} flyttet ${Math.round(d.dx)} / ${Math.round(d.dy)} cm`,
+              angre: `_kundeTilbakestillHjorne(${room.id},${vi})` });
+  }
+  return ut;
+}
+function _forslagMaalHarEndringer() { return _forslagAktiv() && _forslagMaalEndringer().length > 0; }
+function _forslagMaalRomEndret(roomId) { return _forslagAktiv() && _forslagMaalEndringer().some(e => e.roomId === roomId); }
+// Seksjonen «Mål». `kompakt` = den lukkede skuffen på mobil.
+function _forslagMaalHtml(kompakt) {
+  if (!_forslagAktiv() || !_forslagMaalKan()) return '';
+  const smal = _kundeErSmal();
+  const endringer = _forslagMaalEndringer();
+  const liste = endringer.length ? `<div style="margin-top:8px">${endringer.map(e =>
+      `<div style="display:flex;align-items:center;gap:8px;min-height:30px;font-size:12px">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.tekst)}</span>
+        <a href="#" onclick="event.preventDefault();${e.angre}" style="color:var(--accent);font-size:11.5px;font-weight:600;text-decoration:none">Angre</a>
+      </div>`).join('')}</div>` : '';
+  const knapp = (fn, tekst, primær) =>
+    `<button onclick="${fn}" style="min-height:${smal ? 44 : 36}px;padding:0 16px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;
+      border:${primær ? 'none' : '1px solid var(--border)'};background:${primær ? 'var(--info)' : 'var(--surface2)'};color:${primær ? '#fff' : 'var(--text)'}">${tekst}</button>`;
+  if (!_forslagMaalModus()) {
+    return `${kompakt ? '' : '<div class="pp-h">Mål</div>'}
+      <div style="font-size:12px;color:var(--dim);line-height:1.45">Stemmer målene? Du kan rette dem.</div>
+      ${liste}
+      <div style="margin-top:9px">${knapp('_forslagMaalStart()', 'Endre mål', false)}</div>`;
+  }
+  // Målmodus: valgt vegg / hjørne + Lås mål. Tallfeltet har samme id som mållenkas
+  // (`_kf-<rom>-<idx>`), så `_kundeVelgVegg` finner og fokuserer det.
+  const v = _kundeValgtVegg();
+  const h = _kundeValgtHjorne();
+  let valgt = '';
+  if (v) {
+    const rid = v.room.id, i = v.idx;
+    const cur = _kundeFaktiskCm(v.room, i);
+    const ikon = (tegn, fn, tit) => `<button onclick="${fn}" title="${tit}" style="width:${smal ? 44 : 32}px;height:${smal ? 44 : 32}px;flex:0 0 auto;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:${smal ? 17 : 14}px;cursor:pointer">${tegn}</button>`;
+    valgt = `<div style="margin-top:8px;padding:8px 10px;border:1px solid #ffa726;border-radius:9px;background:rgba(255,167,38,.08)">
+      <div style="font-size:12px;font-weight:700;color:#ffa726;margin-bottom:6px">${esc(v.room.name || 'Rom')} · ${esc(v.room.walls[i].label || ('Vegg ' + (i + 1)))}</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        ${ikon('−', `_kundeNudge(-1)`, '−1 cm')}
+        <input id="_kf-${rid}-${i}" type="number" inputmode="decimal" min="1" max="99999" value="${cur}"
+          onchange="_kundeSetWall(${rid},${i},this.value)"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();_kundeSetWall(${rid},${i},this.value);}"
+          style="flex:1;min-width:0;height:${smal ? 44 : 34}px;padding:0 8px;text-align:right;font-family:${CANVAS_NUM_FONT};font-size:${smal ? 16 : 14}px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--text)">
+        <span style="font-size:12px;color:var(--dim)">cm</span>
+        ${ikon('+', `_kundeNudge(1)`, '+1 cm')}
+        ${ikon('↺', `_kundeTilbakestillVegg(${rid},${i})`, 'Tilbakestill')}
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px">Dra veggen inn eller ut, eller skriv inn riktig mål</div>
+    </div>`;
+  } else if (h) {
+    valgt = `<div style="margin-top:8px;padding:8px 10px;border:1px solid #ffa726;border-radius:9px;background:rgba(255,167,38,.08);font-size:12px">
+      <b style="color:#ffa726">${esc(h.room.name || 'Rom')} · hjørne ${h.idx + 1}</b> valgt — dra det dit det skal, eller bruk piltastene.
+      <a href="#" onclick="event.preventDefault();_kundeTilbakestillHjorne(${h.room.id},${h.idx})" style="color:var(--accent);margin-left:6px">Tilbakestill</a></div>`;
+  } else {
+    valgt = `<div style="margin-top:8px;font-size:12px;color:var(--text);line-height:1.45">Trykk på en vegg eller et hjørne i tegningen. Dra veggen inn eller ut, eller skriv inn riktig mål.</div>`;
+  }
+  return `${kompakt ? '' : '<div class="pp-h">Mål · du retter nå</div>'}
+    ${valgt}
+    ${kompakt ? '' : liste}
+    ${endringer.length ? `<div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.4">Utlegget i rom du har endret oppdateres etter at målene er bekreftet.</div>` : ''}
+    <div style="margin-top:9px;display:flex;gap:8px;align-items:center">${knapp('_forslagMaalLaas()', 'Lås mål', true)}
+      ${kompakt && endringer.length ? `<span style="font-size:11.5px;color:var(--dim)">${endringer.length} ${endringer.length === 1 ? 'endring' : 'endringer'}</span>` : ''}</div>`;
+}
+// Demping av produktene i rom kunden har endret. Kalles fra render() etter produktlagene og før
+// målene: ORIGINALENS polygon (der produktene faktisk ligger) OG dagens fylles i én bane, så
+// overlappet ikke dobbeltdempes; dagens omriss strekes opp igjen så veggene er tydelige mens
+// kunden drar i dem.
+function drawForslagMaalDemping() {
+  if (!_forslagAktiv() || !_kundeState || !_kundeState.original) return;
+  const endrede = new Set(_forslagMaalEndringer().map(e => e.roomId));
+  if (!endrede.size) return;
+  const bane = pts => { pts.forEach((q, i) => { const s = w2s(q.x, q.y); if (i) ctx.lineTo(s.x, s.y); else ctx.moveTo(s.x, s.y); }); ctx.closePath(); };
+  ctx.save();
+  for (const rid of endrede) {
+    const r = S.rooms.find(x => x.id === rid);
+    if (!r || !r.points || r.points.length < 3 || !_roomOnActiveFloor(r)) continue;
+    const o = _kundeState.original.get(rid);
+    ctx.beginPath();
+    if (o && o.points.length >= 3) bane(o.points);
+    bane(r.points);
+    ctx.fillStyle = _lc('rgba(240,244,248,.78)', 'rgba(13,14,16,.78)');
+    ctx.fill();
+    ctx.beginPath(); bane(r.points);
+    ctx.setLineDash([]); ctx.lineWidth = 2.5; ctx.strokeStyle = r.color || '#4fa2b8'; ctx.stroke();
+    let cx = 0, cy = 0; for (const q of r.points) { cx += q.x; cy += q.y; }
+    const c = w2s(cx / r.points.length, cy / r.points.length);
+    ctx.font = `600 11px ${CANVAS_NUM_FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = _lc('rgba(18,21,28,.8)', 'rgba(238,240,244,.85)');
+    ctx.fillText('Utlegget oppdateres', c.x, c.y - 7);
+    ctx.fillText('etter at målene er bekreftet', c.x, c.y + 7);
+  }
+  ctx.restore();
 }
 function _presentPanelRender() {
   if (!_presentPanelAktiv()) { _presentPanelFjern(); return; }
@@ -9051,10 +9233,14 @@ function _presentPanelRender() {
     el.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:82;display:flex;flex-direction:column;'
       + 'max-height:' + (_ppApen ? '78vh' : 'none') + ';background:var(--surface);border-top:1px solid var(--border);'
       + 'border-radius:14px 14px 0 0;box-shadow:0 -6px 24px rgba(0,0,0,.3)';
+    // 118: i målmodus viser den lukkede skuffen målkontrollene (valgt vegg + Lås mål), så
+    // tegningen er fri for fingre og kunden likevel har alt hen trenger.
+    const maalHode = (!_ppApen && _forslagMaalModus()) ? _forslagMaalHtml(true) : '';
     el.innerHTML = `
       <div id="_pp-hode" style="flex:0 0 auto;padding:6px 14px 10px;cursor:pointer;user-select:none">
         <div style="width:40px;height:4px;border-radius:2px;background:var(--border);margin:0 auto 8px"></div>
-        <div style="display:flex;align-items:center;gap:10px">
+        ${maalHode ? `<div onclick="event.stopPropagation()" style="cursor:default">${maalHode}</div>` : ''}
+        <div style="display:flex;align-items:center;gap:10px;${maalHode ? 'display:none' : ''}">
           <div style="flex:1;min-width:0">
             <div style="font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${room ? esc(room.name || 'Rom') : esc((S.project || {}).name || 'Prosjekt')}</div>
             <div style="font-size:11px;color:var(--dim)">${_ppApen ? 'Dra ned for å se tegningen' : (room ? (room.area / 10000).toFixed(1).replace('.', ',') + ' m² · trykk for detaljer' : 'Trykk for rom og detaljer')}</div>
@@ -9426,6 +9612,8 @@ function _kundePointsWith(room) {
 
 function _kundeRenderBar() {
   if (!_kundeState) return;
+  // 118: i forslagslenka bor målene i venstrepanelets «Mål»-seksjon — ikke i #_kunde-bar.
+  if (_forslagAktiv()) { _presentPanelRender(); return; }
   const smal = _kundeErSmal();
   const gammel = document.getElementById('_kunde-bar');
   const scroll = gammel ? gammel.scrollTop : 0;
@@ -10509,6 +10697,14 @@ function _kundeCopyLink() {
 // Originalen slik Kenneth sendte den. Alt kunden gjør regnes ut FRA denne, aldri inkrementelt:
 // da spiller rekkefølgen ingen rolle, «Tilbakestill» er gratis, og to redigeringer av samme
 // vegg kan ikke stable seg oppå hverandre.
+// 118: ÉN gate for målmaskineriet (veggvalg, hjørner, gizmo, berøring, piltaster, markering).
+// Mållenka (`?kunde=`, modus maal) som før — og forslagslenka når kunden har trykket «Endre
+// mål». Før sto `S.ui.kundeMode === 'maal'` skrevet 13 steder; nå kan ingen av dem drifte.
+function _kundeMaalAktiv() {
+  if (!S.ui) return false;
+  if (S.ui.kundeMode === 'maal') return true;
+  return S.ui.kundeMode === 'forslag' && !!(_forslagState && _forslagState.maal && _forslagState.maal.modus);
+}
 function _kundeLagreOriginal() {
   if (!_kundeState) return;
   _kundeState.original = new Map();
@@ -10660,7 +10856,7 @@ function _kundeGizmoSlipp() {
 // render() rett før gizmo-pilene — ikke en hale inne i en annen funksjon (lærdommen fra 030,
 // der oppblussingen lå etter to tidlige `return` og aldri tegnet seg).
 function drawKundeValgtVegg() {
-  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedWallId == null) return;
+  if (!_kundeState || !_kundeMaalAktiv() || S.ui.selectedWallId == null) return;
   const v = _kundeValgtVegg();
   if (!v) return;
   const w = v.room.walls[v.idx];
@@ -10996,7 +11192,7 @@ function _kundeHjorneSlipp() {
 // 035: hengelås ved den enden som står fast for den valgte veggen. Klikk på den ANDRE enden
 // flytter låsen dit. Tegnes etter veggmarkeringen, så den ligger oppå.
 function drawKundeFastEnde() {
-  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedWallId == null) return;
+  if (!_kundeState || !_kundeMaalAktiv() || S.ui.selectedWallId == null) return;
   const v = _kundeValgtVegg();
   if (!v) return;
   const n = v.room.points.length;
@@ -11032,7 +11228,7 @@ let _kundeLaasSkjerm = null;
 
 // Er markøren over en av veggens ender (der låsen kan settes)? Ren lesing, ingen bivirkning.
 function _kundeLaasHover(sx, sy, tol) {
-  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedWallId == null) return false;
+  if (!_kundeState || !_kundeMaalAktiv() || S.ui.selectedWallId == null) return false;
   const v = _kundeValgtVegg();
   if (!v) return false;
   const n = v.room.points.length;
@@ -11045,7 +11241,7 @@ function _kundeLaasHover(sx, sy, tol) {
 
 // Klikk på en av veggens ender flytter låsen dit. Returnerer true hvis klikket ble brukt.
 function _kundeLaasKlikk(sx, sy, tol) {
-  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedWallId == null) return false;
+  if (!_kundeState || !_kundeMaalAktiv() || S.ui.selectedWallId == null) return false;
   const v = _kundeValgtVegg();
   if (!v) return false;
   const n = v.room.points.length;
@@ -11064,7 +11260,7 @@ function _kundeLaasKlikk(sx, sy, tol) {
 
 // Rav sirkel på det valgte hjørnet — samme farge som valgt vegg (032).
 function drawKundeValgtHjorne() {
-  if (!_kundeState || S.ui.kundeMode !== 'maal' || S.ui.selectedVertexIdx == null) return;
+  if (!_kundeState || !_kundeMaalAktiv() || S.ui.selectedVertexIdx == null) return;
   const v = _kundeValgtHjorne();
   if (!v) return;
   const p = v.room.points[v.idx];
@@ -11087,7 +11283,7 @@ function drawKundeValgtHjorne() {
 function _kundeKobleBeroring() {
   if (!canvas || canvas._kundeTouch) return;
   canvas._kundeTouch = true;
-  const aktiv = () => S.ui && S.ui.present && S.ui.kundeMode === 'maal';
+  const aktiv = () => _kundeMaalAktiv();   // 118: delt gate
   const videresend = (type, t, e) => {
     canvas.dispatchEvent(new MouseEvent(type, {
       clientX: t.clientX, clientY: t.clientY, bubbles: true, cancelable: true, button: 0,
@@ -11586,9 +11782,11 @@ function _kundeNyeRomHtml() {
 // 033: erstatt rommets polygon med kundens. Brukes når `geometryMode === 'points'` — altså
 // når kunden har flyttet hjørner og rommet ikke lenger kan beskrives av vegglengder.
 // Ett `pushUndo` for hele klikket, som alt annet i 028.
-function _kundeBrukKundePunkter(roomId) {
+// 118: `answer` kan gis inn (forslagssvarets `maal`); da røres ikke mållenkas status.
+function _kundeBrukKundePunkter(roomId, answer) {
   const k = _kundeLinkCache;
-  const pts = k && k.answer && k.answer.points && k.answer.points[roomId];
+  const a = answer || (k && k.answer);
+  const pts = a && a.points && a.points[roomId];
   const room = S.rooms.find(r => r.id === roomId);
   if (!room || !Array.isArray(pts) || pts.length < 3) {
     _showToast && _showToast('Svaret har ingen gyldig geometri for dette rommet', 'warn');
@@ -11604,18 +11802,19 @@ function _kundeBrukKundePunkter(roomId) {
   room.walls = compWalls(room.points);
   room.area = compArea(room.points);
   // Veggene som fikk mål er ikke lenger usikre — samme opprydding som 028s vegg-vei.
-  const fikkMaal = new Set(((k.answer.walls) || []).filter(w => w.roomId === roomId).map(w => w.wallIdx));
+  const fikkMaal = new Set(((a.walls) || []).filter(w => w.roomId === roomId).map(w => w.wallIdx));
   room.uncertainWalls = _roomUncertainWalls(room).filter(i => !fikkMaal.has(i));
   room.maalAvvik = undefined;
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache();
   _kundeHighlight([roomId]);
   renderSidebar(); updateWip(); updateObjInfo(); render();
   _showToast && _showToast('Kundens rom er lagt inn — Ctrl+Z angrer', 'ok');
+  if (answer) return;   // 118: forslagssvaret fører sin egen protokoll
   // Alle rom i svaret behandlet? Da er lenken ferdig.
-  const igjen = Object.keys(k.answer.points || {}).some(rid => {
+  const igjen = Object.keys(a.points || {}).some(rid => {
     const rm = S.rooms.find(r => String(r.id) === String(rid));
     if (!rm) return false;
-    const kp = k.answer.points[rid];
+    const kp = a.points[rid];
     return kp.some((p, i) => !rm.points[i] || Math.hypot(p.x - rm.points[i].x, p.y - rm.points[i].y) > 1);
   });
   if (!igjen) _kundeMarkApplied();
@@ -11718,10 +11917,12 @@ let _kundeRevState = null;
 
 // Kundens svar gruppert per rom, kun for rom som FINNES i prosjektet nå.
 // «Endre rom kunden ikke ga tall på» er forbudt — derfor er dette den eneste kilden.
-function _kundeAnswerByRoom() {
+// 118: `answer` kan gis inn — forslagssvarets `maal` er samme format. Uten argument: mållenka.
+function _kundeAnswerByRoom(answer) {
   const k = _kundeLinkCache;
+  const a = answer || (k && k.answer);
   const out = new Map();
-  const walls = (k && k.answer && Array.isArray(k.answer.walls)) ? k.answer.walls : [];
+  const walls = (a && Array.isArray(a.walls)) ? a.walls : [];
   for (const w of walls) {
     const room = S.rooms.find(r => r.id === w.roomId);
     if (!room) continue;
@@ -11958,7 +12159,9 @@ function _kundeApplyAll(onlyPicked) {
   _kundeFinishApply(_kundeApplyWalls(groups, !!onlyPicked), groups);
 }
 
-function _kundeFinishApply(res, groups) {
+// 118: `opts.ikkeLukkLenke` — innarbeidingen kommer fra et FORSLAGSSVAR, og skal ikke sette
+// mållenka (`_kundeLinkCache`) til applied.
+function _kundeFinishApply(res, groups, opts) {
   if (!res.applied) { _showToast && _showToast('Ingen vegger valgt', 'info'); return; }
   // Rommene lyser opp i tegningen samtidig, så Kenneth ser hva som skjedde (§1).
   _kundeHighlight(res.touched);
@@ -11976,7 +12179,7 @@ function _kundeFinishApply(res, groups) {
     if (Math.abs(_wallLenCm(room, w.wallIdx) - w.kundeCm) > 1 &&
         !(Array.isArray(room.maalAvvik) && room.maalAvvik.some(a => a.wallIdx === w.wallIdx))) rest++;
   }
-  if (!rest) _kundeMarkApplied();
+  if (!rest && !(opts && opts.ikkeLukkLenke)) _kundeMarkApplied();
   if (document.getElementById('kunde-rev-ov')) _kundeRevRender();
 }
 
@@ -12117,17 +12320,22 @@ function _copyManuelt(url) {
 // returverdien — funksjonen heter `…Token` og brukes som et token tre steder.
 let _delLenkeId = null;
 
+let _delLenkeKanRetteMaal = true;   // 118: innstillingen på lenka dialogen viser
 async function _presentForslagToken() {
-  _delLenkeId = null;
+  _delLenkeId = null; _delLenkeKanRetteMaal = true;
   if (!_db || !_supabaseProjectId) return null;
   try {
     const { data } = await _db.from('kundelenker')
-      .select('id, token, expires_at, created_at')
+      .select('id, token, expires_at, created_at, note')
       .eq('project_id', _supabaseProjectId).eq('mode', 'forslag').eq('status', 'open')
       .order('created_at', { ascending: false }).limit(5);
     const naa = Date.now();
     const brukbar = (data || []).find(r => !r.expires_at || new Date(r.expires_at).getTime() > naa);
-    if (brukbar) { _delLenkeId = brukbar.id; return brukbar.token; }
+    if (brukbar) {
+      _delLenkeId = brukbar.id;
+      _delLenkeKanRetteMaal = !/innstilling:maal=av/.test(brukbar.note || '');
+      return brukbar.token;
+    }
   } catch (e) { /* ny lenke under */ }
   const token = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : null;
   if (!token) return null;
@@ -12163,6 +12371,18 @@ function _delOppdater() {
   const aa = document.getElementById('_del-apne');
   if (aa) aa.href = u;
 }
+// 118: «Kunden kan rette mål» lagres i lenkas `note` (ingen ny kolonne): tom = på,
+// 'innstilling:maal=av' = av. Forslagslenka leser den i `_forslagStart`.
+async function _delMaalEndret(paa) {
+  _delLenkeKanRetteMaal = !!paa;
+  if (!_db || !_delLenkeId) return;
+  try {
+    const { error } = await _db.from('kundelenker').update({ note: paa ? null : 'innstilling:maal=av' }).eq('id', _delLenkeId);
+    if (error) throw new Error(error.message);
+  } catch (e) {
+    _showToast && _showToast('Kunne ikke lagre innstillingen: ' + e.message, 'warn');
+  }
+}
 
 function _presentShareModal(url, forslagToken) {
   _delUrler = { ren: url, forslag: forslagToken ? (url + '&forslag=' + forslagToken) : '' };
@@ -12191,6 +12411,10 @@ function _presentShareModal(url, forslagToken) {
     ${forslagToken ? `<label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;font-size:12.5px;cursor:pointer">
       <input type="checkbox" id="_del-forslag" checked onchange="_delOppdater()" style="margin-top:2px">
       <span><b>Kunden kan foreslå endringer</b><br><span style="color:var(--dim);font-size:11.5px">Kunden kan trykke på et rom og si «OK» eller foreslå annet produkt, effekt eller retning. Ingenting endres før du godkjenner.</span></span>
+    </label>
+    <label style="display:flex;align-items:flex-start;gap:8px;margin:-6px 0 14px 24px;font-size:12.5px;cursor:pointer">
+      <input type="checkbox" id="_del-maal" ${_delLenkeKanRetteMaal ? 'checked' : ''} onchange="_delMaalEndret(this.checked)" style="margin-top:2px">
+      <span><b>Kunden kan rette mål</b><br><span style="color:var(--dim);font-size:11.5px">«Endre mål» i lenka: kunden flytter vegger og hjørner, og målene følger med i svaret. Du arbeider dem inn selv.</span></span>
     </label>` : `<div style="font-size:11.5px;color:#f59e0b;margin-bottom:14px">Kunne ikke lage forslagslenke — er <code>supabase-migration-kundeforslag.sql</code> kjørt? Lenken under er en vanlig presentasjon.</div>`}
 
     <div style="font-size:12px;font-weight:600;margin-bottom:5px">Adressen</div>
@@ -22425,6 +22649,104 @@ function _kundeforslagRegressionTest() {
         S.ui.present = lagretL.present; S.view.zoom = lagretL.zoom; S.view.panX = lagretL.panX; S.view.panY = lagretL.panY;
         _ppApen = lagretL.apen; _ppTvingSmal = lagretL.tving; S.cables = lagretL.cables; _presentAutoValgt = lagretL.auto;
         const pb = document.getElementById('present-bar'); if (pb && !S.ui.present) pb.style.display = 'none';
+      }
+    }
+
+    // ── M (118): Endre mål / Lås mål i forslagslenka, mål i svaret, Arbeid inn hos Kenneth ──
+    {
+      const $ = id => document.getElementById(id);
+      const lagretM = { present: S.ui.present, zoom: S.view.zoom, panX: S.view.panX, panY: S.view.panY, tving: _ppTvingSmal, apen: _ppApen,
+        kunde: _kundeState, selW: S.ui.selectedWallId, selV: S.ui.selectedVertexIdx, selR: S.ui.selectedRoomId,
+        sched: _scheduleAutoSave, perform: _performAutoSave, db: _db, fors: _forslagLinkCache, siste: _forslagSisteCache,
+        cables: S.cables, klasse: document.body.classList.contains('kunde-maal') };
+      const lenM = (r, i) => Math.round(Math.hypot(r.points[(i + 1) % r.points.length].x - r.points[i].x, r.points[(i + 1) % r.points.length].y - r.points[i].y));
+      try {
+        _scheduleAutoSave = () => {}; _performAutoSave = async () => {};   // aldri en lagring fra testen
+        S.ui.present = true; S.ui.presentPublic = true; S.ui.kundeMode = 'forslag'; S.ui.presentRoomId = 1;
+        _ppTvingSmal = false; _ppApen = false;
+        S.cables = [{ id: 9, roomId: 1, productId: kab.id, runs: [], direction: 'v' }];
+        _kundeState = null;
+        _forslagState = { token: 't', status: 'open', note: '', orgName: 'Testfirma', valg: new Map(), navn: '', kommentar: '', sendt: false,
+          maal: { kan: true, modus: false } };
+        _presentRenderDetail();
+        check('M: «Mål»-seksjonen finnes med Endre mål når lenka tillater det', true,
+          $('_pp-maal') && $('_pp-maal').style.display !== 'none' && /Endre mål/.test($('_pp-maal').innerHTML) && /Stemmer målene/.test($('_pp-maal').innerHTML), 'mangler');
+        checkIkke('M: målmaskineriet er AV før «Endre mål»', _kundeMaalAktiv(), 'veggene var valgbare fra start');
+        _forslagMaalStart();
+        check('M: «Endre mål» slår på målmaskineriet (delt gate) og CSS-stengslene', true,
+          _kundeMaalAktiv() && document.body.classList.contains('kunde-maal') && !!_kundeState && _kundeState.original.size === 2, 'ikke på');
+        check('M: hintet «Dra veggen inn eller ut, eller skriv inn riktig mål» står i panelet', true,
+          /skriv inn riktig mål/.test($('_pp-maal').innerHTML) && /Lås mål/.test($('_pp-maal').innerHTML), 'mangler');
+        check('M: Send i målmodus gir melding, ikke dialog', true, (_forslagSendModal(), !$('_fors-ov')), 'dialogen åpnet');
+        checkIkke('M: uten endringer følger ingen `maal` med i svaret', 'maal' in _forslagPayload(), 'tomt maal-felt');
+        // Vegg: velg og tast — samme funksjoner som mållenka
+        _kundeVelgVegg(1, 0, true);
+        check('M: valgt vegg får tallfelt med mållenkas id (_kf-1-0)', true, !!$('_kf-1-0') && $('_kf-1-0').value === '500', $('_kf-1-0') && $('_kf-1-0').value);
+        _kundeSetWall(1, 0, 512);
+        check('M: tastet mål bygger rommet om (vegg 1: 500 → 512)', 512, lenM(S.rooms[0], 0) === 512, lenM(S.rooms[0], 0));
+        check('M: endringen listes med rom, vegg, før og etter', 'Stue: vegg 1 500 → 512 cm',
+          _forslagMaalEndringer().length === 1 && _forslagMaalEndringer()[0].tekst === 'Stue: vegg 1 500 → 512 cm', JSON.stringify(_forslagMaalEndringer()));
+        check('M: rommet regnes som endret, Bad ikke', true, _forslagMaalRomEndret(1) && !_forslagMaalRomEndret(2), 'feil rom');
+        check('M: detaljkortet sier «før endring» og at utlegget oppdateres', true,
+          /før endring/.test(_presentRoomDetailHtml(S.rooms[0])) && /Utlegget oppdateres/.test(_presentRoomDetailHtml(S.rooms[0])), 'umerket');
+        checkIkke('M: ...men ikke for et rom som ikke er endret', /før endring/.test(_presentRoomDetailHtml(S.rooms[1])), 'Bad merket');
+        check('M: dempingen tegnes fra render(), etter produktlagene og før målene', true,
+          /drawStairs\(\);\s*drawForslagMaalDemping\(\);/.test(String(render)) && String(render).indexOf('drawForslagMaalDemping') < String(render).indexOf('drawAllDimAnnotations'), 'feil lag');
+        check('M: «Lås mål» slår maskineriet av og fjerner valget', true,
+          (_forslagMaalLaas(), !_kundeMaalAktiv() && !document.body.classList.contains('kunde-maal') && S.ui.selectedWallId == null), 'fortsatt på');
+        check('M: etter låsing står endringen i panelet med Angre, og «Endre mål» kan åpnes igjen', true,
+          /500 → 512 cm/.test($('_pp-maal').innerHTML) && /Angre/.test($('_pp-maal').innerHTML) && /Endre mål/.test($('_pp-maal').innerHTML), $('_pp-maal').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120));
+        check('M: Send er mulig med bare mål rettet (foten sier «mål rettet»)', true,
+          /mål rettet/.test($('_pp-fot').innerHTML) && !$('_pp-send').disabled, $('_pp-fot').textContent.trim());
+        const pl = _forslagPayload();
+        check('M: svaret bærer `maal` i mållenkas format', true,
+          pl.maal && pl.maal.geometryMode === 'walls' && pl.maal.walls.length === 1 && pl.maal.walls[0].roomId === 1 && pl.maal.walls[0].wallIdx === 0
+          && pl.maal.walls[0].lengthCm === 512 && pl.maal.walls[0].wasCm === 500 && Array.isArray(pl.maal.points[1]) && pl.maal.points[1].length === 4,
+          JSON.stringify(pl.maal).slice(0, 160));
+        check('M: rooms er tomt når kunden bare rettet mål', 0, pl.rooms.length === 0, pl.rooms.length);
+        // Størrelse: ett rom med vegg + punkter × 15, godt under 200 kB (kundelenke_answer)
+        const perRom = JSON.stringify(pl).length;
+        check('M: 15 rom med rettede mål holder seg under 200 kB', true, perRom * 15 < 200000, perRom * 15 + ' tegn');
+        // Angre tar rommet tilbake nøyaktig
+        _kundeTilbakestillVegg(1, 0);
+        check('M: Angre gir originalen tilbake (500) og tømmer lista', true, lenM(S.rooms[0], 0) === 500 && _forslagMaalEndringer().length === 0, lenM(S.rooms[0], 0));
+        // Lenke med «Kunden kan rette mål» av
+        _forslagState.maal.kan = false; _presentRenderDetail();
+        checkIkke('M: lenke uten innstillingen viser ingen «Endre mål»', /Endre mål/.test(($('_pp-maal') || {}).innerHTML || ''), 'knappen vises');
+        check('M: innstillingen leses fra note (innstilling:maal=av) i _forslagStart', true,
+          /innstilling:maal=av/.test(String(_forslagStart)) && /innstilling:maal=av/.test(String(_delMaalEndret)) && /_del-maal/.test(String(_presentShareModal)), 'ikke koblet');
+        // Kenneths side: Arbeid inn målene med den eksisterende innarbeidingen
+        _presentPanelFjern();
+        S.ui.present = false; S.ui.kundeMode = null; _forslagState = null; _kundeState = null;
+        document.body.classList.remove('kunde-maal');
+        const skrevet = [];
+        _db = { from: () => ({ update: (felt) => ({ eq: async () => { skrevet.push(felt); return {}; } }) }) };
+        _forslagLinkCache = { id: 'fx', status: 'answered', applied_result: [],
+          answer: { rooms: [], maal: { walls: [{ roomId: 1, wallIdx: 0, lengthCm: 512, wasCm: 500 }], points: {}, geometryMode: 'walls' } } };
+        check('M: et rent mål-svar regnes som ubehandlet (åpner gjennomgangen)', true, _forslagMaalUbehandlet() && _forslagUbehandlede().length === 0, 'oversett');
+        check('M: målblokka viser endringen og knappen', true,
+          /Kunden har rettet målene/.test(_forslagMaalBlokkHtml(_forslagLinkCache)) && /Stue: vegg 1 500 → 512 cm/.test(_forslagMaalBlokkHtml(_forslagLinkCache)) && /Arbeid inn målene/.test(_forslagMaalBlokkHtml(_forslagLinkCache)), 'mangler');
+        _forslagArbeidInnMaal();   // synkron fram til DB-skrivingen — alt under måles før den
+        check('M: «Arbeid inn målene» endrer rommet som et mål-svar (vegg 1 = 512)', 512, lenM(S.rooms[0], 0) === 512, lenM(S.rooms[0], 0));
+        check('M: rommet merkes «Utlegg må oppdateres»', true, S.rooms[0].utleggMaaOppdateres === true && /UTLEGG/.test(_utleggBadge(S.rooms[0])), S.rooms[0].utleggMaaOppdateres);
+        check('M: protokollen er en egen rad (roomId maal), forslaget er IKKE merket ferdig', true,
+          _forslagMaalInnarbeidet() && !_forslagMaalUbehandlet() && _forslagLinkCache.status === 'answered' && skrevet.length === 1 && !('status' in skrevet[0]), JSON.stringify(skrevet).slice(0, 120));
+        check('M: målblokka sier Innarbeidet etterpå', true, /✓ Innarbeidet/.test(_forslagMaalBlokkHtml(_forslagLinkCache)), 'fortsatt knapp');
+        check('M: innarbeidingen er den eksisterende (ingen kopi)', true,
+          /_kundeApplyWalls\(groups, false\)/.test(String(_forslagArbeidInnMaal)) && /_kundeBrukKundePunkter\(r\.id, a\)/.test(String(_forslagArbeidInnMaal)) && /ikkeLukkLenke/.test(String(_kundeFinishApply)), 'egen vei');
+        check('M: «Send svar» beholder mål-markøren', true, /roomId === 'maal'/.test(String(_forslagSendSvar)), 'markøren forsvinner ved sending');
+        _clearRoomProductCollections(1, ['cables']);
+        check('M: nytt utlegg fjerner merket', false, S.rooms[0].utleggMaaOppdateres === false, S.rooms[0].utleggMaaOppdateres);
+        checkIkke('M: kunden skriver fortsatt bare via kundelenke_answer', /\.from\(['"]kundelenker['"]\)/.test(String(_forslagMaalStart) + String(_forslagMaalLaas) + String(_forslagPayload) + String(_kundeSetWall)), 'kunden skriver i tabellen');
+      } finally {
+        _scheduleAutoSave = lagretM.sched; _performAutoSave = lagretM.perform; _db = lagretM.db;
+        _forslagLinkCache = lagretM.fors; _forslagSisteCache = lagretM.siste;
+        _kundeState = lagretM.kunde; S.cables = lagretM.cables;
+        S.ui.selectedWallId = lagretM.selW; S.ui.selectedVertexIdx = lagretM.selV; S.ui.selectedRoomId = lagretM.selR;
+        S.ui.present = lagretM.present; S.view.zoom = lagretM.zoom; S.view.panX = lagretM.panX; S.view.panY = lagretM.panY;
+        _ppTvingSmal = lagretM.tving; _ppApen = lagretM.apen;
+        document.body.classList.toggle('kunde-maal', lagretM.klasse);
+        _presentPanelFjern();
       }
     }
   } catch (e) {
@@ -51968,10 +52290,12 @@ async function _kundelenkeRegressionTest() {
     // 033 skrev om mousemove-grenen, så mønsteret her er oppdatert. Påstanden er den samme:
     // kundemodus er kjent i alle fire lerret-håndtererne, og present-grenen slipper kundens
     // pågående drag (vegg ELLER hjørne) gjennom til den vanlige koden.
+    // 118: gatene er samlet i `_kundeMaalAktiv()` (mål- OG forslagslenke). Påstanden er den
+    // samme — kundemodus er kjent i lerret-håndtererne — bare uttrykt gjennom den delte gaten.
     check('I: alle fire lerret-gates kjenner kundeMode', true,
-      (_skriptI.match(/S\.ui\.present && S\.ui\.kundeMode === 'maal'/g) || []).length >= 3
+      (_skriptI.match(/_kundeMaalAktiv\(\)/g) || []).length >= 6
       && /_movingWall \|\| _vdDragging/.test(_skriptI),
-      (_skriptI.match(/S\.ui\.present && S\.ui\.kundeMode === 'maal'/g) || []).length);
+      (_skriptI.match(/_kundeMaalAktiv\(\)/g) || []).length);
     check('I: Escape avslutter IKKE kundesiden', true,
       /_kundeFjernValg\(\); return;/.test(_skriptI), 'Escape-håndtering mangler');
     check('I: lagring er fortsatt stengt i presentasjon', true,
@@ -51984,7 +52308,7 @@ async function _kundelenkeRegressionTest() {
       /_kTol = _kundeErSmal\(\) \? 22 : 9/.test(_skriptI) && /nearMoveArrow\(_kp\.x, _kp\.y, _kTol\)/.test(_skriptI),
       'toleranse ikke sendt');
     check('I: berøring videresendes kun i kundemodus', true,
-      /kundeMode === 'maal'/.test(_kildeUtenKommentarer(_kundeKobleBeroring)), 'ikke gatet');
+      /_kundeMaalAktiv\(\)/.test(_kildeUtenKommentarer(_kundeKobleBeroring)), 'ikke gatet');
 
     // ─── J (033) — hjørner, markør, fast tabell, geometryMode ───
     (() => {
@@ -52132,7 +52456,7 @@ async function _kundelenkeRegressionTest() {
       typeof drawVertexGizmo === 'function' && /drawVertexGizmo\(\);/.test(_kildeUtenKommentarer(drawTransformGizmo)),
       'ikke delt');
     check('J: kunden får hjørne-gizmoen, men ikke rom-gizmoen', true,
-      /kundeMode === 'maal' && S\.ui\.selectedVertexIdx != null\) drawVertexGizmo\(\)/.test(_skriptJ)
+      /_kundeMaalAktiv\(\) && S\.ui\.selectedVertexIdx != null\) drawVertexGizmo\(\)/.test(_skriptJ)
       && /!S\.ui\.kundeMode && !S\.ui\.selectedHindringId/.test(_skriptJ), 'gizmo-gating feil');
     // 036 endret hvilestillingen fra 'grab' til 'default'; påstanden er den samme — at
     // kundesiden har sin egen, korte kaskade med hovedmodulens funksjoner.
@@ -52164,7 +52488,7 @@ async function _kundelenkeRegressionTest() {
     check('L: merkemodus gir hånd over vegg, pil ellers', true,
       /\(_nh && _nh\.wallId != null\) \? 'pointer' : 'default'/.test(_skriptJ), 'merkemodus uendret');
     check('L: pan-slipp gir pil i kundemodus, hånd i ren presentasjon', true,
-      /const _hvile = \(S\.ui\.kundeMode === 'maal'\) \? 'default' : 'grab'/.test(_skriptJ),
+      /const _hvile = _kundeMaalAktiv\(\) \? 'default' : 'grab'/.test(_skriptJ),
       'pan-slipp ikke skilt');
 
     // ─── M (037) — status hentes ved prosjektåpning, panelet åpner seg selv ───
@@ -55816,6 +56140,8 @@ function _clearRoomProductCollections(roomId, keys) {
     }
     S[key] = (S[key] || []).filter(x => !_rammes(x));
   }
+  // 118: nytt utlegg på vei — merket «Utlegg må oppdateres» har gjort sitt.
+  { const _r = S.rooms.find(x => x.id === roomId); if (_r && _r.utleggMaaOppdateres) _r.utleggMaaOppdateres = false; }
   _invalidateStripCache(); _invalidateCableCache(); _invalidateMatCache(); _invalidatePlateCache();
 }
 // DEL A (spec-varmetype-tegnet-rom-husket-klasse-ferdig-naer-handa.md, Kenneth 11.09.2026): «her
@@ -56700,7 +57026,7 @@ function roomItemHtml(room, indented) {
            ikke bare i listevisningen, så et utegnet rom ikke ser ferdig ut. */
         (typeof _listRoomDrawnState==='function' && _listRoomDrawnState(room.id)==='label')
         ? `<span style="margin-left:4px;font-size:10px;font-weight:700;color:var(--dim,#9aa0aa)" title="Kun produkt valgt — ikke tegnet utlegg">K</span>` : ''}
-      <span class="room-area">${area} m²${_roomMaalBadge(room)}</span>
+      <span class="room-area">${area} m²${_roomMaalBadge(room)}${_utleggBadge(room)}</span>
     </div>
     <span style="display:flex;gap:2px;align-items:center;margin-left:auto;flex-shrink:0">
       <button onclick="event.stopPropagation();startRename(${room.id},this.closest('.room-item'))" title="Gi nytt navn" style="width:20px;height:20px;border:none;border-radius:3px;background:transparent;color:var(--dim);cursor:pointer;font-size:11px;padding:0;display:flex;align-items:center;justify-content:center"><svg class="ic ic-pencil" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex:0 0 auto"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
@@ -60969,7 +61295,7 @@ canvas.addEventListener('mousedown', e=>{
   if (_planAktiv() && e.button === 0) {
     if (_planMouseDown(e)) { e.preventDefault(); return; }
   }
-  if (S.ui.present && S.ui.kundeMode === 'maal' && e.button === 0) {
+  if (_kundeMaalAktiv() && e.button === 0) {   // 118: delt gate (mål- OG forslagslenke)
     const _kp = _evToCanvas(e);
     const _kTol = _kundeErSmal() ? 22 : 9;
     // 035: hengelåsen først — den sitter 16 px over et hjørne, så hjørne-grenen under ville
@@ -62645,7 +62971,7 @@ canvas.addEventListener('mousemove', e=>{
   if (_planAktiv() && !_panning) {
     if (_planMouseMove(e)) return;
   }
-  if (S.ui.present && S.ui.kundeMode === 'maal' && !_movingWall && !_vdDragging && !_panning) {
+  if (_kundeMaalAktiv() && !_movingWall && !_vdDragging && !_panning) {
   // 033: markøren som i Varmeplan — men KUN de grenene som finnes på kundesiden, i samme
     // rekkefølge og med samme funksjoner som innlogget. STEG 0.1 målte at den innloggede
     // kaskaden har 20+ grener (rom-gizmo, folie, kabel, matte, labels) som ikke har noe her.
@@ -62682,7 +63008,7 @@ canvas.addEventListener('mousemove', e=>{
     if (_nyHov !== _hoveredWallId) { _hoveredWallId = _nyHov; render(); }
     return;
   }
-  if (S.ui.present && !(S.ui.kundeMode === 'maal' && (_movingWall || _vdDragging))) {
+  if (S.ui.present && !(_kundeMaalAktiv() && (_movingWall || _vdDragging))) {
     if (_panning) {
       _panMove(e.clientX, e.clientY);
       markDirty();
@@ -63744,8 +64070,8 @@ canvas.addEventListener('mouseleave', () => {
 function _canvasMouseUp(e){
   // 032: gizmo-draget er sluppet — speil den nye geometrien tilbake til kundens tall.
   if (_planAktiv() && _planMouseUp()) return;
-  if (S.ui.present && S.ui.kundeMode === 'maal' && _movingWall) { _kundeGizmoSlipp(); return; }
-  if (S.ui.present && S.ui.kundeMode === 'maal' && _vdDragging) { _kundeHjorneSlipp(); return; }
+  if (_kundeMaalAktiv() && _movingWall) { _kundeGizmoSlipp(); return; }
+  if (_kundeMaalAktiv() && _vdDragging) { _kundeHjorneSlipp(); return; }
   // Presentasjonsmodus: avslutt panorering; tap (uten drag) velger rom under peker.
   if (S.ui.present) {
     if (_panning) {
@@ -63753,7 +64079,7 @@ function _canvasMouseUp(e){
       // 036: ren presentasjon er pan-bare, så hånd er riktig der. Kundesiden er en editor —
       // der skal markøren tilbake til pil, og neste mousemove setter uansett riktig verdi
       // gjennom kundekaskaden.
-      const _hvile = (S.ui.kundeMode === 'maal') ? 'default' : 'grab';
+      const _hvile = _kundeMaalAktiv() ? 'default' : 'grab';
       canvas.style.cursor = _hvile;
       if (_presentPressPt && Math.hypot(e.clientX - _presentPressPt.x, e.clientY - _presentPressPt.y) < 5) {
         const r = _presentRoomAt(e);
@@ -64310,7 +64636,7 @@ document.addEventListener('keydown', e=>{
   }
   // 032: piltaster på kundesiden. Escape fjerner veggvalget i stedet for å avslutte —
   // `_presentExit()` ville tatt kunden ut av siden han nettopp ble sendt til.
-  if (S.ui.present && S.ui.kundeMode === 'maal') {
+  if (_kundeMaalAktiv()) {   // 118: også forslagslenka i målmodus
     const ae = document.activeElement;
     const iFelt = /^(INPUT|TEXTAREA|SELECT)$/.test(ae?.tagName || '');
     // ⚠ MÅLT: etter Enter hopper fokus til neste veggs tallfelt — altså står kunden ALLTID i
@@ -84808,7 +85134,7 @@ function _kundeMaybeOpenReview() {
   // 053: ⚠ sto `status === 'answered'`, så panelet åpnet igjen selv når alt var behandlet.
   // Nå avgjør de faktiske ubehandlede radene — samme kilde som merket i romlista.
   const fors = _forslagLinkCache && _forslagLinkCache.status === 'answered'
-    && _forslagUbehandlede().length > 0;
+    && (_forslagUbehandlede().length > 0 || _forslagMaalUbehandlet());   // 118: også rettede mål
   if (!maal && !fors) return;
   _kundeReviewShownFor = _supabaseProjectId;
   // Mål først: de endrer geometrien, og et forslag gjelder utlegget i den geometrien.
@@ -85248,6 +85574,7 @@ function _forslagRevRender() {
       ${godkjentAlt ? `<div style="margin:10px 11px;padding:8px 10px;border:1px solid #22c55e55;background:#22c55e18;border-radius:8px;font-size:12px;color:#22c55e">
         ✓ ${esc(k.approve_all_name || (k.answer.approveAll && k.answer.approveAll.name) || hvem)} har godkjent hele prosjektet</div>` : ''}
       ${k.answer && k.answer.comment ? `<div style="margin:10px 11px;padding:8px 10px;border:1px solid var(--border);border-left:3px solid var(--accent);background:var(--surface2);border-radius:8px;font-size:12px;white-space:pre-wrap">${esc(String(k.answer.comment).slice(0, 2000))}</div>` : ''}
+      ${_forslagMaalBlokkHtml(k)}
       ${rows}
     </div>
     <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -85265,6 +85592,86 @@ function _forslagRevRender() {
   document.body.appendChild(ov);
   _forslagVinduDrag(ov);
   _forslagRegistrerTaster();
+}
+
+// ── 118: «Kunden har rettet målene» ──────────────────────────────────────────────────────
+// Svaret bærer `maal` i mållenkas format. Innarbeidingen er den EKSISTERENDE (028/033):
+// `_kundeApplyWalls`+`_kundeFinishApply` i vegg-modus, `_kundeBrukKundePunkter` i punkt-modus —
+// begge med svaret gitt inn, så mållenkas egen status aldri røres. Protokollen for «innarbeidet»
+// er en egen rad i `applied_result` (roomId 'maal'), adskilt fra rom-beslutningene: å arbeide inn
+// målene merker ikke forslaget som ferdig, og omvendt.
+function _forslagMaalInnarbeidet() { return _forslagAppliedResult().some(x => x && x.roomId === 'maal'); }
+function _forslagMaalUbehandlet() {
+  const k = _forslagLinkCache;
+  return !!(k && k.answer && k.answer.maal && !_forslagMaalInnarbeidet());
+}
+function _forslagMaalLinjer(a) {
+  const ut = [];
+  const navn = rid => { const r = S.rooms.find(x => String(x.id) === String(rid)); return (r && r.name) || ('Rom ' + rid); };
+  for (const w of (a && Array.isArray(a.walls) ? a.walls : [])) {
+    ut.push(`${navn(w.roomId)}: vegg ${(parseInt(w.wallIdx, 10) || 0) + 1} ${Math.round(Number(w.wasCm) || 0)} → ${Math.round(Number(w.lengthCm) || 0)} cm`);
+  }
+  if (a && a.geometryMode === 'points') {
+    for (const rid in (a.points || {})) ut.push(`${navn(rid)}: hjørner flyttet — hele rommet erstattes`);
+  }
+  return ut;
+}
+function _forslagMaalBlokkHtml(k) {
+  const a = k && k.answer && k.answer.maal;
+  if (!a) return '';
+  const inn = _forslagMaalInnarbeidet();
+  const rad = _forslagAppliedResult().find(x => x && x.roomId === 'maal');
+  const nar = rad && rad.at ? new Date(rad.at).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' }) : '';
+  return `<div style="margin:10px 11px;padding:9px 10px;border:1px solid #f0b232;border-left:3px solid #f0b232;border-radius:8px;background:rgba(240,178,50,.08)">
+    <div style="font-size:12px;font-weight:700;color:#f0b232">📐 Kunden har rettet målene</div>
+    <div style="font-size:11.5px;margin-top:4px;line-height:1.5">${_forslagMaalLinjer(a).map(l => `<div>${esc(l)}</div>`).join('')}</div>
+    <div style="margin-top:7px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      ${inn ? `<span style="font-size:11.5px;color:#22c55e;font-weight:600">✓ Innarbeidet${nar ? ' ' + nar : ''}</span>`
+            : `<button onclick="event.stopPropagation();_forslagArbeidInnMaal()" style="padding:6px 12px;border:none;border-radius:7px;background:var(--accent);color:#0d0e10;font-size:12px;font-weight:600;cursor:pointer">Arbeid inn målene</button>`}
+      <span style="font-size:11px;color:var(--dim)">${inn ? 'Rommene er merket «Utlegg må oppdateres» til du har lagt ut på nytt.' : 'Rommene merkes «Utlegg må oppdateres». Ingen ny utlegging skjer av seg selv.'}</span>
+    </div></div>`;
+}
+async function _forslagArbeidInnMaal() {
+  const k = _forslagLinkCache || _forslagSisteCache;
+  const a = k && k.answer && k.answer.maal;
+  if (!a || _kundeSkrivSperret()) return;
+  let beroerte = [];
+  if (a.geometryMode === 'points') {
+    for (const rid in (a.points || {})) {
+      const r = S.rooms.find(x => String(x.id) === String(rid));
+      if (!r) continue;
+      _kundeBrukKundePunkter(r.id, a);
+      beroerte.push(r.id);
+    }
+  } else {
+    const groups = _kundeAnswerByRoom(a);
+    const res = _kundeApplyWalls(groups, false);
+    _kundeFinishApply(res, groups, { ikkeLukkLenke: true });
+    beroerte = res.touched || [];
+  }
+  for (const id of beroerte) { const r = S.rooms.find(x => x.id === id); if (r) r.utleggMaaOppdateres = true; }
+  const liste = _forslagAppliedResult().filter(x => !(x && x.roomId === 'maal'));
+  liste.push({ roomId: 'maal', status: 'innarbeidet', at: new Date().toISOString(),
+    by: (_currentProfile && _currentProfile.full_name) || (_currentUser && _currentUser.email) || null, rom: beroerte });
+  k.applied_result = liste;
+  try { if (_db) await _db.from('kundelenker').update({ applied_result: liste }).eq('id', k.id); }
+  catch (e) { _showToast && _showToast('Målene er innarbeidet, men status kunne ikke lagres: ' + e.message, 'warn'); }
+  if (typeof renderSidebar === 'function') renderSidebar();
+  render();
+  if (document.getElementById('fors-rev-ov')) _forslagRevRender();
+}
+// Merket i romlista. Fjernes når utlegget legges på nytt (`_clearRoomProductCollections`) eller
+// ved klikk på merket.
+function _utleggBadge(room) {
+  if (!room || !room.utleggMaaOppdateres) return '';
+  return ` <span onclick="event.stopPropagation();_utleggBadgeFjern(${room.id})" style="color:#f0b232;cursor:pointer;font-size:10px;font-weight:700" title="Kunden rettet målene — legg ut på nytt. Klikk for å fjerne merket.">UTLEGG</span>`;
+}
+function _utleggBadgeFjern(roomId) {
+  const r = S.rooms.find(x => x.id === roomId);
+  if (!r) return;
+  pushUndo();
+  r.utleggMaaOppdateres = false;
+  renderSidebar();
 }
 
 // Knappene for den valgte raden. Ligger I raden, så de alltid står ved rommet de gjelder.
@@ -85483,6 +85890,9 @@ async function _forslagSendSvar() {
   // 053: ⚠ denne var ENESTE vei til `applied`. Nå settes den av ferdig-regelen i
   // `_forslagLagreBeslutning`, og sendingen er en egen, valgfri handling (spec regel 13).
   // `applied_result` skrives her også, så en sending alltid speiler det som faktisk er lagret.
+  // 118: markøren for innarbeidede mål er ikke en rom-rad, men skal overleve sendingen.
+  const maalMarkor = _forslagAppliedResult().find(x => x.roomId === 'maal');
+  if (maalMarkor) svar.push(maalMarkor);
   const naa = new Date().toISOString();
   try {
     await _db.from('kundelenker')

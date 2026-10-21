@@ -4,6 +4,65 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 118 — Forslagslenke: «Endre mål» / «Lås mål», mål følger med i svaret, «Arbeid inn målene» hos Kenneth (21.10.2026, `main`, ikke pushet)
+
+Kenneth 21.10.2026: «Bør være knapp: Endre mål — da blir veggene valgbare og kan flyttes. Når kunde
+har flyttet vegger, må hen trykke på "Lås mål". Så kan man fylle inn "hva synes du om" som vanlig og
+velge "send forslag".» Avklart: produktene dempes i endrede rom, ingen ny utlegging hos kunden.
+
+### STEG 0
+
+- **0.1 Mållenkas maskineri inne i forslagslenka:** gatet 13 steder på `S.ui.kundeMode === 'maal'`
+  (mousedown/-move/-up, keydown, `drawVertexGizmo`, `drawKundeValgtVegg/FastEnde/ValgtHjorne`,
+  `_kundeLaasHover/Klikk`, `_kundeKobleBeroring`) og på `_kundeState` (edits, vertexDelta, fixedEnd,
+  original). Eneste antakelse om S: `_kundeLagreOriginal` har tatt vare på originalen, og rom har
+  `points`/`walls`. I det fulle prosjektet bygger `_kundeRebuildRoomMedHjorner` `walls` om med
+  `compWalls` (vegginnstillinger er visuelle hos kunden, ingenting lagres), og produktene blir
+  liggende der de lå. `_kundeRenderBar()` kalles fra 19 steder og måtte omdirigeres.
+- **0.2 Kenneths side:** mål-svar arbeides inn med `_kundeAnswerByRoom` → `_kundeApplyWalls` →
+  `_kundeFinishApply` (vegg-modus) eller `_kundeBrukKundePunkter` (punkt-modus) — alle leste
+  `_kundeLinkCache.answer` direkte og `_kundeFinishApply` satte MÅLlenka til applied. Forslagssvar
+  vises i `_forslagRevRender`, beslutninger i `applied_result` per roomId.
+- **0.3 `kundelenke_answer`:** `p_answer jsonb`, eneste sjekk er `pg_column_size ≤ 200 000`
+  (`supabase-migration-kundelenke.sql` :133). Målt svar med ett rom (vegg + 4 punkter): 368 tegn;
+  15 rom ≈ 5,5 kB. Ingen migrasjon.
+- Ekte drag målt i Playwright: første forsøk på 15 px ga ingen flytting (ikke reprodusert); tre
+  påfølgende drag på 10/15/22 px flyttet veggen (327 → 335/339/345 cm). `S.snap.grid` følger
+  brukerens nettleser i det fulle prosjektet (50 cm rutenett) — skrus av i målmodus, som på mållenka.
+
+### Endring
+
+- **`_kundeMaalAktiv()`** — én gate for målmaskineriet: mållenka som før, forslagslenka når
+  `_forslagState.maal.modus`. Alle 13 gatene bruker den; `_kundelenkeRegressionTest` I/J/L er
+  oppdatert til å kreve den delte gaten i stedet for de gamle strengene.
+- **Kundesiden:** seksjon «Mål» i panelet (117): «Stemmer målene? Du kan rette dem.» + **Endre mål**
+  (`_forslagMaalStart`: lager `_kundeState`, `_kundeLagreOriginal`, `body.kunde-maal`, berøring,
+  snap av). I målmodus: valgt vegg med tallfelt (`_kf-<rom>-<idx>`, samme id som mållenka), −/+/↺
+  og hintet «Dra veggen inn eller ut, eller skriv inn riktig mål»; valgt hjørne; **Lås mål**
+  (`_forslagMaalLaas`). Etter låsing: liste «Stue: vegg 2 400 → 412 cm» med **Angre**
+  (`_kundeTilbakestillVegg/Hjorne`), og Endre mål kan åpnes igjen. Mobil: den lukkede skuffen viser
+  målkontrollene. `_kundeRenderBar()` tegner panelet i forslagslenka.
+- **Demping:** `drawForslagMaalDemping()` fra `render()` etter produktlagene — originalens og
+  dagens polygon fylles i én bane, dagens omriss strekes opp, tekst «Utlegget oppdateres etter at
+  målene er bekreftet». Kortet: banner + «(før endring)» på effekt og flateeffekt.
+- **Svaret:** `_forslagPayload()` + `maal: _kundeBuildAnswer()` når noe er endret. Send krever låst
+  målmodus («Trykk «Lås mål» først»); Send er mulig med bare mål rettet (foten: «· mål rettet»).
+- **Kenneths side:** `_forslagMaalBlokkHtml` i forslagsvinduet («Kunden har rettet målene» + liste +
+  **Arbeid inn målene**). `_forslagArbeidInnMaal` kaller den EKSISTERENDE innarbeidingen med svaret
+  gitt inn: `_kundeAnswerByRoom(a)` → `_kundeApplyWalls` → `_kundeFinishApply(…, { ikkeLukkLenke })`
+  eller `_kundeBrukKundePunkter(id, a)`. Rommene får `utleggMaaOppdateres` (badge **UTLEGG** i
+  romlista, fjernes av `_clearRoomProductCollections` eller klikk). Protokoll: egen rad
+  `{ roomId: 'maal', status: 'innarbeidet' }` i `applied_result` — rom-beslutninger og mål er
+  uavhengige; `_kundeMaybeOpenReview` åpner også for et rent mål-svar; `_forslagSendSvar` beholder raden.
+- **Lenka:** avkryssing «Kunden kan rette mål» (på som standard) i Del-dialogen; av lagres som
+  `note = 'innstilling:maal=av'` på lenka (ingen ny kolonne), lest i `_forslagStart`.
+- `_kundeforslagRegressionTest` seksjon M (32 sjekker). 156/156 grønne; `_kundelenkeRegressionTest`
+  330/330.
+
+Skjermbilder: `docs/serie-116/skjermbilder/118-*.png`.
+
+---
+
 ## 117 — Presentasjon: ett venstre panel (romliste, valgt rom, Hva synes du, Send); skuff på mobil (21.10.2026, `main`, ikke pushet)
 
 Kenneth 21.10.2026: «Kanskje alt skulle stått i en venstre bar slik som vi har i Varmeplan-appen?

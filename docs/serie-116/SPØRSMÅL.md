@@ -35,3 +35,22 @@
    er tegnet av `drawBgImage`), ikke panelet. Topplinja dekket den før.
 
 ## 118 · Endre mål / Lås mål
+
+1. **«Samme visning som mål-svar i dag»** hos deg: målblokka i forslagsvinduet viser listen
+   («Stue: vegg 1 500 → 512 cm») og én knapp. Mållenkas eget vindu har i tillegg «Blir»-kolonnen med
+   forhåndsvisning per vegg og avkryssing per vegg. Det vinduet er bundet til mållenkas cache og
+   status, så jeg kopierte det ikke inn. Vil du ha hele vegg-tabellen også for forslagssvar?
+2. **Innstillingen «Kunden kan rette mål»** lagres i lenkas `note`-felt som `innstilling:maal=av`
+   (bare når den er AV; på = tomt). Ingen ny kolonne. Teksten kan dukke opp om `note` en gang vises
+   for forslagslenker i loggen — si fra om du heller vil ha en kolonne (da er det en migrasjon).
+3. **Send med bare mål rettet** (ingen «Hva synes du?»-valg) er tillatt. Svaret har da `rooms: []`
+   og `maal`. Skulle kunden tvinges til å si noe om minst ett rom?
+4. **Punkt-modus** (kunden flyttet et hjørne): hele rommet erstattes hos deg, som i mållenka (033).
+   `_kundeBrukKundePunkter` tar ett angre-steg per rom; vegg-modus tar ett for alle.
+5. **Merket «UTLEGG»** i romlista fjernes når rommets produkter ryddes for nytt utlegg
+   (`_clearRoomProductCollections`) eller når du klikker på merket. Legger du ut på nytt via en vei
+   som ikke rydder først, blir merket stående til du klikker det bort.
+6. Første ekte veggdrag i testen (15 px) flyttet ingenting; tre påfølgende (10/15/22 px) gjorde det.
+   Jeg fant ikke årsaken (snap var av i alle målte forsøk). Snap skrus nå av i målmodus uansett. Hvis
+   du opplever at første drag «ikke tar», si fra — da er det noe å jakte på.
+7. **Mållenka (`?kunde=`) er urørt** i oppførsel; den deler nå gaten `_kundeMaalAktiv()`.
