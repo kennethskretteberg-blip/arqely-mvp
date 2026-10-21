@@ -6,7 +6,7 @@ Kjørt 21.10.2026 på `main`, fra `ecb71c4` (115). **Ikke pushet.** Én commit p
 |---|---|---|
 | 116 | `70feed0` | Forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» |
 | 117 | `a2b3691` | Ett venstre panel; skuff på mobil |
-| 118 | (se under) | Endre mål / Lås mål i forslagslenka, mål i svaret, Arbeid inn målene |
+| 118 | `2341dca` | Endre mål / Lås mål i forslagslenka, mål i svaret, Arbeid inn målene |
 
 Ingen av promptene var kjørt fra før (sjekket med `git log --oneline -15`).
 
