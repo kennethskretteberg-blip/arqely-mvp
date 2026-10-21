@@ -42,7 +42,87 @@ Skjermbilder: `docs/serie-116/skjermbilder/116-*.png`. Spørsmål: `docs/serie-1
 
 ---
 
-## 113 — PDF: «Skriv ut / PDF» gjorde ingenting (21.10.2026, `main`, ikke pushet)
+## 115 — Maks CC trinn/repos: leverandørens grense, ikke et blankt tall (21.10.2026, `main`, `ecb71c4`, pushet)
+
+Kenneth: «ta bort maks på maks CC trinn/repos også.»
+
+### Denne var IKKE som 111/112/114
+
+`STAIR_MAX_CC_CM = 12` var merket «hard sikkerhetsgrense» og ble håndhevet helt nede i motoren
+(`_stairSurfSettings`), ikke bare i settere og `max`-attributter. Et tall i panelet over 12 ville
+vært en **løgn** uten at klemma også gikk.
+
+### Målt på katalogen
+
+| | |
+|---|---|
+| Trappekabler i katalogen | 148 |
+| Som har egen `max_spacing_mm` | **148 (alle)** |
+| Verdier | **200 mm** (noen 500) |
+
+Det blanke 12-tallet var altså strengere enn **enhver** leverandørs egen regel — stikk i strid med
+husregelen om at monteringsregler er leverandørspesifikke (CLAUDE.md). Konstanten er fjernet.
+
+### Taket nå
+
+Det strengeste av:
+
+* **leverandørens** maks (strengeste på tvers av hele kabelsettet, `_stairSetSpacingLimits`)
+* det **geometriske** — forbi største brukbare dybde er strengantallet alt på gulvet (N = 2), og
+  større CC endrer ingenting
+
+Uten valgt kabel står det geometriske alene. Sonens tak følger sonens egne flater, som 111/114.
+`_stairMaxCcCm` er den ene kilden; elleve steder leser den.
+
+**Forslagsmotoren måtte følge med.** Den leste brukerens maks og klemte den til 12, så en trapp
+satt til 16 fikk forslag bygget på 12. Målt etter: ved 16 gir motoren stepCC 12,5 og 240 W/m², og
+scoren faller fra 256 til 76 — tetthets-scoringen regulerer seg selv uten et blankt tak.
+
+### Sikkerheten ligger nå der den hører hjemme
+
+Varselet om lav flateeffekt (`STAIR_MIN_DENSITY_WM2` = 250) fantes, men ble **beregnet og aldri
+vist** — kun et stumt ⚠️ uten tekst eller `title`. Med CC-taket løftet er dette eneste signalet,
+så det sier nå hva som er galt:
+
+```
+🪜 Trapp  CC-TEST — InSnow 30T 1200W 40.1m · 77.7 m · 2331 W · 231 W/m² ⚠️ · 231 W/m² er under anbefalt 250
+```
+
+Full liste (CC over/under leverandørens grense, kabellengde) i `title`-en.
+
+### Test
+
+`_stairRegressionTest` sjekk 23–29: taket er leverandørens 20 og ikke 12, det geometriske regnes av
+brukbar dybde, 16 cm går inn, klemming ved leverandørens maks, **motoren bruker faktisk tallet
+brukeren satte**, lav flateeffekt varsles med tall og forsvinner ved normal CC.
+
+---
+
+## 114 — Avstand foran/bak trinn: bort med det faste 10 cm-taket (21.10.2026, `main`, `189075f`, pushet)
+
+Kenneth: «ta bort maks på avstand foran/bak trinn også.»
+
+Fire steder, samme mønster som 111 og 112: `_setStairFrontBackOffset`, `_setStairZoneFrontBack`,
+`max="10"` på trappefeltet og 10 som maks i sonens `inheritRow`.
+
+Taket er geometrisk, målt på **trinnenes dybde**. «Avstand foran/bak» er én kontroll som setter
+*både* nese og opptrinn, så den spises fra begge kanter av samme trinn:
+`usableDepth = d_cm − 2 × verdien`. Passerer den halve trinndybden, faller trinnet stille ut av
+utlegget (`if (usableDepth < 0.5) continue`). Taket følger det **grunneste** trinnet — 30 cm gir
+14 cm, 22 cm gir 10 cm. Sonens tak følger sonens egne trinn.
+
+Målt: 12 og 13,9 cm går inn der 10 cm før var veggen, og alle ti trinn har fortsatt løp ved taket.
+
+`_stairMaxFrontBackCm` er tredje bruker av `_stairHalfMinusOne` (111/112): **bredde** for sidene,
+**reposdybde** for reposmarginen, **trinndybde** for nese/opptrinn.
+
+### Test
+
+`_stairRegressionTest` sjekk 19–22.
+
+---
+
+## 113 — PDF: «Skriv ut / PDF» gjorde ingenting (21.10.2026, `main`, `b9f3fe4`, pushet)
 
 Kenneth 21.10.2026: «Print PDF funker ikke.» Ingen dialog, ingen nedlasting, ingen melding —
 i nettleseren og i den installerte Windows-appen.
@@ -140,6 +220,112 @@ vakten returnerer `false` og viser toasten.
 **Vaksine:** feilen ble gjeninnført i kilden, og testen ble rød på nøyaktig de to
 trappe-fixturene. Røyktesten har i tillegg en innebygd vaksine som injiserer en feil hver gang
 den kjører, slik at en test som ikke måler noe ikke kan stå grønn.
+
+---
+
+## 112 — Dybdemargin repos: bort med det faste 20 cm-taket (21.10.2026, `main`, `2687b9d`, pushet)
+
+Kenneth: «ta bort maks på avstand foran/bak repos også.»
+
+Samme to steder som i 111: `_setStairLandingMargin` og `max="20"` på tallfeltet.
+
+Taket er geometrisk, men målt på **dybden**: reposets dybdemargin spises foran *og* bak av samme
+flate (`usableDepth = d_cm − 2 × margin` i `_stairSurfSettings`). Passerer den halve dybden, blir
+`usableDepth` null og flata faller stille ut av utlegget. Taket følger det **grunneste** reposet —
+et 90 cm repos gir 44 cm.
+
+Målt: 25 og 40 cm går rett inn, og begge repos har fortsatt løp helt oppe ved taket.
+
+`_stairMaxEdgeMarginCm` (111) og `_stairMaxLandingMarginCm` deler nå kjernen `_stairHalfMinusOne`:
+halve minste flate, minus 1 cm.
+
+### Test
+
+`_stairRegressionTest` sjekk 15–18.
+
+---
+
+## 111 — Avstand sider: bort med det faste 20 cm-taket (21.10.2026, `main`, `ece894e`, pushet)
+
+Kenneth: «ta bort maks verdi på avstand sider. nå får jeg ikke satt mer enn 20 cm.»
+
+### Taket lå FIRE steder, ikke ett
+
+`_setStairEdgeMargin`, `_setStairZoneEdgeMargin`, og `max="20"` på **begge** tallfeltene. En
+innstilling med både setter og `max`-attributt per nivå (trapp + sone) har fire kallsteder — let
+etter alle fire før den meldes som fjernet.
+
+### Igjen står ett geometrisk tak
+
+`_stairMaxEdgeMarginCm(surfaces, fallbackW)` = `minSurfW / 2 − 1`. Grunnen: avstanden spises av
+**begge** sider av samme flatebredde, og passerer 2 × avstand bredden, faller flata **stille** ut
+av utlegget — `if (runLength <= 0) continue` i `generateStairCable` gir ingen kabel og ingen
+beskjed. Samme uttrykk som `_stairMarginProbe` alt brukte for solverens eget tak.
+
+Sonens tak følger sonens **egne** flater (`_stairZoneSurfaces`, tåler delt sone fra 110) — 240 cm
+trinn gir 119 cm, 100 cm repos gir 49 cm.
+
+### Skillet som avgjorde designet
+
+`STAIR_SINGLE_MAX_MARGIN_FRAC` (75 % varmet bredde) styrer hva **motoren** får velge i et forslag.
+Et tall brukeren taster brukes nøyaktig og skal ikke underlegges den regelen — se 101 og
+105/Regel 22.
+
+---
+
+## 110 — Trappebyggeren: flytt segmenter og sett inn hvor som helst (21.10.2026, `main`, `de6623a`, pushet)
+
+Kenneth: «Jeg har fått slettet nederste repos. Ønsker nå å legge til et repos, men jeg får kun lagt
+til trinn eller repos på slutten og ikke på starten. Vil det være mulig å kunne flytte på
+"modulene" ved å dra opp/ned eller pil opp/ned?»
+
+Hver segmentrad fikk drahåndtak (⠿) og ▲/▼ (deaktivert i endene, fokuserbare for tastatur). Mellom
+hver rad — og over første / under siste — ligger en ＋-stripe som ved hover tilbyr «Trinn» og
+«Repos», og som under et drag vokser til slippmål med blå innsettingslinje. Én hjelper,
+`_stairBuilderMoveSeg`, brukes av både piler og drag.
+
+### STEG 0 — målt, ikke antatt
+
+**Lista var snudd for «Ovenfra og ned».** `displayIdxs` reverserte for `'top'`, men
+`_generateStairSurfaces` gir `segs[0]` `y = 0` (øverst) for den retningen — så rad 0 var segmentet
+som ligger **nederst** i planen (målt: y = 160), under overskriften «SEGMENTER (topp → bunn)» og
+motsatt vei av sidevisningen rett under. Da ville ▲/▼ og draget flyttet segmenter motsatt vei av
+det brukeren ser. Lista er nå byggerekkefølgen i begge retninger (`_stairBuilderDisplayIdxs`); bare
+etiketten snur. Det var også dette som gjorde at ＋-knappene la til i feil ende.
+
+**Trappa hoppet.** Med «Nedenfra og opp» flyttet alle eksisterende flater seg 100 cm nedover da et
+100 cm repos ble lagt til på slutten. Men «hold den nederste kanten i ro» er ikke nok alene: den
+regelen flytter i stedet hele trappa 140 cm **oppover** når et repos settes inn nederst. Begge
+ender holdes samtidig ved å feste et **punkt** i stedet for en kant — `_stairBuilderAnchorSeg` er
+segmentet som lå først da modalen ble åpnet, holdt på **objekt-identitet** gjennom flyttinger. Da
+flytter ingen eksisterende flate seg, uansett hvor det settes inn. `stair.dims` (trappe-lokale)
+kompenseres tilsvarende.
+
+**`runsPerStep` overlevde en formendring.** Målt: trinndybde 30 → 50 cm beholdt 3 strenger der
+geometrien krever 6 — faktisk CC 23 cm, over den daværende harde grensen. Alle andre settere
+nullstiller cachen; nettopp denne veien gjorde det ikke. Et valgt forslag sperret i tillegg
+margin-reberegningen; det degraderes nå til `lastProposal` (101/Regel 20), så «↩ Tilbakestill»
+fortsatt virker.
+
+### Arv ved innsetting
+
+Nærmeste nabo, ikke «siste i lista»: bredde fra nærmeste segment uansett type, trinn arver
+dybde/høyde/antall fra nærmeste trinn, repos arver dybde fra nærmeste repos (ellers 120 cm).
+
+### Soner
+
+`seg.zone` følger segmentet. Deler en flytting en sone, eller lager en innsetting et hull, vises et
+gult varsel i modalen før «Lagre» — uten å blokkere.
+
+### Bifunn (ikke rettet)
+
+CSS-variabelen `--brd` brukes **118 steder** i `index.html`, men er **aldri definert**. `var(--brd)`
+er ugyldig, og hele deklarasjonen den står i faller bort. Oppdaget fordi innsettingslinja var
+usynlig. Ny CSS her bruker `--border`.
+
+### Test
+
+`_stairBuilderMoveRegressionTest110` — 59 sjekker, begge byggeretninger.
 
 ---
 
