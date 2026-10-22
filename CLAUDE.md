@@ -412,3 +412,8 @@ Professional engineering tool for electric heating design with:
 - installation validation
 - full project documentation
 - integration with supplier product databases
+
+---
+
+## Status for prosjektoversikten
+På slutten av hver økt: oppdater `STATUS.md` (Fase, Sist oppdatert, Sist gjort, Neste steg, Blokkert av, Live). Behold formatet på feltlinjene nøyaktig.
