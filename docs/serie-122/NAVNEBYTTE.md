@@ -27,8 +27,8 @@ Kjørt 22.10.2026. `git remote -v` peker til `varmeplan-web` (sjekket før start
 |---|---|
 | `arqely_prefs`, `lumelo_engine_url`, `window.LUMELO_ENGINE_URL` | Den gamle nøkkelen leses for å flytte innstillingene. Fjernes etter 1.2.2027. |
 | `https://lumelo-backend.fly.dev` (og statuslinja «Motor: lumelo-backend.fly.dev ✓», som viser adressen) | Motoren kjører der til den flyttes (egen prompt). |
-| `arqely_usage`, `arqely_mat_bench_history` (localStorage) | Ikke med i bestillingen. Kan flyttes på samme måte om du vil. |
-| `arqely_gbao10`, `arqely_recovery` (IndexedDB-databaser) | Et nytt navn gir en ny, tom database: lagrede filhåndtak for GBAO10 og gjenopprettingskopier ville forsvunnet. Krever egen kopiering. |
+| `arqely_usage`, `arqely_gbao10`, `arqely_recovery` | Flyttet i oppfølgingen (123, se under). De gamle navnene leses bare for å kopiere. |
+| `arqely_mat_bench_history` (localStorage) | Bare et utviklerverktøy (matte-benchmark). Ikke flyttet. |
 | `arqely.com` i opprinnelsessjekken og i kommentarer om lenker i e-post | Beholdes til domenet sies opp. |
 | `noreply@arqely.no` / `invite.arqely.com` i `supabase/functions/kundelenke-mail/README.md` | Avsenderdomenet beholdes til varmeplan.no er satt opp. |
 | «-- Arqely —» øverst i 11 gamle `supabase-migration-*.sql` | Kommentarer i migrasjoner som allerede er kjørt. Historikk, ingen endring i Supabase. |
@@ -52,3 +52,26 @@ eneste er avsenderen i README-en over (secret `FROM_EMAIL`).
 
 Nei. Vercel-prosjektet følger GitHub-repoet. Sjekk likevel at det fortsatt er koblet etter
 omdøpingen på GitHub.
+
+## Oppfølging 123 · usage og IndexedDB flyttet (22.10.2026)
+
+- **`arqely_usage` → `varmeplan_usage`:** samme kopiering ved oppstart som prefs. Den gamle nøkkelen
+  står igjen.
+- **`arqely_gbao10` → `varmeplan_gbao10` og `arqely_recovery` → `varmeplan_recovery`:** én felles
+  funksjon, `_idbOpenFlyttet`, håndterer begge.
+  - Første gang den nye databasen åpnes, kopieres alt den ikke har fra før over fra den gamle.
+  - Et merke i localStorage gjør at det bare skjer én gang. En gjenopprettingskopi som slettes
+    senere, kommer derfor ikke tilbake.
+  - Den gamle databasen slettes ikke, og den opprettes ikke hvis den ikke fantes.
+  - Kan fjernes etter 1.2.2027.
+- **Målt i din nettleser:**
+  - Gjenopprettingskopien `p-044` (6 KB) er identisk i den nye databasen.
+  - Bruksloggen (69 produkter) er kopiert.
+  - De gamle databasene og nøklene står igjen.
+  - GBAO10-mappevalgene var tomme, så selve mappehåndtakene er ikke testet. De går gjennom samme
+    kopiering.
+- **Testet på to engangsdatabaser:**
+  - Alt ble kopiert.
+  - En oppføring som ble slettet i den nye databasen, kom ikke tilbake.
+  - En avbrutt kopiering overskrev ikke en nyere verdi.
+- **Testbatteriene:** samme resultat som over. 28 er grønne, og de samme tre er røde fra før.

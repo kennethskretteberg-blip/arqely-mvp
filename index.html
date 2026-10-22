@@ -4689,11 +4689,13 @@ function _applyPrefs() {
 _applyPrefs();
 
 // ─── USAGE TRACKING (learning system) ───────────────────────
-// Historisk navn fra arqely-tiden. Ikke med i 122-navnebyttet (bare prefs og motoradressen ble
-// flyttet). Byttes den, må den kopieres på samme måte som PREFS_KEY over.
-const USAGE_KEY = 'arqely_usage';
+// 123 (Kenneth 22.10.2026): het `arqely_usage`. Kopieres over første gang, som PREFS_KEY over.
+// USAGE_KEY_GAMMEL og kopieringen kan fjernes etter 1.2.2027.
+const USAGE_KEY = 'varmeplan_usage';
+const USAGE_KEY_GAMMEL = 'arqely_usage';   // kan fjernes etter 1.2.2027
 function _loadUsage() {
   try {
+    _flyttLagretNokkel(USAGE_KEY, USAGE_KEY_GAMMEL);
     const raw = localStorage.getItem(USAGE_KEY);
     return raw ? JSON.parse(raw) : { products: {} };
   } catch(e) { return { products: {} }; }
@@ -7632,7 +7634,7 @@ function _upcScopeProducts(modType) {
 // DEL B (spec-varmetype-tegnet-rom-husket-klasse-ferdig-naer-handa.md, Kenneth 11.09.2026): «den
 // står alltid på 17T» — familien ble forvalgt fra PRODUKTREKKEFØLGEN (klasses[0] i
 // _upcPopulateFamilies), aldri fra hva Kenneth faktisk brukte sist. Signalet fantes allerede
-// (_trackProductUsage sin lastUsed, samme arqely_usage-nøkkel — IKKE omdøpt, se Krav 6) — det ble
+// (_trackProductUsage sin lastUsed, samme usage-nøkkel — het arqely_usage, flyttet i 123 med kopiering) — det ble
 // bare aldri lest for annet enn «Mest brukt»-merket. SIST brukt, ikke MEST brukt (Krav 2): finner,
 // blant produktene _upcScopeProducts allerede har filtrert for gjeldende (produkttype, innendørs/
 // utendørs) — Krav 3 sitt «per modultype» kommer gratis av at _upcScopeProducts allerede skiller
@@ -82543,16 +82545,13 @@ function _gbao10SetType(t) { _gbao10Type = (t === 'ordre') ? 'ordre' : 'tilbud';
 // To lagrede mappehåndtak (ett per type) — FileSystemDirectoryHandle er strukturert-klonbar og
 // kan lagres direkte i IndexedDB, samme mønster exportProjectFile() bruker for filhåndtaket sitt
 // (_projectFileHandle), bare persistert på tvers av økter i stedet for kun i minnet.
-// Historisk navn fra arqely-tiden. Endres IKKE — omdøping mister brukerens lagrede
-// mappevalg for Visma-eksporten i stillhet (ingen migrering finnes).
-const _GBAO10_DB = 'arqely_gbao10', _GBAO10_STORE = 'handles';
+// 123 (Kenneth 22.10.2026): databasen het `arqely_gbao10`. En ren omdøping ville mistet brukerens
+// lagrede mappevalg i stillhet, så `_idbOpenFlyttet` kopierer mappehåndtakene over første gang.
+// Den gamle databasen slettes ikke. `_GBAO10_DB_GAMMEL` kan fjernes etter 1.2.2027.
+const _GBAO10_DB = 'varmeplan_gbao10', _GBAO10_STORE = 'handles';
+const _GBAO10_DB_GAMMEL = 'arqely_gbao10';   // kan fjernes etter 1.2.2027
 function _gbao10OpenDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(_GBAO10_DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(_GBAO10_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  return _idbOpenFlyttet(_GBAO10_DB, _GBAO10_DB_GAMMEL, _GBAO10_STORE);
 }
 async function _gbao10SaveHandle(type, handle) {
   const db = await _gbao10OpenDb();
@@ -83873,19 +83872,73 @@ async function _restoreTrashedProject(projectId) {
   } catch(e) { console.error('Restore error:', e.message); return { ok:false, reason:'error', message:e.message }; }
 }
 
+// ─── INDEXEDDB: ÅPNE MED FLYTTING FRA GAMMELT NAVN (123) ──────────────────────
+// Åpner databasen `ny` (versjon 1, ett objektlager `store`). Første gang i denne nettleseren
+// kopieres alle oppføringer fra `gammel` som `ny` ikke har fra før. Den gamle databasen leses bare,
+// og slettes ikke. Finnes den ikke, opprettes den heller ikke: oppgraderingen avbrytes. Et merke i
+// localStorage gjør at kopieringen bare skjer én gang, så en oppføring som senere slettes i den nye
+// databasen (f.eks. en brukt gjenopprettingskopi) ikke kommer tilbake. Feiler kopieringen, åpnes
+// den nye databasen likevel, og den prøves igjen ved neste åpning. Kan fjernes etter 1.2.2027
+// (sammen med *_GAMMEL-navnene).
+function _idbAapne(navn, store, opprett) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(navn, 1);
+    req.onupgradeneeded = () => {
+      if (opprett) req.result.createObjectStore(store);
+      else req.transaction.abort();   // fantes ikke — ikke lag en tom gammel database
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function _idbOpenFlyttet(ny, gammel, store) {
+  const db = await _idbAapne(ny, store, true);
+  const merke = 'varmeplan_idb_flyttet_' + ny;
+  let ferdig = false;
+  try { ferdig = localStorage.getItem(merke) === '1'; } catch (e) { ferdig = false; }
+  if (ferdig) return db;
+  try {
+    let gdb = null;
+    try { gdb = await _idbAapne(gammel, store, false); } catch (e) { gdb = null; }   // fantes ikke
+    if (gdb && gdb.objectStoreNames.contains(store)) {
+      const gammelt = await new Promise((resolve, reject) => {
+        const tx = gdb.transaction(store, 'readonly'), os = tx.objectStore(store);
+        const kReq = os.getAllKeys(), vReq = os.getAll();
+        tx.oncomplete = () => resolve({ keys: kReq.result || [], vals: vReq.result || [] });
+        tx.onerror = () => reject(tx.error);
+      });
+      if (gammelt.keys.length) {
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(store, 'readwrite'), os = tx.objectStore(store);
+          gammelt.keys.forEach((k, i) => {
+            const finnes = os.getKey(k);
+            finnes.onsuccess = () => { if (finnes.result === undefined) os.put(gammelt.vals[i], k); };
+          });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+    }
+    if (gdb) gdb.close();
+    try { localStorage.setItem(merke, '1'); } catch (e) { /* prøves igjen neste gang, overskriver aldri */ }
+  } catch (e) {
+    console.warn('123: flytting ' + gammel + ' → ' + ny + ' feilet, prøves igjen neste gang:', e && e.message);
+  }
+  return db;
+}
+
 // ─── INDEXEDDB RECOVERY STORE ─────────────────────────────────
-// Databasenavnet under ('arqely_recovery') er historisk fra arqely-tiden. Endres IKKE —
-// omdøping mister brukerens gjenopprettingsdata i stillhet (ingen migrering finnes).
+// 123 (Kenneth 22.10.2026): databasen het `arqely_recovery`. Gjenopprettingskopiene kopieres over
+// første gang (`_idbOpenFlyttet`), så ingen mister et ulagret prosjekt. Den gamle databasen slettes
+// ikke. RECOVERY_DB_GAMMEL og kopieringen kan fjernes etter 1.2.2027.
+const RECOVERY_DB = 'varmeplan_recovery';
+const RECOVERY_DB_GAMMEL = 'arqely_recovery';   // kan fjernes etter 1.2.2027
 const _idb = {
   _db: null,
   async open() {
     if (this._db) return this._db;
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('arqely_recovery', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('autosaves');
-      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
-      req.onerror = () => reject(req.error);
-    });
+    this._db = await _idbOpenFlyttet(RECOVERY_DB, RECOVERY_DB_GAMMEL, 'autosaves');
+    return this._db;
   },
   async set(key, value) {
     try {
