@@ -4,6 +4,60 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 123 — Navnebytte del 2: `arqely_usage` og IndexedDB-databasene flyttet til `varmeplan_*` (22.10.2026, `main`, `06d784b`, pushet)
+
+- `arqely_usage` → `varmeplan_usage`, med samme kopiering ved oppstart som prefs.
+- `arqely_gbao10` → `varmeplan_gbao10` og `arqely_recovery` → `varmeplan_recovery` via ny felles
+  `_idbOpenFlyttet`:
+  - Kopierer manglende oppføringer én gang. Merket ligger i localStorage, så en slettet
+    gjenopprettingskopi kommer ikke tilbake.
+  - Oppretter aldri en gammel database som ikke fantes.
+- Gamle nøkler og databaser slettes ikke. Kopieringen kan fjernes etter 1.2.2027.
+- Målt i Kenneths nettleser: gjenopprettingskopien `p-044` er identisk, og bruksloggen (69 produkter)
+  er kopiert.
+- 28 av 31 batterier er grønne. De tre røde er røde også med den gamle koden. Detaljer i
+  `docs/serie-122/NAVNEBYTTE.md`.
+
+---
+
+## 122 — Navnebytte arqely/lumelo → Varmeplan (web) (22.10.2026, `main`, `94a469a`, pushet)
+
+Repoet heter nå `varmeplan-web` (mappe og GitHub). Motoren heter `varmeplan-motor`, men kjører
+fortsatt på `lumelo-backend.fly.dev`.
+
+- `arqely_prefs` → `varmeplan_prefs` og `lumelo_engine_url` → `varmeplan_engine_url`. Den gamle
+  verdien kopieres over ved oppstart, og den gamle nøkkelen står igjen til 1.2.2027.
+  «Nullstill lagret adresse» fjerner begge motornøklene.
+- `LUMELO_FLY_URL` → `VARMEPLAN_MOTOR_URL` og `LUMELO_LOCAL_URL` → `VARMEPLAN_MOTOR_LOCAL_URL`.
+  `window.VARMEPLAN_ENGINE_URL` erstatter `window.LUMELO_ENGINE_URL`, og det gamle navnet leses
+  fortsatt. URL-verdien er urørt.
+- Kommentarer, `sw.js`, `launch.json` og `docs/kart-lag.md` er oppdatert.
+- Ingen synlig tekst måtte endres. Avsenderdomenet (arqely.no), arqely.com og Supabase er urørt.
+- Rapporten med alle gjenværende treff ligger i `docs/serie-122/NAVNEBYTTE.md`.
+
+---
+
+## 122 — Presentasjon: frihånds-matte og aluboard gjenkjent, areal alltid synlig, «Foreslå endring» med type → gruppe → ▲/▼ og live resultat (22.10.2026, `main`, `73c15a8`, pushet)
+
+Kenneth: en presentasjon med EcoMat lagt i frihånd sa «Ingen varme er planlagt», og kortet sa
+«Produkt: ikke plassert», selv om effekten var 1500 W.
+
+- **Rotårsak:** `_presentRoomProduct` hadde sin egen liste og manglet `S.matPaths` og `S.aluboard`.
+  Den leser nå `_roomDominantProduct` (den felles kilden fra 097). Kortet viser alle produktene,
+  f.eks. «2 × …».
+- **Areal:** netto og brutto vises alltid i kortet og i romlista, med «før → etter» etter Endre mål.
+- **Én velger** (`_forslagVelgerHtml`) for rom med og uten produkt: type → produktgruppe → ▲/▼, med
+  live resultat (effekt, flateeffekt, CC, dekning, mot ønsket og «Nå:» til sammenligning).
+  - Mattegruppa er nå «EcoMat» (60/100/150). Før var den én død rad per W/m².
+- **Godkjenning:** ved typebytte ryddes rommet først. En frihånds-matte beholder banen og bytter bare
+  produktfamilie.
+- **Testene:** oppsettet tømmer nå matPaths, foilFree og aluboard (testen var miljøavhengig). Den
+  automatiske lagringen av valget lekker ikke lenger inn i ekte tilstand. Ny seksjon M.
+- `_kundeforslagRegressionTest` 227/227 og `_kundelenkeRegressionTest` 330/330.
+- Rapport og fire spørsmål: `docs/serie-122/RAPPORT.md`.
+
+---
+
 ## 121 — Kabelmotor: fail-open uten polygonbibliotek gjenopprettet (tilnærmet kandidat), 7 utdaterte påstander oppdatert med begrunnelse, rask variant av batteriet (21.10.2026, `main`, ikke pushet)
 
 Kenneths svar på SPØRSMÅL 103 (skrevet inn i `docs/trapp/prompter/SPØRSMÅL.md`). Full måling i
