@@ -6,7 +6,7 @@
 //   - activate → clients.claim() + slett ALLE cacher med annet navn enn vår (vi lager ingen selv).
 //   - fetch    → BARE navigasjonsforespørsler (request.mode === 'navigate') håndteres, og alltid
 //                nettverk først. Feiler nettet, vises en liten innebygd side — laget her, ikke en
-//                cachet kopi av appen. Alt annet (Supabase, lumelo, CDN-skript, fonter, bilder)
+//                cachet kopi av appen. Alt annet (Supabase, tolkemotoren, CDN-skript, fonter, bilder)
 //                går urørt forbi: ingen respondWith, ingen caches.put.
 //
 // Finnes bare for at Edge/Chrome skal regne Varmeplan som installerbar (krever en fetch-handler)

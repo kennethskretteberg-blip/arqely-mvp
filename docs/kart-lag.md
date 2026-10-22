@@ -55,8 +55,8 @@ ser galt ut. «Bytt plantegning» er erstattet av «Hent nytt utsnitt».
 
 ## Klienten finner tjenesten selv
 
-`_roofApi` speiler lumelo-mønsteret, men med **egne** konstanter og **egen** cache — en død
-lumelo-adresse skal aldri kunne blokkere kart-henting.
+`_roofApi` speiler mønsteret til tolkemotoren (`varmeplan-motor`), men med **egne** konstanter og **egen** cache — en død
+motoradresse skal aldri kunne blokkere kart-henting.
 
 ```
 window.VARMEPLAN_ROOF_URL  →  localStorage varmeplan_roof_url  →  localhost:4100  →  Fly
