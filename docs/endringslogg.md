@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 133 — Vannrett matte: én koordinatkonvensjon (24.10.2026, `main`, ikke pushet)
+
+Rapport, spørsmål og skjermbilder i `docs/serie-133/`. Bakgrunn: 124 «Funn 1», SPØRSMÅL 128-1/130-4.
+
+- **Konvensjon (kommentar ved `S.mats`, `matCoordV: 2`):** `x_cm/y_cm` = blokkas lave hjørne for 0° og
+  90°; bredder stables i +tvers (x / y), kabel i +langs (y / x), `runStarts` absolutte. 90° er en
+  transponering av 0°-blokka — motorens eksisterende A-konvensjon. Fri vinkel = rotasjon om senteret som før.
+- **`_matFrame(mat)`** (senter, aksevektorer, `toW`) leses av `_matRunWorldGeom`, `drawMats`
+  (`ctx.transform(0,1,1,0)` for 90°), label, `_matRunDragDelta`, målkjeden, `_matCenter`, gizmo,
+  rotasjonspivot og `_clampMatToRoom`. Treff/rødmerking/130/131/127/PDF gikk alt via `_matRunWorldGeom`.
+- **Motoren:** `autoFillMatSerpentine` 'h' skriver `matX = alongCenter − L/2`, `matY = acrossCenter −
+  totalW/2` (var byttet om siden `b85c30a`). `_matRunOrder`: høy along-ende for 90° = høyre; piltaster følger.
+- **`_matSetRotationDeg`:** ↻ 90°-knappen og håndtaket holder senteret inn i/ut av 90°, `runStarts` følger.
+- **`_matMigrateCoordV2`** i `_restoreProject`: gamle 90°-matter konverteres fra tegnet posisjon
+  (speilede `runStarts`, materialisert ved kort siste/klipp, `startCorner: 'tl'` når feltet mangler).
+  To gamle prosjekter (11 matter): 0 geometriavvik, canvas-hash identisk i vanlig og PDF-modus.
+- **Resultat:** 900 × 300 'h' 8,64 → 15,0 m² (= speilet 'v'); rect #10 'h' 8,0 → 10,0 m² = estimatet;
+  benk 29 'h'-rader opp, 6 InSnow-rader ned (talte nett utenfor rommet før), ingen 'v'-rad endret.
+- **Ny `_matRotationRegressionTest`** 35/35 (gammel formel tilbake → 9 røde). Alle andre batterier og
+  `_pdfExportSmokeTest` grønne.
+
+---
+
 ## 128 — Matte: veggmargin etter Regel 12 (kabel 5 cm fra vegg = nett 2,5/3 cm), én kilde (23.10.2026, `main`, ikke pushet)
 
 Kenneth: «Min 5 cm fra kabel til vegg, dvs. 2,5 cm fra ytterkant nettet til vegg.» Rapport, spørsmål og

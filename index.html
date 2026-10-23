@@ -4240,7 +4240,21 @@ const S = {
   strips   : [],   // [{id,roomId,productId,direction,pos_cm,start_cm,length_cm}]
   cables   : [],   // [{id,roomId,productId,direction,spacing_cm,startCorner,runs,totalLength_cm,multiCableIndex?,multiCableGroup?,leadRun?}]
   zones    : [],   // [{id,roomId,type:'forbidden'|'preferred',purpose,points:[{x,y}],label}]
-  mats     : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,rotation_deg}]
+  // 133 · ÉN koordinatkonvensjon for matter (matCoordV: 2), uansett retning:
+  //   x_cm/y_cm = blokkas LAVE hjørne i verden (første bredde, r=0, starter der).
+  //   rotation_deg 0  (loddrett): bredder stables i +x (x_cm + r·(width_cm+gap_cm)), kabel langs +y;
+  //                               runStarts[] er absolutte y, length_cm langs y.
+  //   rotation_deg 90 (vannrett): bredder stables i +y (y_cm + r·(width_cm+gap_cm)), kabel langs +x;
+  //                               runStarts[] er absolutte x, length_cm langs x. 90° er altså en
+  //                               TRANSPONERING (x↔y) av 0°-blokka, ikke en rotasjon om senteret —
+  //                               det er den motoren, klippingen og vakten alltid har brukt
+  //                               (perpBase = y_cm, alongStart = x_cm), og det «høy along-ende»
+  //                               i _matRunOrder betyr høy x.
+  //   Andre vinkler (fritt håndtak): 0°-blokka rotert om senteret (x_cm + totalW/2, y_cm + L/2), som før.
+  //   All verdensgeometri (tegning, treff, rødmerking, klamp, naboer, PDF) går via _matFrame/
+  //   _matRunWorldGeom. Lagrede matter uten matCoordV (tegnet med senter+rotasjon før 133)
+  //   konverteres ved innlasting av _matMigrateCoordV2 fra den TEGNEDE posisjonen.
+  mats     : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,rotation_deg,matCoordV}]
   matPaths : [],   // frihånds-matte: [{id,roomId,productId,start:{x,y},moves:[{axis,dir,len,conn,side}],gapCm,centered,offX,offY}] — relativ, deriveres ved render
   plates   : [],   // [{id,roomId,productId,x_cm,y_cm,width_cm,length_cm,direction}]
   aluboard : [],   // [{id,roomId,direction:'h'|'v',plateProductId,vendeProductId,cableProductId, ...derived}] — Varmecomfort Aluboard platesystem
@@ -14483,14 +14497,17 @@ function _matRunAcrossOffsetCm(mat, r, gapCm) {
 // plasserte matter): nøyaktig dagens rekkefølge (r stigende, første bredde starter i «høy»
 // along-ende), så ingenting lagret endrer utseende.
 //   • loddrett (rotation 0):  r=0 er VENSTRE bredde; høy along-ende = NEDERST (høy y).
-//   • vannrett (rotation 90): r=0 er ØVERSTE bredde; høy along-ende (lokal) = VENSTRE (lav x),
-//     fordi 90°-rotasjonen speiler langaksen (målt i STEG 0.1, prompt 124).
+//   • vannrett (rotation 90): r=0 er ØVERSTE bredde (y_cm); høy along-ende = HØYRE (høy x).
+//     133: før 133 speilet tegningen langaksen for 90° (høy = venstre, målt i 124 STEG 0.1). Med
+//     én konvensjon (se S.mats) går langaksen i +x, så «start i venstre hjørne» er LAV ende
+//     (firstHigh = !left). Lagrede matter uten startCorner får 'tl' ved migrering
+//     (_matMigrateCoordV2) — samme verdens-startende som før.
 function _matRunOrder(mat) {
   const sc = mat && mat.startCorner;
   if (!sc || sc.length < 2) return { reverse: false, firstHigh: true };
   const left = sc.charAt(1) === 'l', bottom = sc.charAt(0) === 'b';
   const horiz = (mat.rotation_deg || 0) === 90;
-  return horiz ? { reverse: bottom, firstHigh: left } : { reverse: !left, firstHigh: bottom };
+  return horiz ? { reverse: bottom, firstHigh: !left } : { reverse: !left, firstHigh: bottom };
 }
 // Kabelrekkefølgen (indekser r) for en matte — brukt av _matCablePlan og tegningen.
 function _matRunCableOrder(mat) {
@@ -14506,22 +14523,71 @@ function _matRunStartIsHigh(mat, r) {
   return o.firstHigh ? (j % 2 === 0) : (j % 2 === 1);
 }
 
-// 124: verdensgeometri for ÉN bredde — samme transform som drawMats (senter + rotasjon), så
-// treff, rødmerking og håndtak alltid ligger nøyaktig der bredden tegnes. Returnerer null for en
-// bredde uten lengde. {quad:[4 pkt], start:{x,y} (startendens midtpunkt), end:{x,y}, lenCm}.
+// 133: ÉN ramme for mattas lokale koordinater → verden. Lokale koordinater er SENTRERT i blokka
+// (lx tvers ∈ [−totalW/2, totalW/2], ly langs ∈ [−L/2, L/2]) — samme lokale system drawMats
+// tegner i. Konvensjonen (se S.mats): 0°/fri vinkel = rotasjon om senteret (x_cm + totalW/2,
+// y_cm + L/2), bit-identisk med før 133; 90° = transponering: senter (x_cm + L/2, y_cm + totalW/2),
+// lx → +y, ly → +x — altså bredde r på y = y_cm + r·(bredde+gap) og langs fra x_cm, nøyaktig det
+// motoren klipper med (perpBase/alongStart). a = tvers-enhetsvektor, b = langs-enhetsvektor i verden.
+function _matFrame(mat) {
+  const totalW = _matTotalWidthCm(mat);
+  const deg = mat.rotation_deg || 0;
+  if (deg === 90) {
+    const cx = mat.x_cm + mat.length_cm / 2, cy = mat.y_cm + totalW / 2;
+    return { horiz: true, deg, totalW, cx, cy, alongStart: mat.x_cm, acrossStart: mat.y_cm,
+      ax: 0, ay: 1, bx: 1, by: 0, toW: (lx, ly) => ({ x: cx + ly, y: cy + lx }) };
+  }
+  const rad = deg * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
+  const cx = mat.x_cm + totalW / 2, cy = mat.y_cm + mat.length_cm / 2;
+  return { horiz: false, deg, totalW, cx, cy, alongStart: mat.y_cm, acrossStart: mat.x_cm,
+    ax: c, ay: sn, bx: -sn, by: c, toW: (lx, ly) => ({ x: cx + lx * c - ly * sn, y: cy + lx * sn + ly * c }) };
+}
+// 133: migrering av en lagret VANNRETT matte (rotation 90) uten matCoordV fra den gamle TEGNEDE
+// posisjonen (drawMats/_matRunWorldGeom før 133: senter (x_cm + totalW/2, y_cm + L/2) + 90°-
+// rotasjon, som speilet langaksen: langs-posisjon s lå på x = 2·x_cm + totalW/2 + L/2 − s) til
+// konvensjonen i S.mats. Kjøres én gang ved innlasting (_restoreProject); nye matter skrives med
+// matCoordV: 2. Resultatet tegnes nøyaktig som brukeren så det (vaksinert i
+// _matRotationRegressionTest). Bredder med kort siste (last_run_length_cm) eller klipp (runStarts)
+// får eksplisitte runStarts/runLengths, siden paritetsregelen i _matRunStartBaseCm ellers ville
+// lagt den korte bredden i motsatt ende etter speilingen. runAdjust (124) beholdes: startenden i
+// verden er uendret (se _matRunOrder), så «start +N cm» korter samme ende som før. Loddrette og
+// fritt roterte matter røres ikke (får bare feltet). Returnerer true hvis geometrien ble regnet om.
+function _matMigrateCoordV2(mat) {
+  if (!mat || (mat.matCoordV || 0) >= 2) return false;
+  mat.matCoordV = 2;
+  if ((mat.rotation_deg || 0) !== 90 || mat.labelOnly || typeof mat.x_cm !== 'number' || typeof mat.y_cm !== 'number') return false;
+  const totalW = _matTotalWidthCm(mat), L = mat.length_cm || 0, x0 = mat.x_cm, n = mat.num_runs || 1;
+  const needRuns = Array.isArray(mat.runStarts) || mat.last_run_length_cm != null;
+  let starts = null, lens = null;
+  if (needRuns) {
+    starts = []; lens = [];
+    for (let r = 0; r < n; r++) {
+      const s = _matRunStartBaseCm(mat, r), len = _matRunLenBaseCm(mat, r);
+      lens.push(len);
+      starts.push(2 * x0 + totalW / 2 + L / 2 - s - len);
+    }
+  }
+  mat.x_cm = x0 + totalW / 2 - L / 2;
+  mat.y_cm = mat.y_cm + L / 2 - totalW / 2;
+  if (needRuns) { mat.runStarts = starts; mat.runLengths = lens; }
+  if (!mat.startCorner) mat.startCorner = 'tl';   // gammel standard uten velger: r stigende, start i venstre ende
+  return true;
+}
+// 124: verdensgeometri for ÉN bredde — samme ramme som drawMats (_matFrame), så treff, rødmerking
+// og håndtak alltid ligger nøyaktig der bredden tegnes. Returnerer null for en bredde uten lengde.
+// {quad:[4 pkt], start:{x,y} (startendens midtpunkt), end:{x,y}, lenCm}.
 function _matRunWorldGeom(mat, r) {
   const len = _matRunLenCm(mat, r);
   if (!(len > 0)) return null;
   const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
   const gapCm = mat.gap_cm != null ? mat.gap_cm : (prod?.min_gap_mm || 20) / 10;
-  const totalW = _matTotalWidthCm(mat);
-  const cx = mat.x_cm + totalW / 2, cy = mat.y_cm + mat.length_cm / 2;
-  const rad = (mat.rotation_deg || 0) * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
+  const f = _matFrame(mat);   // 133: én konvensjon — tegning, treff, klipp og klamp leser samme ramme
+  const totalW = f.totalW;
   const hw = mat.width_cm / 2, hl = mat.length_cm / 2;
-  const alongStart = mat.rotation_deg === 90 ? mat.x_cm : mat.y_cm;
+  const alongStart = f.alongStart;
   const lxC = -totalW / 2 + hw + _matRunAcrossOffsetCm(mat, r, gapCm);
   const ly0 = (_matRunStartCm(mat, r) - alongStart) - hl, ly1 = ly0 + len;
-  const toW = (lx, ly) => ({ x: cx + lx * c - ly * sn, y: cy + lx * sn + ly * c });
+  const toW = f.toW;
   const quad = [toW(lxC - hw, ly0), toW(lxC + hw, ly0), toW(lxC + hw, ly1), toW(lxC - hw, ly1)];
   const high = _matRunStartIsHigh(mat, r);
   return { quad, start: toW(lxC, high ? ly1 : ly0), end: toW(lxC, high ? ly0 : ly1), lenCm: len, lxC, ly0, ly1, toW };
@@ -14666,8 +14732,8 @@ function _matRunDragDelta(t, e) {
   const step = fine ? 0.1 : 5;
   const snap = v => Math.round(v / step) * step;
   if (t.kind === 'mat') {
-    const rad = (t.obj.rotation_deg || 0) * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
-    const dlx = dx * c + dy * sn, dly = -dx * sn + dy * c;   // skjerm → mattas lokale akser
+    const f = _matFrame(t.obj);   // 133: skjerm → mattas lokale akser (a = tvers, b = langs), samme ramme som tegningen
+    const dlx = dx * f.ax + dy * f.ay, dly = dx * f.bx + dy * f.by;
     const high = _matRunStartIsHigh(t.obj, t.r);
     return { dAcross: snap(dlx), dStart: snap(high ? -dly : dly) };
   }
@@ -15537,7 +15603,7 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
       x_cm: matX, y_cm: matY, width_cm: matWidthCm, length_cm: L,
       num_runs: item.runs, last_run_length_cm: null,
       runLengths: runLengthsOut, runStarts: runStartsOut,
-      gap_cm: gapCm, rotation_deg: dir === 'h' ? 90 : 0,
+      gap_cm: gapCm, rotation_deg: dir === 'h' ? 90 : 0, matCoordV: 2,   // 133: én koordinatkonvensjon (se S.mats)
       startCorner: (S.varmefolie && S.varmefolie.startCorner) || 'bl',   // 124 DEL A: som autoFillMatSerpentine
       // DEL B: fra-vegg-aksen har ALDRI slakk på startsiden (all slark havner på motsatt vegg) —
       // rapporter marginCm rent der, ikke den gamle sentrerings-formelen (som IKKE lenger stemmer
@@ -16768,6 +16834,240 @@ function _matCrossFillRegressionTest() {
   return { ok: allOk, results };
 }
 
+// ─── 133 · VANNRETT MATTE — ÉN KOORDINATKONVENSJON (Kenneth 24.10.2026) ──────────────────────
+// Kjør i konsollen: _matRotationRegressionTest()
+// Låser: (1) motor = klipp = tegning = treff for 'h' (900×300: 5 bredder, ingen klippet til 0,
+// samme dekning som speilet 300×900 'v'); (2) rect #10 (420×259, 150T): 'h' leverer det estimatet
+// sier (10,0 m²) og slår 'v' (8,96), så auto-retningen velger riktig; (3) bilde 1 og T-stamme
+// (auto-retning): ingen bredde utenfor rommet, stammen > 0 cm; (4) migrering av matter lagret FØR
+// 133 (senter + 90°-rotasjon med speilet langakse) tegnes nøyaktig som før — VAKSINE: legacyBox
+// under ER den gamle drawMats/_matRunWorldGeom-formelen; gjeninnføres den i _matRunWorldGeom,
+// havner de migrerte mattene et annet sted og testen blir rød; (5) ↻ 90° holder senteret og
+// 4 × 90° gir feltene tilbake; (6) klamp, treff, rødmerking og 124-justering for 'h'.
+function _matRotationRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedMats = S.mats, savedMatPaths = S.matPaths, savedHindrings = S.hindrings, savedZones = S.zones,
+    savedFloors = S.floors, savedSelectedRoomId = S.ui.selectedRoomId, savedSelPath = S.ui.selectedMatPathId, savedSelMat = S.ui.selectedMatId,
+    savedSelRun = S.ui.selectedMatRunIdx, savedVarmematte = S.varmematte ? { ...S.varmematte } : S.varmematte,
+    savedDirection = S.varmefolie && S.varmefolie.direction, savedCorner = S.varmefolie && S.varmefolie.startCorner,
+    savedDirExplicit = S.varmefolie && S.varmefolie.dirExplicit, savedNextMatId = S.counters.nextMatId, savedActiveFloor = S.ui.activeFloorId;
+  const savedRenderSidebar = renderSidebar, savedUpdateCtxBar = updateCtxBar, savedRender = render, savedToast = window._showToast, savedAlert = window.alert;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const near = (a, b, t) => Math.abs(a - b) <= (t == null ? 0.05 : t);
+  const roomOf = (id, pts) => ({ id, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) });
+  const rect = (w, h, ox, oy) => [{ x: ox || 0, y: oy || 0 }, { x: (ox || 0) + w, y: oy || 0 }, { x: (ox || 0) + w, y: (oy || 0) + h }, { x: ox || 0, y: (oy || 0) + h }];
+  const box = (mat, r) => { const g = _matRunWorldGeom(mat, r); if (!g) return null; const xs = g.quad.map(q => q.x), ys = g.quad.map(q => q.y);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys), sx: g.start.x, sy: g.start.y, ex: g.end.x, ey: g.end.y }; };
+  const fmtBox = b => b ? `x ${b.x0.toFixed(1)}–${b.x1.toFixed(1)} y ${b.y0.toFixed(1)}–${b.y1.toFixed(1)} start (${b.sx.toFixed(1)},${b.sy.toFixed(1)})` : 'null';
+  const sameBox = (a, b, t) => !!(a && b && ['x0', 'x1', 'y0', 'y1', 'sx', 'sy', 'ex', 'ey'].every(k => near(a[k], b[k], t == null ? 0.01 : t)));
+  // GAMMEL tegning (drawMats/_matRunWorldGeom før 133, e3b5904): senter (x_cm + totalW/2, y_cm + L/2)
+  // + rotasjon om senteret; for 90° speilet det langaksen, og «høy along-ende» var VENSTRE
+  // (gammel _matRunOrder: firstHigh = left). Regnes på mattas EGNE felt — før migrering er det
+  // nøyaktig det brukeren så, etter migrering er det det en tilbakerullet formel ville tegnet.
+  const legacyOrder = mat => { const sc = mat.startCorner; if (!sc || sc.length < 2) return { reverse: false, firstHigh: true };
+    const left = sc.charAt(1) === 'l', bottom = sc.charAt(0) === 'b'; return (mat.rotation_deg || 0) === 90 ? { reverse: bottom, firstHigh: left } : { reverse: !left, firstHigh: bottom }; };
+  const legacyHigh = (mat, r) => { const n = mat.num_runs || 1, o = legacyOrder(mat); const j = o.reverse ? (n - 1 - r) : r; return o.firstHigh ? (j % 2 === 0) : (j % 2 === 1); };
+  const legacyBox = (mat, r) => {
+    const base = _matRunStartBaseCm(mat, r), baseLen = _matRunLenBaseCm(mat, r), adj = _matRunStartAdjCm(mat, r);
+    const len = adj > 0 ? Math.max(0, baseLen - adj) : baseLen; if (!(len > 0)) return null;
+    const start = (adj > 0 && !legacyHigh(mat, r)) ? base + Math.min(adj, baseLen) : base;
+    const gapCm = mat.gap_cm != null ? mat.gap_cm : 2, totalW = _matTotalWidthCm(mat);
+    const cx = mat.x_cm + totalW / 2, cy = mat.y_cm + mat.length_cm / 2;
+    const rad = (mat.rotation_deg || 0) * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
+    const hw = mat.width_cm / 2, hl = mat.length_cm / 2;
+    const alongStart = mat.rotation_deg === 90 ? mat.x_cm : mat.y_cm;
+    const lxC = -totalW / 2 + hw + _matRunAcrossOffsetCm(mat, r, gapCm);
+    const ly0 = (start - alongStart) - hl, ly1 = ly0 + len;
+    const toW = (lx, ly) => ({ x: cx + lx * c - ly * sn, y: cy + lx * sn + ly * c });
+    const q = [toW(lxC - hw, ly0), toW(lxC + hw, ly0), toW(lxC + hw, ly1), toW(lxC - hw, ly1)];
+    const high = legacyHigh(mat, r), s = toW(lxC, high ? ly1 : ly0), e = toW(lxC, high ? ly0 : ly1);
+    return { x0: Math.min(...q.map(p => p.x)), x1: Math.max(...q.map(p => p.x)), y0: Math.min(...q.map(p => p.y)), y1: Math.max(...q.map(p => p.y)), sx: s.x, sy: s.y, ex: e.x, ey: e.y };
+  };
+  try {
+    renderSidebar = () => {}; updateCtxBar = () => {}; render = () => {}; window._showToast = () => {}; window.alert = () => {};
+    HEATING_PRODUCTS.length = 0;
+    const areas100 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const areas150 = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30];
+    const cat100 = _matBenchCatalog(areas100, { idBase: 904000, prefix: 'ROT100', family: 'EcoMat 100T', wm2: 100 });
+    for (const q of cat100) { q.mat_cc_mm = 120; q.mat_cut_interval_mm = 240; }
+    const cat150 = _matBenchCatalog(areas150, { idBase: 904100, prefix: 'ROT150', family: 'EcoMat 150T', wm2: 150 });
+    HEATING_PRODUCTS.push(...cat100, ...cat150);
+    const p100 = cat100.find(q => q.mat_area_m2 === 9), p150 = cat150[Math.floor(cat150.length / 2)];   // samme 150T-produkt som mattebenken
+    S.hindrings = []; S.zones = []; S.floors = []; S.matPaths = []; S.mats = []; S.ui.activeFloorId = null;
+    if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+    S.ui.selectedMatPathId = null; S.ui.selectedMatId = null; S.ui.selectedMatRunIdx = null;
+    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: 1, fromWall: false, fromWallAlong: undefined, _multiMatPref: null });
+    S.varmefolie = Object.assign(S.varmefolie || {}, { direction: 'h', startCorner: 'bl', dirExplicit: true });
+    const setRoom = (room, dir) => { S.rooms = [room]; S.ui.selectedRoomId = room.id; S.mats = []; S.varmefolie.direction = dir; S.varmefolie.dirExplicit = !!dir; };
+    const marg100 = _matWallMarginCm(p100);
+
+    // 1) 900×300 'h' — motor = klipp = tegning; speilet 300×900 'v' gir samme dekning.
+    const roomH = roomOf(904001, rect(900, 300));
+    setRoom(roomH, 'h');
+    const mH = autoFillMatSerpentine(p100.id, { dryRun: true });
+    check('900×300 h: 5 bredder, ingen klippet til 0, 30 m-rull (5 × 600) = 15,0 m²', '5 / 3000 / 90°',
+      mH && mH.num_runs === 5 && (mH.rotation_deg || 0) === 90 && near(_matLaidLengthCm(mH), 3000) && [0, 1, 2, 3, 4].every(r => _matRunLenCm(mH, r) > 0) && mH.matCoordV === 2,
+      mH ? `${mH.num_runs} / ${_matLaidLengthCm(mH)} / ${mH.rotation_deg}° / x ${mH.x_cm} y ${mH.y_cm} L ${mH.length_cm}` : 'ingen matte');
+    if (mH) {
+      const gap = mH.gap_cm;
+      let drawEqEngine = true, allInside = true, detail = [];
+      for (let r = 0; r < mH.num_runs; r++) {
+        const b = box(mH, r), perp = mH.y_cm + _matRunAcrossOffsetCm(mH, r, gap), s = _matRunStartCm(mH, r), len = _matRunLenCm(mH, r);
+        // tegnet boks = det motoren klipper med (perpPos på tvers, runStart..runStart+len langs), og klippesegmentet inneholder den
+        const segs = _matClippedSegments(roomH.id, 'h', perp, mH.width_cm, marg100, 0);
+        const inSeg = segs.some(sg => sg.start_cm <= b.x0 + 0.05 && sg.start_cm + sg.length_cm >= b.x1 - 0.05);
+        if (!(near(b.y0, perp, 0.01) && near(b.y1, perp + mH.width_cm, 0.01) && near(b.x0, s, 0.01) && near(b.x1, s + len, 0.01) && inSeg)) drawEqEngine = false;
+        if (_matRunPlacementIssue(mH, r)) allInside = false;
+        detail.push(`r${r} ${fmtBox(b)} perp ${perp}`);
+      }
+      check('900×300 h: tegnet boks per bredde = motorens klipp (perpPos/runStart), inne i klippesegmentet, ingen rødmerking', 'likt / inne', drawEqEngine && allInside && _matRunsWithinRoom(mH, roomH, marg100, p100), detail.join(' | '));
+      check('900×300 h: bredde 0 starter i lav tvers-ende (y_cm) og venstre start (hjørne nede-venstre → siste bredde nederst starter til venstre)', 'y0 = y_cm / start x = x_cm',
+        near(box(mH, 0).y0, mH.y_cm, 0.01) && near(box(mH, _matRunCableOrder(mH)[0]).sx, mH.x_cm, 0.01) && near(box(mH, _matRunCableOrder(mH)[0]).y0, mH.y_cm + 4 * (mH.width_cm + gap), 0.01),
+        `${fmtBox(box(mH, 0))} / første i kabelrekkefølge: ${fmtBox(box(mH, _matRunCableOrder(mH)[0]))}`);
+      // treff: midt i bredde 3 → {r: 3}; utenfor blokka → null
+      S.mats = [mH];
+      const b3 = box(mH, 3);
+      const hit = hitMatRun((b3.x0 + b3.x1) / 2, (b3.y0 + b3.y1) / 2), miss = hitMatRun((b3.x0 + b3.x1) / 2, mH.y_cm + _matTotalWidthCm(mH) + 5);
+      check('900×300 h: treff midt i bredde 4 gir r=3, 5 cm under blokka gir ingen', '3 / null', hit && hit.r === 3 && miss === null, `${hit && hit.r} / ${miss}`);
+      // 124-justering på vannrett: sidelengs +5 → +y, start +20 → kortere i startenden (x)
+      const bBefore = box(mH, 2), highBefore = _matRunStartIsHigh(mH, 2);
+      _matSetRunAdj(mH, 2, { acrossCm: 5, startCm: 20 });
+      const bAfter = box(mH, 2);
+      check('900×300 h: justering — sidelengs +5 flytter bredden +5 i y, start +20 korter 20 cm i startenden (x)', '+5 y / −20 cm',
+        near(bAfter.y0 - bBefore.y0, 5, 0.01) && near((bAfter.x1 - bAfter.x0), (bBefore.x1 - bBefore.x0) - 20, 0.01) && (highBefore ? near(bAfter.x1, bBefore.x1 - 20, 0.01) : near(bAfter.x0, bBefore.x0 + 20, 0.01)),
+        `${fmtBox(bBefore)} → ${fmtBox(bAfter)} (startenden høy: ${highBefore})`);
+      _matSetRunAdj(mH, 2, { acrossCm: 0, startCm: 0 });
+      // klamp: skyv matta ut til høyre/ned → klemmes etter 90°-utstrekningen (L langs x, totalW langs y)
+      const mC = { ...mH, x_cm: 800, y_cm: 290 };
+      _clampMatToRoom(mC, roomH);
+      check('900×300 h: _clampMatToRoom bruker L langs x og totalW langs y', `x ${900 - mH.length_cm} / y ${300 - _matTotalWidthCm(mH)}`,
+        near(mC.x_cm, 900 - mH.length_cm, 0.01) && near(mC.y_cm, 300 - _matTotalWidthCm(mH), 0.01), `x ${mC.x_cm} / y ${mC.y_cm}`);
+      // målkjede/senter/gizmo fra samme ramme
+      const c = _matCenter(mH), gz = _getMatGizmoPos(mH), gzExp = w2s(mH.x_cm - 2, mH.y_cm + _matTotalWidthCm(mH) + 2);
+      check('900×300 h: senter = (x + L/2, y + totalW/2), gizmo nede-venstre av den vannrette blokka', 'senter / gizmo',
+        near(c.x, mH.x_cm + mH.length_cm / 2, 0.01) && near(c.y, mH.y_cm + _matTotalWidthCm(mH) / 2, 0.01) && near(gz.x, gzExp.x, 0.01) && near(gz.y, gzExp.y, 0.01), `${JSON.stringify(c)}`);
+    }
+    const roomV = roomOf(904002, rect(300, 900));
+    setRoom(roomV, 'v');
+    const mV = autoFillMatSerpentine(p100.id, { dryRun: true });
+    check('Speilet 300×900 v: samme rull, bredder og dekning som 900×300 h (symmetri)', '5 × 600 = 3000',
+      mV && mH && mV.num_runs === mH.num_runs && near(mV.length_cm, mH.length_cm) && near(_matLaidLengthCm(mV), _matLaidLengthCm(mH)) && mV.productId === mH.productId,
+      mV ? `${mV.num_runs} × ${mV.length_cm} = ${_matLaidLengthCm(mV)} (${mV.productId === (mH && mH.productId) ? 'samme produkt' : 'annet produkt'})` : 'ingen matte');
+    check('Loddrett er urørt: 300×900 v ligger x 23–277, y 297,5–897,5 (bit-identisk med før 133)', 'x 23 / y 297.5',
+      mV && near(mV.x_cm, 23) && near(mV.y_cm, 297.5) && near(box(mV, 0).x0, 23, 0.01) && near(box(mV, 0).y0, 297.5, 0.01) && near(box(mV, 0).y1, 897.5, 0.01), mV ? `x ${mV.x_cm} y ${mV.y_cm} ${fmtBox(box(mV, 0))}` : '');
+
+    // 2) rect #10 (420×259, mattebenkens 150T-produkt, standard-mellomrom): estimat = levering, 'h' slår 'v'.
+    const room10 = roomOf(904003, rect(420, 259));
+    S.varmematte.gapCm = null;
+    setRoom(room10, null);
+    const o10 = _matFillRoomSmart(p150.id, { dryRun: true }) || { mats: [] };
+    const m10 = o10.mats && o10.mats[0];
+    const cov = (o10.mats || []).reduce((s, m) => s + m.width_cm * _matLaidLengthCm(m) / 10000, 0);
+    const mg = _matWallMarginCm(p150), mw = (p150.mat_width_mm || 500) / 10, cut = (p150.mat_cut_interval_mm || 160) / 10;
+    const est = d => { const acr = (d === 'h' ? 259 : 420) - 2 * mg, alo = (d === 'h' ? 420 : 259) - 2 * mg; const n = Math.floor(acr / mw); const rl = Math.floor(alo / cut) * cut; return n * mw * rl / 10000; };
+    check('rect #10 auto: velger h, leverer estimatet (10,0 m² = 5 × 400) — var 8,0 m² med y_cm = −30,5', `h / ${est('h').toFixed(2)}`,
+      m10 && (m10.rotation_deg || 0) === 90 && near(cov, est('h'), 0.01) && near(cov, 10, 0.01) && m10.y_cm >= mg - 0.01 && m10.x_cm >= mg - 0.01 && _matRunsWithinRoom(m10, room10, mg, HEATING_PRODUCTS.find(q => q.id === m10.productId)),
+      m10 ? `${m10.rotation_deg}° / ${cov.toFixed(2)} m² / x ${m10.x_cm} y ${m10.y_cm} L ${m10.length_cm} n ${m10.num_runs}` : 'ingen matte');
+    setRoom(room10, 'v');
+    const o10v = _matFillRoomSmart(p150.id, { dryRun: true }) || { mats: [] };
+    const covV = (o10v.mats || []).reduce((s, m) => s + m.width_cm * _matLaidLengthCm(m) / 10000, 0);
+    check('rect #10 v: 8,96 m² som før (uendret), altså er h nå faktisk bedre', '8.96 < 10', near(covV, 8.96, 0.01) && covV < cov, `${covV.toFixed(2)}`);
+    S.varmematte.gapCm = 1;
+
+    // 3) Bilde 1 (L + alkove) og T-rom med auto-retning: ingen bredde utenfor rommet, stammen > 0 cm.
+    for (const [name, pts, stemTest] of [
+      ['Bilde 1 (300×400 + alkove 200×200)', [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }], null],
+      ['T (600×200 + stamme 200×300)', [{ x: 0, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 200 }, { x: 400, y: 200 }, { x: 400, y: 500 }, { x: 200, y: 500 }, { x: 200, y: 200 }, { x: 0, y: 200 }], 198]]) {
+      const rm = roomOf(904004, pts);
+      setRoom(rm, null);
+      const zp = _matPlanZones(rm, p100);
+      const rects = (zp && zp.chapters || []).flatMap(ch => ch._runRects || []);
+      const outside = rects.filter(r => !_matRectInsidePoly(r.x0 + 0.05, r.y0 + 0.05, r.x1 - 0.05, r.y1 - 0.05, rm.points));
+      const hasH = (zp && zp.chapters || []).some(ch => ch.dir === 'h');
+      check(`${name}, auto-retning: minst ett vannrett kapittel, ingen bredde utenfor rommet`, 'h / 0 utenfor', zp && hasH && rects.length > 0 && outside.length === 0,
+        `${(zp && zp.chapters || []).map(ch => ch.dir + ':' + (ch.runs || []).length).join(' ')} / ${outside.length} utenfor`);
+      if (stemTest != null) {
+        const stemCm = (zp && zp.chapters || []).filter(ch => ch.rect && ch.rect.y0 >= stemTest - 0.5).reduce((s, ch) => s + (ch.runs || []).reduce((t, r) => t + r.len, 0), 0);
+        check('T-stamme: ikke lenger 0 cm lagt', '> 0', stemCm > 0, `${stemCm} cm`);
+      }
+    }
+
+    // 4) Migrering: matter lagret FØR 133 tegnes nøyaktig som før. Fikstene er den gamle motorens egne
+    //    felt (900×300 h fra 8e9607f: x 103,5 / y −78 / bredde 0 klippet til 0) + manuelle varianter.
+    const roomM = roomOf(904005, rect(1400, 1000));
+    setRoom(roomM, 'h');
+    const oldMats = [
+      { id: 1, roomId: roomM.id, productId: p100.id, x_cm: 103.5, y_cm: -78, width_cm: 50, length_cm: 456, num_runs: 5, last_run_length_cm: null, runLengths: [0, 456, 456, 456, 360], runStarts: [103.5, 103.5, 103.5, 103.5, 199.5], gap_cm: 1, rotation_deg: 90, startCorner: 'bl' },
+      { id: 2, roomId: roomM.id, productId: p100.id, x_cm: 50, y_cm: 420, width_cm: 50, length_cm: 400, num_runs: 4, last_run_length_cm: 240, runLengths: null, runStarts: null, gap_cm: 2, rotation_deg: 90, startCorner: 'br', runAdjust: [null, { acrossCm: 6, startCm: 30 }, { acrossCm: 0, startCm: 50 }, null] },
+      { id: 3, roomId: roomM.id, productId: p100.id, x_cm: 60, y_cm: 640, width_cm: 50, length_cm: 360, num_runs: 3, last_run_length_cm: null, runLengths: [360, 240, 120], runStarts: [60, 60, 180], gap_cm: 0, rotation_deg: 90 },
+      { id: 4, roomId: roomM.id, productId: p100.id, x_cm: 2.5, y_cm: 30, width_cm: 50, length_cm: 600, num_runs: 2, last_run_length_cm: null, runLengths: null, runStarts: null, gap_cm: 1, rotation_deg: 90, startCorner: 'bl', _multiMatGroup: true },
+      { id: 5, roomId: roomM.id, productId: p100.id, x_cm: 700, y_cm: 100, width_cm: 50, length_cm: 300, num_runs: 3, last_run_length_cm: 120, runLengths: [300, 300, 120], runStarts: [100, 100, 280], gap_cm: 1, rotation_deg: 0, startCorner: 'tl', runAdjust: [null, { acrossCm: -3, startCm: 10 }, null] },
+      { id: 6, roomId: roomM.id, productId: p100.id, x_cm: 900, y_cm: 600, width_cm: 50, length_cm: 200, num_runs: 2, last_run_length_cm: 120, runLengths: null, runStarts: null, gap_cm: 1, rotation_deg: 180, startCorner: 'bl' },
+    ];
+    // «gammelt prosjekt-JSON»: samme rundtur som lagring/innlasting
+    const loaded = JSON.parse(JSON.stringify({ _version: 2, mats: oldMats })).mats;
+    const before = loaded.map(m => ({ m, boxes: Array.from({ length: m.num_runs }, (_, r) => legacyBox(m, r)), laid: _matLaidLengthCm(m), order: _matRunCableOrder(m).join(','), fields: JSON.stringify([m.x_cm, m.y_cm, m.runStarts, m.runLengths]) }));
+    const migrated = loaded.map(m => _matMigrateCoordV2(m));
+    check('Migrering: kjører for 90° (true), ikke for 0°/180° (false), alle får matCoordV 2', '[t,t,t,t,f,f]', JSON.stringify(migrated) === JSON.stringify([true, true, true, true, false, false]) && loaded.every(m => m.matCoordV === 2), JSON.stringify(migrated));
+    check('Migrering: loddrett og 180° er urørt (felt uendret)', 'uendret', [4, 5].every(i => JSON.stringify([loaded[i].x_cm, loaded[i].y_cm, loaded[i].runStarts, loaded[i].runLengths]) === before[i].fields), `${before[4].fields} / ${JSON.stringify([loaded[4].x_cm, loaded[4].y_cm, loaded[4].runStarts, loaded[4].runLengths])}`);
+    for (const [i, b] of before.entries()) {
+      const m = loaded[i];
+      const after = Array.from({ length: m.num_runs }, (_, r) => box(m, r));
+      const same = b.boxes.every((bb, r) => (bb === null && after[r] === null) || sameBox(bb, after[r]));
+      check(`Migrering matte ${m.id} (${m.rotation_deg}°${m.runAdjust ? ', runAdjust' : ''}${m.last_run_length_cm != null ? ', kort siste' : ''}${m.runStarts && i < 4 ? ', klippet' : ''}${!oldMats[i].startCorner ? ', uten startCorner' : ''}): hver bredde tegnes nøyaktig som før (boks + start/slutt)`, 'likt',
+        same && near(_matLaidLengthCm(m), b.laid, 0.01) && _matRunCableOrder(m).join(',') === b.order,
+        b.boxes.map((bb, r) => `r${r}: ${fmtBox(bb)} → ${fmtBox(after[r])}`).join(' | '));
+      if (i < 4) {
+        // VAKSINE: den gamle formelen på de migrerte feltene gir et ANNET sted — tilbakerulles
+        // _matRunWorldGeom til senter+rotasjon, blir sjekken over rød.
+        const rev = Array.from({ length: m.num_runs }, (_, r) => legacyBox(m, r));
+        const differs = b.boxes.some((bb, r) => bb && rev[r] && !sameBox(bb, rev[r]));
+        check(`Vaksine matte ${m.id}: gammel tegneformel på migrerte felt tegner et annet sted`, 'ulikt', differs, rev.map((bb, r) => `r${r}: ${fmtBox(bb)}`).join(' | '));
+        const again = _matMigrateCoordV2(m);
+        check(`Migrering matte ${m.id} er idempotent (andre kall gjør ingenting)`, 'false', again === false && box(m, 0) ? sameBox(box(m, 0), after[0]) : again === false, String(again));
+      }
+    }
+    check('Migrering uten startCorner får «tl» (gammel standard: r stigende, start til venstre), med startCorner beholdes den', 'tl / br', loaded[2].startCorner === 'tl' && loaded[1].startCorner === 'br', `${loaded[2].startCorner} / ${loaded[1].startCorner}`);
+    check('_restoreProject kaller migreringen', 'ja', /_matMigrateCoordV2\(m\)/.test(_restoreProject.toString()), 'kode');
+
+    // 5) ↻ 90°: senteret står, 4 × 90° gir feltene tilbake (også runStarts).
+    const mR = { id: 7, roomId: roomM.id, productId: p100.id, x_cm: 100, y_cm: 100, width_cm: 50, length_cm: 300, num_runs: 3, last_run_length_cm: null, runLengths: [300, 240, 300], runStarts: [100, 160, 100], gap_cm: 1, rotation_deg: 0, startCorner: 'bl', matCoordV: 2 };
+    const orig = JSON.stringify([mR.x_cm, mR.y_cm, mR.runStarts]);
+    const c0 = _matCenter(mR);
+    _matSetRotationDeg(mR, 90);
+    const c90 = _matCenter(mR), b90 = box(mR, 1);
+    check('↻ 90°: senteret står fast, blokka ligger vannrett (bredde 2: 240 lang i x, start 60 cm inn), runStarts følger blokkstarten', 'senter likt / x-utstrekning 240',
+      near(c0.x, c90.x, 0.001) && near(c0.y, c90.y, 0.001) && mR.rotation_deg === 90 && near(b90.x1 - b90.x0, 240, 0.01) && near(b90.x0, mR.x_cm + 60, 0.01) && near(b90.y0, mR.y_cm + 51, 0.01),
+      `${JSON.stringify(c0)} → ${JSON.stringify(c90)} / ${fmtBox(b90)} / x ${mR.x_cm} y ${mR.y_cm} rs ${JSON.stringify(mR.runStarts)}`);
+    _matSetRotationDeg(mR, 180); _matSetRotationDeg(mR, 270); _matSetRotationDeg(mR, 0);
+    check('4 × 90°: tilbake til utgangspunktet (x, y, runStarts)', orig, JSON.stringify([Math.round(mR.x_cm * 1000) / 1000, Math.round(mR.y_cm * 1000) / 1000, mR.runStarts.map(v => Math.round(v * 1000) / 1000)]) === orig, JSON.stringify([mR.x_cm, mR.y_cm, mR.runStarts]));
+
+    // 6) Rødmerking for en vannrett bredde flyttet ut av rommet (124 på 'h').
+    setRoom(roomH, 'h');
+    const mI = autoFillMatSerpentine(p100.id, { dryRun: true });
+    if (mI) {
+      S.mats = [mI];
+      _matSetRunAdj(mI, 0, { acrossCm: -40, startCm: 0 });
+      const issue = _matRunPlacementIssue(mI, 0);
+      check('900×300 h: bredde 1 flyttet 40 cm opp → «ligger N cm utenfor rommet» (rødmerking via samme geometri)', 'utenfor', issue && /utenfor rommet/.test(issue.text) && issue.outsideCm > 10, issue && issue.text);
+    }
+  } finally {
+    renderSidebar = savedRenderSidebar; updateCtxBar = savedUpdateCtxBar; render = savedRender; window._showToast = savedToast; window.alert = savedAlert;
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.mats = savedMats; S.matPaths = savedMatPaths; S.hindrings = savedHindrings; S.zones = savedZones; S.floors = savedFloors;
+    S.ui.selectedRoomId = savedSelectedRoomId; S.ui.selectedMatPathId = savedSelPath; S.ui.selectedMatId = savedSelMat; S.ui.selectedMatRunIdx = savedSelRun; S.ui.activeFloorId = savedActiveFloor;
+    if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+    S.varmematte = savedVarmematte;
+    if (S.varmefolie) { S.varmefolie.direction = savedDirection; S.varmefolie.startCorner = savedCorner; S.varmefolie.dirExplicit = savedDirExplicit; }
+    S.counters.nextMatId = savedNextMatId;
+    if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matRotationRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'} (${results.filter(r => r.ok).length}/${results.length})`, results.filter(r => !r.ok));
+  return { ok: allOk, results };
+}
+
 // ─── «FYLL ROM AUTOMATISK» BRUKER HELE MOTOREN (Kenneth 19.08.2026) ───────
 // STEG 0-revisjon (Varmeplan-prompt-fyll-rom-automatisk-halve-motoren.md), rapportert FØR fiksen
 // under ble skrevet — samme mønster som 786d95a og 05390a0. Kartlegger HVERT inngangspunkt som
@@ -17805,9 +18105,12 @@ function autoFillMatSerpentine(productId, opts) {
 
     // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
     // along-axis dimension before rotation. rotation_deg=90 swaps them in world.
+    // 133: samme konvensjon for begge retninger (se S.mats): x_cm/y_cm = blokkstart langs/tvers.
+    // Før 133 sto totalW og L byttet om i 'h'-grenen (b85c30a), så klippingen under
+    // (perpBase = matY, alongStart = matX) traff bredder utenfor rommet mens tegningen lå midt i.
     if (dir === 'h') {
-      matX = alongCenter - totalW / 2;
-      matY = acrossCenter - runLengthCm / 2;
+      matX = alongCenter - runLengthCm / 2;
+      matY = acrossCenter - totalW / 2;
     } else {
       matX = acrossCenter - totalW / 2;
       matY = alongCenter - runLengthCm / 2;
@@ -17936,6 +18239,7 @@ function autoFillMatSerpentine(productId, opts) {
     runStarts: runStartsOut,             // REGEL A: startpunkt fra SAMME klipp som lengden (null = alle nominelle)
     gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0,
+    matCoordV: 2,   // 133: én koordinatkonvensjon (se S.mats)
     startCorner: (S.varmefolie && S.varmefolie.startCorner) || 'bl',   // 124 DEL A: første bredde + start følger velgeren (se _matRunOrder)
     _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
     _fromWall: fromWall,                                            // true → alt kaldt felt på én side; false → deles likt
@@ -42764,15 +43068,20 @@ function drawMats() {
     const gapCm = mat.gap_cm != null ? mat.gap_cm : (prod?.min_gap_mm || 20) / 10;
 
     ctx.save();
-    const totalW = _matTotalWidthCm(mat);
-    const cx = mat.x_cm + totalW / 2;
-    const cy = mat.y_cm + mat.length_cm / 2;
+    // 133: ÉN ramme (_matFrame) for tegning, treff og klipp. Lokale px-koordinater under er sentrert
+    // i blokka (lx tvers, ly langs). 0°/fri vinkel = rotasjon om senteret som før; 90° =
+    // transponering (lx → +y, ly → +x), så bredde r ligger på y_cm + r·(bredde+gap) og starter på
+    // runStart langs x — nøyaktig der motoren klippet. Ingen egen formel her lenger.
+    const frame = _matFrame(mat);
+    const totalW = frame.totalW;
+    const cx = frame.cx;
+    const cy = frame.cy;
     const sp = w2s(cx, cy);
     const sc = S.view.zoom * BASE_SCALE;
     const rad = (mat.rotation_deg || 0) * Math.PI / 180;
 
     ctx.translate(sp.x, sp.y);
-    ctx.rotate(rad);
+    if (frame.horiz) ctx.transform(0, 1, 1, 0, 0, 0); else ctx.rotate(rad);
 
     const htw = totalW * sc / 2;  // half total width in px
     const hw = mat.width_cm * sc / 2;  // half single-run width in px
@@ -43004,9 +43313,8 @@ function drawMats() {
       // Skjerm-AABB + retning for klamping/one-line/callout-logikken, regnet fra mattas faktiske
       // (evt. roterte) verdenshj\u00f8rner.
       const hw0 = totalW / 2, hl0 = mat.length_cm / 2;
-      const cosR = Math.cos(rad), sinR = Math.sin(rad);
       const localC = [[-hw0,-hl0],[hw0,-hl0],[hw0,hl0],[-hw0,hl0]];
-      const scrC = localC.map(([lx,ly]) => w2s(cx + lx*cosR - ly*sinR, cy + lx*sinR + ly*cosR));
+      const scrC = localC.map(([lx,ly]) => { const w = frame.toW(lx, ly); return w2s(w.x, w.y); });   // 133: samme ramme
       const sxs = scrC.map(p=>p.x), sys = scrC.map(p=>p.y);
       const _mnx = Math.min(...sxs), _mny = Math.min(...sys);
       const _mnw = Math.max(...sxs) - _mnx, _mnh = Math.max(...sys) - _mny;
@@ -43103,9 +43411,8 @@ function drawMatMoveGizmo() {
   if (!S.ui.selectedMatId) return;
   const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
   if (!mat) return;
-  // Gizmo at bottom-left of mat (unrotated, offset outward)
-  const gx = mat.x_cm, gy = mat.y_cm + mat.length_cm;
-  const gp = w2s(gx - 2, gy + 2);
+  // Gizmo at bottom-left of mat (unrotated, offset outward) — 133: samme punkt som treffet (_getMatGizmoPos)
+  const gp = _getMatGizmoPos(mat);
   ctx.save();
   // X arrow (red)
   drawGizmoArrow(gp.x + 18, gp.y, gp.x + 72, gp.y, 'rgba(255,75,75,0.9)');
@@ -46075,11 +46382,31 @@ function deleteMat(id) {
   renderSidebar(); updateCtxBar(); render();
 }
 
+// 133: sett rotasjon og hold blokkas SENTER i verden fast. 90° er en transponering (se S.mats), ikke
+// en rotasjon om senteret som de andre vinklene — x_cm/y_cm (og runStarts) regnes derfor om når
+// matta går inn i eller ut av 90°, så «↻ 90°» fortsatt snur matta på stedet. Breddemønsteret
+// (runStarts relativt til blokkstarten, runAdjust) følger med uendret — ikke speilet.
+function _matSetRotationDeg(mat, deg) {
+  const norm = ((deg % 360) + 360) % 360;
+  const isH = Math.abs(norm - 90) < 1e-9;
+  const wasH = (mat.rotation_deg || 0) === 90;
+  if (isH) deg = 90;
+  if (wasH !== isH) {
+    const f = _matFrame(mat);
+    const L = mat.length_cm, totalW = f.totalW, oldAlongStart = f.alongStart;
+    mat.rotation_deg = deg;
+    if (isH) { mat.x_cm = f.cx - L / 2; mat.y_cm = f.cy - totalW / 2; }
+    else { mat.x_cm = f.cx - totalW / 2; mat.y_cm = f.cy - L / 2; }
+    const d = (isH ? mat.x_cm : mat.y_cm) - oldAlongStart;
+    if (Array.isArray(mat.runStarts) && d !== 0) mat.runStarts = mat.runStarts.map(v => (typeof v === 'number' ? v + d : v));
+  } else mat.rotation_deg = deg;
+  mat.matCoordV = 2;
+}
 function _matRotate90() {
   const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
   if (!mat) return;
   pushUndo();
-  mat.rotation_deg = ((mat.rotation_deg || 0) + 90) % 360;
+  _matSetRotationDeg(mat, ((mat.rotation_deg || 0) + 90) % 360);
   updateCtxBar(); render();
 }
 
@@ -46263,9 +46590,12 @@ function _clampMatToRoom(mat, room) {
   const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
   const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
   const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
-  const totalW = _matTotalWidthCm(mat);
-  mat.x_cm = Math.max(rMinX, Math.min(rMaxX - totalW, mat.x_cm));
-  mat.y_cm = Math.max(rMinY, Math.min(rMaxY - mat.length_cm, mat.y_cm));
+  // 133: utstrekningen følger konvensjonen (0°: bredder langs x, lengde langs y; 90°: byttet om).
+  // Andre vinkler (fritt håndtak) klemmes som før på 0°-boksen — ikke rotasjonsbevisst (uendret).
+  const f = _matFrame(mat);
+  const extX = f.horiz ? mat.length_cm : f.totalW, extY = f.horiz ? f.totalW : mat.length_cm;
+  mat.x_cm = Math.max(rMinX, Math.min(rMaxX - extX, mat.x_cm));
+  mat.y_cm = Math.max(rMinY, Math.min(rMaxY - extY, mat.y_cm));
 }
 
 /** Start zone drawing mode for a given room */
@@ -47307,7 +47637,7 @@ function _matFillWedgeZone(zone, refProd) {
       x_cm: dir === 'v' ? st.pos_cm : st.start_cm,
       y_cm: dir === 'v' ? st.start_cm : st.pos_cm,
       width_cm: st.ncCm, length_cm: st.length_cm, num_runs: 1,
-      rotation_deg: dir === 'h' ? 90 : 0, gap_cm: 0, last_run_length_cm: null, runLengths: null, runStarts: null,
+      rotation_deg: dir === 'h' ? 90 : 0, gap_cm: 0, last_run_length_cm: null, runLengths: null, runStarts: null, matCoordV: 2,
     };
     S.mats.push(mat);
   }
@@ -53598,9 +53928,13 @@ function _drawMatDimChainForRoom(room) {
     if (matDir !== dir) continue;
     const n = mat.num_runs || 1;
     const gap = mat.gap_cm != null ? mat.gap_cm : 0;
-    const totalW = _matTotalWidthCm(mat);
-    const cx = mat.x_cm + totalW / 2;
-    const cy = mat.y_cm + mat.length_cm / 2;
+    // 133: blokkas senter fra samme ramme som tegningen (_matFrame) — for 90° er senteret
+    // (x_cm + L/2, y_cm + totalW/2), ikke lenger (x_cm + totalW/2, y_cm + L/2). Kjeden måler
+    // fortsatt blokkas NOMINELLE lengde (ikke klippede bredder), som før.
+    const frame = _matFrame(mat);
+    const totalW = frame.totalW;
+    const cx = frame.cx;
+    const cy = frame.cy;
     for (let r = 0; r < n; r++) {
       const localCx = -totalW/2 + mat.width_cm/2 + _matRunAcrossOffsetCm(mat, r, gap);   // 124: inkl. sideforskyvning
       if (dir === 'v') {
@@ -63944,14 +64278,15 @@ function hitMatRunStartHandle(sx, sy) {
 }
 
 function _getMatGizmoPos(mat) {
-  // Gizmo at bottom-left of entire multi-run group
-  const gx = mat.x_cm, gy = mat.y_cm + mat.length_cm;
+  // Gizmo at bottom-left of entire multi-run group — 133: høyden følger konvensjonen (90°: totalW)
+  const f = _matFrame(mat);
+  const gx = mat.x_cm, gy = mat.y_cm + (f.horiz ? f.totalW : mat.length_cm);
   return w2s(gx - 2, gy + 2);
 }
-/** Get the rotation center for a multi-run mat */
+/** Get the rotation center for a multi-run mat — 133: fra _matFrame (90°: x_cm + L/2, y_cm + totalW/2) */
 function _matCenter(mat) {
-  const totalW = _matTotalWidthCm(mat);
-  return { x: mat.x_cm + totalW / 2, y: mat.y_cm + mat.length_cm / 2 };
+  const f = _matFrame(mat);
+  return { x: f.cx, y: f.cy };
 }
 function hitMatGizmoFree(sx, sy) {
   if (!S.ui.selectedMatId) return false;
@@ -66207,6 +66542,7 @@ canvas.addEventListener('mousedown', e=>{
           num_runs: cand.numRuns || 1,
           gap_cm: cand.gapCm || 0,
           rotation_deg: 0,
+          matCoordV: 2,   // 133
           // STEG 2 (Kenneth 19.08.2026, «Sentrer kaster matta og kjører auto på nytt»): merker
           // denne mattas rom som «noen har plassert manuelt her» — _matToggleFromWall leser dette
           // for å avgjøre om Sentrer skal FLYTTE gruppen (manuelt) eller trygt kunne legge rommet
@@ -66302,7 +66638,7 @@ canvas.addEventListener('mousedown', e=>{
         _matRotating = true;
         _matRotId = S.ui.selectedMatId;
         const mat = S.mats.find(m => m.id === _matRotId);
-        _matRotCenter = { x: mat.x_cm + mat.width_cm/2, y: mat.y_cm + mat.length_cm/2 };
+        _matRotCenter = _matCenter(mat);   // 133: samme senter som tegningen (var x_cm + width_cm/2 — én bredde, uansett rotasjon)
         const gp = w2s(_matRotCenter.x, _matRotCenter.y);
         _matRotStart = Math.atan2(sy0 - gp.y, sx0 - gp.x);
         _matRotOrigDeg = mat.rotation_deg || 0;
@@ -66997,7 +67333,7 @@ canvas.addEventListener('mousemove', e=>{
       const angle = Math.atan2(e.clientY - gp.y, e.clientX - gp.x);
       let dAngle = (angle - _matRotStart) * 180 / Math.PI;
       if (!S.shiftHeld) { dAngle = Math.round(dAngle / 45) * 45; }
-      mat.rotation_deg = _matRotOrigDeg + dAngle;
+      _matSetRotationDeg(mat, _matRotOrigDeg + dAngle);   // 133: senteret holdes fast inn i/ut av 90°
     }
     render(); return;
   }
@@ -68601,7 +68937,7 @@ document.addEventListener('keydown', e=>{
       if (t.kind === 'mat') {
         const high = _matRunStartIsHigh(t.obj, t.r);   // startenden ligger i høy along-ende?
         if (alongY) { dAcross = dxk; dStart = high ? -dyk : dyk; }
-        else { dAcross = dyk; dStart = high ? dxk : -dxk; }   // 90°: lokal along er speilet x (høy = venstre)
+        else { dAcross = dyk; dStart = high ? -dxk : dxk; }   // 133: 90° — langs er +x (høy ende = høyre), ingen speiling
       } else {
         const m = t.obj.moves[t.r];
         if (alongY) { dAcross = dxk; dStart = dyk * m.dir; }
@@ -74633,6 +74969,9 @@ function _restoreProject(data) {
     } else if (h.floorId != null) { h.floorId = +h.floorId; }
   }
   for (const m of S.mats)      { if (m.roomId != null) m.roomId = +m.roomId; if (m.id != null) m.id = +m.id; if (m.productId != null) m.productId = +m.productId; }
+  // 133: lagrede vannrette matter fra før én koordinatkonvensjon konverteres fra tegnet posisjon
+  // (én gang; nye matter har matCoordV: 2). Se _matMigrateCoordV2.
+  for (const m of S.mats) _matMigrateCoordV2(m);
   for (const p of S.plates)    { if (p.roomId != null) p.roomId = +p.roomId; if (p.id != null) p.id = +p.id; if (p.productId != null) p.productId = +p.productId; }
   for (const f of S.foilFree)  { if (f.roomId != null) f.roomId = +f.roomId; if (f.id != null) f.id = +f.id; if (f.productId != null) f.productId = +f.productId; }
   // Manglet fra før (STEG 0-rapporten over S-objektet) — uten dette ville en aluboard lastet med
