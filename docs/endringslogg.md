@@ -4,6 +4,22 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 126 — GBAO10-eksport: «Ferdig» (primær) og «Eksporter på nytt» etter eksport; Esc lukker (23.10.2026, `main`, ikke pushet)
+
+Kenneth: «"Avbryt" er feil ord på knappen etter at det er eksportert.» Rapport i `docs/serie-126/`.
+
+- Etter vellykket eksport (mappe eller nedlasting) blir «Avbryt» til **«Ferdig»** (blå) og «Eksporter»
+  til **«Eksporter på nytt»** (sekundær). Feil (ingen tilgang, unntak) setter knappene tilbake.
+  Én funksjon, `_gbao10SetDone`, skriver tekstene; tilstanden overlever re-render i samme åpning.
+- **Esc** lukker dialogen i begge tilstander (gjorde det ikke før). Alle lukkeveier går via `_gbao10Close`.
+- Målt før: et nytt «Eksporter»-trykk lastet ned samme fil en gang til uten spørsmål; mappe-veien
+  skriver `_2.txt` (kollisjonsvernet) — «Avbrutt.»-grenen er død kode i dag.
+- Andre eksportdialoger (PDF, XLSX, Kopier til Visma, Tilbehør) lukker seg selv — ingen har problemet.
+- `_gbao10RegressionTest` har fått del D (11 sjekker, async): knappetekst før/etter, re-render,
+  Esc, tilgangsnekt, ny åpning.
+
+---
+
 ## 125 — Materialliste: foliemengde (m per produkt) i tilbehørsdialogen, justerbar og lagret (23.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth: «beregnet mengde kommer opp i samme listen, slik at bruker kan justere mengde opp eller ned
