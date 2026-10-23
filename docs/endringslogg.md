@@ -4,7 +4,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## 126 — GBAO10-eksport: «Ferdig» (primær) og «Eksporter på nytt» etter eksport; Esc lukker (23.10.2026, `main`, ikke pushet)
+## 126 — GBAO10-eksport: «Ferdig» (primær) og «Eksporter på nytt» etter eksport; Esc lukker (23.10.2026, `main`, `b40496e`, pushet)
 
 Kenneth: «"Avbryt" er feil ord på knappen etter at det er eksportert.» Rapport i `docs/serie-126/`.
 

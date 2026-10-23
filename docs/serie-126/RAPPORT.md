@@ -1,6 +1,6 @@
 # 126 — Visma-eksport (GBAO10): «Ferdig» og «Eksporter på nytt» etter eksport
 
-Kjørt 23.10.2026 på `main` fra `829be8a`. Ikke pushet. Skjermbilder i `skjermbilder/` (headless Chrome,
+Kjørt 23.10.2026 på `main` fra `829be8a`. Pushet som `b40496e`. Skjermbilder i `skjermbilder/` (headless Chrome,
 fikstur med ett folieprodukt, kunde 38156, nedlastingsveien).
 
 ## STEG 0 — målt før endring
