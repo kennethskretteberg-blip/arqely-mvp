@@ -4,6 +4,25 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 128 — Matte: veggmargin etter Regel 12 (kabel 5 cm fra vegg = nett 2,5/3 cm), én kilde (23.10.2026, `main`, ikke pushet)
+
+Kenneth: «Min 5 cm fra kabel til vegg, dvs. 2,5 cm fra ytterkant nettet til vegg.» Rapport, spørsmål og
+skjermbilder i `docs/serie-128/`. Spec Regel 12 oppdatert (avgjørelsen skrevet inn, konflikt lukket).
+
+- **`MAT_CABLE_WALL_CM = 5` + `_matWallMarginCm(prod)`** = `max(0, 5 − kant-inntrekk)` → 2,5 cm
+  (60T/100T), 3,0 cm (150T); `min_wall_margin_mm === 0` (InSnow) → 0, uendret. Erstatter
+  `prod.min_wall_margin_mm ?? 50` (= 5 cm nett, 7–7,5 cm kabel) i auto, flermatte, soner, omlegging
+  (127), klikk-plassering, gruppe-avstand, varsel, mattebenk og frihånd — kortside OG langside
+  (kortsiden var `max(cc/2, 5)`, altså 6 cm for 60T/100T). Basen urørt.
+- Mattebenk (absolutt m²): auto +54 m² over 56 rom, 38 rader høyere, 183 like, **3 lavere** — alle
+  retningsbytter (v↔h) der 'h'-veien leverer under sitt eget estimat (124-funnet om vannrett matte).
+  Med retningen holdt fast er alle rom identiske. Stoppet og rapportert, ikke rettet.
+- Funn (ikke rettet, før 128): frihånd-vakten godtar 1 cm innenfor marginen langs banen og sjekker
+  ikke tverr-marginen.
+- `_matFreeRegressionTest`: (30,295) → (28,297). Alle matte-batterier og `_pdfExportSmokeTest` grønne.
+
+---
+
 ## 127 — Matte: flytt alle matter i rommet sammen; mellomrom per valgt matte (23.10.2026, `main`, ikke pushet)
 
 Kenneth: «markere en matte og flytte hele arrangementet … velge avstand mellom breddene på den valgte
