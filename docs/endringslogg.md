@@ -4,7 +4,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## 125 — Materialliste: foliemengde (m per produkt) i tilbehørsdialogen, justerbar og lagret (23.10.2026, `main`, ikke pushet)
+## 125 — Materialliste: foliemengde (m per produkt) i tilbehørsdialogen, justerbar og lagret (23.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth: «beregnet mengde kommer opp i samme listen, slik at bruker kan justere mengde opp eller ned
 selv … kanskje gå opp litt siden det kan være snaut». Rapport og skjermbilder i `docs/serie-125/`.
@@ -107,7 +107,7 @@ Kenneth: en presentasjon med EcoMat lagt i frihånd sa «Ingen varme er planlagt
 
 ---
 
-## 121 — Kabelmotor: fail-open uten polygonbibliotek gjenopprettet (tilnærmet kandidat), 7 utdaterte påstander oppdatert med begrunnelse, rask variant av batteriet (21.10.2026, `main`, ikke pushet)
+## 121 — Kabelmotor: fail-open uten polygonbibliotek gjenopprettet (tilnærmet kandidat), 7 utdaterte påstander oppdatert med begrunnelse, rask variant av batteriet (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneths svar på SPØRSMÅL 103 (skrevet inn i `docs/trapp/prompter/SPØRSMÅL.md`). Full måling i
 `docs/kabel/STATUS.md` §45.
@@ -138,7 +138,7 @@ Kenneths svar på SPØRSMÅL 103 (skrevet inn i `docs/trapp/prompter/SPØRSMÅL.
 
 ---
 
-## 120 — Trapp: alle soner starter på samme side som sone 1, «Antall kabler» i sonen, auto 2 kabler når 1 ikke holder, låst/auto også på trappenivå (21.10.2026, `main`, ikke pushet)
+## 120 — Trapp: alle soner starter på samme side som sone 1, «Antall kabler» i sonen, auto 2 kabler når 1 ikke holder, låst/auto også på trappenivå (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneths svar på SPØRSMÅL fra serie 104/105/106 (skrevet inn i `docs/serie-104/SPØRSMÅL.md`).
 
@@ -187,7 +187,7 @@ Kenneths svar på SPØRSMÅL fra serie 104/105/106 (skrevet inn i `docs/serie-10
 
 ---
 
-## 119 — Presentasjon: produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer, vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes ved nytt utlegg (21.10.2026, `main`, ikke pushet)
+## 119 — Presentasjon: produktmål skjult for kunden, klikk-styring, forhåndsvalg over etasjer, vegg-tabell per vegg i forslagssvar, UTLEGG-merket ryddes ved nytt utlegg (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneths svar på SPØRSMÅL fra serie 116/117/118 (svarene står under hvert spørsmål i
 `docs/serie-116/SPØRSMÅL.md`).
@@ -248,7 +248,7 @@ Kenneths svar på SPØRSMÅL fra serie 116/117/118 (svarene står under hvert sp
 
 ---
 
-## 118 — Forslagslenke: «Endre mål» / «Lås mål», mål følger med i svaret, «Arbeid inn målene» hos Kenneth (21.10.2026, `main`, ikke pushet)
+## 118 — Forslagslenke: «Endre mål» / «Lås mål», mål følger med i svaret, «Arbeid inn målene» hos Kenneth (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 21.10.2026: «Bør være knapp: Endre mål — da blir veggene valgbare og kan flyttes. Når kunde
 har flyttet vegger, må hen trykke på "Lås mål". Så kan man fylle inn "hva synes du om" som vanlig og
@@ -307,7 +307,7 @@ Skjermbilder: `docs/serie-116/skjermbilder/118-*.png`.
 
 ---
 
-## 117 — Presentasjon: ett venstre panel (romliste, valgt rom, Hva synes du, Send); skuff på mobil (21.10.2026, `main`, ikke pushet)
+## 117 — Presentasjon: ett venstre panel (romliste, valgt rom, Hva synes du, Send); skuff på mobil (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 21.10.2026: «Kanskje alt skulle stått i en venstre bar slik som vi har i Varmeplan-appen?
 Da er alt samlet.»
@@ -346,7 +346,7 @@ Skjermbilder: `docs/serie-116/skjermbilder/117-*.png`.
 
 ---
 
-## 116 — Presentasjon: forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» (21.10.2026, `main`, ikke pushet)
+## 116 — Presentasjon: forhåndsvalgt rom, mål på alle vegger, blå «Send forslag» (21.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 21.10.2026: «Jeg ønsker at et rom allerede er valgt når presentasjonen åpner. Det er ikke
 lett å forstå at man skal trykke på et rom for å få opp detaljer. Jeg ønsker også at målene på alle
@@ -671,7 +671,7 @@ usynlig. Ny CSS her bruker `--border`.
 
 ---
 
-## 109 — Listevisning: slett kalkyle-produktet i et tegnet rom (20.10.2026, `main`, ikke pushet)
+## 109 — Listevisning: slett kalkyle-produktet i et tegnet rom (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Vi må ha en slette-knapp for produkter som er lagt inn i listevisning etter
 at rommet er tegnet opp … Hvis jeg i ettertid går inn på canvas og tegner inn et nytt produkt i
@@ -762,7 +762,7 @@ Batterier (alle grønne, 538 sjekker): `_listevisningRegressionTest` (54 — 059
 `_cableZoneRegressionTest` (33), `_stairRegressionTest` (24), `_stairManualSetRegressionTest`
 (42), `_stairZoneRegressionTest102` (77), `_stairSideRegressionTest` (25).
 
-## 108 — Flytt rom: alt innhold følger med (20.10.2026, `main`, ikke pushet)
+## 108 — Flytt rom: alt innhold følger med (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Når jeg flytter et rom med produkter og hindringer i, så ønsker jeg at alt
 flyttes. Slik det er nå så flyttes kun rommet og produktene står igjen. Går det an uten konsekvens
@@ -896,7 +896,7 @@ Mitt forslag, i prioritert rekkefølge:
 
 Ikke bygget. Si fra hvis du vil ha punkt 1.
 
-## 107 — Frihånds-matte: klikket «hang seg» (20.10.2026, `main`, ikke pushet)
+## 107 — Frihånds-matte: klikket «hang seg» (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Jeg har nettopp lagt ut en EcoMat 60T for frihånd i et rom. Det skjer
 ingenting når jeg trykker i canvas … hvis jeg går inn på rommet og trykker på matten som er lagt
@@ -995,7 +995,7 @@ etter et trykk utenfor, og label-drag i én bevegelse virker fortsatt). Alle 11 
 
 ---
 
-## 106 — Trapp: kabelvalg — produktgruppe først, fullt produktnavn, flere kabler per sone (20.10.2026, `main`, ikke pushet)
+## 106 — Trapp: kabelvalg — produktgruppe først, fullt produktnavn, flere kabler per sone (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Når man skal endre til en kabel manuelt, bør man kunne først velge
 produktgruppe: InSnow 30T 230V eller InSnow 400V. Så bør listen komme opp med "InSnow 30T 3000W
@@ -1046,7 +1046,7 @@ gruppe per sone og at etiketten ikke dobler spenningen.
 
 ---
 
-## 105 — Trapp: avstand fra sidene i en sone — tomt = auto, tall = låst nøyaktig (Regel 22) (20.10.2026, `main`, ikke pushet)
+## 105 — Trapp: avstand fra sidene i en sone — tomt = auto, tall = låst nøyaktig (Regel 22) (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Jeg ser også at det ikke skjer noe endring når jeg reduserer avstand til sider
 nærmere enn 6 cm. Det bør kunne gå. Da skal kabel bli for kort i enden, og det må vises.»
@@ -1102,7 +1102,7 @@ for lang gir gul, auto-kabel med låst avstand velger nærmeste kortere, og migr
 
 ---
 
-## 104 — Trapp: hver sone legges nedenfra og opp (Regel 14 per sone) (20.10.2026, `main`, ikke pushet)
+## 104 — Trapp: hver sone legges nedenfra og opp (Regel 14 per sone) (20.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 20.10.2026: «Trappen er bygd nedenfra og opp. Da starter kabel nederst i sone 1. Men i sone 2,
 så starter repos i motsatt retning slik at kabelendene på sone 1 og sone 2 møtes og ligger et trinn
@@ -1166,7 +1166,7 @@ snur alle sonene likt. Vaksinetestet — med den gamle repos-retningen blir 5 av
 
 ---
 
-## 103 — Trapp: Kenneths svar på 101/102; lite overskudd er «Passer» med merknad; dobbelt produktnavn bort; åtte røde sjekker målt (20.10.2026, `main`, ikke pushet)
+## 103 — Trapp: Kenneths svar på 101/102; lite overskudd er «Passer» med merknad; dobbelt produktnavn bort; åtte røde sjekker målt (20.10.2026, `main`, `89c1cd7`, pushet)
 
 **Del A.** Kenneths svar på alle 14 spørsmålene fra 101 og 102 er skrevet inn under hvert spørsmål i
 `docs/trapp/prompter/SPØRSMÅL.md`. To av dem krevde endring (101/1 og 101/6); resten var bekreftelser.
@@ -1208,7 +1208,7 @@ fortsatt ut` — 083s harde kaskadefilter bryter fail-open-regelen). Full tabell
 
 ---
 
-## 102 — Trapp: hver sone som eget rom — velg sone, bytt kabel, se sonens egne mål (19.10.2026, `main`, ikke pushet)
+## 102 — Trapp: hver sone som eget rom — velg sone, bytt kabel, se sonens egne mål (19.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 19.10.2026: «Den fyller seg ut automatisk når jeg setter soner, det er bra. Men jeg ønsker
 også etterpå å kunne velge en sone og endre kabel manuelt. Jeg savner også å kunne se detaljer i
@@ -1279,7 +1279,7 @@ alle åtte, med commiten som gjorde hver enkelt rød, står i `docs/kabel/STATUS
 
 ---
 
-## 101 — Trapp: manuelt kabelsett (ulike kabler i lista), fast sett løser sidemarginen som Forslag (19.10.2026, `main`, ikke pushet)
+## 101 — Trapp: manuelt kabelsett (ulike kabler i lista), fast sett løser sidemarginen som Forslag (19.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 19.10.2026: «Jeg ønsker også å kunne legge ut kabler manuelt, dvs. at jeg f.eks. kan velge
 tre ulike kabler som legger seg jevnt ut i hele trappa.» Avklart: «jevnt» = hele trappa dekkes, lik
@@ -1339,7 +1339,7 @@ forslag refittes ikke», Tilbakestill, og at soner er urørt. `_stairRegressionT
 
 ---
 
-## 100-web — Innebygd modus `?embed=app`: Varmeplan inne i feltappen, økt fra appen uten fornying, bare visning, berøring (18.10.2026, `main`, ikke pushet)
+## 100-web — Innebygd modus `?embed=app`: Varmeplan inne i feltappen, økt fra appen uten fornying, bare visning, berøring (18.10.2026, `main`, `89c1cd7`, pushet)
 
 Fellesprompt 100 for app og web (`prompter/feltapp/lop-051-052-100/100-…md`). Kenneth 18.10.2026:
 kabelmotoren bor bare i weben; appen viser weben i en WebView, allerede innlogget, og tegningen kan
@@ -1428,7 +1428,7 @@ ingen migrasjon, ingen RLS-endring, ingen Edge Function, ingen push.
 
 ---
 
-## 036 — Matrikkel/boligmappenr på prosjektet, og beregnet c/c + flateeffekt stemplet per rom (17.10.2026, `main`, ikke pushet)
+## 036 — Matrikkel/boligmappenr på prosjektet, og beregnet c/c + flateeffekt stemplet per rom (17.10.2026, `main`, `89c1cd7`, pushet)
 
 To ting feltappen (varmeplan-app) trenger fra web og som bare web kan lage. Kenneth 17.10.2026: web skal
 sende matrikkel og boligmappenummer så de tastes **én gang** ved prosjektering, og appen skal vise c/c og
@@ -1505,7 +1505,7 @@ adresseteksten ligger i `data.project.description`.
 
 ---
 
-## 065 — Varmeplan som installerbar app (PWA) på Windows (17.10.2026, `main`, ikke pushet)
+## 065 — Varmeplan som installerbar app (PWA) på Windows (17.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth 12.10.2026: «Jeg ønsker å lage Varmeplan-appen som en desktop-app på Windows-PC.» Valgt:
 installerbar nettapp (PWA) fremfor .exe — Edge/Chrome installerer varmeplan.no som egen app med eget
@@ -1558,7 +1558,7 @@ Prøv igjen**, ikke hvit side. Ikke testet: selve installasjonen i Edge på Wind
 
 ---
 
-## 099 — Kabelmotor: stigetrinn innenfor toleransen er varianter; robust mot 1 cm veggflytting (17.10.2026, `main`, ikke pushet)
+## 099 — Kabelmotor: stigetrinn innenfor toleransen er varianter; robust mot 1 cm veggflytting (17.10.2026, `main`, `89c1cd7`, pushet)
 
 Underlag: STATUS §38 (forstyrrelsestesten: 34 brudd av 136, «celler 5 → 4»). Full måling i STATUS §40.
 
@@ -1583,7 +1583,7 @@ og hjørnerunden på N-stigen (7 røde).
 
 ---
 
-## 075 — Høyreklikkmenyer måler egen høyde og holdes innenfor skjermen; romtyper i to kolonner (17.10.2026, `main`, ikke pushet)
+## 075 — Høyreklikkmenyer måler egen høyde og holdes innenfor skjermen; romtyper i to kolonner (17.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth: «Menyen som kommer opp ved høyreklikk fra rom er så stor at den går under skjermen, ingen
 mulighet å se hva som står nederst.»
@@ -1613,7 +1613,7 @@ og produktmenyene åpner riktig. Skjermbilder: `docs/serie-098/skjermbilder/075-
 
 ---
 
-## 098 — Trapp, sidevisning: start og slutt speilet riktig per trinn; «Sidevisning» følger tegningen (17.10.2026, `main`, ikke pushet)
+## 098 — Trapp, sidevisning: start og slutt speilet riktig per trinn; «Sidevisning» følger tegningen (17.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth (Test Cenika, P0341): «Grønt og rødt merke … ligger feil plassert på sidevisning av trappen.
 Grønn start bør ligge helt til venstre. Rød stopp bør ligge helt til høyre.»
@@ -1658,7 +1658,7 @@ Skjermbilder før/etter: `docs/serie-098/skjermbilder/098-*`.
 
 ---
 
-## 097 — PDF: én kilde for rommets produkter, og «m²» vises som m² (16.10.2026, `main`, ikke pushet)
+## 097 — PDF: én kilde for rommets produkter, og «m²» vises som m² (16.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth (Coop Ålen, P0339 rev. 3): «Her regner ikke appen med rampe og inngang som jeg har lagt ut
 med frihånd. Den bør regnes med. Den er tatt med kun for produkter, så den kom med på materiallisten.»
@@ -1697,7 +1697,7 @@ uendret. Figur: `docs/kabel/fasit/097-pdf-for-etter.svg`. 22 regresjonsbatterier
 
 ---
 
-## 096 — flerkabel-soner går gjennom geo-motoren med felles CC og søm (16.10.2026, `main`, ikke pushet)
+## 096 — flerkabel-soner går gjennom geo-motoren med felles CC og søm (16.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneths skjermbilde fra varmeplan.no: Rom 8, 2 × 3400W 200m i to soner. K1 jevn med røde ringer,
 K2 ødelagt med store buer. Begge ⚠.
@@ -1734,7 +1734,7 @@ Se `docs/kabel/STATUS.md` §39.
 
 ---
 
-## 095 — R-ENDE gjelder restceller; rask geo-port med lagret baselinje; forstyrrelsestest (16.10.2026, `main`, ikke pushet)
+## 095 — R-ENDE gjelder restceller; rask geo-port med lagret baselinje; forstyrrelsestest (16.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneths beslutninger: ikke kjøp R-ENDE med dekning (5–7 prosentpoeng er for dyrt), og presiser
 regelen til **restceller**, ikke ekte nisjer.
@@ -1768,7 +1768,7 @@ Se `docs/kabel/STATUS.md` §38.
 
 ---
 
-## 094 — R-ENDE: de frie endene rekker like langt som naboløpenes svinger (16.10.2026, `main`, ikke pushet)
+## 094 — R-ENDE: de frie endene rekker like langt som naboløpenes svinger (16.10.2026, `main`, `89c1cd7`, pushet)
 
 Kenneth: «700W innsett øverst til høyre: her er siste løp kortere enn løpene ved siden. Det skal det
 ikke være. Siste løp må forlenges, og heller øke avstand fra alle løpene mot vegger.»
@@ -1801,7 +1801,7 @@ dekke en grunn nisje med kabelens ende. Se `docs/kabel/STATUS.md` §37.
 
 ---
 
-## 093 — forskjøvet ytterbane som variant, ikke erstatning (15.10.2026, `main`, ikke pushet)
+## 093 — forskjøvet ytterbane som variant, ikke erstatning (15.10.2026, `main`, `89c1cd7`, pushet)
 
 092 forskjøv alltid ytterbanen. Det løste Rom 5 / 700W `tr` (84,3 → 94,1 %) men brakk R-START og
 R-VEGG på 600W `bl` (start 25 → 77 cm, stripe 19,4 → 33,8) og R-START på 10T `bl` (31 → 67 cm).
@@ -1818,7 +1818,7 @@ og ingen av de ti fixturene er dårligere enn før 092 på noen låst regel.
 men start 67 cm, og R-START rangerer over dekning. Gevinsten var kjøpt ved regelbrudd.
 ⚠ Forstyrrelsestesten er fortsatt ikke bygget — se STATUS §36.
 
-## 092 (delvis) — rotårsaken funnet i millimeter; fiksen brekker R-START (15.10.2026, `main`, ikke pushet)
+## 092 (delvis) — rotårsaken funnet i millimeter; fiksen brekker R-START (15.10.2026, `main`, `89c1cd7`, pushet)
 
 ⚠ STATUS §34 var feil: rutingen mister ingen N-trinn — hvert trinn 17–24 ruter ved begge
 veggposisjoner. Og «W falt 290,4 → 278,3» var min egen målefeil.
@@ -1836,7 +1836,7 @@ hovedsaken: Kenneths rom går fra CC 11,62/84,3 % til **CC 13,20 · 41,00 m · 9
 ⚠ MEN R-START brekker på to tilfeller (rom5 600W `bl`: start 25 → 77 cm; 10T `bl`: 31 → 67 cm).
 **Skal ikke pushes.** Se STATUS §35.
 
-## 091b — lengdesøket itererer over antall løp N (15.10.2026, `main`, ikke pushet)
+## 091b — lengdesøket itererer over antall løp N (15.10.2026, `main`, `89c1cd7`, pushet)
 
 Lag F brukte grovsveip + bisekssjon over CC, mens kommentaren selv slo fast at lengden er en
 SAGTANN i CC. N er den egentlige frie variabelen (`cc = W/(N−1)`). Søket teller nå N over hele

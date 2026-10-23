@@ -1,6 +1,6 @@
 # 125 — Materialliste: foliemengde (meter per produkt) i tilbehørsdialogen, justerbar og lagret
 
-Kjørt 23.10.2026 på `main` fra `6c32745`. Ikke pushet. Skjermbilder i `skjermbilder/` (headless Chrome,
+Kjørt 23.10.2026 på `main` fra `6c32745`. Pushet som `89c1cd7`. Skjermbilder i `skjermbilder/` (headless Chrome,
 fikstur med to folieprodukter i tre rom, dialogen åpnet direkte med `showAccessoriesModal()`).
 
 ## STEG 0 — lest før endring
