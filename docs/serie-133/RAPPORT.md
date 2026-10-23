@@ -225,3 +225,171 @@ senteret (300, 453,5) står, feltene tilbake. Skjermbilde 133-03.
 
 Commit: «133: vannrett matte — én koordinatkonvensjon (motor = klipp = tegning = treff = klamp via
 _matRunWorldGeom), migrering av lagrede matter, estimat = levering; regresjonstest». **Ikke pushet.**
+
+## 134
+
+**Matte — Kenneths svar på serie-128 (motor).** Kjørt 24.10.2026 på `main` fra `75bb622` (133). **Ikke
+pushet.** Svarene er skrevet inn under hvert spørsmål i `docs/serie-128/SPØRSMÅL.md` («**Svar (Kenneth
+24.10):**»). Skjermbilder i `skjermbilder/134-*` (headless Chrome via CDP, harness i `/tmp/cdp134`;
+gammel kode (`75bb622`) servert fra port 4002 for «før»-bildene).
+
+**Resultat i én setning:** en sone klemt mellom to matter sentreres (A), rullvalget hopper over planer som
+ender i en stubb og viser den større som alternativ (B), senere kapitler starter i velgerens ende (C), et
+rektangulært rom med kvalifisert restfelt får tverrstykker via kapittelbanen (D), en sone som Regel 27-
+vakten avviser prøves i den andre retningen (E) — og hindring #30, som var bestillingen bak E, viste seg å
+være en snapp-feil i `_matZoneFreeRoom` (boksen ble aldri trukket inn til nabomatta + mellomrom), rettet
+i samme økt: 84,0 → 94,5 % dekning.
+
+### STEG 0 — målt før endring (fila fra `75bb622`, port 4000)
+
+1. **B — hvor rullen velges, og hvordan stubben ser ut.** `_matPlanZones` → `_matChapterRollPlans(Σ, prod)`:
+   «blandet» = `_matFreeSplitPlan` (K klatrer til resten er under korteste rull; så størst sum, så minst
+   spredning), «like» = samme K, største lengde som går opp K ganger. Bare Σ gikk inn — banen var ukjent for
+   rullvalget. Stubben er bare synlig etter `_matChapterPieces` (`_matFreeSliceMoves` skjærer banen ved
+   rullens lengde): T-rommet (600×200 + stamme 200×300, 100T, velger nede-venstre): Σ 29,76 m, stammen
+   først (3 × 288), så 11 × 192 → 28 m-biten slutter 16 cm inn i bredde 14 (`u/v-16`, under 24-rasteret).
+   Variant A (132): 26 m-biten slutter 8 cm inn i tverrstykke 2 (`u/h-8X`, under 2 × CC = 24). Benk (150T,
+   auto): Kenneth L-rom 26 m → 8 cm i en vanlig bredde (raster 16), hindring #27 26 m → 8 cm i et
+   tverrstykke, L #23 14 m → 8 cm tverr, hindring #26 18 m → 8 cm tverr, hindring #25 10 m → 24 cm inn i
+   et 32 cm-stykke (≥ 16, lov), T #20 2 × 32 m → 176 cm (lov).
+2. **C — startende for kapittel 2+.** `_matChapterRunOrder(ch, prevEnd)`: for `prevEnd` satt prøves begge
+   ytterbredder × begge ender, kortest avstand til forrige slutt vinner. Bilde 2, velger nede-venstre:
+   bredde 5 slutter øverst (252, 8) → bredde 6 startet øverst (303, 3), hopp (51, −5) ≈ 51 cm. Å følge
+   velgeren koster løs kabel: bredde 6 nederst (303, 195), hopp (51, 187) ≈ **194 cm** (Kenneths «200 cm»).
+   Velger øverst-venstre: bredde 5 slutter nederst (252, 392) → bredde 6 øverst (303, 3), hopp ≈ 392 cm.
+3. **D — rektangel med slakk i dag.** 300×400, 100T, «fra vegg» nede-venstre: `_matPlanZones` null (én sone)
+   → `S.mats`-veien: 18 m, 5 × 360 på x 2,5–256,5, y 37,5–397,5, 9,0 m²; slakken x 256,5–300 = **43,5 cm**
+   (≥ 37) står udekket. Simulert kapittel på samme rektangel: 5 × 384 + restfelt 43,5 × 400 → 7 × 24 cm
+   tverr (x 264,5–288,5), Σ 20,88 m. Veien som ble valgt: hele rommet over til kapittelbanen når det finnes
+   et kvalifisert felt (null ellers, så `S.mats`-veien står bit-identisk) — ikke `S.mats` + et tverrkapittel,
+   fordi rullen velges av hele Σ (Regel 22 pkt. 2-mønsteret) og alle leserne alt finnes for banen.
+4. **E — hindring #30.** 378×518, hindring 10–59 × 10–58 (klaring vegg), 150T, auto: sone 1 (y 60–516)
+   vannrett 9 × 368 fra y 60 (sonegrensen, 0 margin, mellomrom kappet til 0,375); sone 2 (x 60–378 × y 0–60)
+   velger selv 'h' (loddrett gir langs 57 < 100). `_matZoneFreeRoom`: y1-kanten (sonegrense) stoppes av
+   matta i første stripe, men snappen godtok bare kanter *utenfor* boksen (`edge ≥ cur`) — matta lå kant i
+   kant på y 60, så boksen beholdt y 60, kapitlet ble ankret 'hi' på y 10–60 og overlappet → `warn` og
+   utelatt. «Prøv den andre retningen» gir der **ingenting** ('v' er for kort) — det som manglet var snapp
+   innover. Begge er gjort (E som bestilt, snappen som årsaken).
+
+### Gjort (alt i `index.html`)
+
+- **A · Sentrering.** `_matZoneAnchorSide`: begge sider matte → `'mid'` (var lav side). Lest i
+  `_matChapterBlock` (tvers og langs), `_matCrossFieldChapter` (stykkets ender og stablingen),
+  `_matPlaceMultiMats` og `autoFillMatSerpentine` (de gamle `S.mats`-veiene, for konsistens). H-rom
+  (stolper 200×800 + bro 300×200 mellom, 100T): broa 6 bredder x **197,5–502,5** — 19 cm til hver
+  nabomatte (var 178,5–483,5: 0 / 38). Skjermbilde `134-A-hrom-*`.
+- **B · Rullvalg uten stubb.** Ny `_matChapterStubAt(runs, coverCm, prod)`: hvor planens sum lander i banen;
+  lagt del av den bredden < kuttraster (Regel 24) eller < max(2 × CC, raster) i et tverrstykke (Regel 29
+  pkt. 2) = stubb. `_matChapterRollPlans(Σ, prod, path)`: like → neste lengde ned ved samme K; blandet →
+  `_matChapterBestAtKFree` (alle kombinasjoner ved samme K, størst sum så minst spredning, memoisert per sum).
+  Den større planen beholdes som `equalAlt`/`mixedAlt` (+ `…AltStub`); finnes ingen stubbfri ved samme K,
+  står den største med `equalStub`/`mixedStub`. Uten `path` er alt som før (testene for 50,0 m / 1,5 m uendret).
+  Panelet: den valgte raden sier «unngår stubb på 16 cm (Regel 24)» / «… 8 cm inne i et tverrstykke (Regel
+  29 pkt. 2)», den større vises som «(største som får plass) … ender i en stubb på X cm» og kan velges
+  (`equalAlt`/`unequalAlt` → `_matChapterCommit` med den planen; `_multiMatPref` husker bare like/blandet).
+- **C · Startende følger velgeren.** `_matChapterRunOrder`: `startHigh` = velgerens ende per akse ('v':
+  nederst for «b…», 'h': venstre for «…l») for alle kapitler; senere kapitler velger bare hvilken ytterbredde
+  som er først (nærmest forrige kapittel, 2D-avstand til breddens midtpunkt). Gjelder også tverrkapitler.
+- **D · Regel 29 i rektangulære rom.** `_matPlanZones`: én sone er ikke lenger `null` med én gang —
+  kapittelet planlegges, `_matCrossFillChapters` kjøres, og **uten** tverrkapittel returneres `null` (S.mats-
+  veien, bit-identisk: benkens 106 rektangulære rader uendret). Med tverrkapittel: `zonePlan.single = true`,
+  panelet heter «Én matte med tverrstykker i restfeltet», toasten «lagt ut med tverrstykker i restfeltet».
+  Toasten teller nå bredder som faktisk ble lagt (bitenes moves), ikke planens.
+- **E · Utelatt sone i andre retning.** `_matChapterBlock(room, rect, prod, priorMats, opts)`: `opts.dir`
+  tvinger retningen, `opts.fail = { reason: 'size' | 'overlap', dir }` ved null; kapitlet får `otherDir`.
+  `_matPlanZones`: fail `overlap` → nytt forsøk med den andre retningen (vakten like streng), varsler
+  «prøver den andre retningen» / «også i retning X — sonen utelatt». Panelet: «lagt i den andre retningen —
+  i hovedretningen ville kapitlet overlappet en nabomatte (Regel 27)».
+- **Snapp innover (`_matZoneFreeRoom`).** `inside`-vinduet for en mattekant + mellomrom er nå
+  `[cur − g, cur + STEP]` for en høy kant (speilet for lav), og boksen settes til kanten også når det
+  betyr å krympe. Hindring #30: sone 2 får y 3–59, én bredde 304 cm på y 9–59 inntil hovedkapitlet
+  (anchor 'hi'), Σ 33,12 → 36,16 m, 32 → 36 m-rull, **16,0 → 18,0 m²** (benk: 84,0 → 94,5 %).
+- **Tester.** `_matChapterRegressionTest` 14 → **22** (C bilde 2 nede-/øverst-venstre, B T-rom + `_matChapterStubAt`
+  på fire punkter, A H-rom, E/snapp hindring #30, E-mekanismen med en inntrenger 2 cm inn i alkoven: 'v'
+  feiler med `overlap`, tvungen 'h' legger 3 × 480 (Regel 27 på langs gjennom tom hoveddel), begge feiler
+  med inntrenger → to varsler og utelatt). `_matCrossFillRegressionTest` 23 → **30** (variant A: 24 m valgt,
+  26 m som alternativ med stubb 8 tverr, commit med alternativet beholder tverr-sjekkene; D 100T/150T og
+  sentrert bit-identisk; A tverrstykker mellom to matter sentrert x 110,5–134,5).
+
+### Før / etter per punkt
+
+| Punkt | Rom | Før (`75bb622`) | Etter 134 |
+|---|---|---|---|
+| A | H-rom, bro mellom to stolper (100T) | 6 bredder x 178,5–483,5 (inntil venstre, 38 cm slakk mot høyre) | x **197,5–502,5**, 19 cm til hver nabomatte (`anchorAcross: 'mid'`) |
+| B | T-rom 600×200 + stamme 200×300 (100T), Σ 29,76 m | 28 m, siste bredde **16 cm**, 14,0 m² | **24 m**, siste bredde hel (192), 12,0 m²; panel: 24 m «unngår stubb på 16 cm», 28 m «ender i en stubb på 16 cm» |
+| B | Variant A 300×380 + alkove 226×200 (100T), Σ 26,40 m | 26 m, **8 cm** inn i tverrstykke 2, 13,0 m² | **24 m**, ender 24 cm inn i bredde 9 (= ett raster), 12,0 m²; 26 m som alternativ (`134-B-variantA-etter-panel`) |
+| C | Bilde 2, velger nede-venstre | bredde 6 starter øverst (303, 3), hopp (51, −5) | bredde 6 starter **nederst** (303, 195), hopp (51, 187) ≈ 194 cm (`134-C-bilde2-bl-*`) |
+| C | Bilde 2, velger øverst-venstre | bredde 6 starter nederst (303, 195), hopp (51, 187) | bredde 6 starter **øverst** (303, 3), hopp (51, −389) |
+| C | Bilde 2, velger øverst-høyre (alkoven først) | kapittel 2 starter øverst (252, 8), hopp (−51, 5) | uendret |
+| D | Rektangel 300×400 «fra vegg» (100T) | `S.mats`: 18 m, 5 × 360, slakk 43,5 cm udekket, 9,0 m² | kapittelbane: 5 × 384 + 7 × 24 cm tverr planlagt, Σ 20,88 m → **18 m** (20 m ville endt 8 cm inn i stykke 4), 9,0 m²; 20 m som alternativ gir 10,0 m² med 3 hele stykker + 8 cm (`134-D-rekt-fravegg-*`) |
+| D | Samme, 150T | `S.mats`: 18 m, 8,96 m² («siste bredde kortere») | 5 × 384 + 7 × 32 cm, Σ 21,44 → **20 m** (ender 16 cm = to strenger inn i stykke 3), **10,0 m²** |
+| D | Samme, sentrert (slakk 20,5 per side) | `S.mats` | `_matPlanZones` null → `S.mats`, bit-identisk |
+| E | Benk hindring #30 (150T, auto) | sone 2 utelatt («ville overlappet en nabomatte»), 32 m, 16,0 m², 84,0 % | sone 2: 1 × 304 vannrett på y 9–59, 36 m, **18,0 m²**, **94,5 %** — snappen, ikke retningen (`134-E-hindring30-*`) |
+
+### Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | A: sone mellom to matter: lik slakk begge sider | Ja — H-rom 19 / 19 cm; tverrstykker mellom to matter 10,5 / 10,5 cm. Låst. |
+| 2 | B: T-rommet ikke lenger 28 m + 16 cm; variant A ikke 8 cm inn i stykke 2; panelet viser alternativet | Ja — 24 m begge (tabellen); panelet viser den stubbfrie med «unngår stubb på X cm» og den større med «ender i en stubb på X cm». Låst. |
+| 3 | C: bilde 2 nede-venstre: bredde 6 nederst, hopp ≈ 200 cm; øverst motsatt | Ja — (51, 187) ≈ 194 cm; øverst-venstre: bredde 6 øverst. Låst. |
+| 4 | D: 300×400 «fra vegg» 100T: tverrstykker når feltet kvalifiserer; uten felt bit-identisk | Feltet (43,5 cm) kvalifiserer og får 7 × 24 cm planlagt; med B-regelen faller de utenfor 18 m-rullen (20 m ender 8 cm inn i stykke 4) — 20 m er ett klikk unna i panelet og gir 10,0 m² (`134-D-rekt-fravegg-alt20m-etter-utlegg`). 150T får stykkene i 20 m-rullen (10,0 m², var 8,96). Sentrert → null → bit-identisk (benk: alle rektangulære rader uendret). Låst. |
+| 5 | E: hindring #30: 319 cm-bredden legges, dekning opp | Ja — 304 cm (312 brukbart etter hindringsklaring 3 cm, 16-raster), 84,0 → 94,5 %. Årsaken var snappen (STEG 0.4); E-mekanismen er bygget og låst, men gir ingenting i benken. |
+| 6 | Mattebenk: ingen rom lavere (B kan gi små nedganger — list dem), batterier grønne, testene utvidet | 224 rader, 212 uendret, 2 høyere (hindring #30 vei 1/2), **10 lavere — alle B**, se under. Ingen ny ulovlig (29 før/etter, alle vei 4). `_matRegressionTest` 2/2 · `_matZoneRegressionTest` 17/17 · `_matChapterRegressionTest` **22/22** · `_matCrossFillRegressionTest` **30/30** · `_matFreeRegressionTest` 26/26 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_matRotationRegressionTest` 35/35 · `_foilRegressionTest` 9/9 · `_pdfExportSmokeTest` 20/20. Ingen konsollunntak. |
+
+### Mattebenk-differansen (`_matBench(42, 64)`, før = `75bb622`, etter = 134; vei 1 = vei 2)
+
+| Rom (150T, auto, 1 cm) | Dekning før → etter | Rull før → etter | Hvorfor |
+|---|---|---|---|
+| hindring #30 | 84,0 → **94,5 %** | 32 → 36 m | snapp innover: sone 2 lagt (1 × 304) |
+| 1108 Garderobe / Kenneth L-rom (samme geometri) | 84,1 → 77,6 % | 26 → 24 m | B: 26 m endte 8 cm inn i en 192-bredde (raster 16) |
+| L #23 | 80,5 → 69,0 % | 14 → 12 m | B: 14 m endte 8 cm inn i tverrstykke 1 (16 cm) |
+| hindring #26 | 85,3 → 75,8 % | 18 → 16 m | B: 18 m endte 8 cm inn i et tverrstykke |
+| hindring #27 | 85,6 → 79,0 % | 26 → 24 m | B: 26 m endte 8 cm inn i et tverrstykke |
+
+De fem nedgangene er nøyaktig Kenneths valg i 131-2/132-2 (c): én kabelstreng (8 cm) i en bredde er ikke
+en bredde. I alle fem viser panelet den større rullen som alternativ. Benkens `_matBenchPathsResult`
+måler standardvalget. Poengene stiger i fire av dem (mindre breddespredning) — poengformelen sier fortsatt
+lite om en kapittelbane (131).
+
+### Funn utenfor scope (ikke rettet)
+
+- **Grid-dekomponeringen taper centimeter i soner.** H-rommets bro (y 300–500) blir rektangel y 301–497;
+  kapitlet får 168 cm bredder der 192 hadde fått plass (margin 2,5 fra den ekte veggen). `_decomposeRoomToRects`
+  rasteriserer i 6–12 cm celler (132 STEG 0.2). Regel 27-utvidelsen gjelder bare sonegrense-kanter, så en
+  vegg-kant som ligger noen cm inne i rommet blir stående.
+- **E gir ingenting i benken** etter snapp-fiksen: en Regel 27-avvisning krever nå en matte som stikker
+  dypere enn mellomrommet inn i sonen, og da feiler som regel begge retninger. Mekanismen står (bestilt),
+  låst i testen med en syntetisk inntrenger.
+- **Panelet viser fortsatt to like rader** når like og blandet er samme plan (131-6) — nå også for
+  alternativ-radene (dedupliseres når de er like).
+- **Hindring uten navn tegnes med «undefined»-etikett** i den syntetiske #30-oppsettet (`134-E-hindring30-*`) —
+  harnessens hindring mangler `name`; ikke sett i appen.
+- **D endrer geometrien i rektangler med kvalifisert felt** selv når tverrstykkene faller utenfor rullen
+  (300×400 100T: 5 × 384 + 264 i stedet for 5 × 360, samme 9,0 m²): kapittelbanen fyller til kapasitet og
+  lar rullen skjære. Dekningen er lik, bildet er et annet (SPØRSMÅL 134-2).
+
+### Skal IKKE — holdt
+133s konvensjon, frihånd-tegningen og frihånd-panelet (`_matPathPanel`) er urørt; bare sone-forslagspanelet
+(`_showMatZoneProposalPanel`) har fått B-radene og D-ordlyden. Ikke pushet.
+
+### Verifiseringsmetode
+Headless Chrome (CDP, port 9333) mot `serve-varmeplan.js` på 4000 (ny) og `python -m http.server` på
+4002 (`75bb622`) uten innlogging — harness i `/tmp/cdp134/` (`cdp.mjs`, `setup130.js`, `steg0.mjs` (alle
+punktene målt på begge versjoner → `steg0-before.json` / `steg0-after.json`), `debug30.mjs` (snapp-
+hypotesen), `dbgL.mjs` (benkrommene med B), `tests.mjs`, `bench.mjs` + `diff.mjs` (radnivå), `shots.mjs`
+(panel + utlegg på begge porter)). Utlegg via `_matFillRoomSmart` og ekte «Legg ut»-klikk.
+
+### Endringslogg (kode, alt i `index.html`)
+- Nye: `_matChapterStubAt`, `_matChapterBestAtKFree`.
+- Endret: `_matZoneAnchorSide` (`'mid'`), `_matChapterBlock` (`opts.dir`/`opts.fail`/`otherDir`, `'mid'`),
+  `_matCrossFieldChapter` (`'mid'`), `_matPlaceMultiMats` og `autoFillMatSerpentine` (`'mid'`),
+  `_matZoneFreeRoom` (snapp innover), `_matChapterRunOrder` (velgerens ende), `_matChapterRollPlans`
+  (`path`, `equalAlt`/`mixedAlt`/stubb-felter), `_matPlanZones` (én sone, E-forsøk, `single`, banen til
+  rullvalget, `otherDir`), `_showMatZoneProposalPanel` (alternativ-rader, stubbnoter, D-ordlyd, E-note,
+  laidRuns i toasten), `_matChapterRegressionTest`, `_matCrossFillRegressionTest`.
+- Spec `spec-matte-utlegg.md` (Cowork-mappa): Regel 11-notat, Regel 24-notat (stubbvalget), Regel 27 pkt. 3–5
+  + 134-notat, Regel 28 pkt. 1 (startende), Regel 29 pkt. 1–2 + 134-notat.
+
+Commit: «134: matte — svar serie-128 (motor): sentrering mellom naboer, rullvalg uten stubb, kapittelstart
+følger velgeren, Regel 29 i rektangulære rom, utelatt sone prøves i andre retning; spec». **Ikke pushet.**

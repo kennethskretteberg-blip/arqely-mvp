@@ -18,3 +18,21 @@
 5. **Enkelt-matte-drag flytter ikke `runStarts`** (fantes før 133, gjelder 'v' òg). Skal mousemove
    bruke samme `_ROOM_TRANSLATE_SPEC`-vei som 108/127, så vakten og 127 ser matta der den tegnes?
 6. **`_renderRoomToImageOffscreen`** er død kode med den gamle tegneformelen. Slette?
+
+# 134 — spørsmål til Kenneth
+
+1. **Stubbvalget koster dekning i benken.** Fem rom faller 6,5–11,5 % (26 → 24 m, 14 → 12 m, 18 → 16 m)
+   fordi den største rullen endte 8 cm (én 150T-streng) inn i en bredde. Står det slik — eller skal
+   stubbvalget bare gjelde når nedgangen er under én rullengde / når det finnes en rull imellom? I alle
+   fem er den større rullen ett klikk unna i panelet.
+2. **Rektangel uten plass til stykkene i rullen.** 300×400 «fra vegg» med 100T: tverrstykkene planlegges
+   (7 × 24), men 20 m ender 8 cm inn i stykke 4, så 18 m velges og ingen stykker legges — rommet får 5 × 384
+   + 264 cm i stedet for `S.mats`-veiens 5 × 360, samme 9,0 m². Skal et rektangel bare gå til kapittelbanen
+   når stykkene faktisk havner i den valgte rullen (ellers `S.mats` bit-identisk), eller er det greit at
+   bildet endrer seg med lik dekning?
+3. **Retningslås og E.** Når brukeren har låst retningen og en sone avvises av Regel 27-vakten, prøves
+   likevel den andre retningen (tverrstykkene legges uansett på tvers). Riktig, eller skal låsen vinne og
+   sonen utelates?
+4. **Grid-dekomponeringen** gir sonerektangler 1–4 cm inne i de ekte veggene (H-rommets bro 300–500 → 301–497:
+   168 cm bredder der 192 får plass). Skal `_decomposeRoomToRects` snappes til polygonets kantkoordinater
+   for ortogonale rom (samme kompresjon som `_matFreeFieldRects`), eller er tapet akseptabelt?

@@ -4,6 +4,26 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 134 — Matte: Kenneths svar på serie-128, motor (24.10.2026, `main`, ikke pushet)
+
+Rapport «## 134» i `docs/serie-133/RAPPORT.md`, svar i `docs/serie-128/SPØRSMÅL.md`, skjermbilder `docs/serie-133/skjermbilder/134-*`.
+
+- **A · Sentrering:** `_matZoneAnchorSide` gir `'mid'` når begge sider stoppes av matter — kapittel, tverrstykker og
+  de gamle `S.mats`-veiene sentrerer blokka mellom dem (lik slakk).
+- **B · Rullvalg uten stubb:** `_matChapterStubAt` + `_matChapterRollPlans(Σ, prod, path)`: ender største rull i en
+  bredde under ett kuttraster eller i et tverrstykke under 2 × CC, velges nest største (like: neste lengde, blandet:
+  neste kombinasjon ved samme K, `_matChapterBestAtKFree`); den større står som `equalAlt`/`mixedAlt` i panelet.
+- **C · Startende:** `_matChapterRunOrder` — alle kapitler starter i velgerens ende, senere kapitler i ytterbredden
+  nærmest forrige kapittel.
+- **D · Regel 29 i rektangler:** `_matPlanZones` planlegger én sone og returnerer null bare uten tverrkapittel
+  (`S.mats` bit-identisk); med: `zonePlan.single`, eget panelhode og toast.
+- **E · Andre retning:** `_matChapterBlock(…, opts)` med `opts.dir`/`opts.fail`; `_matPlanZones` prøver den andre
+  retningen ved Regel 27-avvisning. **Snapp innover** i `_matZoneFreeRoom` (boksen trekkes inn til nabomatte +
+  mellomrom) — det som faktisk manglet for hindring #30.
+- Tester: `_matChapterRegressionTest` 22/22, `_matCrossFillRegressionTest` 30/30. Spec Regel 11/24/27/28/29.
+
+---
+
 ## 133 — Vannrett matte: én koordinatkonvensjon (24.10.2026, `main`, ikke pushet)
 
 Rapport, spørsmål og skjermbilder i `docs/serie-133/`. Bakgrunn: 124 «Funn 1», SPØRSMÅL 128-1/130-4.
