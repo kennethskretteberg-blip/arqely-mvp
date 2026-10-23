@@ -36,3 +36,20 @@
 4. **Grid-dekomponeringen** gir sonerektangler 1–4 cm inne i de ekte veggene (H-rommets bro 300–500 → 301–497:
    168 cm bredder der 192 får plass). Skal `_decomposeRoomToRects` snappes til polygonets kantkoordinater
    for ortogonale rom (samme kompresjon som `_matFreeFieldRects`), eller er tapet akseptabelt?
+
+# 135 — spørsmål til Kenneth
+
+1. **Stykke 2 av hopp-streken.** Regelen «først langs veggen bredden slutter mot, så inn til
+   startpunktet» gir i bilde 2 (5 bredder i hoveddelen) en strek langs V1 til x = 303 og så rett ned
+   *gjennom bredde 6* til startpunktet nederst i alkoven. Skal stykke 2 heller legges langs kanten av
+   den nye bredden (x = 278 − mellomrom, utenfor nettet), eller er «gjennom nettet» greit siden den
+   bare er orientering?
+2. **Grid-dekomponeringen** ble rettet for kanter som stakk *utenfor* veggen (halvcentimeter-vegger),
+   fordi A ellers hadde avvist auto-utlegg i T-19/T-20/U-22. Kanter som ligger *inne* i rommet (134-4,
+   1–4 cm tapt) står fortsatt. Skal 134-4 tas nå, med samme `snapToWalls`-mekanisme (snapp også
+   innover-kanter til veggen når de ligger innenfor én celle)?
+3. **Rødmerking av alle bredder** (ikke bare justerte) viser også lagrede baner som ble lovlige under
+   den gamle 1 cm-toleransen og baner der en hindring er lagt til etterpå. Riktig at de står røde til
+   brukeren flytter dem, eller skal baner lagret før 135 få en engangsmigrering (klem inn ≤ 1 cm)?
+4. **«Tøm og fyll» tømmer bare matter** (`mats` + `matPaths`); folie/kabel/plater i rommet står. UPC-auto
+   tømmer alt. Skal valget tømme alle produkter i rommet som UPC, eller bare matter som nå?

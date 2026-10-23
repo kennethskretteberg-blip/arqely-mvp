@@ -393,3 +393,160 @@ hypotesen), `dbgL.mjs` (benkrommene med B), `tests.mjs`, `bench.mjs` + `diff.mjs
 
 Commit: «134: matte — svar serie-128 (motor): sentrering mellom naboer, rullvalg uten stubb, kapittelstart
 følger velgeren, Regel 29 i rektangulære rom, utelatt sone prøves i andre retning; spec». **Ikke pushet.**
+
+## 135
+
+Kjørt 24.10.2026 på `main` fra `273cce5` (134 committet, ikke pushet). **Ikke pushet.** Kenneths svar på
+serie-128 (panel og frihånd), skrevet inn i `docs/serie-128/SPØRSMÅL.md` (128-2/3/4, 129-1/2/3, 130-2,
+131-6). Skjermbilder i `skjermbilder/135-*` (headless Chrome via CDP på port 9335, harness i
+`/tmp/cdp135`, gammel kode `273cce5` servert fra port 4002).
+
+**Resultat i én setning:** frihånd-vakten godtar nå 0,1 cm (var 1 cm i startsøket, 0,5 cm på lengden)
+og sjekker nettkanten mot vegg også på tvers (var ingen sjekk — en nettkant 1,5 cm *utenfor* veggen
+gikk gjennom); katalogen viser «Nett 2,5 cm · kabel 5,0 cm» (150T: 3,0; InSnow: 0); hopp-streken rutes
+langs veggen bredden slutter mot og så inn til startpunktet (rundt et hjørne: neste vegg), ellers rett;
+hopp-punktet snapper langs banen til kuttrasteret fra forrige ende (24/16 cm); «Fyll rom» i et rom med
+matter spør «Tøm og fyll / Fyll rundt dem / Avbryt» (Enter = tøm); sonepanelet viser én rad når like og
+blandet er samme plan. Én ting utenfor listen: den strammere vakten avslørte at grid-dekomponeringen lar
+sone-rektangler stikke 0,5–2,5 cm **utenfor** ekte vegger som ligger på en halv centimeter — rettet i
+`_decomposeRoomToRects` (se «Funn under A»).
+
+### STEG 0 — målt før endring (`steg0-foer.json`, port 4000 = `273cce5`)
+
+1. **A · Vakten.** `_matFreeRunsWithinRoom` → `_matFreeClampLen`: startpunktet fikk ligge **1 cm**
+   utenfor intervallet (`along >= lo − 1`, to steder), lengden fikk være **0,5 cm** for lang
+   (`maxLen + 0.5 < len`). Målt i 300×400 med 100T (margin 2,5): langs 0,05 innenfor **OK**, 0,2
+   utenfor **OK**, 0,9 utenfor avvist («matta ville ligget utenfor rommet»), 1,5 utenfor avvist
+   («starter utenfor»). På tvers: 0,2 / 1,0 / 2,5 cm inne i marginen **OK**, og **nettkant 1,5 cm utenfor
+   selve veggen OK** — `clipStripToRoom` klipper båndet stille til rommets ytterboks og trekker marginen
+   bare fra intervallets ender. Benk vei 4 (134 `bench-after.json` = `273cce5`): **29 ulovlige** av 56
+   (16 «starter utenfor», 13 «ville ligget utenfor» — 133-2: benkens 'h'-bane går nedover ut av rommet).
+2. **B · Katalogen** bor i `index.html` (`_renderProductCatalog`, kolonnen «Veggmargin» via `marginOf` =
+   `min_wall_margin_mm / 10`), ikke i `admin.html` (som ikke har noen margin-kolonne). Viste «5.0 cm» for
+   alle EcoMat, «0.0 cm» for InSnow.
+3. **C · Hoppet** tegnes av `_drawMatJumpLink(A, B)` som én rett stiplet strek — i plan (lagret bane og
+   ghost) og i PDF (`_renderRoomToImage` tegner via hoved-`render()`, samme tegner). Bilde 2 (bl): hopp
+   fra (252, 8) til (303, 195), rett diagonal (`135-C-bilde2-utlegg-foer`).
+4. **E · «Fyll rom».** Det gamle produktpanelet kaller `_matFillRoomSmart(id)` direkte — tømmer ikke;
+   UPC «Fyll rom automatisk ★» (`_upcPlaceMat(id,'auto')`) gjør `pushUndo` + `_clearRoomProductCollections`
+   og kaller med `skipPushUndo`. Målt: rom 300×400 med to frihåndsmatter → «Fyll rom» la én `S.mats`-
+   matte rundt dem uten spørsmål (`135-E-fyllrom-utlegg-foer`).
+5. **D · Snapp:** `_matFreeJumpPoint` snappet til 10 cm-raster på begge akser (E = (27,5, 13,5): mus
+   (80, 206) → (78,5, 210)). **F:** bilde 2 ga «1 rull» + «1 rull (gir ingenting ekstra her)».
+
+### Gjort (alt i `index.html`)
+
+- **A · Vakt.** Ny konstant `MAT_FREE_TOL_CM = 0.1` brukt i `_matFreeClampLen` (begge intervallsøk) og i
+  `_matFreeRunsWithinRoom` (lengden). Ny `_matFreeRunCrossShortCm(mp, r, room)`: båndet nett + margin på
+  begge sider må ligge inne i polygonet langs hele bredden (ytterboks + skannelinjer via
+  `clipStripToRoom` med margin 0); mangler det, trimmes båndet fra én side om gangen (binærsøk) og tallet
+  rapporteres. Vakten avviser med «bredden ligger X cm for nær veggen på tvers (margin Y cm)»; et
+  startpunkt inne i rommet men inne i marginen sier nå «banen starter inne i veggmarginen (Y cm)» (var
+  «utenfor rommet»). Kun rommets vegger — hindringer/soner har sine egne klaringer i klampen.
+  **Rødmerking (124):** `_matPathRunIssue` får «ligger X cm inne i veggmarginen (Y cm) i enden / på
+  tvers», og `_drawMatPathObj` merker nå **alle** bredder i en lagret bane (var kun justerte) — en bane
+  lagret med den gamle toleransen vises rød, spretter ikke; breddepanelet (`_matRunPanelHtml`) viser
+  teksten for frihåndsbredder uten justering også.
+- **B · Katalog.** `marginOf(p, isMat)`: matte-rader «Nett 2,5 cm · kabel 5,0 cm» (`_matWallMarginCm` /
+  `MAT_CABLE_WALL_CM`), 150T «Nett 3,0 cm · kabel 5,0 cm», `min_wall_margin_mm = 0` → «0». Andre typer
+  som før. Ingen DB-endring.
+- **C · Strek langs vegg.** Ny `_matJumpLinkRoute(mp, prevRun, A, B)`: A må ligge inntil en vegg
+  (≤ max(12, margin + cc + 2) cm), stykke 1 går på tvers av banens akse i A sin langs-koordinat til
+  B sin tverr-koordinat (hjørnet P) og må følge veggen hele veien; stykke 2 går langs banens akse inn
+  til B. Ligger P utenfor rommet (hopp rundt et hjørne), trekkes P inn til innsiden av veggen og kabelen
+  følger neste vegg til B sin langs-koordinat (P2) før et kort stykke inn til B — fire punkter. Faller
+  noe av dette utenfor, tegnes streken rett som før. `_drawMatJumpLink(A, B, invalid, route)` tegner
+  polylinjen; lagret bane, ghost (fase hopp og låst punkt) og PDF bruker samme rute.
+- **D · Snapp.** `_matFreeJumpPoint`: langs forrige bredde sin akse snapper punktet til
+  `E.along + k × RASTER` (`mat_cut_interval_mm` = 2 × CC: 24 cm 60T/100T, 16 cm 150T); på tvers inntil
+  forrige bredde ± mellomrom og forrige endes koordinat innen ~14 px, ellers fritt (0,1 cm). 10 cm-
+  rasteret er borte.
+- **E · Fyll rom.** `_matFillRoomSmart`: har rommet matter (`S.mats` + `S.matPaths` med `roomId`) og
+  kallet ikke er `dryRun`/`skipPushUndo`/`fillAround`, vises `_matFillChoicePanel`: «Rommet har N matter
+  fra før» → [Tøm og fyll] (standard, Enter: `pushUndo` + `_clearRoomProductCollections(roomId,
+  ['mats','matPaths'])` + `_matFillRoomSmart(…, {skipPushUndo:true})` — ett angre-steg, sonepanelets
+  Avbryt gir mattene tilbake via sin egen `undo()`) [Fyll rundt dem] (`fillAround: true` = 130-oppførsel)
+  [Avbryt] (Esc). UPC-auto og benken (dryRun) uendret.
+- **F · Rullvalg.** `_showMatZoneProposalPanel`: er «like» og «blandet» samme plan, vises bare like-raden
+  (forvalget faller til 'equal' om det sto på 'unequal'); noten «(gir ingenting ekstra her)» er borte
+  der. `_showMatMultiProposalPanel`: «ulike» skjules bare når produktlista er nøyaktig den samme; lik
+  dekning med en annen plan beholder begge rader og noten.
+
+### Funn under A — grid-dekomponeringen stikker utenfor halvcentimeter-vegger (rettet)
+
+Benken etter A alene: dekning uendret på alle 224 rader, men **T-19, T-20 og U-22 (vei 1 og 2) ble
+ulovlige** — kapittelbanen fra 134 ville blitt avvist av `_matChapterCommit` sin vakt i appen («Ingen
+matte kunne legges ut»). Årsak (målt i `dbgB.mjs`): `_decomposeRoomToRects` legger cellekanter på
+`minX + k × CELL` (7 cm) og klemmer bare til rommets *ytterboks* — en indre vegg på 164,5 ga rektangel
+161–301 for stammen 164,5–299,5 (T-19), 462 for veggen 459,5 (T-20: bredden lå **1 cm** fra veggen, 2 cm
+inne i marginen, og hadde gått gjennom i 134 fordi vakten ikke sjekket tvers), 343 for veggen 345 (U-22).
+Kapitlene ankrer på rektangelet + margin, og den gamle 1 cm-toleransen skjulte det. Rettet i
+`_decomposeRoomToRects` (`snapToWalls`): en rektangelkant som ligger innenfor én celle *utenfor* en
+ortogonal vegg (rommet på innsiden, sjekket med prøvepunkt 0,5 cm på hver side) trekkes inn til veggen.
+Kanter som ligger *inne* i rommet røres ikke — 134-4 («taper centimeter») står som eget spørsmål.
+Etter fiksen: T-19 161→164,5 / 301→299,5, T-20 252→252,5 / 462→459,5, U-22 343→345 / 161→160,5 / 322→322,5;
+alle tre lovlige, **dekning identisk** (224/224 rader uendret mot 134). `_foilRegressionTest` 9/9
+(folie-sonene bruker samme dekomponering, strimlene klippes mot rommet uansett).
+
+### Mattebenk (`_matBench(42, 64)`, før = 134 `bench-after.json`, etter = `135-bench-after.json`)
+
+| | Før | Etter | |
+|---|---|---|---|
+| Rader / dekning uendret | 224 | **224 / 224** | ingen rad opp eller ned |
+| Ulovlige, alle veier | 29 | **30** | +1: grense-minlengde-51 vei 4 |
+| Ulovlige, vei 4 | 29 | **30** | 16 «50,0 cm for nær veggen på tvers», 13 «ville ligget utenfor», 1 «starter utenfor» |
+
+Den nye raden (rom 232×113, 'h', 2 bredder): benkens syntetiske bane legger bredde 2 på y 135 — 22 cm
+*under* rommet — og gikk før gjennom fordi klampen klippet båndet stille til ytterboksen (ingen tverr-
+sjekk); nå «bredden ligger 50,0 cm for nær veggen på tvers». De 16 'h'-radene som før sa «starter
+utenfor» (bredde 3) stoppes nå alt på bredde 2 med tverr-tallet — samme rom, riktigere grunn (133-2
+står). Ingen lovlig rad ble ulovlig etter dekomponeringsfiksen.
+
+### Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | A: 0,05 innenfor godtas, 0,2 utenfor avvises, for nær på tvers rødmerkes; benk vei 4 før/etter | Langs: 0,05 **OK**, 0,2 **avvist** («starter inne i veggmarginen (2,5 cm)»). Tvers: 0,05 OK, 0,2 avvist «0,2 cm for nær veggen på tvers», nettkant utenfor veggen «4,0 cm». Rødmerking: `_matPathRunIssue` gir «Bredde 1 ligger 1 cm inne i veggmarginen (2,5 cm) på tvers». Vei 4: 29 → 30 (én ekte ulovlig som slapp gjennom før). Låst i `_matFreeRegressionTest`. |
+| 2 | B: nett/kabel for 60T, 100T, 150T, 0 for InSnow | 60T/100T «Nett 2,5 cm · kabel 5,0 cm», 150T «Nett 3,0 cm · kabel 5,0 cm», InSnow «0» (`135-B-katalog-*`; InSnow-raden er syntetisk i harnessen — ingen Supabase uten innlogging). |
+| 3 | C: bilde 2 hopp 6 → 7 langs veggen i plan og PDF; midt i rommet rett | Bilde 2 (bl, 5 bredder i hoveddelen): (252, 8) → (303, 8) → (303, 195) — langs V1 og ned til startpunktet, i plan (`135-C-bilde2-hopp-zoom-etter`) og PDF (`135-C-bilde2-pdf-rombilde-etter`). Midt i rommet (bredde stoppet 157,5 cm fra veggen): rett (`135-C-midt-etter`). Rundt hjørnet (L-rom, hopp fra hoveddelens bunn til alkoven): 4 punkter, låst i testen. Ghost i fase hopp følger samme rute (`135-C-hopp-ghost-etter`). |
+| 4 | D: hopp-snapp treffer 24/16 cm-raster langs banen | E = (27,5, 13,5), 100T: mus (80, 206) → (78,5, **205,5**) = 13,5 + 8 × 24; (150, 100) → (150, 109,5); (27, 300) → (27,5, 301,5). Testen: 150T-rom (397,5 − 9 × 24 = 181,5). Låst. |
+| 5 | E: rom med to matter → valget; Tøm og fyll som før 130; Fyll rundt = 130 | Valget vises (`135-E-fyllrom-etter`). Tøm og fyll: 2 baner → 0, 1 ny matte, undo-stakk +1, angre gir de to tilbake (`135-E-toem-og-fyll-etter`). Fyll rundt: 2 baner + 1 matte (`135-E-fyll-rundt-etter`, = STEG 0.4). |
+| 6 | F: én rad når like, to når ulike | Bilde 2: én rad «1 rull» (`135-F-bilde2-panel-etter`, var to). T-rom/variant A fra 134 (like ≠ blandet): uendret to rader + alternativ-rader (`_matChapterRegressionTest` 22/22). |
+| 7 | Batterier, `_matFreeRegressionTest` utvidet, `_pdfExportSmokeTest` | `_matFreeRegressionTest` 26 → **36** (A: 5, C: 3, D: 1 + omskrevet snapp-fasit) · `_matChapterRegressionTest` 22/22 · `_matCrossFillRegressionTest` 30/30 · `_matZoneRegressionTest` 17/17 · `_matRegressionTest` 2/2 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_matRotationRegressionTest` 35/35 · `_foilRegressionTest` 9/9 · `_pdfExportSmokeTest` 20/20. Ingen konsollunntak. |
+
+### Skjermbilder
+`135-B-katalog-{foer,etter,150T-etter,insnow-etter}`, `135-C-bilde2-utlegg-{foer,etter}`,
+`135-C-bilde2-hopp-zoom-etter`, `135-C-bilde2-pdf-rombilde-etter`, `135-C-midt-etter`,
+`135-C-hopp-ghost-etter`, `135-E-fyllrom-{foer,etter}`, `135-E-fyllrom-utlegg-foer`,
+`135-E-toem-og-fyll-etter`, `135-E-fyll-rundt-etter`, `135-F-bilde2-panel-{foer,etter}`,
+`135-bench-after.json`.
+
+### Funn utenfor scope (ikke rettet)
+- **Stykke 2 av hopp-streken går over bredden selv** når startpunktet ligger i enden av bredden som
+  vender bort fra veggen (bilde 2: fra (303, 8) ned x = 303 til (303, 195) — rett gjennom bredde 6). Det
+  er bokstavelig «langs veggen, så inn til startpunktet»; en montør ville nok limt kabelen langs V1 og
+  bredde 6 sin kant. SPØRSMÅL 135-1.
+- **Rødmerking for alle bredder** betyr at en lagret bane over en hindring som er lagt til *etterpå*
+  også blir rød (før: bare justerte bredder). Tilsiktet (124-prinsippet), men nytt.
+- **Benkens 'h'-bane (133-2)** står: 16 rom får fortsatt bredde 2 lagt under rommet.
+- `admin.html` har ingen produktkatalog; prompten antok det.
+
+### Skal IKKE — holdt, med ett unntak
+Motoren fra 134 (`_matZoneAnchorSide`, `_matChapterRollPlans`, `_matChapterRunOrder`, `_matPlanZones`,
+`_matChapterBlock`) og 133-konvensjonen er urørt; `min_wall_margin_mm` ikke migrert; ikke pushet.
+**Unntaket** er `_decomposeRoomToRects` (eldre enn 134, delt med folie-sonene): kanter som stakk
+*utenfor* veggen klemmes inn. Uten den ville A gjort auto-utlegg umulig i rom med vegger på halve
+centimeter. Lett å ta ut (én blokk, `snapToWalls`) om det skal vente på 134-4.
+
+### Endringslogg (kode, alt i `index.html`)
+- Nye: `MAT_FREE_TOL_CM`, `_matFreeRunCrossShortCm`, `_matJumpLinkRoute`, `_matFillChoicePanel`,
+  `snapToWalls` (inne i `_decomposeRoomToRects`).
+- Endret: `_matFreeClampLen` (0,1 cm), `_matFreeRunsWithinRoom` (0,1 cm, tverr-sjekk, ny startmelding),
+  `_matPathRunIssue` (margintekst), `_drawMatPathObj` (alle bredder merkes, hopp-rute),
+  `_matRunPanelHtml` (frihånd uten justering), `_drawMatJumpLink` (polylinje), ghost-tegningen,
+  `_matFreeJumpPoint` (kuttraster), `_matFillRoomSmart` (valget), `_showMatZoneProposalPanel` og
+  `_showMatMultiProposalPanel` (én rad), `_renderProductCatalog` (nett/kabel), `_matFreeRegressionTest`.
+
+Commit: «135: matte — svar serie-128 (panel/frihånd): vakt 0,1 cm + tverr, katalog viser nett/kabel-
+margin, hopp-strek langs vegg, snapp på kuttraster, Fyll rom spør om tømming, én rad ved like planer».
+**Ikke pushet.**

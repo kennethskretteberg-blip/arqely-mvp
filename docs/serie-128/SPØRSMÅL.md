@@ -10,24 +10,30 @@
 2. **Frihånd-vakten** godtar en bane inntil 1 cm innenfor marginen langs banen, og sjekker ikke
    marginen på tvers (fantes før 128 — plasseringen holder marginen eksakt, så det slår bare ut hvis
    noen flytter banen manuelt). Skal vakten strammes til 0,1 cm og få tverr-sjekk?
+   **Svar (Kenneth 24.10):** Stram til 0,1 cm og legg til tverr-sjekk. Bygget i 135 (A: `MAT_FREE_TOL_CM`, `_matFreeRunCrossShortCm`; lagrede baner som nå faller utenfor rødmerkes, spretter ikke).
 3. **`min_wall_margin_mm`** betyr nå bare «0 = ute». Skal feltet omtolkes til kabelkravet (50/0 — det
    er det radene allerede inneholder) og evt. omdøpes `mat_cable_wall_mm`, med migrasjon og opprydding
    i reservekatalog + innlastingsstandard? Da kan en annen leverandør få et annet kabelkrav uten kode.
+   **Svar (Kenneth 24.10):** Senere — ligger i Notion-køen. Ingen endring i 135.
 4. **Produktkatalogen (admin)** viser fortsatt kolonnen «5,0 cm» (DB-feltet). Skal den vise den
    effektive nettmarginen (2,5/3,0) for matte, eller kabelkravet?
+   **Svar (Kenneth 24.10):** Vis begge — effektiv nettmargin (2,5/3,0) og kabelkravet (5,0). Bygget i 135 (B: matte-rader «Nett 2,5 cm · kabel 5,0 cm», InSnow «0»; ingen DB-endring).
 
 # 129 — spørsmål til Kenneth
 
 1. **Forbindelsens strek.** Nå tegnes den rett fra forrige ende til nytt startpunkt (slik Regel 28 pkt. 2
    sier). I bildet ditt limes kabelen langs veggen. Skal streken rutes langs nærmeste vegg (to rette
    stykker) for å ligne monteringen, eller holde seg rett? Den teller uansett ikke.
+   **Svar (Kenneth 24.10):** Langs nærmeste vegg (to rette stykker), lav prioritet. Bygget i 135 (C: `_matJumpLinkRoute` — først langs veggen bredden slutter mot, så inn til startpunktet; rundt et hjørne følger den neste vegg; hopp midt i rommet tegnes rett). Fortsatt stiplet, fortsatt uten lengde.
 2. **Snapp-avstanden.** Startpunktet snapper inntil forrige bredde (± mellomrom) og til 10 cm-raster
    innen ca. 14 skjermpiksler. Er 10 cm riktig raster, eller skal den følge kuttrasteret (24 cm for
    60T/100T, 16 cm for 150T) langs banen?
+   **Svar (Kenneth 24.10):** Kuttrasteret langs banen. Bygget i 135 (D: `_matFreeJumpPoint` snapper langs forrige bredde sin akse til `mat_cut_interval_mm` regnet fra forrige ende; på tvers fortsatt inntil forrige bredde ± mellomrom, ellers fritt. 10 cm-rasteret er borte).
 3. **Hopp uten H.** I dag må du trykke H / «Hopp» / Shift. Vil du i tillegg at et vanlig klikk langt
    fra fri ende (der ingen U-sving/90° gir mening) skal tolkes som hopp automatisk? Jeg lot det være,
    fordi et slikt klikk i dag avslutter banen («tilgivende avslutning»), og jeg ville ikke endre den
    uten å spørre.
+   **Svar (Kenneth 24.10):** Nei — H / Shift / «Hopp» som nå. Ingen endring.
 
 # 130 — spørsmål til Kenneth
 
@@ -39,6 +45,7 @@
 2. **Matter som alt ligger i rommet** regnes nå som naboer (Regel 27 pkt. 2: «andre matter»). «Fyll
    rom»-knappen i det gamle produktpanelet tømmer ikke rommet først — den legger nå rundt det som
    ligger der i stedet for oppå. Er det ønsket, eller skal «Fyll rom» alltid tømme først?
+   **Svar (Kenneth 24.10):** Spør: «Rommet har N matter fra før» → [Tøm og fyll] [Fyll rundt dem] [Avbryt]. Bygget i 135 (E: `_matFillChoicePanel` i `_matFillRoomSmart`; Enter = Tøm og fyll (som før 130), Fyll rundt = 130-oppførselen; UPC-auto tømmer selv som før og spør ikke).
 3. **Begge sider stoppet av en matte** (en sone klemt mellom to naboer): blokka ankres til den lave
    siden. Skal den heller sentreres mellom dem?
    **Svar (Kenneth 24.10):** Sentrer mellom dem. Bygget i 134 (A: `_matZoneAnchorSide` → `'mid'`, lik slakk på begge sider; gjelder også tverrstykker i et felt mellom to matter).
@@ -84,6 +91,7 @@
    **Svar (Kenneth 24.10):** OK. Ingen endring.
 6. **Rullvalget i panelet** viser to like rader («1 rull … (gir ingenting ekstra her)») når like og
    blandet er samme plan. Skal den andre raden skjules da?
+   **Svar (Kenneth 24.10):** Skjul den andre når planene er like. Bygget i 135 (F: sonepanelet viser én rad uten «(gir ingenting ekstra her)»; flermattepanelet skjuler «ulike» bare når det er nøyaktig samme produktliste).
 
 # 132 — spørsmål til Kenneth
 
