@@ -14,3 +14,16 @@
    i reservekatalog + innlastingsstandard? Da kan en annen leverandør få et annet kabelkrav uten kode.
 4. **Produktkatalogen (admin)** viser fortsatt kolonnen «5,0 cm» (DB-feltet). Skal den vise den
    effektive nettmarginen (2,5/3,0) for matte, eller kabelkravet?
+
+# 129 — spørsmål til Kenneth
+
+1. **Forbindelsens strek.** Nå tegnes den rett fra forrige ende til nytt startpunkt (slik Regel 28 pkt. 2
+   sier). I bildet ditt limes kabelen langs veggen. Skal streken rutes langs nærmeste vegg (to rette
+   stykker) for å ligne monteringen, eller holde seg rett? Den teller uansett ikke.
+2. **Snapp-avstanden.** Startpunktet snapper inntil forrige bredde (± mellomrom) og til 10 cm-raster
+   innen ca. 14 skjermpiksler. Er 10 cm riktig raster, eller skal den følge kuttrasteret (24 cm for
+   60T/100T, 16 cm for 150T) langs banen?
+3. **Hopp uten H.** I dag må du trykke H / «Hopp» / Shift. Vil du i tillegg at et vanlig klikk langt
+   fra fri ende (der ingen U-sving/90° gir mening) skal tolkes som hopp automatisk? Jeg lot det være,
+   fordi et slikt klikk i dag avslutter banen («tilgivende avslutning»), og jeg ville ikke endre den
+   uten å spørre.

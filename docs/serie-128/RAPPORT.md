@@ -149,3 +149,141 @@ globale funksjoner. Benk-sammenligning på absolutt m² (egen kjøring, samme ka
   `_matBenchMatsResult`, `_matBenchRunVei4`, `_matArrangementRegressionTest` — leser funksjonen.
 - `_matFreeRegressionTest` — forventning (30,295) → (28,297), kommentert.
 - Spec `spec-matte-utlegg.md` Regel 12 og Regel 29-avhengigheten (Cowork-mappa, utenfor repoet).
+
+---
+
+# 129 — Frihånds-matte: «hopp» (fri start på neste bredde), stiplet forbindelse uten lengde
+
+## 129
+
+Kjørt 23.10.2026 på `main` fra `a973fc5` (128 committet, ikke pushet). **Ikke pushet.** Spec: Regel 17,
+Regel 22, **Regel 28** (`spec-matte-utlegg.md`, Cowork-mappa) — frihånd-delen av pkt. 3 er nå merket
+bekreftet, auto-delen står som utkast. Skjermbilder i `skjermbilder/129-*.png` (headless Chrome).
+
+Kenneth (23.10.2026): «Fra matte 6 til matte 7 så er det forskyvning av stopp og start på de to mattene.
+[…] Jeg ønsker at appen kan gjøre dette uten å beregne noe kortere matte. […] ved hjelp av frihånd-utlegg.»
+
+**Resultat i én setning:** i frihånd kan neste bredde nå starte hvor som helst i rommet (tast **H**,
+knappen **⤼ Hopp**, eller **Shift + klikk**); forbindelsen tegnes som tynn stiplet strek i plan og PDF,
+og teller ikke noe sted — lengden er fortsatt Σ breddelengder, rullvalget er det samme som uten hopp.
+
+## STEG 0 — målt før endring (fila fra `a973fc5`, port 4000)
+
+Rom i testen: L-rom **300 × 400 + alkove 300 × 200** (x 0–300 / y 0–400 pluss x 300–600 / y 0–200),
+EcoMat 100T (cc 12 cm, kuttraster 24 cm, nettmargin 2,5 cm etter 128), hjørne nede-venstre, stående.
+Avvik fra prompten: alkoven er 300 bred, ikke 200, fordi «90° til 10 + U-svinger 11–12» ellers ikke får
+plass (3 loddrette bredder i alkoven bruker 150 cm; en vannrett bredde trenger ≥ 100 cm til). Og
+hoveddelen får **5** loddrette bredder, ikke 6: 6 × 50 = 300 cm > 295 (300 − 2 × 2,5). Bildet i prompten
+er håndtegnet og ikke i målestokk — mønsteret (U-svinger, hopp, U-svinger, 90°, U-svinger) er det
+som er testet, ikke antallet.
+
+### 0.1 Bildet tegnet i frihånd i dag
+
+| Steg | Hva skjer | Mulig? |
+|---|---|---|
+| 1–5 (U-svinger loddrett) | 5 × 384 cm, kant i kant, fri ende øverst på bredde 5 (227,5, 13,5) | ja |
+| 5 → «7» i alkoven (musa ved 327,5, 190) | `_matFreeCandidate` regner alltid fra fri ende `E`: anti-parallell → **U-sving ved x = 277,5** (inntil bredde 5), ikke ved 327,5. Ghosten lander i hoveddelen/øvre del, 168 cm ned | nei — ingen kobling der neste bane starter fritt |
+| klikk mot alkoven som gir lengde 0 (f.eks. 327,5, 5 → vannrett 96 cm < minste 100) | treffer «tilgivende avslutning» (`moves.length ≥ 1 && len ≤ 0` → `_matFreeExit(true)`): banen **committes og frihånd avsluttes** | nei — brukeren mister tegnemodus uten å ville det |
+| 9 → 10 (90°) | egen bane startet fra toppveggen (hjørne 'tr'): `corner` gir flush bane ved siden av, 168 cm | ja |
+| 10–12 (U-svinger vannrett) | 168 + 144 cm | ja |
+
+Konklusjon 0.1: alt unntatt hoppet lar seg tegne — men som **to** matter (5 + 6 bredder), ikke én.
+Skjermbildene `129-04`/`129-05` viser det samme mønsteret tegnet som ÉN matte etter 129.
+
+### 0.2 Hvordan en bane avsluttes og tilstanden mellom to klikk
+
+`_matFree` mellom to klikk (målt): `{ roomId, productId, start, moves[], ghost, gapCm, offX, offY,
+phase:'draw', startAxis, startWall, startFromCorner, lastReject }`. `phase` har bare to verdier i dag:
+`'start'` (glir innsettingspunktet) og `'draw'`. En bane «avsluttes» ikke eksplisitt — hvert klikk
+legger ett move i `moves`, og `_matFreeEnd` (siste `run.b`) er alltid neste startpunkt. `ghost` er
+kandidaten under musa (`axis, dir, len, conn, side, rawLen`).
+
+Et «sett nytt startpunkt»-steg passer derfor som **en tredje fase `'jump'`** (H / knapp): musa viser
+punktet, klikk låser det i `_matFree.jumpFrom` og går tilbake til `'draw'`. `_matFreeCandidate` leser
+`jumpFrom` som `E` i stedet for fri ende. Shift + klikk hopper over fasen og låser punktet direkte.
+
+### 0.3 `_matFreeCatalog` over banene
+
+`_matFreeCatalog` → `_matFreeTotalCm(mp, raw)` → `Σ _matFreeRunLen(r)` over `_matFreeDeriveRuns`. Ingen
+del av rullvalget (`_matFreeSplitPlan`, segments `fromCm/toCm`) leser hvor en bane ligger — kun lengden.
+Målt: 5 bredder uten hopp → `totalCm 1920`, `Σ runLen 1920`. Etter 129, 12 bredder med ett hopp →
+`totalCm 2952` = Σ bredder, og en syntetisk rett bane med samme 12 lengder gir **samme** rull (0,5 × 28 m,
+152 cm udekket). Katalogen tåler altså en bane som ikke henger geometrisk sammen — uten endring.
+
+To steder leser geometri mellom baner: `_drawMatPathCable` (kabelen starter hver bredde i enden
+nærmest forrige utgang — `moveTo`, aldri strek mellom bredder) og skjøtmarkøren i `_drawMatPathObj`
+(kun skjøt *inni* en bane). Begge virker uendret; skjøt som faller nøyaktig i et hopp er lagt til (se under).
+
+## Gjort (alt i `index.html`)
+
+1. **Ny kobling `jump`** i `_matFreeDeriveRuns`: `{ axis, dir, len, conn:'jump', side, from:{dx,dy} }`.
+   `from` er forskyvningen fra forrige **nominelle** ende — **relativ**, ikke verdenskoordinat som prompten
+   skisserte (`from:{x,y}`). Grunn: hele moves-modellen er relativ, og dermed virker flytting av matta
+   (start/offX/offY, 127 «flytt alle»), kloning i `pushUndo`, lagring og oppdeling i ruller
+   (`_matFreeSliceMoves`) uten ett eneste nytt spesialtilfelle. Banen har full lengde fra det nye punktet
+   (ikke 124 sin `startCm`, som korter). Ingen U-svingbue.
+2. **Tegnemåte:** `_matFreeJumpBegin` (H / «⤼ Hopp» i ctxbar) → fase `'jump'`; `_matFreeJumpPoint` snapper
+   til 10 cm-raster, til senterlinja for en bredde **inntil forrige bane ± mellomrom** (NET + gap til hver
+   side) og til forrige endes koordinat — nærmeste innen ~14 px vinner, ellers rasteret. Utenfor rommet
+   eller på en hindring → `ok:false` (rød ghost, toast, fasen beholdes). `_matFreeJumpSet` låser punktet
+   (`jumpFrom`). Shift + klikk kaller `_matFreeJumpSet` direkte. Med `jumpFrom` satt regner
+   `_matFreeCandidate` fra punktet og gir `conn:'jump'`; klikk legger movet og sletter `jumpFrom`.
+   Et klikk som ikke gir bane mens `jumpFrom` er satt avslutter **ikke** (ny vakt før «tilgivende
+   avslutning») — toast i stedet.
+3. **Forbindelsen:** `_drawMatJumpLink` — tynn stiplet strek fra forrige ende til ny start, i
+   `_drawMatPathObj` for både aktiv og committet bane. PDF-en går gjennom samme `render`, så streken er
+   med der (`129-09`). Ingen lengde noe sted: katalog, «Dekker», materialliste, toast, sidepanel.
+4. **Rullvalg:** uendret (Σ breddelengder). Skjøt som faller nøyaktig på slutten av banen *før* et hopp
+   vises nå ved slutten av forrige bane (ny gren i skjøt-løkka); skjøter inni baner som før.
+5. **Angre/Esc:** `_matFreeUndoMove` fjerner et satt, ubrukt hopp-punkt først; deretter går hopp +
+   bredde i ett (ett move). Esc i fase `'jump'` eller med `jumpFrom` satt → `_matFreeJumpCancel`
+   (tilbake til tegning, ikke ut av frihånd). H i fase `'jump'` slår fasen av igjen.
+6. **Lagring, PDF, 124, 127:** målt — JSON-rundtur gir identiske baner; `_matPathSetRunAdj` på bredde 7
+   (etter hoppet: shift 5, start 24) flytter bare den, naboen står; justering av selve hopp-banen
+   (start 24: `a` 190 → 166, `b` står); Alt + dra (127) flytter alle 12 bredder med samme delta
+   (20,6 / −10,3), `undo()` setter start tilbake.
+7. **Hurtigtaster:** to nye rader i `_SHORTCUTS` (H, Shift + klikk). Hintlinje og ctxbar sier hva som
+   skjer i hver fase. H fanges i frihånd **før** den globale «H = håndverktøy».
+8. **Regresjonstest:** ny seksjon «129 / Regel 28» i `_matFreeRegressionTest` (13 nye sjekker, 26 totalt):
+   geometri, Σ lengde 936, samme rull som uten hopp, kandidat med `from`, snapping, avvisning (utenfor
+   rom / hindring), angre (punkt, så hopp + bredde), H/Esc, oppdeling beholder `from`, commit.
+
+## Skal IKKE — holdt
+Auto-utlegg urørt. Forbindelsen tegnes kun, måles/telles aldri. Ikke pushet.
+
+## Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | Kenneths bilde som ÉN matte: 1–5 U, Shift-klikk inntil bredde 5, 6–9, 90°, U 10–12 | 12 bredder i ett objekt (`129-04`, `129-05`). Σ = 2952 cm = 5 × 384 + 4 × 168 + 3 × 120. Rull 0,5 × 28 m, 1,5 m udekket. Syntetisk rett bane med samme lengder: samme rull. |
+| 2 | Stiplet strek i plan og PDF, ingen lengde | `129-05` (plan), `129-09` (PDF-utsnitt). Sidepanel: «5 × 3,8 + 4 × 1,7 + 3 × 1,2 = 29,5 m», materialliste 1 × 28 m. |
+| 3 | Hopp utenfor rommet avvises | (650, 100) og det manglende hjørnet (450, 300) → rød ghost «⚠ utenfor rommet», toast, fasen beholdes (`129-02`). |
+| 4 | Angre, lagre/åpne, flytt alle, juster etter hopp | Alle målt, se «Gjort» pkt. 5–6 og `129-06`, `129-07`. |
+| 5 | Testbatterier | `_matFreeRegressionTest` 26/26 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_pdfExportSmokeTest` 20/20. Ingen konsollfeil. |
+
+## Funn utenfor scope (ikke rettet)
+- Streken går rett fra ende til start — i Kenneths bilde limes kabelen **langs veggen**. Rett strek er
+  det spec-en sier («tynn stiplet strek mellom slutt og start»); om den skal rutes langs vegg er et
+  spørsmål (SPØRSMÅL 129-1).
+- Et committet enkelt-rull-objekt beholder `productId` for det *tegnede* produktet (0,5 × 18 m) selv om
+  katalogen velger 28 m — eksisterende Modell A-oppførsel (rullen løses ved render), ikke endret.
+- Hopp-punkt nøyaktig på kanten av en innvendig vegg (f.eks. y = 200 der alkoven begynner) gir
+  «får ikke plass» for neste bredde fordi båndet på 50 cm krysser veggen — punktet selv er lovlig
+  (inne i rommet), men bredden er det ikke. Rasteret på 10 cm gjør det lett å havne der.
+
+## Verifiseringsmetode
+`new Function` på inline-scriptet; headless Chrome 156 (CDP, port 9333) mot `serve-varmeplan.js` på
+4000, uten innlogging (`#app` vist, skylagring stubbet); tegning via ekte `MouseEvent`/`KeyboardEvent`
+mot lerretet (ikke direkte funksjonskall) — unntatt 124-justeringen, som ble kalt direkte
+(`_matPathSetRunAdj`). PDF fanget ved å stubbe `jsPDF.save`, rendret med `pdftoppm` 300 dpi.
+
+## Endringslogg (kode, alt i `index.html`)
+- `_matFreeDeriveRuns` — gren `conn === 'jump'`.
+- `_matFreeCandidate` — `E = jumpFrom` når satt; move med `conn:'jump', from`.
+- Nye: `_matFreeJumpBegin`, `_matFreeJumpCancel`, `_matFreeJumpPoint`, `_matFreeJumpSet`, `_drawMatJumpLink`.
+- `_matFreeUndoMove` — hopp-punkt angres først.
+- `_matFreeSliceMoves` — kopierer `from`.
+- `_drawMatPathObj` — stiplet forbindelse, hopp-ghost/låst punkt, skjøt ved hopp.
+- mousedown/mousemove (lerret), keydown (H, Esc), `updateCtxBar` (Hopp-knapp + status), `updMode`
+  (hint), `_SHORTCUTS` (2 rader), `_matFreeRegressionTest` (ny seksjon).
+- Spec `spec-matte-utlegg.md` Regel 28 (Cowork-mappa, utenfor repoet).
