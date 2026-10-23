@@ -2896,6 +2896,7 @@ const _SHORTCUTS = [
   { group: 'Matte: bredde valgt',   keys: ['dra'],                 what: 'Flytt bredden sidelengs i steg på 5 cm · Shift = glidende' },           // 124
   { group: 'Matte: bredde valgt',   keys: ['dra S'],               what: 'Forskyv starten langs bredden (bredden blir kortere, slutten står)' },  // 124
   { group: 'Matte: bredde valgt',   keys: ['Piler'],               what: 'På tvers = sidelengs 5 cm, langs = start 5 cm · Shift = 1 cm' },         // 124
+  { group: 'Matte',                 keys: ['Alt', 'dra'],          what: 'Flytt alle matter i rommet sammen (eller slå på «Flytt alle» i panelet)' }, // 127
   { group: 'Frihånds-matte',        keys: ['Enter'],               what: 'Avslutt banen' },                                     // :41250
   { group: 'Frihånds-matte',        keys: ['Backspace'],           what: 'Angre siste segment' },                               // :41255
   { group: 'Presentasjonsmodus',    keys: ['dra'],                 what: 'Panorer' },                                           // :38293
@@ -16184,6 +16185,136 @@ function _matZoneUsableRoom(room, rect, marginCm) {
   return { points: [{ x: ix0, y: iy0 }, { x: ix1, y: iy0 }, { x: ix1, y: iy1 }, { x: ix0, y: iy1 }] };
 }
 
+// 127: klipp ÉN matte-bredde mot rommet (polygon + hindringer + forbudte soner, evt. sonens egne
+// along-grenser) på en gitt tverrposisjon — løkkekroppen fra autoFillMatSerpentine (STEG 1 /
+// Regel A / Regel H), trukket ut UENDRET så «Mellomrom i denne matta» (_matRelayWithGap) klipper
+// nøyaktig som utlegget selv. Returnerer { len, start, clipped } — len 0 = bredden får ikke plass
+// (ingen fritt segment, eller for kort etter kuttraster-snapping).
+function _matClipRunToRoom(p) {
+  const { roomId, dir, perpPos, matWidthCm, marginCm, cutCm, minLenCm, nominalLen, runLengthCm, alongStart, upR, zoneAlongMin, zoneAlongMax } = p;
+  const nominalStart = upR ? (alongStart + runLengthCm - nominalLen) : alongStart;
+  const anchorPoint = upR ? (nominalStart + nominalLen) : nominalStart;   // sømenden (upR) ELLER alongStart
+  // cutCm=0: se samme note som i kapasitetsløkka i autoFillMatSerpentine — snapping skjer ÉN
+  // gang, i Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
+  const segs = _matClipSegsToZone(_matClippedSegments(roomId, dir, perpPos, matWidthCm, marginCm, 0), zoneAlongMin, zoneAlongMax);
+  // Segmentet som faktisk INNEHOLDER forankringspunktet foretrekkes (bevarer sømflukt der
+  // rommet tillater det).
+  let seg = segs.find(s => s.start_cm <= anchorPoint + 0.5 && s.start_cm + s.length_cm >= anchorPoint - 0.5);
+  let len = 0, start = nominalStart;
+  if (seg) {
+    if (upR) {
+      // Forankret i sømenden: reachable strekker seg BAKOVER (mot alongStart) fra ankeret.
+      const reachable = anchorPoint - seg.start_cm;
+      len = Math.max(0, Math.min(nominalLen, reachable));
+      len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+      start = anchorPoint - len;   // vegg-regelen vinner: flytt startpunktet innover i stedet for å stikke ut
+    } else {
+      const reachable = (seg.start_cm + seg.length_cm) - anchorPoint;
+      len = Math.max(0, Math.min(nominalLen, reachable));
+      len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+      start = anchorPoint;
+    }
+  } else if (segs.length) {
+    // STEG 1 (Regel H, Kenneth 19.08.2026): ingen segment inneholder ankeret — ankeret er
+    // utledet fra rommets OMSLUTTENDE boundingboks og kan derfor ligge utenfor et innhukket
+    // hjørne selv om et stort, brukbart segment finnes et annet sted på denne breddeposisjonen
+    // (Kenneths røde firkant). Ikke gi opp: velg det LENGSTE segmentet som faktisk finnes her,
+    // og forankre fra samme SIDE (nær/fjern, etter paritet — samme ende drawMats/_matRunStartCm
+    // bruker) av DET segmentet. Sømflukt tapes her (den var uansett umulig — ankeret selv ligger
+    // utenfor rommet); å henge sammen med resten via riktig ende og holde seg innenfor veggen
+    // er ABSOLUTT.
+    const alt = segs.reduce((a, b) => (b.length_cm > a.length_cm ? b : a));
+    len = Math.max(0, Math.min(nominalLen, alt.length_cm));
+    len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
+    start = upR ? (alt.start_cm + alt.length_cm - len) : alt.start_cm;
+  }
+  if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → legg den ikke ut
+  const clipped = (len < nominalLen - 0.05 || Math.abs(start - nominalStart) > 0.05);
+  return { len, start, clipped };
+}
+
+// 127 (Kenneth 23.10.2026, «markere en matte og velge avstand mellom breddene på den valgte
+// matten»): legg breddene i ÉN lagt matte på nytt med nytt mellomrom. Samme produkt, hjørne,
+// retning (mat.startCorner / rotation_deg) og sone (mat.zoneId → samme along-grenser som Regel 20
+// ga ved utlegget). Ankeret er FØRSTE bredde i kabelrekkefølgen (_matRunCableOrder — den
+// velgeren fra 124 pekte ut): den står stille, de andre flytter seg. Klipp mot rom og hindringer
+// regnes på nytt per bredde (Regel A: runStarts/runLengths fra SAMME klipp). runAdjust (124)
+// nullstilles — kalleren sier fra med en toast. Bredder som ikke får plass legges ikke ut (len 0,
+// som motoren selv gjør) og telles i mat._gapDroppedRuns for den gule merknaden (Regel 8/9:
+// mellomrom spiser aldri antall uten at brukeren får vite det). Antall bredder, rull og produkt
+// røres ALDRI (Regel 17), og ingen annen matte i rommet røres. Returnerer { dropped, hadAdjust }
+// eller null hvis matta ikke kan legges om.
+function _matRelayWithGap(mat, newGapCm) {
+  if (!mat) return null;
+  const room = S.rooms.find(r => r.id === mat.roomId);
+  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+  if (!room || !room.points || room.points.length < 3 || !prod) return null;
+  const n = mat.num_runs || 1;
+  const dir = (mat.rotation_deg || 0) === 90 ? 'h' : 'v';
+  const w = mat.width_cm;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;   // samme ??-regel som motoren (utendørs: 0)
+  const oldGap = mat.gap_cm != null ? mat.gap_cm : (prod.min_gap_mm || 20) / 10;
+  const gap = Math.round(newGapCm * 10) / 10;
+  const hadAdjust = _matHasRunAdjust(mat);
+  // Ankeret: første bredde i kabelrekkefølgen står stille. Tverrposisjonen til bredde r er
+  // perpBase + r × (bredde + gap) (_matRunAcrossOffsetCm) — flytt blokkstarten så ankerbredden
+  // får samme tall som før.
+  const rFirst = _matRunCableOrder(mat)[0] || 0;
+  const dGap = gap - oldGap;
+  if (dir === 'h') mat.y_cm -= rFirst * dGap; else mat.x_cm -= rFirst * dGap;
+  mat.gap_cm = gap;
+  mat.runAdjust = null;
+  // Regel 20: en sone-matte klippes mot sonens egne along-grenser (samme _matZoneUsableRoom-boks
+  // som autoFillMatSerpentine sin zoneRect-gren), ikke bare rommets polygon.
+  let zoneAlongMin = null, zoneAlongMax = null;
+  const zone = mat.zoneId != null ? (S.zones || []).find(z => z.id === mat.zoneId) : null;
+  if (zone && zone.points && zone.points.length >= 3) {
+    const zxs = zone.points.map(p => p.x), zys = zone.points.map(p => p.y);
+    const usable = _matZoneUsableRoom(room, { x0: Math.min(...zxs), x1: Math.max(...zxs), y0: Math.min(...zys), y1: Math.max(...zys) }, marginCm);
+    const al = usable.points.map(p => dir === 'h' ? p.x : p.y);
+    zoneAlongMin = Math.min(...al); zoneAlongMax = Math.max(...al);
+  }
+  const alongStart = dir === 'h' ? mat.x_cm : mat.y_cm;
+  const perpBase = dir === 'h' ? mat.y_cm : mat.x_cm;
+  // Tverr-grensene (Regel 12): rommets boks minus margin — samme grense maxRuns i _matAreaGeom er
+  // bygget på. MÅLT: _matClippedSegments/clipStripToRoom godtar en bredde som bare DELVIS ligger
+  // innenfor rommet på tvers (klipper kun langs), så en bredde som stikker ut over veggen må avvises
+  // her eksplisitt — motoren slipper dette fordi den aldri legger flere bredder enn maxRuns.
+  const rxs = room.points.map(p => p.x), rys = room.points.map(p => p.y);
+  let acrossMin = (dir === 'h' ? Math.min(...rys) : Math.min(...rxs)) + marginCm;
+  let acrossMax = (dir === 'h' ? Math.max(...rys) : Math.max(...rxs)) - marginCm;
+  if (zoneAlongMin != null) {
+    const zpts = _matZoneUsableRoom(room, { x0: Math.min(...zone.points.map(p => p.x)), x1: Math.max(...zone.points.map(p => p.x)), y0: Math.min(...zone.points.map(p => p.y)), y1: Math.max(...zone.points.map(p => p.y)) }, marginCm).points;
+    const ac = zpts.map(p => dir === 'h' ? p.y : p.x);
+    acrossMin = Math.min(...ac); acrossMax = Math.max(...ac);
+  }
+  const runLengthCm = mat.length_cm;
+  const stub = { num_runs: n, length_cm: mat.length_cm, last_run_length_cm: mat.last_run_length_cm };   // nominelt, uten klipp/justering
+  const lens = [], starts = [];
+  let anyClipped = false, dropped = 0;
+  for (let r = 0; r < n; r++) {
+    const nominalLen = _matRunLenBaseCm(stub, r);
+    const upR = (r % 2 === 0) && (nominalLen < runLengthCm - 0.05);   // samme paritet som motoren
+    const perpPos = perpBase + r * (w + gap);
+    const acrossOk = perpPos >= acrossMin - 0.05 && perpPos + w <= acrossMax + 0.05;
+    const cl = acrossOk
+      ? _matClipRunToRoom({ roomId: room.id, dir, perpPos, matWidthCm: w, marginCm, cutCm, minLenCm, nominalLen, runLengthCm, alongStart, upR, zoneAlongMin, zoneAlongMax })
+      : { len: 0, start: alongStart, clipped: true };   // får ikke plass på tvers
+    if (cl.clipped) anyClipped = true;
+    if (!(cl.len > 0)) dropped++;
+    lens.push(cl.len); starts.push(cl.start);
+  }
+  mat.runLengths = anyClipped ? lens : null;
+  mat.runStarts = anyClipped ? starts : null;
+  if (mat._coldTotalCm != null) mat._coldTotalCm = Math.max(0, mat._coldTotalCm - (n - 1) * dGap);
+  mat._gapCappedFromCm = null;   // dette er brukerens eget, eksplisitte tall for DENNE matta
+  mat._gapDroppedRuns = dropped > 0 ? dropped : null;
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  return { dropped, hadAdjust };
+}
+
 // opts.exact: place exactly the given product (skip best-fit variant swap).
 // opts.keepPanel: don't hide the product panel after placing (for live variant preview).
 // opts.zoneRect: se REGEL 20-kommentaren ved _matZoneUsableRoom.
@@ -16527,46 +16658,12 @@ function autoFillMatSerpentine(productId, opts) {
       // Samme paritet som drawMats' upR — se _matRunStartCm. Kun relevant når denne breddens
       // nominelle lengde faktisk ER kortere enn hele blokka (ellers spiller ankeret ingen rolle).
       const upR = (r % 2 === 0) && (nominalLen < runLengthCm - 0.05);
-      const nominalStart = upR ? (alongStart + runLengthCm - nominalLen) : alongStart;
-      const anchorPoint = upR ? (nominalStart + nominalLen) : nominalStart;   // sømenden (upR) ELLER alongStart
-      // cutCm=0: se samme note som i idealLenCm-løkken over — snapping skjer ÉN gang, i
-      // Math.floor(len/cutCm) rett under, ikke inni _matClippedSegments også.
-      const segs = _matClipSegsToZone(_matClippedSegments(room.id, dir, perpPos, matWidthCm, marginCm, 0), zoneAlongMin, zoneAlongMax);
-      // Segmentet som faktisk INNEHOLDER forankringspunktet foretrekkes (bevarer sømflukt der
-      // rommet tillater det).
-      let seg = segs.find(s => s.start_cm <= anchorPoint + 0.5 && s.start_cm + s.length_cm >= anchorPoint - 0.5);
-      let len = 0, start = nominalStart;
-      if (seg) {
-        if (upR) {
-          // Forankret i sømenden: reachable strekker seg BAKOVER (mot alongStart) fra ankeret.
-          const reachable = anchorPoint - seg.start_cm;
-          len = Math.max(0, Math.min(nominalLen, reachable));
-          len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
-          start = anchorPoint - len;   // vegg-regelen vinner: flytt startpunktet innover i stedet for å stikke ut
-        } else {
-          const reachable = (seg.start_cm + seg.length_cm) - anchorPoint;
-          len = Math.max(0, Math.min(nominalLen, reachable));
-          len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
-          start = anchorPoint;
-        }
-      } else if (segs.length) {
-        // STEG 1 (Regel H, Kenneth 19.08.2026): ingen segment inneholder ankeret — ankeret er
-        // utledet fra rommets OMSLUTTENDE boundingboks og kan derfor ligge utenfor et innhukket
-        // hjørne selv om et stort, brukbart segment finnes et annet sted på denne breddeposisjonen
-        // (Kenneths røde firkant). Ikke gi opp: velg det LENGSTE segmentet som faktisk finnes her,
-        // og forankre fra samme SIDE (nær/fjern, etter paritet — samme ende drawMats/_matRunStartCm
-        // bruker) av DET segmentet. Sømflukt tapes her (den var uansett umulig — ankeret selv ligger
-        // utenfor rommet); å henge sammen med resten via riktig ende og holde seg innenfor veggen
-        // er ABSOLUTT.
-        const alt = segs.reduce((a, b) => (b.length_cm > a.length_cm ? b : a));
-        len = Math.max(0, Math.min(nominalLen, alt.length_cm));
-        len = cutCm > 0 ? Math.floor(len / cutCm) * cutCm : len;
-        start = upR ? (alt.start_cm + alt.length_cm - len) : alt.start_cm;
-      }
-      if (len > 0 && len < minLenCm) len = 0;   // STEG 2: for kort etter snapping → legg den ikke ut
-      if (len < nominalLen - 0.05 || Math.abs(start - nominalStart) > 0.05) anyRunClipped = true;
-      clippedRunLens.push(len);
-      clippedRunStarts.push(start);
+      // 127: selve klippingen av én bredde bor nå i _matClipRunToRoom (uendret logikk, delt med
+      // «Mellomrom i denne matta» — _matRelayWithGap), så de to aldri kan klippe ulikt.
+      const cl = _matClipRunToRoom({ roomId: room.id, dir, perpPos, matWidthCm, marginCm, cutCm, minLenCm, nominalLen, runLengthCm, alongStart, upR, zoneAlongMin, zoneAlongMax });
+      if (cl.clipped) anyRunClipped = true;
+      clippedRunLens.push(cl.len);
+      clippedRunStarts.push(cl.start);
     }
 
     // STEG 2 (Regel H): mål hva som FAKTISK ble lagt ut mot rullens egen lengde. Går den ikke opp
@@ -18267,6 +18364,235 @@ function _matRunAdjustRegressionTest() {
   return { ok: allOk, results };
 }
 
+// 127: «Flytt alle matter i rommet» + «Mellomrom i denne matta». Samme fikstur-/opprydnings-
+// disiplin som _matRunAdjustRegressionTest over. Kjør i konsollen: _matArrangementRegressionTest()
+function _matArrangementRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  if (!canvas || !canvas.width || !canvas.height || !canvas.getBoundingClientRect().width) {
+    console.error('_matArrangementRegressionTest: HOPPET OVER — lerretet er 0×0 (åpne et prosjekt i tegnemodulen først)');
+    return { ok: false, skipped: true, results };
+  }
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const saved = { rooms: S.rooms, mats: S.mats, matPaths: S.matPaths, hindrings: S.hindrings, zones: S.zones, strips: S.strips, cables: S.cables,
+    floors: S.floors, activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId, selectedRoomId: S.ui.selectedRoomId,
+    selectedMatId: S.ui.selectedMatId, selectedMatPathId: S.ui.selectedMatPathId, selectedMatRunIdx: S.ui.selectedMatRunIdx,
+    drawMode: S.ui.drawMode, view: { ...S.view }, varmefolie: { ...S.varmefolie }, varmematte: { ...S.varmematte }, snapGrid: S.snap.grid,
+    nextMatId: S.counters.nextMatId, nextMatPathId: S.counters.nextMatPathId, matFree: _matFree, cycle: S.ui.cycle, arrMode: _matArrangeMode,
+    autoSave: window._performAutoSave, toast: window._showToast, undoLen: _undoStack.length };
+  const toasts = [];
+  window._performAutoSave = () => Promise.resolve();
+  window._showToast = (msg) => { toasts.push(String(msg)); };
+  const cr = () => canvas.getBoundingClientRect();
+  const ev = (type, sx, sy, extra) => canvas.dispatchEvent(new MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, clientX: cr().left + sx, clientY: cr().top + sy, button: 0, buttons: type === 'mouseup' ? 0 : 1 }, extra || {})));
+  const near = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 0.05 : tol);
+  const quadKey = q => q.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('|');
+  const shiftedKey = (q, dx, dy) => q.map(p => `${(p.x + dx).toFixed(1)},${(p.y + dy).toFixed(1)}`).join('|');
+  const matById = id => S.mats.find(m => m.id === id);
+  const mpById = id => (S.matPaths || []).find(m => m.id === id);
+  try {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(..._matBenchCatalog([1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20], { idBase: 912700, prefix: 'ARR' }));
+    const RID = 912701;
+    const pts = [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 300 }, { x: 0, y: 300 }];
+    const room = { id: RID, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) };
+    room.walls = compWalls(pts);
+    S.rooms = [room]; S.mats = []; S.matPaths = []; S.hindrings = []; S.zones = []; S.strips = []; S.cables = [];
+    S.floors = []; S.ui.activeFloorId = null; S.ui.activePartId = null; _rebuildActiveFloorRoomIds();
+    S.ui.selectedRoomId = RID; S.ui.selectedMatId = null; S.ui.selectedMatPathId = null; S.ui.selectedMatRunIdx = null;
+    S.ui.drawMode = null; S.ui.cycle = null; _matFree = null; _matArrangeMode = false; S.snap.grid = false;
+    S.varmematte = { gapCm: null }; S.varmefolie = Object.assign(S.varmefolie || {}, { direction: 'v', startCorner: 'bl', dirExplicit: true });
+    S.view = { ...S.view, zoom: 1.2, panX: 200, panY: 150 };
+    const sc = S.view.zoom * BASE_SCALE;
+    const prod = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 6);
+
+    // ── Fikstur: 2 auto-matter (én fra motoren, én direkte med klipp) + 1 frihånds-matte ──────
+    const r1 = autoFillMatSerpentine(prod.id);
+    const M1 = r1 && S.mats[0] ? S.mats[0].id : null;
+    check('fikstur: auto-matte med ≥2 bredder', '≥2', M1 != null && (matById(M1).num_runs || 1) >= 2, M1 != null ? matById(M1).num_runs : r1);
+    const M2 = 912702;
+    S.mats.push({ id: M2, roomId: RID, productId: prod.id, x_cm: 330, y_cm: 20, width_cm: 50, length_cm: 200, num_runs: 1,
+      last_run_length_cm: null, gap_cm: 0, rotation_deg: 0, startCorner: 'bl', runStarts: [30], runLengths: [180], labelPos: { x: 355, y: 120 } });
+    const fam = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 4);
+    const MP = 912703;
+    S.matPaths = [{ id: MP, roomId: RID, productId: fam.id, start: { x: 60, y: 250 },
+      moves: [{ axis: 'h', dir: 1, len: 200, conn: 'first', side: -1 }, { axis: 'h', dir: -1, len: 200, conn: 'uturn', side: -1 }],
+      gapCm: 0, centered: false, offX: 0, offY: 0 }];
+    const snapPos = () => ({
+      m1: { x: matById(M1).x_cm, y: matById(M1).y_cm, rs: JSON.stringify(matById(M1).runStarts) },
+      m2: { x: matById(M2).x_cm, y: matById(M2).y_cm, rs: JSON.stringify(matById(M2).runStarts), lp: JSON.stringify(matById(M2).labelPos) },
+      mp: { x: mpById(MP).start.x, y: mpById(MP).start.y },
+    });
+    const P0 = snapPos();
+    S.ui.selectedMatId = M1; renderSidebar(); updateCtxBar(); render();
+    // Grep-punkt: midt i bredde 0 på matte 1
+    const g10 = _matRunWorldGeom(matById(M1), 0);
+    const gc = { x: (g10.quad[0].x + g10.quad[2].x) / 2, y: (g10.quad[0].y + g10.quad[2].y) / 2 };
+    const pw = w2s(gc.x, gc.y);
+    check('fikstur: grep-punktet treffer matte 1', M1, hitMat(gc.x, gc.y) === M1, hitMat(gc.x, gc.y));
+
+    // ── A: «Flytt alle matter i rommet» (modus) — 40 cm til høyre ──────────────────────────
+    const undo0 = _undoStack.length;
+    _matToggleArrangeMode();
+    check('A modus på', 'true', _matArrangeMode === true, _matArrangeMode);
+    check('A ctxbar viser chippen «Flytt alle matter i rommet» (på)', 'on', /Flytt alle matter i rommet/.test(document.getElementById('ctxbar')?.innerHTML || '') , null);
+    _resetCycle();
+    ev('mousedown', pw.x, pw.y);
+    check('A mousedown i modus starter arrangement-drag', 'matarr', _matDragging && _matDragKind === 'matarr', { _matDragging, _matDragKind });
+    ev('mousemove', pw.x + 40 * sc, pw.y);
+    ev('mouseup', pw.x + 40 * sc, pw.y);
+    const P1 = snapPos();
+    check('A matte 1 flyttet 40 cm i x, 0 i y', '+40/0', near(P1.m1.x, P0.m1.x + 40) && near(P1.m1.y, P0.m1.y), P1.m1);
+    check('A matte 2 flyttet 40 cm i x', '+40', near(P1.m2.x, P0.m2.x + 40) && near(P1.m2.y, P0.m2.y), P1.m2);
+    check('A matte 2: runStarts (langs y) urørt ved ren x-flytting', P0.m2.rs, P1.m2.rs === P0.m2.rs, P1.m2.rs);
+    check('A matte 2: labelPos fulgte med (+40)', '+40', near(matById(M2).labelPos.x, 355 + 40) && near(matById(M2).labelPos.y, 120), matById(M2).labelPos);
+    check('A frihånds-matte flyttet 40 cm i x', '+40', near(P1.mp.x, P0.mp.x + 40) && near(P1.mp.y, P0.mp.y), P1.mp);
+    check('A innbyrdes avstand uendret', 'lik', near((P1.m2.x - P1.m1.x), (P0.m2.x - P0.m1.x)) && near((P1.mp.x - P1.m1.x), (P0.mp.x - P0.m1.x)), { d12: P1.m2.x - P1.m1.x, d12_0: P0.m2.x - P0.m1.x });
+    check('A ett pushUndo for hele draget', undo0 + 1, _undoStack.length === undo0 + 1, _undoStack.length - undo0);
+    check('A ingen drag henger igjen', 'ingen', !_matDragging && _matArrSnap == null, { _matDragging, _matArrSnap });
+    check('A matte 1 valgt fortsatt', M1, S.ui.selectedMatId === M1, S.ui.selectedMatId);
+    undo();
+    const P2 = snapPos();
+    check('A angre setter alt tilbake', 'som før', JSON.stringify(P2) === JSON.stringify(P0), P2);
+    check('A angre: modus fortsatt på (UI-tilstand, ikke prosjekt)', 'true', _matArrangeMode === true, _matArrangeMode);
+    // Akselås via gizmo-piler i modus: _matArrDelta med y-lås gir dx = 0
+    _matDragAxis = 'y'; _matDragOrigStart = { x: 100, y: 100 }; _matDragOrigPos = { x: 0, y: 0 };
+    const dl = _matArrDelta({ clientX: 100 + 30 * sc, clientY: 100 + 20 * sc });
+    check('A akselås y: dx = 0, dy = 20', '0/20', near(dl.dx, 0) && near(dl.dy, 20), dl);
+    _matDragAxis = 'free';
+    _matToggleArrangeMode();
+    check('A modus av igjen', 'false', _matArrangeMode === false, _matArrangeMode);
+
+    // ── B: Alt + dra uten modus — 30 cm ned ────────────────────────────────────────────────
+    S.ui.selectedMatId = M1; updateCtxBar(); render();
+    _resetCycle();
+    ev('mousedown', pw.x, pw.y, { altKey: true });
+    check('B Alt + mousedown på matte starter arrangement-drag (ikke panorering)', 'matarr', _matDragging && _matDragKind === 'matarr' && !_panning, { _matDragging, _matDragKind, _panning });
+    ev('mousemove', pw.x, pw.y + 30 * sc, { altKey: true });
+    ev('mouseup', pw.x, pw.y + 30 * sc, { altKey: true });
+    const P3 = snapPos();
+    check('B alle tre flyttet 30 cm i y', '+30', near(P3.m1.y, P0.m1.y + 30) && near(P3.m2.y, P0.m2.y + 30) && near(P3.mp.y, P0.mp.y + 30) && near(P3.m1.x, P0.m1.x), P3);
+    check('B matte 2: runStarts fulgte med (+30 langs y)', '[60]', JSON.stringify(matById(M2).runStarts) === JSON.stringify([60]), matById(M2).runStarts);
+    check('B utenfor rommet → ingen sprett, men merket (_arrCheck) og rød toast', 'merket', (matById(M1)._arrCheck === true || matById(M2)._arrCheck === true) && toasts.some(t => /Flyttet, men/.test(t)), { m1: matById(M1)._arrCheck, m2: matById(M2)._arrCheck, toasts: toasts.slice() });
+    undo();
+    check('B angre setter alt tilbake', 'som før', JSON.stringify(snapPos()) === JSON.stringify(P0), snapPos());
+    // Alt + dra UTENFOR en matte panorerer som før
+    _panning = false;
+    ev('mousedown', 2, 2, { altKey: true });
+    check('B Alt + dra utenfor matte = panorering som før', 'pan', _panning === true && !_matDragging, { _panning, _matDragging });
+    ev('mouseup', 2, 2, { altKey: true });
+    _panning = false;
+
+    // ── C: «Mellomrom i denne matta» — bare den valgte matta legges om, anker fast ────────
+    toasts.length = 0;
+    const m1 = matById(M1);
+    const n = m1.num_runs || 1;
+    const order = _matRunCableOrder(m1);
+    const first = order[0], second = order[1];
+    const gap0 = m1.gap_cm;
+    const Q0 = []; for (let r = 0; r < n; r++) Q0.push(quadKey(_matRunWorldGeom(m1, r).quad));
+    const m2Before = JSON.stringify(matById(M2)), mpBefore = JSON.stringify(mpById(MP));
+    S.ui.selectedMatId = M1; S.ui.selectedMatRunIdx = null; renderSidebar(); updateCtxBar(); updateObjInfo();
+    const fieldHtml = _matGapFieldHtml();
+    check('C produktpanel-feltet er mattas eget når en lagt matte er valgt', 'Mellomrom i denne matta', /Mellomrom i denne matta/.test(fieldHtml) && new RegExp(`value="${Math.round(gap0)}"`).test(fieldHtml), fieldHtml.slice(0, 160));
+    check('C ctxbar viser «Mellomrom i denne matta»', 'chip', /Mellomrom i denne matta/.test(document.getElementById('ctxbar')?.innerHTML || ''), null);
+    check('C sidepanelet (objektinfo) har feltet', 'matown-gap-obj-input', !!document.getElementById('matown-gap-obj-input'), null);
+    const undoC = _undoStack.length;
+    setMatOwnGap(M1, gap0 + 3, true);
+    const m1b = matById(M1);
+    check('C gap_cm = gammelt + 3', gap0 + 3, near(m1b.gap_cm, gap0 + 3), m1b.gap_cm);
+    check('C første bredde (ankeret) ligger fast', Q0[first], quadKey(_matRunWorldGeom(m1b, first).quad) === Q0[first], quadKey(_matRunWorldGeom(m1b, first).quad));
+    const dirSign = order[0] < order[1] ? 1 : -1;   // nabo-bredden flytter seg BORT fra ankeret
+    const g2 = _matRunWorldGeom(m1b, second);
+    check('C andre bredde ligger nå bredde + (gap + 3) fra ankeret (flyttet 3 cm bort)', (second - first) * (m1b.width_cm + gap0 + 3), g2 && near(g2.lxC - _matRunWorldGeom(m1b, first).lxC, (second - first) * (m1b.width_cm + gap0 + 3)), g2 && { d: g2.lxC - _matRunWorldGeom(m1b, first).lxC, dirSign });
+    check('C naboene urørt (matte 2, frihånds-matte)', 'uendret', JSON.stringify(matById(M2)) === m2Before && JSON.stringify(mpById(MP)) === mpBefore, null);
+    check('C antall bredder og produkt urørt (Regel 17)', `${n}/${m1.productId}`, m1b.num_runs === n && m1b.productId === m1.productId, { n: m1b.num_runs, p: m1b.productId });
+    check('C ett pushUndo', undoC + 1, _undoStack.length === undoC + 1, _undoStack.length - undoC);
+    const marginCm = (prod.min_wall_margin_mm ?? 50) / 10;
+    check('C klipp mot rom: alle lagte bredder ligger innenfor rommet (uten kabelplan-sjekk)', 'true', _matRunsWithinRoom(m1b, room, marginCm, null) === true, null);
+    check('C «Dekker» (lagt lengde) er summen av breddene', 'sum', near(_matLaidLengthCm(m1b), Array.from({ length: n }, (_, r) => _matRunLenCm(m1b, r)).reduce((a, b) => a + b, 0)), _matLaidLengthCm(m1b));
+    const droppedSmall = m1b._gapDroppedRuns || 0;
+    check('C med +3 cm: dropp-telleren stemmer med bredder uten lengde', 'lik', droppedSmall === Array.from({ length: n }, (_, r) => _matRunLenCm(m1b, r)).filter(l => !(l > 0)).length, { dropped: droppedSmall, lens: m1b.runLengths });
+    // Stort mellomrom (maks, MAT_GAP_MAX_CM — 40 klemmes dit): en eller flere bredder faller ut
+    // → gul merknad + toast. 7 × 50 + 6 × maks > 400 − 2 × margin i dette rommet.
+    const maxG = _matOwnGapBounds(matById(M1)).maxG;
+    setMatOwnGap(M1, 40, true);
+    const m1c = matById(M1);
+    check('C 40 → klemmes til maks', maxG, near(m1c.gap_cm, maxG), m1c.gap_cm);
+    check('C maks mellomrom: minst én bredde får ikke plass', '≥1', (m1c._gapDroppedRuns || 0) >= 1, m1c._gapDroppedRuns);
+    check('C maks mellomrom: gul merknad i tekst og toast', 'får ikke plass', new RegExp(`får ikke plass med ${maxG} cm mellomrom`).test(_matOwnGapNoteText(m1c)) && toasts.some(t => /får ikke plass/.test(t)), { note: _matOwnGapNoteText(m1c), toasts: toasts.slice() });
+    check('C maks mellomrom: antall bredder uendret, de som ikke får plass har lengde 0', n, m1c.num_runs === n && m1c.runLengths && m1c.runLengths.filter(l => !(l > 0)).length === m1c._gapDroppedRuns, m1c.runLengths);
+    check('C maks mellomrom: ingen lagt bredde stikker ut av rommet', 'true', _matRunsWithinRoom(m1c, room, (prod.min_wall_margin_mm ?? 50) / 10, null) === true && Array.from({ length: n }, (_, r) => _matRunPlacementIssue(m1c, r)).every(x => !x), Array.from({ length: n }, (_, r) => _matRunPlacementIssue(m1c, r)));
+    check('C maks mellomrom: ankeret ligger fortsatt fast', Q0[first], quadKey(_matRunWorldGeom(m1c, first).quad) === Q0[first], quadKey(_matRunWorldGeom(m1c, first).quad));
+    // Tilbake til utgangspunktet: bit-for-bit samme geometri som før
+    setMatOwnGap(M1, gap0, true);
+    const m1d = matById(M1);
+    const Qd = []; for (let r = 0; r < n; r++) Qd.push(quadKey(_matRunWorldGeom(m1d, r).quad));
+    check('C tilbake til opprinnelig mellomrom: alle bredder som før', 'lik', JSON.stringify(Qd) === JSON.stringify(Q0) && !m1d._gapDroppedRuns, { Qd, Q0 });
+    // runAdjust (124) nullstilles med toast
+    toasts.length = 0;
+    _matSetRunAdj(matById(M1), second, { acrossCm: 5 });
+    check('C fikstur: bredde har runAdjust', 'true', _matHasRunAdjust(matById(M1)), matById(M1).runAdjust);
+    setMatOwnGap(M1, gap0 + 1, true);
+    check('C endring av mellomrom nullstiller runAdjust', 'null', !_matHasRunAdjust(matById(M1)), matById(M1).runAdjust);
+    check('C toast «Justeringer på breddene er nullstilt»', 'toast', toasts.some(t => /Justeringer på breddene er nullstilt/.test(t)), toasts.slice());
+    undo();
+    check('C angre: mellomrom og runAdjust tilbake', `${gap0} + adjust`, near(matById(M1).gap_cm, gap0) && _matHasRunAdjust(matById(M1)), { gap: matById(M1).gap_cm, adj: matById(M1).runAdjust });
+    _matSetRunAdj(matById(M1), second, { acrossCm: 0 });
+    // Samme verdi på nytt = ingen endring, ingen undo
+    const undoSame = _undoStack.length;
+    setMatOwnGap(M1, gap0, true);
+    check('C samme verdi: ingen omlegging, ingen undo', undoSame, _undoStack.length === undoSame, _undoStack.length - undoSame);
+    // Grenser: under produktets gulv klemmes
+    setMatOwnGap(M1, -5, true);
+    check('C under 0 klemmes til minste lovlige', '≥0', matById(M1).gap_cm >= 0, matById(M1).gap_cm);
+    setMatOwnGap(M1, gap0, true);
+    // Vannrett matte (rotation 90): anker i motorens tverr-konvensjon (perpBase = y_cm + r·(b+gap))
+    const M3 = 912704;
+    S.mats.push({ id: M3, roomId: RID, productId: prod.id, x_cm: 50, y_cm: 50, width_cm: 50, length_cm: 300, num_runs: 2,
+      last_run_length_cm: null, gap_cm: 0, rotation_deg: 90, startCorner: 'bl', runStarts: null, runLengths: null });
+    const o3 = _matRunCableOrder(matById(M3))[0];
+    const perp3Before = matById(M3).y_cm + o3 * (50 + 0);
+    setMatOwnGap(M3, 4, true);
+    check('C vannrett matte: ankerbreddens tverrposisjon (motor-konvensjon) uendret', perp3Before, near(matById(M3).y_cm + o3 * (50 + 4), perp3Before), { y: matById(M3).y_cm, o3 });
+    S.mats = S.mats.filter(m => m.id !== M3);
+
+    // ── D: ingen matte valgt → feltet er globalt som før ──────────────────────────────────
+    S.ui.selectedMatId = null; S.ui.selectedMatPathId = null; updateCtxBar();
+    const globalHtml = _matGapFieldHtml();
+    check('D uten valg: globalt felt («Mellomrom», ikke «i denne matta»)', 'globalt', /Mellomrom/.test(globalHtml) && !/i denne matta/.test(globalHtml), globalHtml.slice(0, 120));
+    const gapM1 = matById(M1).gap_cm;
+    setMatGap(7, false);
+    check('D setMatGap skriver det globale tallet', 7, S.varmematte.gapCm === 7, S.varmematte.gapCm);
+    check('D … og rører ikke den lagte matta', gapM1, near(matById(M1).gap_cm, gapM1), matById(M1).gap_cm);
+    check('D modus av når ingen matte er valgt', 'false', _matArrangeMode === false, _matArrangeMode);
+
+    // ── E: lagring — gap_cm, posisjoner og dropp-merknad overlever JSON-rundtur ──────────
+    setMatOwnGap(M1, 40, true);
+    const copy = JSON.parse(JSON.stringify(matById(M1)));
+    check('E JSON-rundtur: gap_cm, x_cm, runStarts, _gapDroppedRuns like', 'lik', copy.gap_cm === matById(M1).gap_cm && copy.x_cm === matById(M1).x_cm && JSON.stringify(copy.runStarts) === JSON.stringify(matById(M1).runStarts) && copy._gapDroppedRuns === matById(M1)._gapDroppedRuns, copy);
+  } catch (e) {
+    check('Uventet feil', 'ingen', false, e.message + ' @ ' + (e.stack || '').split('\n')[1]);
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    _matDragging = false; _matDragId = -1; _matDragKind = 'mat'; _matDragInvalid = false; _matRunDragOrig = null; _matArrSnap = null; _matArrRoomId = null; _panning = false;
+    _matArrangeMode = saved.arrMode;
+    S.rooms = saved.rooms; S.mats = saved.mats; S.matPaths = saved.matPaths; S.hindrings = saved.hindrings; S.zones = saved.zones; S.strips = saved.strips; S.cables = saved.cables;
+    S.floors = saved.floors; S.ui.activeFloorId = saved.activeFloorId; S.ui.activePartId = saved.activePartId; _rebuildActiveFloorRoomIds();
+    S.ui.selectedRoomId = saved.selectedRoomId; S.ui.selectedMatId = saved.selectedMatId; S.ui.selectedMatPathId = saved.selectedMatPathId; S.ui.selectedMatRunIdx = saved.selectedMatRunIdx;
+    S.ui.drawMode = saved.drawMode; S.view = saved.view; S.varmefolie = saved.varmefolie; S.varmematte = saved.varmematte; S.snap.grid = saved.snapGrid;
+    S.counters.nextMatId = saved.nextMatId; S.counters.nextMatPathId = saved.nextMatPathId; _matFree = saved.matFree; S.ui.cycle = saved.cycle;
+    window._performAutoSave = saved.autoSave; window._showToast = saved.toast;
+    _undoStack.length = Math.min(_undoStack.length, saved.undoLen);
+    canvas.style.cursor = 'default';
+    if (typeof _matPathPanel === 'function') _matPathPanel();
+    renderSidebar(); updateCtxBar(); render();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matArrangementRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'} (${results.filter(r => r.ok).length}/${results.length})`, results.filter(r => !r.ok));
+  return { ok: allOk, results };
+}
+
 function _matPathClickRegressionTest() {
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
@@ -19670,7 +19996,7 @@ function _matPathPanel() {
       ${usableM2 != null ? `<div style="display:flex;justify-content:space-between${overArea ? ';color:#dc2626' : ''}"><span>Dekket areal</span><b>${coveredM2.toFixed(2)} m²${overArea ? ' — ' + (coveredM2 - usableM2).toFixed(2) + ' m² for mye' : ''}</b></div>` : ''}
     </div>
     <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px">
-      <span>Avstand mellom baner</span>
+      <span>Mellomrom i denne matta</span>
       <input type="number" value="${mp.gapCm || 0}" min="0" step="0.5" style="width:56px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg)" onchange="_matPathSetGap(${mp.id},this.value)"><span>cm</span>
     </div>
     <div style="display:flex;gap:4px;margin-top:8px">
@@ -37135,6 +37461,10 @@ function _matGapFieldState() {
   return { snow, minG, maxG, cm, hint, prod };
 }
 function _matGapFieldHtml() {
+  // 127: er en LAGT matte valgt, er feltet mattas eget (gap_cm) og legger breddene om — det
+  // globale tallet for neste utlegg røres ikke. Uten valg: som før (globalt, Regel 9).
+  const own = _matOwnGapSelected();
+  if (own) return _matOwnGapFieldHtml(own, 'matown-gap-side-input');
   const st = _matGapFieldState();
   return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 6px;font-size:11px" title="Avstand mellom breddene ved neste utlegg (Regel 9). ${esc(st.hint)}">
     <span style="white-space:nowrap">Mellomrom</span>
@@ -37214,6 +37544,103 @@ function stepMatGap(delta) {
   if (inp) inp.value = S.varmematte.gapCm;
 }
 
+// ── 127: «Mellomrom i denne matta» — mellomrom per VALGT, lagt matte ────────────────────────
+// Kenneth 23.10.2026: «markere en matte og velge avstand mellom breddene på den valgte matten».
+// Før skrev Mellomrom-feltet alltid det globale S.varmematte.gapCm (neste utlegg); en lagt matte
+// beholdt sitt gap_cm (målt i 124 STEG 0.3). Nå: er en lagt matte med ≥2 bredder valgt, viser
+// feltet (produktpanelet, sidepanelet og ctxbar-chippen) mattas eget gap_cm, og en endring legger
+// breddene i DENNE matta om via _matRelayWithGap (anker = første bredde, naboer urørt). Uten valg
+// er feltet globalt som før. Grenser: produktets Regel 18-gulv (0 EcoMat / 5 InSnow) … MAT_GAP_MAX_CM.
+function _matOwnGapSelected() {
+  if (S.ui.selectedMatId == null) return null;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  return (mat && !mat.labelOnly && (mat.num_runs || 1) > 1) ? mat : null;
+}
+function _matOwnGapBounds(mat) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+  const snow = (typeof _roomModuleType === 'function') ? _roomModuleType(mat.roomId) === 'snow'
+             : ((typeof _isSnowModule === 'function') && _isSnowModule());
+  const minG = Math.max(snow ? 5 : 0, prod ? _matProductMinGapCm(prod) : 0);
+  const maxG = snow ? 20 : MAT_GAP_MAX_CM;
+  return { minG, maxG, snow };
+}
+function _matOwnGapNoteText(mat) {
+  const n = mat && mat._gapDroppedRuns;
+  if (!n) return '';
+  return `${n} ${n === 1 ? 'bredde' : 'bredder'} får ikke plass med ${Math.round(mat.gap_cm || 0)} cm mellomrom`;
+}
+// Samme utseende som det globale feltet (_matGapFieldHtml), bare etikett og mål er mattas egne.
+// Feltet og steppeknappene tar hvert sitt pushUndo (ett per endring) — det finnes ikke noe
+// «åpne panel»-øyeblikk å ta det i når feltet står fast i et sidepanel.
+function _matOwnGapFieldHtml(mat, inputId) {
+  const { minG, maxG } = _matOwnGapBounds(mat);
+  const cm = Math.round(mat.gap_cm || 0);
+  const note = _matOwnGapNoteText(mat);
+  return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 6px;font-size:11px" title="Mellomrom mellom breddene i den valgte matta. Endring legger breddene om — første bredde ligger fast. Min ${minG} cm · maks ${maxG} cm">
+    <span style="white-space:nowrap">Mellomrom i denne matta</span>
+    <button class="gap-step-btn" onclick="event.stopPropagation(); stepMatOwnGap(${mat.id}, -1, '${inputId}')" title="Mindre">▼</button>
+    <input id="${inputId}" class="gap-mm-input" type="number" min="${minG}" max="${maxG}" step="1" value="${cm}"
+      style="font-family:var(--font-mono);width:48px;text-align:center;padding:2px 4px"
+      onclick="event.stopPropagation()" onkeydown="event.stopPropagation(); if (event.key === 'Enter') this.blur();"
+      onchange="setMatOwnGap(${mat.id}, parseFloat(this.value), true)" />
+    <span style="color:var(--dim)">cm</span>
+    <button class="gap-step-btn" onclick="event.stopPropagation(); stepMatOwnGap(${mat.id}, 1, '${inputId}')" title="Mer">▲</button>
+  </div>${note ? `<div style="color:var(--warn);font-size:11px;margin:-2px 0 6px">⚠ ${esc(note)}</div>` : ''}`;
+}
+// withUndo: true fra felt/steppere (ett undo-steg per endring); false fra popup-panelet, som tar
+// sitt pushUndo én gang ved åpning (samme mønster som openMatGroupGapPanel).
+function setMatOwnGap(matId, cm, withUndo) {
+  const mat = S.mats.find(m => m.id === matId); if (!mat) return;
+  const { minG, maxG } = _matOwnGapBounds(mat);
+  const v = Math.max(minG, Math.min(maxG, Math.round(Number.isFinite(cm) ? cm : minG)));
+  const cur = mat.gap_cm != null ? mat.gap_cm : null;
+  if (cur != null && Math.abs(v - cur) < 0.05) { _matOwnGapSyncInputs(mat); return; }
+  if (withUndo) pushUndo();
+  const res = _matRelayWithGap(mat, v);
+  if (res && res.hadAdjust && typeof _showToast === 'function') _showToast('Justeringer på breddene er nullstilt', 'info');
+  if (res && res.dropped && typeof _showToast === 'function') _showToast(_matOwnGapNoteText(mat), 'warn');
+  _matOwnGapSyncInputs(mat);
+  renderSidebar(); updateCtxBar(); if (typeof updateObjInfo === 'function') updateObjInfo(); render();
+}
+function _matOwnGapSyncInputs(mat) {
+  for (const id of ['matown-gap-cm-input', 'matown-gap-side-input', 'matown-gap-obj-input']) {
+    const inp = document.getElementById(id);
+    if (inp && document.activeElement !== inp) inp.value = Math.round(mat.gap_cm || 0);
+  }
+}
+function stepMatOwnGap(matId, delta, inputId) {
+  const mat = S.mats.find(m => m.id === matId); if (!mat) return;
+  setMatOwnGap(matId, Math.round(mat.gap_cm || 0) + delta, inputId !== 'matown-gap-cm-input');
+  const inp = inputId ? document.getElementById(inputId) : null;
+  if (inp) inp.value = Math.round(mat.gap_cm || 0);
+}
+// Popup fra ctxbar-chippen — samme #gap-panel-DOM og stepper-mønster som openMatGapPanel.
+function openMatOwnGapPanel(e, matId) {
+  e.stopPropagation();
+  const mat = S.mats.find(m => m.id === matId); if (!mat) return;
+  const { minG, maxG } = _matOwnGapBounds(mat);
+  const cm = Math.round(mat.gap_cm || 0);
+  pushUndo();
+  const panel = document.getElementById('gap-panel');
+  panel.innerHTML = `
+    <div class="gap-title">Mellomrom i denne matta</div>
+    <div class="gap-custom-row" style="justify-content:center;gap:8px">
+      <button class="gap-step-btn" onclick="stepMatOwnGap(${matId},-1,'matown-gap-cm-input')" title="Mindre">▼</button>
+      <input id="matown-gap-cm-input" class="gap-mm-input" type="number" min="${minG}" max="${maxG}" step="1" value="${cm}"
+        style="font-family:var(--font-mono);width:56px;text-align:center"
+        onclick="event.stopPropagation()"
+        oninput="setMatOwnGap(${matId}, parseFloat(this.value), false)" />
+      <span class="gap-custom-lbl">cm</span>
+      <button class="gap-step-btn" onclick="stepMatOwnGap(${matId},1,'matown-gap-cm-input')" title="Mer">▲</button>
+    </div>
+    <div class="gap-custom-lbl" style="margin-top:4px;text-align:center">Første bredde ligger fast · min ${minG} cm · maks ${maxG} cm</div>`;
+  const W = window.innerWidth, H = window.innerHeight;
+  panel.style.display = 'block';
+  const pw = panel.offsetWidth || 270, ph = panel.offsetHeight || 120;
+  panel.style.left = Math.min(e.clientX, W - pw - 8) + 'px';
+  panel.style.top  = Math.min(e.clientY + 8, H - ph - 8) + 'px';
+}
+
 // EDIT 3 (Kenneth 19.08.2026, «frihånds-matta mangler ... flytende verktøylinje»): samme
 // #gap-panel-DOM og samme stepper-mønster som openMatGapPanel/setMatGap/stepMatGap over — men
 // scoped til ÉN SPESIFIKK bane (mp.gapCm, en per-instans verdi), ikke det globale
@@ -37229,7 +37656,7 @@ function openMatPathGapPanel(e, mpId) {
   const hint = snow ? 'Min 5 cm · standard 10 cm' : 'Min 0 cm';
   const panel = document.getElementById('gap-panel');
   panel.innerHTML = `
-    <div class="gap-title">Avstand mellom matter</div>
+    <div class="gap-title">Mellomrom i denne matta</div>
     <div class="gap-custom-row" style="justify-content:center;gap:8px">
       <button class="gap-step-btn" onclick="stepMatPathGap(${mpId},-1)" title="Mindre">▼</button>
       <input id="matpath-gap-cm-input" class="gap-mm-input" type="number" min="${minG}" max="${maxG}" step="1" value="${cm}"
@@ -40920,7 +41347,7 @@ function drawMats() {
       const rStartCm = _matRunStartCm(mat, r);
       const ry0 = (rStartCm - alongStartCm) * sc - hl;
       const rh = rLenCm * sc;
-      const issue = (hasAdj && _matRunAdj(mat, r)) ? _matRunPlacementIssue(mat, r) : null;   // kun JUSTERTE bredder merkes
+      const issue = ((hasAdj && _matRunAdj(mat, r)) || mat._arrCheck) ? _matRunPlacementIssue(mat, r) : null;   // kun JUSTERTE bredder merkes — og (127) en matte flyttet som del av arrangementet
       ctx.fillStyle = issue ? 'rgba(220,38,38,0.22)' : fillColor;
       ctx.fillRect(runCenterX - hw, ry0, hw * 2, rh);
       ctx.strokeStyle = issue ? 'rgba(220,38,38,0.95)' : strokeColor;
@@ -57652,12 +58079,16 @@ function _translatedFieldsFor(obj, spec, dx, dy) {
  * «original + delta» fra dette bildet, aldri som «legg til litt mer» — da kan rutenett-snappingen
  * ikke akkumulere avrundingsfeil gjennom et langt drag (samme grunn som _thOrigHPts fantes fra før).
  */
-function _snapshotRoomForMove(roomId) {
+function _snapshotRoomForMove(roomId, keys) {
   const room = S.rooms.find(r => r.id === roomId);
   const clone = v => JSON.parse(JSON.stringify(v));
   const items = [];
+  // 127: `keys` (valgfri) begrenser bildet til noen samlinger — brukt av «flytt alle matter i
+  // rommet» (mats + matPaths). Da tas rommet selv IKKE med (room: null), så
+  // _applyRoomMoveSnapshot lar veggene stå.
   for (const spec of _ROOM_TRANSLATE_SPEC) {
     if (!spec.fields.length) continue;
+    if (keys && !keys.includes(spec.key)) continue;
     for (const o of (S[spec.key] || [])) {
       if (!o || o.roomId !== roomId) continue;
       items.push({ key: spec.key, id: o.id, orig: clone(o) });
@@ -57665,7 +58096,7 @@ function _snapshotRoomForMove(roomId) {
   }
   return {
     roomId,
-    room: room ? clone({ points: room.points || [], walls: room.walls || [], cardPos: room.cardPos || null, dims: room.dims || [] }) : null,
+    room: (room && !keys) ? clone({ points: room.points || [], walls: room.walls || [], cardPos: room.cardPos || null, dims: room.dims || [] }) : null,
     items,
   };
 }
@@ -61258,6 +61689,7 @@ function updateObjInfo() {
         <div class="soi-row"><span class="soi-k">Antall baner</span><span class="soi-v">${nBaner}${nBaner>1?' \u00d7 '+Math.round(mat.length_cm)+' cm':''}</span></div>
         <div class="soi-row"><span class="soi-k">Bredde</span><span class="soi-v">${Math.round(mat.width_cm)} cm</span></div>
         ${nBaner===1?`<div class="soi-row"><span class="soi-k">Lengde</span><span class="soi-v">${Math.round(mat.length_cm)} cm</span></div>`:''}
+        ${nBaner>1 && !mat.labelOnly ? _matOwnGapFieldHtml(mat, 'matown-gap-obj-input') : ''}
         <div class="soi-row"><span class="soi-k">Dekket areal</span><span class="soi-v">${dekketM2.toFixed(2)} m\u00b2</span></div>
         ${mat._capacityCm!=null && mp?.mat_length_mm ? `<div class="soi-row"><span class="soi-k">Romkapasitet</span><span class="soi-v">${(mat._capacityCm/100).toFixed(1)} m</span></div>
         <div class="soi-row"><span class="soi-k">Valgt rull</span><span class="soi-v" style="${(mp.mat_length_mm/10) > mat._capacityCm + 0.5 ? 'color:var(--warn)' : ''}">${(mp.mat_length_mm/1000).toFixed(1)} m</span></div>` : ''}
@@ -62350,6 +62782,12 @@ let _matRunDragOrig = null;   // 124: { r, acrossCm, startCm } ved start av en b
 // tilbake»-prinsipp som _matFreeExit sin egen FEIL 4-fiks.
 let _matDragKind='mat', _matDragInvalid=false, _matDragOrigCentered=false;
 let _matDragOrigStart={x:0,y:0}, _matDragOrigPos={x:0,y:0};
+// 127 (Kenneth 23.10.2026, «markere en matte og flytte hele arrangementet»): _matDragKind 'matarr'
+// = flytt ALLE matter og frihånds-matter i rommet med samme delta. Startbildet tas med 108 sin
+// _snapshotRoomForMove (filtrert på mats/matPaths), og hvert musesteg skriver «original + delta»
+// via _applyRoomMoveSnapshot — ingen egen løkke per felt, runStarts/labelPos følger med. Modusen
+// (_matArrangeMode) slås på med chippen «Flytt alle matter i rommet»; Alt + dra gjør det samme.
+let _matArrangeMode=false, _matArrSnap=null, _matArrRoomId=null;
 let _matRotating=false, _matRotId=-1, _matRotStart=0, _matRotOrigDeg=0;
 let _matRotCenter={x:0,y:0};
 // F4b (Kenneth 17.09.2026): fri folie-rotasjon, samme mønster som mattas egen (_matRotating over).
@@ -62393,6 +62831,82 @@ let _thRotCenter={x:0,y:0}, _thRotStartAngle=0;
 let _spacePrevTool='arrow';
 // L-shape variant (Edit 5)
 let _lshapeVariant=3;
+
+// ─── 127: FLYTT HELE ARRANGEMENTET (alle matter i rommet) ─────────────────────────────────
+function _matToggleArrangeMode() {
+  _matArrangeMode = !_matArrangeMode;
+  if (_matArrangeMode && typeof _showToast === 'function') _showToast('Dra en matte for å flytte alle mattene i rommet sammen', 'info');
+  updateCtxBar(); render();
+}
+function _matArrWants(e) { return _matArrangeMode || !!(e && e.altKey); }
+// grabbed = { kind: 'mat'|'matpath', id } — objektet man grep i; rutenett-snappingen regnes mot
+// dets eget ankerpunkt (x_cm/y_cm eller start), som for én matte. axis: 'free'|'x'|'y' (gizmo).
+function _matArrBegin(roomId, e, axis, grabbed) {
+  pushUndo();
+  // Frihånd: «Sentrer»-offset (offX/offY) foldes inn i start, som en enkelt-flytting også gjør —
+  // en manuell flytting betyr at posisjonen ikke lenger er avledet.
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== roomId) continue;
+    if (mp.offX || mp.offY || mp.centered) { mp.start = { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }; mp.offX = 0; mp.offY = 0; mp.centered = false; }
+  }
+  _matArrSnap = _snapshotRoomForMove(roomId, ['mats', 'matPaths']);
+  _matArrRoomId = roomId;
+  let anchor = { x: 0, y: 0 };
+  if (grabbed && grabbed.kind === 'matpath') { const mp = (S.matPaths || []).find(m => m.id === grabbed.id); if (mp) anchor = { x: mp.start.x, y: mp.start.y }; }
+  else if (grabbed) { const m = S.mats.find(x => x.id === grabbed.id); if (m) anchor = { x: m.x_cm, y: m.y_cm }; }
+  _matDragging = true; _matDragKind = 'matarr'; _matDragId = grabbed ? grabbed.id : -1; _matDragAxis = axis || 'free';
+  _matDragInvalid = false; _matRunDragOrig = null;
+  _matDragOrigStart = { x: e.clientX, y: e.clientY };
+  _matDragOrigPos = { x: anchor.x, y: anchor.y };
+  canvas.style.cursor = 'move';
+}
+// Skjerm-delta → verdens-delta med akselås og rutenett-snap (mot det grepne objektets anker),
+// nøyaktig som enkelt-mattas egen gren i mousemove. Delta fra startbildet, aldri akkumulert.
+function _matArrDelta(e) {
+  const sc = S.view.zoom * BASE_SCALE;
+  let dx = (e.clientX - _matDragOrigStart.x) / sc;
+  let dy = (e.clientY - _matDragOrigStart.y) / sc;
+  if (_matDragAxis === 'x') dy = 0;
+  if (_matDragAxis === 'y') dx = 0;
+  if (S.snap.grid && !S.shiftHeld && _matDragAxis === 'free') {
+    const nx = Math.round((_matDragOrigPos.x + dx) / GRID) * GRID;
+    const ny = Math.round((_matDragOrigPos.y + dy) / GRID) * GRID;
+    dx = nx - _matDragOrigPos.x; dy = ny - _matDragOrigPos.y;
+  }
+  return { dx, dy };
+}
+function _matArrMove(e) {
+  if (!_matArrSnap) return;
+  const { dx, dy } = _matArrDelta(e);
+  _applyRoomMoveSnapshot(_matArrSnap, dx, dy);
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+}
+// Slipp: valider som for én matte (124-prinsippet) — utenfor rom / over hindring gir rød merknad
+// (toast + rødmerkede bredder via mat._arrCheck i drawMats), ALDRI sprett tilbake.
+function _matArrEnd() {
+  const roomId = _matArrRoomId;
+  const issues = [];
+  for (const m of S.mats) {
+    if (m.roomId !== roomId || m.labelOnly) continue;
+    let bad = null;
+    for (let r = 0; r < (m.num_runs || 1) && !bad; r++) bad = _matRunPlacementIssue(m, r);
+    if (bad) { m._arrCheck = true; issues.push(`matte ${m.id}: ${bad.text}`); }
+    else if (m._arrCheck) delete m._arrCheck;
+  }
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== roomId) continue;
+    const v = _matPathMoveValid(mp);
+    if (!v.ok) issues.push(`frihånds-matte ${mp.id}: ${v.reason || 'ugyldig plassering'}`);
+  }
+  if (issues.length && typeof _showToast === 'function') _showToast('Flyttet, men: ' + issues.join(' · '), 'error');
+  _matArrSnap = null; _matArrRoomId = null;
+  _matDragging = false; _matDragId = -1; _matDragAxis = 'free'; _matDragKind = 'mat'; _matDragInvalid = false;
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  canvas.style.cursor = 'default';
+  if (typeof _matPathPanel === 'function') _matPathPanel();
+  updateCtxBar(); render();
+  return issues;
+}
 
 // ─── UNDO SYSTEM ──────────────────────────────────────────────
 const _undoStack=[];
@@ -63021,6 +63535,20 @@ canvas.addEventListener('mousedown', e=>{
     _panSV={x:S.view.panX,y:S.view.panY};
     canvas.style.cursor='grabbing';
     e.preventDefault(); return;
+  }
+  // 127: Alt + dra PÅ en matte/frihånds-matte = flytt hele arrangementet (alle matter i rommet).
+  // Sjekkes FØR Alt-panoreringen under, som ellers tar trykket; Alt + dra utenfor en matte
+  // panorerer som før.
+  if (e.button === 0 && e.altKey && !S.ui.drawMode) {
+    const { x: ax, y: ay } = _evToCanvas(e);
+    const awp = s2w(ax, ay);
+    const hmA = hitMatRun(awp.x, awp.y);
+    const hmpA = hmA ? null : _matPathAtWorld(awp);
+    const objA = hmA ? S.mats.find(m => m.id === hmA.id) : (hmpA ? (S.matPaths || []).find(m => m.id === hmpA.id) : null);
+    if (objA) {
+      _matArrBegin(objA.roomId, e, 'free', { kind: hmA ? 'mat' : 'matpath', id: objA.id });
+      e.preventDefault(); return;
+    }
   }
   // Pan: middle mouse or Alt+left
   if (e.button===1 || (e.button===0&&e.altKey)) {
@@ -63979,6 +64507,10 @@ canvas.addEventListener('mousedown', e=>{
           // klikk skal starte en drag eller bare velge en gravd-fram nabo).
           // 124 / Regel 26: klikk på en bane i en ALLEREDE valgt frihånds-matte velger BANEN og
           // starter en sidelengs flytting av bare den (naboene står stille).
+          if (_chosen.type === 'matpath' && _idx === 0 && !_noDrag && _matArrangeMode) {   // 127: flytt alle
+            const mpA = (S.matPaths || []).find(m => m.id === _chosen.id);
+            if (mpA) { S.ui.selectedMatRunIdx = null; _matArrBegin(mpA.roomId, e, 'free', { kind: 'matpath', id: mpA.id }); if (typeof _matPathPanel === 'function') _matPathPanel(); updateCtxBar(); render(); return; }
+          }
           if (_chosen.type === 'matpath' && _idx === 0 && !_noDrag && _mpWasSelected === _chosen.id && _chosen.runIdx != null) {
             const mpRun = (S.matPaths || []).find(m => m.id === _chosen.id);
             if (mpRun) {
@@ -64290,6 +64822,10 @@ canvas.addEventListener('mousedown', e=>{
         return;
       }
       const matGizmoHit = hitMatGizmo(sx0, sy0);
+      if (matGizmoHit && _matArrangeMode) {   // 127: akselåst flytting av hele arrangementet
+        const matA = S.mats.find(m => m.id === S.ui.selectedMatId);
+        if (matA) { _matArrBegin(matA.roomId, e, matGizmoHit, { kind: 'mat', id: matA.id }); return; }
+      }
       if (matGizmoHit) {
         pushUndo();
         _matDragging = true;
@@ -64367,6 +64903,15 @@ canvas.addEventListener('mousedown', e=>{
     const hmid = hmRun ? hmRun.id : null;
     // 124 / Regel 26: klikk på en bredde i en ALLEREDE valgt matte velger BREDDEN (og starter en
     // sidelengs flytting av bare den). Klikk på en uvalgt matte velger matta som før.
+    if (hmid !== null && _matArrangeMode) {   // 127: modus på — ethvert grep i en matte flytter alle
+      const matA = S.mats.find(m => m.id === hmid);
+      if (matA) {
+        if (hmid !== S.ui.selectedMatId) { S.ui.selectedMatId = hmid; S.ui.selectedMatRunIdx = null; S.ui.selectedMatPathId = null; S.ui.selectedRoomId = matA.roomId; renderSidebar(); updateObjInfo(); }
+        _matArrBegin(matA.roomId, e, 'free', { kind: 'mat', id: hmid });
+        updateCtxBar(); render();
+        return;
+      }
+    }
     if (hmid !== null && hmid === S.ui.selectedMatId) {
       const mat = S.mats.find(m => m.id === hmid);
       if (mat) {
@@ -65016,6 +65561,7 @@ canvas.addEventListener('mousemove', e=>{
   }
   // ── Mat dragging ──
   if (_matDragging) {
+    if (_matDragKind === 'matarr') { _matArrMove(e); render(); return; }   // 127: hele arrangementet
     // 124 / Regel 26: flytting av ÉN bredde/bane (sidelengs) eller dens start — delta fra der man
     // grep, snappet 5 cm (Shift glidende). Ingen klamping, ingen sprett: rødmerking er svaret.
     if (_matDragKind === 'matrun' || _matDragKind === 'matrunstart' || _matDragKind === 'mprun' || _matDragKind === 'mprunstart') {
@@ -65896,6 +66442,7 @@ function _canvasMouseUp(e){
   if (_foilFreeMoving) { _foilFreeMoving=false; _foilFreeMoveId=null; _foilFreeMoveConstraint='free'; canvas.style.cursor='default'; render(); return; }
   if (_foilFreeLenDragging) { _foilFreeLenDragging=false; _foilFreeLenId=null; canvas.style.cursor='default'; render(); return; }
   if (_matDragging) {
+    if (_matDragKind === 'matarr') { _matArrEnd(); return; }   // 127: validering ved slipp, ingen sprett
     // 124 / Regel 26: bredde-/bane-drag avsluttes uten avvisning (Kenneth avgjør selv).
     if (_matDragKind === 'matrun' || _matDragKind === 'matrunstart' || _matDragKind === 'mprun' || _matDragKind === 'mprunstart') {
       const isPath = _matDragKind.startsWith('mp');
@@ -67013,6 +67560,9 @@ function syncDimChip() {
 
 // ─── CONTEXT BAR ──────────────────────────────────────────────
 function updateCtxBar() {
+  // 127: arrangement-modus lever bare så lenge en matte/frihånds-matte er valgt — chippen som
+  // slår den av finnes ikke ellers, så den skal ikke kunne bli hengende.
+  if (_matArrangeMode && S.ui.selectedMatId == null && S.ui.selectedMatPathId == null) _matArrangeMode = false;
   const bar = document.getElementById('ctxbar');
   if (!bar) return;
   let html = _ctxBarItems();
@@ -67597,9 +68147,20 @@ function _ctxBarItems() {
     const matRotationDeg = mat ? (mat.rotation_deg || 0) : 0;
     const manualGroupMats = mat ? _matManualGroupX(mat.roomId, matRotationDeg) : [];
     const hasManualGroup = manualGroupMats.length >= 2;
-    const gapChipHtml = hasManualGroup
+    // 127: mellomrommet INNI den valgte matta er nå mattas eget felt (gap_cm, legger breddene om
+    // med fast første bredde) — ikke lenger det globale neste-utlegg-tallet (openMatGapPanel), som
+    // bare lever i produktpanelet når ingen matte er valgt. Gruppe-chippen (avstand MELLOM matter)
+    // er uendret og vises i tillegg. Én bredde har ikke noe mellomrom — ingen chip da (som før).
+    const ownGapMat = _matOwnGapSelected();
+    const ownGapNote = ownGapMat ? _matOwnGapNoteText(ownGapMat) : '';
+    const gapChipHtml = (ownGapMat
+      ? `<button class="snap-chip" onclick="openMatOwnGapPanel(event,${ownGapMat.id})" title="Mellomrom i denne matta — endring legger breddene om, første bredde ligger fast">Mellomrom i denne matta <span style="font-family:var(--font-mono)">${Math.round(ownGapMat.gap_cm || 0)}</span> cm</button>${ownGapNote ? `<span style="font-size:11px;color:#d97706;padding:0 4px">\u26a0 ${esc(ownGapNote)}</span>` : ''}`
+      : '')
+      + (hasManualGroup
       ? `<button class="snap-chip" onclick="openMatGroupGapPanel(event,${mat.roomId},${matRotationDeg})" title="Avstand mellom matter i gruppa (min ${_matGroupMinGapCm(manualGroupMats)} cm \u2014 Regel 18)">\u2194 <span style="font-family:var(--font-mono)">${Math.round(_matGroupCurrentGapCm(mat.roomId, matRotationDeg))}</span> cm</button>`
-      : (mat && mat._manualPlace ? '' : `<button class="snap-chip" onclick="openMatGapPanel(event)" title="Avstand mellom baner inni matta (min 5 cm)">\u2194 <span style="font-family:var(--font-mono)">${matGapCm}</span> cm</button>`);
+      : '');
+    // 127: «Flytt alle matter i rommet» — arrangement-modus (eller Alt + dra uten modus).
+    const arrChipHtml = `<button class="snap-chip${_matArrangeMode ? ' on' : ''}" onclick="_matToggleArrangeMode()" title="Dra én matte og flytt alle matter og frihånds-matter i rommet sammen (Alt + dra gjør det samme uten å slå på)">Flytt alle matter i rommet</button>`;
     let uncoveredHtml = '';
     if (hasManualGroup && matRoom) {
       const axis = matRotationDeg === 90 ? 'y_cm' : 'x_cm';
@@ -67621,6 +68182,8 @@ function _ctxBarItems() {
       ${gapChipHtml}
       ${fromWallHtml}
       ${uncoveredHtml}
+      <span class="tc-sep"></span>
+      ${arrChipHtml}
       <span class="tc-sep"></span>
       <button class="snap-chip${matRoom?.matDimSnap?' on':''}" id="chip-dim-matte" onclick="toggleMatDimSnap()" title="Vis avstander mellom matter og til vegg"><span class="snap-dot"></span>M\u00e5lsett Matte</button>
       <span class="tc-sep"></span>
@@ -67651,7 +68214,9 @@ function _ctxBarItems() {
         <span style="font-size:12px;color:var(--dim);padding:0 4px">${labelHtml}</span>
         ${runPanelHtml}
         <span class="tc-sep"></span>
-        <button class="snap-chip" onclick="openMatPathGapPanel(event,${mp.id})" title="Avstand mellom matter">↔ <span style="font-family:var(--font-mono)">${gapCm}</span> cm</button>
+        <button class="snap-chip" onclick="openMatPathGapPanel(event,${mp.id})" title="Mellomrom i denne matta (mellom banene)">Mellomrom i denne matta <span style="font-family:var(--font-mono)">${gapCm}</span> cm</button>
+        <span class="tc-sep"></span>
+        <button class="snap-chip${_matArrangeMode ? ' on' : ''}" onclick="_matToggleArrangeMode()" title="Dra én matte og flytt alle matter og frihånds-matter i rommet sammen (Alt + dra gjør det samme uten å slå på)">Flytt alle matter i rommet</button>
         <span class="tc-sep"></span>
         <button class="snap-chip${mp.centered ? ' on' : ''}" onclick="_matPathToggleCenter(${mp.id})" title="Sentrer hele arrangementet i rommet (slakk likt på begge ytterveggene)">Sentrer</button>
         <span class="tc-sep"></span>

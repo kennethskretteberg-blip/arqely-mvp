@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 127 — Matte: flytt alle matter i rommet sammen; mellomrom per valgt matte (23.10.2026, `main`, ikke pushet)
+
+Kenneth: «markere en matte og flytte hele arrangementet … velge avstand mellom breddene på den valgte
+matten.» Rapport og skjermbilder i `docs/serie-127/`.
+
+- **«Flytt alle matter i rommet»** (chip i ctxbar for matte/frihånds-matte) slår på arrangement-modus:
+  et drag på hvilken som helst matte flytter alle matter og frihånds-matter i rommet med samme delta.
+  **Alt + dra** på en matte gjør det samme uten modus (Alt + dra utenfor en matte panorerer som før).
+  Bygget på 108-flyttingen (`_snapshotRoomForMove(roomId, ['mats','matPaths'])` +
+  `_applyRoomMoveSnapshot`), rutenett-snap og akselås som for én matte, ett pushUndo per drag.
+  Validering ved slipp (124-prinsippet): rød toast og rødmerkede bredder, aldri sprett.
+- **«Mellomrom i denne matta»**: er en lagt matte valgt, viser Mellomrom-feltet (produktpanel,
+  objektinfo, ctxbar-chip med popup) mattas eget `gap_cm`, og en endring legger breddene i DENNE matta
+  om (`_matRelayWithGap`): første bredde i kabelrekkefølgen ligger fast, klipp mot rom/hindringer/sone
+  regnes på nytt per bredde (ny delt `_matClipRunToRoom`, trukket ut av motoren uendret), bredder som
+  ikke får plass legges ikke ut og gir gul merknad «N bredder får ikke plass med X cm mellomrom»,
+  `runAdjust` nullstilles med toast. Uten valgt matte er feltet globalt som før. Frihånds-matte: samme
+  etikett på chip/popup/sidepanel.
+- Funn (ikke rettet): enkelt-matte-drag flytter ikke `runStarts` (klippet matte blir liggende igjen
+  langs dragaksen); vannrett matte har fortsatt to koordinatkonvensjoner (124) — ankeret holdes i
+  motorens. `clipStripToRoom` godtar delvis tverr-overlapp — omleggingen sjekker tverrplass selv.
+- Ny `_matArrangementRegressionTest()` (55 sjekker). Eksisterende matte-/rom-/PDF-tester grønne,
+  mattebenk 224 rader uendret.
+
+---
+
 ## 126 — GBAO10-eksport: «Ferdig» (primær) og «Eksporter på nytt» etter eksport; Esc lukker (23.10.2026, `main`, `b40496e`, pushet)
 
 Kenneth: «"Avbryt" er feil ord på knappen etter at det er eksportert.» Rapport i `docs/serie-126/`.
