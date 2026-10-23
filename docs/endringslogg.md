@@ -4,7 +4,7 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
-## 124 — Matte: start og første bredde følger velgeren, mellomrom før utlegg, én bredde kan justeres (23.10.2026, `main`, ikke pushet)
+## 124 — Matte: start og første bredde følger velgeren, mellomrom før utlegg, én bredde kan justeres (23.10.2026, `main`, `e3b5904`, pushet)
 
 Regel 26 i `spec-matte-utlegg.md`. Rapport og skjermbilder i `docs/serie-124/`.
 

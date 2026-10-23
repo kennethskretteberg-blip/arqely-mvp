@@ -1,6 +1,6 @@
 # 124 — Matteutlegg: start følger velgeren, mellomrom før utlegg, én bredde kan justeres
 
-Kjørt 23.10.2026 på `main` fra `b750c70`. **Ikke pushet.** Spec: Regel 26 i `spec-matte-utlegg.md`.
+Kjørt 23.10.2026 på `main` fra `b750c70`. Pushet som `e3b5904`. Spec: Regel 26 i `spec-matte-utlegg.md`.
 Skjermbilder i `skjermbilder/` (headless Chromium, 400 × 300-rom, EcoMat 150T fra mattebenkens katalog).
 
 ## STEG 0 — målt før endring
