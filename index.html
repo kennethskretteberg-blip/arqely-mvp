@@ -15733,43 +15733,370 @@ function _matZonePlanFor(room, rect, prod, priorMats) {
 // 130 / REGEL 27 (Kenneth 23.10.2026): FEIL 3 over er nå adressert for TVERR- og LANGS-aksen av
 // hver sone — sonegrensen er ikke lenger en vegg (se _matZoneFreeRoom): en sone får bruke ledig
 // plass i nabosonen, stoppet av vegg/hindring/forbudt sone/nabomatte, og ankres inntil nabomatta.
-// Sonedelingen (_decomposeRoomToRects) og rekkefølgen (størst først) er uendret; én matte som
-// FORTSETTER fra én sone til neste (Regel 28) er fortsatt ikke bygget (131).
+// Sonedelingen (_decomposeRoomToRects) er uendret.
+//
+// 131 / REGEL 28 (Kenneth 23.10.2026): ÉN matte som FORTSETTER fra én sone til neste er nå bygget —
+// se seksjonen «131 · ÉN MATTE GJENNOM SONENE» rett under: rekkefølgen kommer fra retningsvelgeren
+// (ikke lenger størst først), hver sone er et KAPITTEL fylt til kapasitet, kapitlene bindes med et
+// fritt hopp, og rullene velges av Σ breddelengder. Resultatet lagres som en frihånds-bane
+// (S.matPaths); _matZonePlanFor over (én matte per sone) brukes ikke lenger av nytt utlegg og står
+// kun for lesbarhet/bakoverkompatibilitet (gamle prosjekter med én matte per sone åpnes uendret).
 function _matPlanZones(room, prod) {
   const rects = _decomposeRoomToRects(room);
   if (!rects || rects.length <= 1) return null;
+  // GEOMETRIEN regnes størst først (Regel 20 pkt. 1 / 130): en liten sone som legges først ville
+  // utvidet seg (Regel 27) inn i den store, ulagte nabosonen og tatt plassen dens — målt i 131
+  // (velger i alkoven: alkoven tok stripa y 3–195 over hele rommet, hoveddelen ble utelatt).
+  // REKKEFØLGEN på kapitlene (hvor kabelen starter, hoppene) kommer derimot fra velgeren —
+  // _matZoneOrderFromPicker under, Regel 28 pkt. 1.
   rects.sort((a, b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) - ((a.x1 - a.x0) * (a.y1 - a.y0)));
-
   const wm2 = prod.watt_per_m2 || 0;
-  const zonePlans = [], excludedZones = [];
-  let totalAreaM2 = 0, totalWatt = 0;
-  // 130 / REGEL 27: sonene planlegges som dryRun, så mattene fra tidligere soner ligger IKKE i
-  // S.mats — de akkumuleres her og sendes inn som priorMats (pluss det som alt ligger i rommet).
-  // Commit-løkka (_showMatZoneProposalPanel) gjør det samme med de committede mattene, så forslag
-  // og utlegg ser nøyaktig samme naboer.
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  let chapters = [];
+  const excludedZones = [];
+  // Kapitlene planlegges uten å røre S — hvert kapittel blir «nabomatte» (priorMats, Regel 27) for
+  // det neste, pluss det som alt ligger i rommet (_matPriorMatsFor).
   let prior = _matPriorMatsFor(room, []);
   for (const rect of rects) {
     const zoneAreaM2 = (rect.x1 - rect.x0) * (rect.y1 - rect.y0) / 10000;
-    const plan = _matZonePlanFor(room, rect, prod, prior);
-    if (!plan) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
-    let mats;
-    if (plan.mode === 'multi') {
-      mats = _matPlaceMultiMats(room, plan.prod, plan.geom, plan.sol, { dryRun: true });
-    } else {
-      const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect, priorMats: prior });
-      mats = mat ? [mat] : null;
-    }
-    if (!mats || !mats.length) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
-    let coveredM2 = 0;
-    for (const m of mats) coveredM2 += m.width_cm * _matLaidLengthCm(m) / 10000;
-    const watt = Math.round(wm2 * coveredM2);
-    // 130: ligger noen bredde utenfor sonerektangelet, brukte sonen ledig plass i en nabosone (panelet sier det).
-    const extended = mats.some(m => _matRunWorldRects(m).some(r => r.x0 < rect.x0 - 0.5 || r.x1 > rect.x1 + 0.5 || r.y0 < rect.y0 - 0.5 || r.y1 > rect.y1 + 0.5));
-    zonePlans.push({ rect, mats, mode: plan.mode, zoneAreaM2, coveredM2, watt, extended });
-    totalAreaM2 += coveredM2; totalWatt += watt;
-    prior = prior.concat(mats);
+    const ch = _matChapterBlock(room, rect, prod, prior);
+    if (!ch) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
+    ch.zoneAreaM2 = zoneAreaM2;
+    chapters.push(ch);
+    prior = prior.concat([{ id: 'kap:' + chapters.length, _runRects: ch._runRects }]);
   }
-  return { zonePlans, excludedZones, totalAreaM2, totalWatt };
+  // 131 / Regel 28 pkt. 1: kapitlene i velgerens rekkefølge — startsone der pila står, så nærmeste nabo.
+  const order = _matZoneOrderFromPicker(room, chapters.map(ch => ch.rect));
+  chapters = order.map(rect => chapters.find(ch => ch.rect === rect));
+  const base = { zonePlans: [], excludedZones, totalAreaM2: 0, totalWatt: 0, chapter: true, chapters, path: null, rolls: null, kind: null, plan: null, pieces: [], totalCm: 0, coverCm: 0, uncoveredCm: 0 };
+  if (!chapters.length) return base;
+  const path = _matChaptersToPath(room, prod, chapters);
+  const totalCm = _matFreeTotalCm(path, true);   // Σ breddelengder (Regel 17) — hoppene teller ikke
+  const rolls = _matChapterRollPlans(totalCm, prod);
+  // Samme forvalg som flermatte-panelet: brukerens huskede preferanse, ellers «like» (Regel 11 pkt. 4).
+  const pref = (S.varmematte && S.varmematte._multiMatPref) || 'equal';
+  let kind = (pref === 'unequal' && rolls.mixed) ? 'unequal' : (rolls.equal ? 'equal' : (rolls.mixed ? 'unequal' : 'equal'));
+  let plan = kind === 'unequal' ? rolls.mixed : rolls.equal;
+  if (!plan && rolls.shortfall) plan = [totalCm];   // minste rull er lengre enn banen — brukes likevel, panelet varsler
+  const pieces = plan ? _matChapterPieces(path, plan, rolls.cands) : [];
+  const coverCm = plan ? Math.min(totalCm, plan.reduce((s, l) => s + l, 0)) : 0;
+  const stats = _matChapterPlanStats(plan, rolls.cands, prod);
+  const zonePlans = chapters.map(ch => {
+    const nomCm = ch.runs.reduce((s, r) => s + r.len, 0);
+    const coveredM2 = nomCm * matWidthCm / 10000;
+    return { rect: ch.rect, mode: 'chapter', mats: [], zoneAreaM2: ch.zoneAreaM2, coveredM2, watt: Math.round(wm2 * coveredM2), extended: ch.extended, runs: ch.runs.length, runLenCm: ch.runs[0].len, dir: ch.dir };
+  });
+  // «Dekker» følger geometrien (rullene × bredden); effekten er rullenes ratede (som frihånd-katalogen).
+  return { ...base, zonePlans, totalAreaM2: coverCm * matWidthCm / 10000, totalWatt: stats.watt, path, rolls, kind, plan, pieces, totalCm, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm) };
+}
+
+// ═══ 131 · ÉN MATTE GJENNOM SONENE (Regel 28, Kenneth 23.10.2026) ═══════════════════════════════
+// Bilde 2: bredde 1–6 loddrett i hoveddelen, 7–9 loddrett i alkoven — ÉN matte; mellom 6 og 7 er
+// slutt og start forskjøvet, kabelen rives løs og limes langs veggen (hopp, Regel 28 pkt. 2).
+// Til og med 130 la sone-flyten ÉN matte per sone (_matZonePlanFor → autoFillMatSerpentine/
+// _matPlaceMultiMats, hver med sin egen rull) — Regel 11 (færrest mulig matter) ble brutt av selve
+// soneinndelingen. Fra 131 legges ÉN bane gjennom alle sonene:
+//   • hver sone er et KAPITTEL (_matChapterBlock): bredder på én tverr-akse, nøyaktig 130-geometrien
+//     (sone-boks → utvidet inn i ledig naboplass → ankret inntil nabobreddene), men fylt til
+//     KAPASITET (N = maxRuns, hver bredde så lang rommet gir, kuttraster) — ingen rull per sone;
+//   • kapitlene legges i rekkefølgen RETNINGSVELGEREN gir (_matZoneOrderFromPicker, pkt. 1):
+//     startsonen er der velgerens hjørne står, deretter nærmeste sone som grenser til den forrige;
+//   • banen lagres som en FRIHÅNDS-BANE (S.matPaths, samme moves-modell 129 ga hoppet): U-sving
+//     mellom nabobredder i samme kapittel, `jump` mellom kapitlene (og der en bredde ikke starter
+//     der forrige sluttet) — tynn stiplet strek uten lengde (Regel 17);
+//   • rullene velges av Σ breddelengder over ALLE kapitler (Regel 11/22, _matFreeSplitPlan —
+//     færrest, så likest; «like» er standard, «blandet» et valg), skjøten faller der den faller
+//     (_matFreeSliceMoves, Regel 22 pkt. 4), siste bredde kortes men utelates aldri (Regel 24).
+// Valget av datamodell (STEG 0.2): frihånds-banen beskriver alt bildet viser (ulik tvers-posisjon,
+// ulik lengde, ulik retning per kapittel, hopp), og ALT nedstrøms leser den alt — tegning
+// (_drawMatPathObj), kabel (_drawMatPathCable), treff/valg/dra, panel (_matPathPanel), 124-justering
+// per bane (shiftCm/startCm), 127 (flytt alle, mellomrom per matte), PDF, romliste, materialliste,
+// undo. S.mats-modellen (én akse, én rotasjon, ~110 direkte feltlesere) er urørt: gamle prosjekter
+// med én matte per sone åpnes uendret, og rektangulære rom går fortsatt ETT-blokk-veien
+// (_matPlanZones returnerer null der, som før). Frihånd-tegningen selv er ikke endret.
+
+// Hjørnepunktet retningsvelgeren (S.varmefolie.startCorner) peker på — rommets omsluttende boks.
+function _matPickerCornerPt(room) {
+  const { left, bottom } = _matCornerFlags();
+  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
+  return { x: left ? Math.min(...xs) : Math.max(...xs), y: bottom ? Math.max(...ys) : Math.min(...ys) };
+}
+function _matRectEdgeDist(pt, r) {
+  const dx = Math.max(r.x0 - pt.x, 0, pt.x - r.x1), dy = Math.max(r.y0 - pt.y, 0, pt.y - r.y1);
+  return Math.hypot(dx, dy);
+}
+// Deler to soner en kant (minst 10 cm felles)? Sonene fra _decomposeRoomToRects ligger kant i kant.
+function _matRectsAdjacent(a, b) {
+  const T = 3, MIN_SHARED = 10;
+  const sharedY = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0), sharedX = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+  if ((Math.abs(a.x1 - b.x0) <= T || Math.abs(a.x0 - b.x1) <= T) && sharedY >= MIN_SHARED) return true;
+  if ((Math.abs(a.y1 - b.y0) <= T || Math.abs(a.y0 - b.y1) <= T) && sharedX >= MIN_SHARED) return true;
+  return false;
+}
+// Regel 28 pkt. 1: startsonen er sonen der velgerens hjørne ligger (ligger hjørnet i et innhukk
+// utenfor alle soner: den nærmeste). Deretter nærmeste sone (senteravstand) som grenser til den
+// forrige — størst først ved likhet; finnes ingen nabo til den forrige, en som grenser til noen
+// alt lagt sone, og til sist den nærmeste uansett (soner skilt av en hindring).
+function _matZoneOrderFromPicker(room, rects) {
+  if (!rects || rects.length <= 1) return (rects || []).slice();
+  const pt = _matPickerCornerPt(room);
+  const area = r => (r.x1 - r.x0) * (r.y1 - r.y0);
+  const center = r => ({ x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2 });
+  const rest = rects.slice().sort((a, b) => (_matRectEdgeDist(pt, a) - _matRectEdgeDist(pt, b)) || (area(b) - area(a)));
+  const order = [rest.shift()];
+  while (rest.length) {
+    const prev = order[order.length - 1], pc = center(prev);
+    let pool = rest.filter(r => _matRectsAdjacent(prev, r));
+    if (!pool.length) pool = rest.filter(r => order.some(o => _matRectsAdjacent(o, r)));
+    if (!pool.length) pool = rest.slice();
+    pool.sort((a, b) => {
+      const da = Math.hypot(center(a).x - pc.x, center(a).y - pc.y), db = Math.hypot(center(b).x - pc.x, center(b).y - pc.y);
+      return Math.abs(da - db) < 1 ? (area(b) - area(a)) : (da - db);
+    });
+    const next = pool[0];
+    rest.splice(rest.indexOf(next), 1);
+    order.push(next);
+  }
+  return order;
+}
+
+// ETT kapittel: breddene i én sone, fylt til kapasitet. Geometrien er autoFillMatSerpentine sin
+// zoneRect+priorMats-gren (130): sone-boks med sone-bevisst margin (_matZoneUsableRoom), retning
+// valgt på sonens EGET rektangel (Regel 27 pkt. 1), boksen utvidet inn i ledig naboplass
+// (_matZoneFreeRoom), ankring inntil nabobreddene (pkt. 3), Regel 9-mellomrom som gir etter før
+// margen, og hver bredde klippet mot rommet med _matClipRunToRoom (Regel A). Forskjellen fra 130:
+// ingen rull og ingen Regel E/H her — N = maxRuns, bredden så lang rommet gir (kuttraster). Rullen
+// velges FØRST når alle kapitlene er lagt (Σ breddelengder). Returnerer null når sonen ikke får
+// plass til én bredde i minste brukslengde (samme grense som før → sonen telles som utelatt).
+// runs[]: { r, perp0, perp1, start, len } i verdens-cm (perp = x for loddrett, y for vannrett;
+// start/len langs y hhv. x). _runRects: breddenes verdensrektangler — samme form som
+// _matRunWorldRects gir, så kapitlet kan være «nabomatte» (priorMats) for neste kapittel.
+function _matChapterBlock(room, rect, prod, priorMats) {
+  const matWidthCm = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const marginCm = _matWallMarginCm(prod);   // 128 / Regel 12
+  const gapCm = _matResolveGapCm(prod);      // Regel 9
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const minMandatoryGapCm = _matProductMinGapCm(prod);   // Regel 18
+  const userDir = (S.varmefolie?.direction === 'h' || S.varmefolie?.direction === 'v') ? S.varmefolie.direction : null;
+  const prior = _matPriorMatsFor(room, priorMats || []);
+  const usable = _matZoneUsableRoom(room, rect, marginCm);
+  const ctx0 = { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir, minMandatoryGapCm };
+  const zoneDir = userDir || _matAreaGeom(usable, ctx0).dir;
+  const zoneFree = _matZoneFreeRoom(room, rect, marginCm, zoneDir, prior, gapCm);
+  const g = _matAreaGeom(zoneFree, { ...ctx0, userDir: zoneDir });
+  if (g.maxRuns <= 0 || g.alongSpan < minLenCm) return null;
+  const dir = g.dir, n = g.maxRuns;
+  let runLengthCm = cutCm > 0 ? Math.floor(g.alongSpan / cutCm) * cutCm : g.alongSpan;
+  if (runLengthCm < minLenCm) return null;
+  const anchorAcross = _matZoneAnchorSide(zoneFree.acrossLoBy, zoneFree.acrossHiBy);
+  const anchorAlong = _matZoneAnchorSide(zoneFree.alongLoBy, zoneFree.alongHiBy);
+  // Regel 9: mellomrommet gir etter før margen; gulvet er produktets påkrevde minsteavstand.
+  const maxFitGapCm = n > 1 ? Math.max(minMandatoryGapCm, (g.acrossSpan - n * matWidthCm) / (n - 1)) : gapCm;
+  const gap = Math.max(minMandatoryGapCm, Math.min(gapCm, maxFitGapCm));
+  const totalW = n * matWidthCm + Math.max(0, n - 1) * gap;
+  const { left, bottom } = _matCornerFlags();
+  const acrossFromHigh = dir === 'v' ? !left : bottom;
+  const fromWall = !!(S.varmematte && S.varmematte.fromWall);
+  const acrossCenter = anchorAcross === 'lo' ? (g.acrossMin + totalW / 2)
+    : anchorAcross === 'hi' ? (g.acrossMax - totalW / 2)
+    : fromWall ? (acrossFromHigh ? (g.acrossMax - totalW / 2) : (g.acrossMin + totalW / 2))
+    : (g.acrossMin + g.acrossMax) / 2;
+  // Langs: ankret inntil nabobreddene når langs-kanten ble stoppet av dem, ellers sentrert i sonen
+  // (som i sone-flyten til og med 130 — slakken er under ett kuttintervall).
+  const alongCenter = anchorAlong === 'lo' ? (g.alongMin + runLengthCm / 2)
+    : anchorAlong === 'hi' ? (g.alongMax - runLengthCm / 2)
+    : (g.alongMin + g.alongMax) / 2;
+  const alongStart = alongCenter - runLengthCm / 2;
+  const perpBase = acrossCenter - totalW / 2;
+  const runs = [];
+  for (let r = 0; r < n; r++) {
+    const perpPos = perpBase + r * (matWidthCm + gap);
+    const cl = _matClipRunToRoom({ roomId: room.id, dir, perpPos, matWidthCm, marginCm, cutCm, minLenCm, nominalLen: runLengthCm, runLengthCm, alongStart, upR: false, zoneAlongMin: g.alongMin, zoneAlongMax: g.alongMax });
+    if (!(cl.len > 0)) continue;
+    runs.push({ r, perp0: perpPos, perp1: perpPos + matWidthCm, start: cl.start, len: cl.len });
+  }
+  if (!runs.length) return null;
+  const rects = runs.map(ru => dir === 'v'
+    ? { x0: ru.perp0, x1: ru.perp1, y0: ru.start, y1: ru.start + ru.len }
+    : { x0: ru.start, x1: ru.start + ru.len, y0: ru.perp0, y1: ru.perp1 });
+  // Regel 27 pkt. 2: aldri oppå (eller nærmere enn mellomrommet til) en nabobredde — vakt.
+  if (_matOverlapsMats({ _runRects: rects }, prior, gap)) {
+    // Skjer når et større kapittel alt har brukt denne sonens plass (Regel 27) — ventet utfall,
+    // sonen vises som utelatt i panelet; derfor warn, ikke error.
+    console.warn('_matChapterBlock: Regel 27 — kapitlet ville overlappet en nabomatte — sonen utelatt', { rect, dir });
+    return null;
+  }
+  const extended = rects.some(q => q.x0 < rect.x0 - 0.5 || q.x1 > rect.x1 + 0.5 || q.y0 < rect.y0 - 0.5 || q.y1 > rect.y1 + 0.5);
+  return { rect, dir, width: matWidthCm, gap, cutCm, runs, _runRects: rects, anchorAcross, anchorAlong, extended };
+}
+
+// Rekkefølgen på breddene i et kapittel og hvilken ende kabelen går inn. Første kapittel: følger
+// velgeren (124 A — 'v': venstre bredde først, start nederst for 'b'; 'h': nederste bredde først
+// for 'b', start til venstre for 'l'). Senere kapitler: den ytterste bredden og enden som ligger
+// nærmest der forrige kapittel sluttet («starter inntil nabobreddene», kortest løs kabel).
+function _matChapterRunOrder(ch, prevEnd) {
+  const { left, bottom } = _matCornerFlags();
+  const horiz = ch.dir === 'h';
+  const endPt = (ru, high) => {
+    const c = (ru.perp0 + ru.perp1) / 2, a = high ? ru.start + ru.len : ru.start;
+    return horiz ? { x: a, y: c } : { x: c, y: a };
+  };
+  if (!prevEnd || ch.runs.length === 0) {
+    const firstLow = horiz ? !bottom : left;   // 'h': r=0 er øverst (lav y); 'v': r=0 er venstre
+    const order = firstLow ? ch.runs.slice() : ch.runs.slice().reverse();
+    return { order, startHigh: horiz ? !left : bottom };
+  }
+  let best = null;
+  for (const firstLow of [true, false]) {
+    const order = firstLow ? ch.runs.slice() : ch.runs.slice().reverse();
+    for (const startHigh of [false, true]) {
+      const p = endPt(order[0], startHigh);
+      const d = Math.hypot(p.x - prevEnd.x, p.y - prevEnd.y);
+      if (!best || d < best.d - 0.01) best = { d, order, startHigh };
+    }
+  }
+  return { order: best.order, startHigh: best.startHigh };
+}
+// Kapitlene → ÉN frihånds-bane (S.matPaths-form). Nabobredder i samme kapittel som starter der
+// forrige sluttet og ligger nøyaktig NET+gap unna: `uturn`. Alt annet — kapittelskiftet, en bredde
+// som er klippet annerledes enn naboen, et avvikende mellomrom: `jump` med `from` relativt til
+// forrige nominelle ende (129). Banens mellomrom er første kapittels; et kapittel der Regel 9 måtte
+// kappe mellomrommet (trang sone) bærer sitt eget på U-svingene (move.gap, lest av
+// _matFreeDeriveRuns) — så nabobredder i samme kapittel alltid er U-svinger, ikke hopp.
+function _matChaptersToPath(room, prod, chapters) {
+  const NET = chapters[0].width, gap = chapters[0].gap;
+  const moves = [], chapterIdx = [];
+  let start = null, E = null;
+  for (const ch of chapters) {
+    const horiz = ch.dir === 'h';
+    const { order, startHigh } = _matChapterRunOrder(ch, E);
+    let high = startHigh;
+    const from = moves.length;
+    order.forEach((ru, i) => {
+      const c = (ru.perp0 + ru.perp1) / 2;
+      const aAlong = high ? ru.start + ru.len : ru.start, bAlong = high ? ru.start : ru.start + ru.len;
+      const A = horiz ? { x: aAlong, y: c } : { x: c, y: aAlong };
+      const B = horiz ? { x: bAlong, y: c } : { x: c, y: bAlong };
+      const dirSign = high ? -1 : 1;
+      if (!moves.length) {
+        start = A;
+        moves.push({ axis: ch.dir, dir: dirSign, len: ru.len, conn: 'first', side: 1 });
+      } else {
+        const eAlong = horiz ? E.x : E.y, eAcross = horiz ? E.y : E.x;
+        const dAcross = c - eAcross;
+        if (i > 0 && Math.abs(aAlong - eAlong) < 0.05 && Math.abs(Math.abs(dAcross) - (NET + ch.gap)) < 0.05) {
+          const mv = { axis: ch.dir, dir: dirSign, len: ru.len, conn: 'uturn', side: dAcross > 0 ? 1 : -1 };
+          if (Math.abs(ch.gap - gap) > 0.01) mv.gap = Math.round(ch.gap * 100) / 100;   // Regel 9 kappet mellomrommet i denne sonen
+          moves.push(mv);
+        } else {
+          moves.push({ axis: ch.dir, dir: dirSign, len: ru.len, conn: 'jump', side: 1, from: { dx: Math.round((A.x - E.x) * 100) / 100, dy: Math.round((A.y - E.y) * 100) / 100 } });
+        }
+      }
+      E = B; high = !high;
+    });
+    chapterIdx.push({ from, to: moves.length - 1, rect: ch.rect, dir: ch.dir, extended: ch.extended });
+  }
+  return { roomId: room.id, productId: prod.id, start, moves, gapCm: gap, centered: false, offX: 0, offY: 0, chapters: chapterIdx };
+}
+
+// Rullkandidater: samme filter _matFreeCatalog bruker (familie + bredde + spenning), så de
+// committede bitene løses til nøyaktig den rullen planen valgte.
+function _matChapterRollCands(prod) {
+  const widthMm = prod.mat_width_mm || 500, voltage = prod.voltage || 230;
+  return HEATING_PRODUCTS.filter(p => p.active !== false && p.product_family === prod.product_family
+      && (p.mat_width_mm || 500) === widthMm && (p.voltage || 230) === voltage && _matTotalLengthMm(p) > 0)
+    .sort((a, b) => _matTotalLengthMm(a) - _matTotalLengthMm(b));
+}
+// Regel 11: «blandet» = _matFreeSplitPlan (færrest ruller — K klatrer bare til resten er under
+// korteste rull — så likest, Regel 22 pkt. 3). «Like» = SAMME antall ruller K (pkt. 1, færrest, er
+// primær for begge), alle av én lengde, den største som går opp K ganger i Σ bredder. Begge ≤ Σ
+// (Regel 13). Like og eksakt dekning kan ikke alltid oppfylles samtidig — begge vises med tall
+// (pkt. 4). En «like»-plan som maksimerte dekningen alene ble vurdert og forkastet: i benken ga den
+// 13–29 små identiske ruller der «blandet» klarte seg med 2–3 (U #22: 29 × 1 m-ruller).
+// Går ikke engang minste rull opp i banen: `shortfall` — minste rull brukes likevel (som
+// autoFillMatSerpentine sin _matCapacityShortfall) og kalleren varsler.
+function _matChapterRollPlans(totalCm, prod) {
+  const cands = _matChapterRollCands(prod);
+  const lens = [...new Set(cands.map(p => _matTotalLengthMm(p) / 10))].sort((a, b) => a - b);
+  const mixed = cands.length ? _matFreeSplitPlan(totalCm, cands) : null;
+  let equal = null;
+  if (mixed && mixed.length) {
+    const K = mixed.length;
+    let bestL = null;
+    for (const L of lens) if (K * L <= totalCm + 1e-6 && (bestL == null || L > bestL)) bestL = L;
+    if (bestL != null) equal = Array(K).fill(bestL);
+  }
+  const shortfall = !mixed && lens.length > 0;
+  return { cands, lens, equal, mixed, shortfall, smallestCm: lens.length ? lens[0] : null };
+}
+function _matChapterPlanStats(plan, cands, prod) {
+  const wm2 = prod.watt_per_m2 || 0, matWidthCm = (prod.mat_width_mm || 500) / 10;
+  let areaM2 = 0, watt = 0;
+  const byProd = {};
+  for (const L of (plan || [])) {
+    const p = cands.find(c => Math.abs(_matTotalLengthMm(c) / 10 - L) < 0.05) || cands[0] || prod;
+    const a = p.mat_area_m2 || (L * matWidthCm / 10000);
+    areaM2 += Math.min(a, L * matWidthCm / 10000);
+    watt += p.total_effect_w || Math.round(wm2 * a);
+    const key = p.id;
+    if (!byProd[key]) byProd[key] = { name: p.name || 'Matte', count: 0 };
+    byProd[key].count++;
+  }
+  const label = Object.values(byProd).map(g => `${g.count} × ${g.name}`).join(' + ');
+  return { n: (plan || []).length, areaM2, watt, label };
+}
+// Banen delt i fysiske ruller (Regel 22 pkt. 4: matte 2 begynner der matte 1 slutter, skjøten der
+// den faller) — samme _matFreeSliceMoves frihånd-committen bruker. Hver bit får rullens egen
+// produktrad og `auto: true` (panel-tittel). Ingen id før commit.
+function _matChapterPieces(path, plan, cands) {
+  const pieces = [];
+  let acc = 0;
+  for (const L of (plan || [])) {
+    const product = cands.find(p => Math.abs(_matTotalLengthMm(p) / 10 - L) < 0.05) || cands[0];
+    const sliced = _matFreeSliceMoves(path, acc, acc + L);
+    if (sliced) pieces.push({ id: null, roomId: path.roomId, productId: product ? product.id : path.productId, start: sliced.start, moves: sliced.moves, gapCm: path.gapCm, centered: false, offX: 0, offY: 0, auto: true });
+    acc += L;
+  }
+  return pieces;
+}
+// Lane-rektangler for en bane (verden) — til vaktene mot S.mats og mot hverandre.
+function _matPathLaneRects(mp) {
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  return _matFreeDeriveRuns(mp).filter(r => _matFreeRunLen(r) > 0.5).map(r => _matFreeLaneRectWorld(r, NET));
+}
+// Commit: vakt per bit (rom-grense/margin/hindring/forbudt sone/areal via _matPathMoveValid, pluss
+// mot matter som alt ligger i rommet), så ETT undo-steg (med mindre kalleren alt tok det), id-er,
+// S.matPaths. Returnerer bitene eller null (ingenting lagt ut).
+function _matChapterCommit(room, prod, zonePlan, plan, opts) {
+  opts = opts || {};
+  const pieces = _matChapterPieces(zonePlan.path, plan, zonePlan.rolls.cands);
+  if (!pieces.length) return null;
+  if (!S.matPaths) S.matPaths = [];
+  const roomMats = (S.mats || []).filter(m => m.roomId === room.id && !m.labelOnly);
+  for (const piece of pieces) {
+    const g = _matPathMoveValid(piece);
+    if (!g.ok) {
+      console.error('_matChapterCommit: banen brøt regelverket — avbrutt', { piece, reason: g.reason });
+      if (typeof _showToast === 'function') _showToast('Utlegg avbrutt: ' + (g.reason || 'ugyldig plassering'), 'error');
+      return null;
+    }
+    if (roomMats.length && _matOverlapsMats({ _runRects: _matPathLaneRects(piece) }, roomMats, 0)) {
+      console.error('_matChapterCommit: Regel 27 — banen ville overlappet en matte i rommet — avbrutt', { piece });
+      if (typeof _showToast === 'function') _showToast('Utlegg avbrutt: ville overlappet en annen matte', 'error');
+      return null;
+    }
+  }
+  if (!opts.skipPushUndo) pushUndo();
+  for (const piece of pieces) { piece.id = S.counters.nextMatPathId++; S.matPaths.push(piece); }
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+  _trackProductUsage(pieces[0].productId);
+  S.ui.selectedMatId = null; S.ui.selectedMatRunIdx = null;
+  S.ui.selectedMatPathId = pieces[0].id; S.ui.selectedMatPathSegIdx = 0;
+  renderSidebar(); updateCtxBar();
+  if (typeof _matPathPanel === 'function') _matPathPanel();
+  render();
+  return pieces;
 }
 
 // ─── DELT KATALOGBYGGER (spec-mattebenk-n-syntetiske-rom.md, 12.09.2026) ───────────────────────
@@ -15826,82 +16153,113 @@ function _matBenchCatalog(areas, opts) {
 // eksplisitte omfang. Låst fasit derfor mot EN katalog der utfallet er entydig verifisert.
 function _matZoneRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
-  const savedRooms = S.rooms, savedMats = S.mats, savedHindrings = S.hindrings, savedZones = S.zones,
+  const savedRooms = S.rooms, savedMats = S.mats, savedMatPaths = S.matPaths, savedHindrings = S.hindrings, savedZones = S.zones,
     savedSelectedRoomId = S.ui.selectedRoomId, savedVarmematte = S.varmematte ? { ...S.varmematte } : S.varmematte,
-    savedDirection = S.varmefolie && S.varmefolie.direction, savedNextMatId = S.counters.nextMatId;
+    savedDirection = S.varmefolie && S.varmefolie.direction, savedCorner = S.varmefolie && S.varmefolie.startCorner,
+    savedNextMatId = S.counters.nextMatId;
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  // 131: kapittelplanens breddebokser (samme form som _matRunWorldRects) og en kort beskrivelse.
+  const rectsOf = zp => zp.chapters.flatMap(ch => ch._runRects);
+  const chapterDesc = zp => zp.zonePlans.map(z => `${z.runs} × ${Math.round(z.runLenCm)} (${z.dir})`).join(' | ');
   try {
     // 130: fasiten under er målt med produktets standard-mellomrom (gapCm null) og auto-retning —
-    // lås det eksplisitt så en annen økts innstillinger ikke flytter tallene.
-    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: null, fromWall: false, fromWallAlong: undefined });
-    if (S.varmefolie) S.varmefolie.direction = null;
+    // lås det eksplisitt så en annen økts innstillinger ikke flytter tallene. 131: velgeren nede til
+    // venstre og «like» ruller (standard) låses av samme grunn.
+    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: null, fromWall: false, fromWallAlong: undefined, _multiMatPref: null });
+    if (S.varmefolie) { S.varmefolie.direction = null; S.varmefolie.startCorner = 'bl'; }
     HEATING_PRODUCTS.length = 0;
     const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     HEATING_PRODUCTS.push(..._matBenchCatalog(areas, { idBase: 901000, prefix: 'ZONETEST' }));
 
     // «1102» L-form-analog (IKKE Kenneths eksakte polygon): 45 m² brutto, delt i to soner
-    // (_decomposeRoomToRects): 35,84 m² (skal ta 3 matter) + 8,76 m² (skal forbli én matte).
+    // (_decomposeRoomToRects): 35,84 m² + 8,76 m². Til og med 130: 3 + 1 matter, 32,0 m². 131 /
+    // Regel 28: ÉN matte — den store sonen fylles til kapasitet (17 bredder à 384, var 3 ruller à
+    // 8 × 360), den lille får 5 à 288 inntil den store (var 320 da den store sluttet tidligere);
+    // Σ 79,68 m → 3 × 26 m-ruller (katalogen stopper på 30 m), 39,0 m² dekket.
     const RID = 901101;
     const pts = [{ x: 0, y: 0 }, { x: 900, y: 0 }, { x: 900, y: 400 }, { x: 300, y: 400 }, { x: 300, y: 700 }, { x: 0, y: 700 }];
     const room = { id: RID, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) };
-    S.rooms = [room]; S.mats = []; S.hindrings = []; S.zones = [];
+    S.rooms = [room]; S.mats = []; S.matPaths = []; S.hindrings = []; S.zones = [];
     S.ui.selectedRoomId = RID;
 
     const prod = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 15);
     const zonePlan = _matPlanZones(room, prod);
 
-    check('1102 gir 2 soner', '2', zonePlan.zonePlans.length === 2, zonePlan.zonePlans.length);
+    check('1102 gir 2 soner = 2 kapitler i ÉN matte', '2', zonePlan.chapter === true && zonePlan.zonePlans.length === 2 && zonePlan.chapters.length === 2, zonePlan.zonePlans.length);
     const big = zonePlan.zonePlans.find(zp => zp.zoneAreaM2 > 20);
     const small = zonePlan.zonePlans.find(zp => zp.zoneAreaM2 <= 20);
-    check('Stor sone (35,84 m²): flermatte, 3 matter, 24,0 m²', 'multi, 3 matter, 24,0 m²',
-      big && big.mode === 'multi' && big.mats.length === 3 && Math.abs(big.coveredM2 - 24) < 0.05,
-      big ? `${big.mode}, ${big.mats.length} matter, ${big.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
-    // 130 / Regel 27: den lille sonen (x 0–300, y 400–700) grenser til den store langs y = 400.
-    // Den store sonens matter slutter ved y ≈ 381, så den lille får bruke stripa 400 → ~384 (ledig
-    // plass i nabosonen, ankret inntil nabomatta med mellomrommet): 5 bredder à 320 cm i stedet
-    // for 288 → 8,00 m² (var 6,96 m² da sonegrensen var en vegg), samlet 32,00 (var 30,96).
-    check('Liten sone (8,76 m²): enkelt-matte, 1 matte, 8,00 m² (130: bruker ledig plass i nabosonen; var 6,96)', 'single, 1 matte, 8,00 m²',
-      small && small.mode === 'single' && small.mats.length === 1 && Math.abs(small.coveredM2 - 8.0) < 0.05,
-      small ? `${small.mode}, ${small.mats.length} matte(r), ${small.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
-    check('Liten sone: breddene går inn i nabosonen (y < 400) uten å overlappe den store sonens matter', 'extended, ingen overlapp',
-      small && small.extended === true && small.mats.every(m => !_matOverlapsMats(m, big ? big.mats : [], 0)),
-      small ? `extended=${small.extended}, overlapp=${small.mats.some(m => _matOverlapsMats(m, big ? big.mats : [], 0))}` : 'sone ikke funnet');
-    check('Samlet dekning 32,0 m² av 45,0 m² (130; var 30,96 med sonegrensen som vegg, ~15-20 FØR STEG 1)', '~32,00 m²',
-      Math.abs(zonePlan.totalAreaM2 - 32.0) < 0.1, zonePlan.totalAreaM2.toFixed(2));
+    check('Stor sone (35,84 m²): kapittel fylt til kapasitet — 17 bredder à 384 cm (var 3 matter, 24,0 m²)', '17 × 384, 32,64 m²',
+      big && big.runs === 17 && Math.abs(big.runLenCm - 384) < 0.05 && Math.abs(big.coveredM2 - 32.64) < 0.05,
+      big ? `${big.runs} × ${big.runLenCm}, ${big.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
+    check('Liten sone (8,76 m²): 5 bredder à 288 cm inntil den store (Regel 27)', '5 × 288, 7,20 m², extended',
+      small && small.runs === 5 && Math.abs(small.runLenCm - 288) < 0.05 && Math.abs(small.coveredM2 - 7.2) < 0.05 && small.extended === true,
+      small ? `${small.runs} × ${small.runLenCm}, ${small.coveredM2.toFixed(2)} m², extended=${small.extended}` : 'sone ikke funnet');
+    check('Velger nede til venstre: kapittel 1 er den lille sonen (y ≥ 400), kapittel 2 den store', 'liten, stor',
+      zonePlan.zonePlans[0] === small && zonePlan.zonePlans[1] === big, chapterDesc(zonePlan));
+    check('Kapitlene overlapper ikke hverandre', 'ingen overlapp',
+      zonePlan.chapters.length === 2 && !_matOverlapsMats({ _runRects: zonePlan.chapters[0]._runRects }, [{ id: 'k2', _runRects: zonePlan.chapters[1]._runRects }], 0),
+      'overlapp=' + (zonePlan.chapters.length === 2 ? _matOverlapsMats({ _runRects: zonePlan.chapters[0]._runRects }, [{ id: 'k2', _runRects: zonePlan.chapters[1]._runRects }], 0) : '?'));
+    const jumps = zonePlan.path ? zonePlan.path.moves.map((m, i) => m.conn === 'jump' ? i : -1).filter(i => i >= 0) : [];
+    check('Ett hopp — fra siste bredde i kapittel 1 (bredde 5) til første i kapittel 2', '[5]', jumps.length === 1 && jumps[0] === 5, JSON.stringify(jumps));
+    check('Σ bredder 79,68 m → 3 × 26 m (like = blandet), 39,0 m² dekket, 1,68 m udekket (var 32,0 m² med 4 matter)', '7968 / [2600,2600,2600] / 39,00',
+      Math.abs(zonePlan.totalCm - 7968) < 0.05 && JSON.stringify(zonePlan.plan) === '[2600,2600,2600]' && JSON.stringify(zonePlan.rolls.mixed) === '[2600,2600,2600]'
+      && Math.abs(zonePlan.totalAreaM2 - 39.0) < 0.05 && Math.abs(zonePlan.uncoveredCm - 168) < 0.05,
+      `${zonePlan.totalCm} / ${JSON.stringify(zonePlan.plan)} / ${zonePlan.totalAreaM2.toFixed(2)} / udekket ${zonePlan.uncoveredCm}`);
+    check('Tre biter à 26 m, hver innenfor rommet (frihånd-vakten) og med Σ = rullen', '3 × 2600, ok',
+      zonePlan.pieces.length === 3 && zonePlan.pieces.every(pc => Math.abs(_matFreeTotalCm(pc) - 2600) < 0.05 && _matFreeRunsWithinRoom(pc).ok),
+      zonePlan.pieces.map(pc => `${_matFreeTotalCm(pc).toFixed(0)}:${_matFreeRunsWithinRoom(pc).ok}`).join(','));
 
-    // ── 130 / REGEL 27 — Kenneths bilde 1 (23.10.2026): L-rom 300×400 + alkove 200×200 ─────────
-    // Rød (hoveddel): 5 bredder sentrert (x 23–277, 1 cm mellomrom). Blå (alkove, x 300–500) fikk
-    // FØR 3 bredder sentrert i sonen (x 322–474) med 45 cm ledig mot rød — sonegrensen x = 300 var
-    // en vegg. Nå: 4 bredder inntil rød (x 278–481, 1 cm mellomrom), slakk mot høyre yttervegg.
-    // Loddrett retning låses (auto-retning velger 'h' for hoveddelen, og den vannrette veien har
-    // sin egen åpne koordinatsak — SPØRSMÅL 128-1), mellomrom 1 cm som i bildet.
+    // ── 130 / REGEL 27 + 131 / REGEL 28 — Kenneths bilde 1/2 (23.10.2026): L-rom 300×400 + alkove 200×200 ─
+    // Rød (hoveddel): 5 bredder sentrert (x 23–277, 1 cm mellomrom). Blå (alkove, x 300–500): 4
+    // bredder inntil rød (x 278–481), slakk mot høyre yttervegg. 131: de to er nå kapitler i ÉN matte
+    // (5 × 384 + 4 × 192 = 26,88 m → 26 m-rull, siste bredde kortes til 104), med et hopp 5 → 6.
+    // Loddrett retning låses (auto-retning velger 'h' for hoveddelen), mellomrom 1 cm som i bildet.
     S.varmematte.gapCm = 1;
     if (S.varmefolie) S.varmefolie.direction = 'v';
     const RID2 = 901130;
     const pts2 = [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }];
     const room2 = { id: RID2, floorId: null, points: pts2, walls: [], dims: [], area: Math.abs(compArea(pts2)) };
-    S.rooms = [room2]; S.mats = []; S.ui.selectedRoomId = RID2;
+    S.rooms = [room2]; S.mats = []; S.matPaths = []; S.ui.selectedRoomId = RID2;
     const prod2 = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 9);
     const zp2 = _matPlanZones(room2, prod2);
-    const red = zp2 && zp2.zonePlans.find(z => z.rect.x1 <= 300 + 1 && z.rect.y1 > 300);
-    const blue = zp2 && zp2.zonePlans.find(z => z.rect.x0 >= 300 - 1);
-    const redMat = red && red.mats[0], blueMat = blue && blue.mats[0];
-    const redRects = redMat ? _matRunWorldRects(redMat) : [], blueRects = blueMat ? _matRunWorldRects(blueMat) : [];
+    const red = zp2 && zp2.chapters.find(ch => ch.rect.x1 <= 300 + 1 && ch.rect.y1 > 300);
+    const blue = zp2 && zp2.chapters.find(ch => ch.rect.x0 >= 300 - 1);
+    const redRects = red ? red._runRects : [], blueRects = blue ? blue._runRects : [];
     const redX1 = redRects.length ? Math.max(...redRects.map(r => r.x1)) : null;
     const blueX0 = blueRects.length ? Math.min(...blueRects.map(r => r.x0)) : null;
     const blueX1 = blueRects.length ? Math.max(...blueRects.map(r => r.x1)) : null;
-    check('Bilde 1: rød (hoveddel) uendret — 5 bredder, x 23–277', '5 bredder, 23–277',
-      redMat && redMat.num_runs === 5 && Math.abs(Math.min(...redRects.map(r => r.x0)) - 23) < 0.6 && Math.abs(redX1 - 277) < 0.6,
-      redMat ? `${redMat.num_runs} bredder, ${Math.min(...redRects.map(r => r.x0)).toFixed(1)}–${redX1.toFixed(1)}` : 'ingen rød');
-    check('Bilde 1: blå (alkove) får 4 bredder (var 3)', '4', blueMat && blueMat.num_runs === 4, blueMat ? blueMat.num_runs : 'ingen blå');
+    check('Bilde 1: rød (hoveddel) — 5 bredder à 384, x 23–277', '5 × 384, 23–277',
+      red && red.runs.length === 5 && Math.abs(red.runs[0].len - 384) < 0.05 && Math.abs(Math.min(...redRects.map(r => r.x0)) - 23) < 0.6 && Math.abs(redX1 - 277) < 0.6,
+      red ? `${red.runs.length} × ${red.runs[0].len}, ${Math.min(...redRects.map(r => r.x0)).toFixed(1)}–${redX1.toFixed(1)}` : 'ingen rød');
+    check('Bilde 1: blå (alkove) får 4 bredder à 192 (var 3 før 130)', '4 × 192', blue && blue.runs.length === 4 && Math.abs(blue.runs[0].len - 192) < 0.05, blue ? `${blue.runs.length} × ${blue.runs[0].len}` : 'ingen blå');
     check('Bilde 1: blå ankres inntil rød med 1 cm mellomrom (x0 = 278)', '278',
       blueX0 != null && redX1 != null && Math.abs(blueX0 - (redX1 + 1)) < 0.1, blueX0 != null ? blueX0.toFixed(1) : 'ingen blå');
     check('Bilde 1: slakken ligger mot høyre yttervegg (blå x1 < 497,5 − 10)', '< 487,5',
       blueX1 != null && blueX1 < 487.5 && blueX1 > 470, blueX1 != null ? blueX1.toFixed(1) : 'ingen blå');
-    check('Bilde 1: ingen overlapp rød/blå, begge innenfor rommet', 'true',
-      redMat && blueMat && !_matOverlapsMats(blueMat, [redMat], 1) && _matRunsWithinRoom(blueMat, room2, _matWallMarginCm(prod2), prod2) && _matRunsWithinRoom(redMat, room2, _matWallMarginCm(prod2), prod2),
-      redMat && blueMat ? `overlapp=${_matOverlapsMats(blueMat, [redMat], 1)}` : 'mangler matte');
+    check('Bilde 1: ingen overlapp rød/blå, alle bredder innenfor rommet', 'true',
+      red && blue && !_matOverlapsMats({ _runRects: blueRects }, [{ id: 'r', _runRects: redRects }], 1) && zp2.pieces.length && zp2.pieces.every(pc => _matFreeRunsWithinRoom(pc).ok),
+      red && blue ? `overlapp=${_matOverlapsMats({ _runRects: blueRects }, [{ id: 'r', _runRects: redRects }], 1)}` : 'mangler kapittel');
+    // 131 / Regel 28: ÉN matte — velger nede til venstre: kapittel 1 = hoveddelen (start nederst i
+    // bredde 1, x 48 / y 392), hopp 5 → 6, 26 m-rull, siste bredde 104 cm (Regel 24: kortes, utelates ikke).
+    const mv2 = zp2 ? zp2.path.moves : [];
+    const lastPiece = zp2 && zp2.pieces[0];
+    const lastRun = lastPiece ? _matFreeDeriveRuns(lastPiece).slice(-1)[0] : null;
+    check('Bilde 2: én matte — kapittel 1 hoveddelen (start x 48, y 392, opp), hopp ved bredde 6, 9 bredder', 'start (48,392), jump@5, 9 moves',
+      zp2 && zp2.zonePlans[0] === zp2.zonePlans.find(z => z.rect.x1 <= 301) && Math.abs(zp2.path.start.x - 48) < 0.1 && Math.abs(zp2.path.start.y - 392) < 0.1
+      && mv2.length === 9 && mv2[0].dir === -1 && mv2[5].conn === 'jump' && mv2.filter(m => m.conn === 'jump').length === 1,
+      zp2 ? `start (${zp2.path.start.x},${zp2.path.start.y}), ${mv2.map(m => m.conn).join(',')}` : 'ingen plan');
+    check('Bilde 2: Σ 26,88 m → én 26 m-rull, 13,0 m² dekket, siste bredde 104 cm (utelates ikke)', '2688 / [2600] / 104',
+      zp2 && Math.abs(zp2.totalCm - 2688) < 0.05 && JSON.stringify(zp2.plan) === '[2600]' && zp2.pieces.length === 1 && lastRun && Math.abs(_matFreeRunLen(lastRun) - 104) < 0.05 && Math.abs(zp2.totalAreaM2 - 13.0) < 0.05,
+      zp2 ? `${zp2.totalCm} / ${JSON.stringify(zp2.plan)} / ${lastRun ? _matFreeRunLen(lastRun).toFixed(1) : '?'} / ${zp2.totalAreaM2.toFixed(2)}` : 'ingen plan');
+    // Velger i alkoven (øvre høyre): kapittel 1 blir alkoven (start øverst i bredde 1, x 456 / y 3), kapittel 2 hoveddelen.
+    S.varmefolie.startCorner = 'tr';
+    const zp2b = _matPlanZones(room2, prod2);
+    check('Bilde 2, velger i alkoven: kapittel 1 = alkoven (start x 456, y 3, ned), kapittel 2 = hoveddelen; samme Σ og rull', 'alkove først, (456,3), 2688/[2600]',
+      zp2b && zp2b.zonePlans[0].rect.x0 >= 299 && zp2b.zonePlans[1].rect.x1 <= 301 && Math.abs(zp2b.path.start.x - 456) < 0.1 && Math.abs(zp2b.path.start.y - 3) < 0.1
+      && zp2b.path.moves[0].dir === 1 && zp2b.path.moves[4].conn === 'jump' && Math.abs(zp2b.totalCm - 2688) < 0.05 && JSON.stringify(zp2b.plan) === '[2600]',
+      zp2b ? `${chapterDesc(zp2b)}, start (${zp2b.path.start.x},${zp2b.path.start.y}), ${zp2b.path.moves.map(m => m.conn).join(',')}` : 'ingen plan');
+    S.varmefolie.startCorner = 'bl';
     // Uten priorMats (båndene fra «Del så matta går opp», _matRelayWithGap) er sonegrensen fortsatt
     // grensen — bit-for-bit som før 130: 3 bredder sentrert i alkoven.
     const legacy = autoFillMatSerpentine(prod2.id, { dryRun: true, zoneRect: blue ? blue.rect : { x0: 300, y0: 0, x1: 498, y1: 198 } });
@@ -15911,13 +16269,136 @@ function _matZoneRegressionTest() {
   } finally {
     HEATING_PRODUCTS.length = 0;
     HEATING_PRODUCTS.push(...savedProducts);
-    S.rooms = savedRooms; S.mats = savedMats; S.hindrings = savedHindrings; S.zones = savedZones;
+    S.rooms = savedRooms; S.mats = savedMats; S.matPaths = savedMatPaths; S.hindrings = savedHindrings; S.zones = savedZones;
     S.ui.selectedRoomId = savedSelectedRoomId; S.varmematte = savedVarmematte;
-    if (S.varmefolie) S.varmefolie.direction = savedDirection;
+    if (S.varmefolie) { S.varmefolie.direction = savedDirection; S.varmefolie.startCorner = savedCorner; }
     S.counters.nextMatId = savedNextMatId;
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_matZoneRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
+// ─── 131 · KAPITTEL-REGRESJONSTEST (Regel 28, Kenneth 23.10.2026) ─────────────────────────────
+// Låser det 131 bygde: rekkefølgen fra velgeren (_matZoneOrderFromPicker), ett kapittel per sone i
+// ÉN bane med hopp imellom, rullvalget av Σ bredder (like/blandet), bitene per rull (skjøt der den
+// faller, siste bredde kortet men aldri utelatt), commit til S.matPaths med ett undo-steg, og at
+// rektangulære rom og gamle prosjekter (S.mats) er urørt. Samme try/finally-disiplin som
+// _matZoneRegressionTest; katalogen er benkens (150T, 16 cm raster).
+function _matChapterRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedMats = S.mats, savedMatPaths = S.matPaths, savedHindrings = S.hindrings, savedZones = S.zones,
+    savedFloors = S.floors, savedSelectedRoomId = S.ui.selectedRoomId, savedSelPath = S.ui.selectedMatPathId, savedSelMat = S.ui.selectedMatId,
+    savedVarmematte = S.varmematte ? { ...S.varmematte } : S.varmematte,
+    savedDirection = S.varmefolie && S.varmefolie.direction, savedCorner = S.varmefolie && S.varmefolie.startCorner,
+    savedNextMatId = S.counters.nextMatId, savedNextPathId = S.counters.nextMatPathId;
+  const savedRenderSidebar = renderSidebar, savedUpdateCtxBar = updateCtxBar, savedRender = render, savedToast = window._showToast;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const roomOf = (id, pts) => ({ id, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) });
+  try {
+    renderSidebar = () => {}; updateCtxBar = () => {}; render = () => {}; window._showToast = () => {};
+    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: 1, fromWall: false, fromWallAlong: undefined, _multiMatPref: null });
+    if (S.varmefolie) { S.varmefolie.direction = 'v'; S.varmefolie.startCorner = 'bl'; }
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(..._matBenchCatalog([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], { idBase: 902000, prefix: 'KAPTEST' }));
+    S.hindrings = []; S.zones = []; S.floors = []; S.matPaths = []; S.mats = [];
+    const prod = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 9);
+
+    // 1) Rekkefølgen fra velgeren — tre soner (trappeform): nede til venstre starter i den sonen som
+    //    inneholder hjørnet, så nærmeste nabo; øverst til høyre starter i toppsonen.
+    const rects3 = [{ x0: 0, y0: 0, x1: 600, y1: 200 }, { x0: 0, y0: 200, x1: 400, y1: 400 }, { x0: 0, y0: 400, x1: 200, y1: 600 }];
+    const roomT = roomOf(902001, [{ x: 0, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 200 }, { x: 400, y: 200 }, { x: 400, y: 400 }, { x: 200, y: 400 }, { x: 200, y: 600 }, { x: 0, y: 600 }]);
+    S.rooms = [roomT]; S.ui.selectedRoomId = roomT.id;
+    const ordBl = _matZoneOrderFromPicker(roomT, rects3).map(r => r.y0);
+    S.varmefolie.startCorner = 'tr';
+    const ordTr = _matZoneOrderFromPicker(roomT, rects3).map(r => r.y0);
+    S.varmefolie.startCorner = 'bl';
+    check('Rekkefølge: velger nede-venstre → nederste sone først, så oppover; øverst-høyre → toppsonen først', '[400,200,0] / [0,200,400]',
+      JSON.stringify(ordBl) === '[400,200,0]' && JSON.stringify(ordTr) === '[0,200,400]', `${JSON.stringify(ordBl)} / ${JSON.stringify(ordTr)}`);
+    check('_matRectsAdjacent: kant i kant ja, diagonal nei', 'true/false',
+      _matRectsAdjacent(rects3[0], rects3[1]) && _matRectsAdjacent(rects3[1], rects3[2]) && !_matRectsAdjacent(rects3[0], rects3[2]),
+      `${_matRectsAdjacent(rects3[0], rects3[1])}/${_matRectsAdjacent(rects3[1], rects3[2])}/${_matRectsAdjacent(rects3[0], rects3[2])}`);
+
+    // 2) Trapperommet: tre kapitler, to hopp, ingen overlapp, ingen bredde utenfor rommet.
+    const zpT = _matPlanZones(roomT, prod);
+    const jumpsT = zpT && zpT.path ? zpT.path.moves.filter(m => m.conn === 'jump').length : -1;
+    let overlapT = false;
+    if (zpT) for (let i = 0; i < zpT.chapters.length; i++) for (let j = i + 1; j < zpT.chapters.length; j++)
+      if (_matOverlapsMats({ _runRects: zpT.chapters[i]._runRects }, [{ id: 'k' + j, _runRects: zpT.chapters[j]._runRects }], 0)) overlapT = true;
+    const withinT = zpT && zpT.pieces.length > 0 && zpT.pieces.every(pc => _matFreeRunsWithinRoom(pc).ok);
+    check('Trapperom (tre soner): tre kapitler, to hopp, ingen overlapp, alle biter innenfor rommet', '3 / 2 / false / true',
+      zpT && zpT.chapters.length === 3 && jumpsT === 2 && !overlapT && withinT,
+      zpT ? `${zpT.chapters.length} / ${jumpsT} / ${overlapT} / ${withinT} (${zpT.zonePlans.map(z => z.runs + '×' + Math.round(z.runLenCm)).join(' | ')})` : 'ingen plan');
+    check('Trapperom: Σ bredder = Σ bitenes lengder + udekket (Regel 17: hoppene teller ikke)', 'lik',
+      zpT && Math.abs(zpT.totalCm - (zpT.pieces.reduce((s, pc) => s + _matFreeTotalCm(pc), 0) + zpT.uncoveredCm)) < 0.1,
+      zpT ? `${zpT.totalCm} = ${zpT.pieces.reduce((s, pc) => s + _matFreeTotalCm(pc), 0).toFixed(1)} + ${zpT.uncoveredCm.toFixed(1)}` : 'ingen plan');
+    check('Trapperom: hoppene bærer `from` relativt til forrige ende, U-svingene ikke', 'ja',
+      zpT && zpT.path.moves.every(m => (m.conn === 'jump') === !!m.from), zpT ? zpT.path.moves.map(m => m.conn + (m.from ? '@' : '')).join(',') : 'ingen plan');
+
+    // 3) Rullvalg (Regel 11): «like» = K identiske ruller med størst dekning (færrest ved likhet),
+    //    «blandet» = _matFreeSplitPlan (færrest, så likest). Begge ≤ Σ (Regel 13).
+    const rp = _matChapterRollPlans(5000, prod);
+    check('Ruller for 50,0 m: like 2 × 24 m (48,0), blandet 26 + 24 m (50,0, eksakt)', '[2400,2400] / [2400,2600]',
+      JSON.stringify(rp.equal) === '[2400,2400]' && JSON.stringify((rp.mixed || []).slice().sort((a, b) => a - b)) === '[2400,2600]',
+      `${JSON.stringify(rp.equal)} / ${JSON.stringify(rp.mixed)}`);
+    const rp2 = _matChapterRollPlans(150, prod);
+    check('Σ kortere enn minste rull (1,5 m < 2 m): shortfall, ingen plan', 'shortfall', rp2.shortfall && !rp2.equal && !rp2.mixed && rp2.smallestCm === 200, JSON.stringify({ s: rp2.shortfall, e: rp2.equal, m: rp2.mixed, min: rp2.smallestCm }));
+
+    // 4) Bilde 2-rommet: dryRun-flyten gir biter, commit legger dem i S.matPaths med ett undo-steg,
+    //    siste bredde kortet (ikke rastermultiplum) og frihånd-vakten godtar den (131-fiksen i
+    //    _matFreeClampLen). Gamle S.mats i rommet røres ikke.
+    const roomL = roomOf(902002, [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }]);
+    S.rooms = [roomL]; S.ui.selectedRoomId = roomL.id; S.matPaths = []; S.mats = [];
+    S.counters.nextMatPathId = 1;
+    const dry = _matFillRoomSmart(prod.id, { dryRun: true });
+    check('_matFillRoomSmart(dryRun) i L-rom: kind zone, ingen mat[]-objekter, én bit (26 m)', 'zone / 0 / 1',
+      dry && dry.kind === 'zone' && dry.mats.length === 0 && dry.matPaths && dry.matPaths.length === 1,
+      dry ? `${dry.kind} / ${dry.mats.length} / ${dry.matPaths && dry.matPaths.length}` : 'ingen');
+    const zpL = dry && dry.zonePlan;
+    const lastLen = zpL && zpL.pieces[0] ? _matFreeRunLen(_matFreeDeriveRuns(zpL.pieces[0]).slice(-1)[0]) : null;
+    check('Siste bredde kortet til 104 cm (ikke rastermultiplum) og godtatt av frihånd-vakten', '104 / ok',
+      lastLen != null && Math.abs(lastLen - 104) < 0.05 && _matFreeRunsWithinRoom(zpL.pieces[0]).ok, `${lastLen} / ${zpL && zpL.pieces[0] ? JSON.stringify(_matFreeRunsWithinRoom(zpL.pieces[0])) : '?'}`);
+    const committed = _matChapterCommit(roomL, prod, zpL, zpL.plan, {});
+    check('Commit: én bit i S.matPaths, auto-merket, valgt, id fra telleren', '1 / auto / valgt',
+      committed && committed.length === 1 && S.matPaths.length === 1 && S.matPaths[0].auto === true && S.ui.selectedMatPathId === S.matPaths[0].id && S.matPaths[0].id === 1,
+      `${committed && committed.length} / ${S.matPaths.length} / auto=${S.matPaths[0] && S.matPaths[0].auto} / sel=${S.ui.selectedMatPathId}`);
+    const cat = S.matPaths[0] ? _matFreeCatalog(S.matPaths[0]) : null;
+    check('Katalogen leser biten som nøyaktig 26 m-rullen (ingen udekket)', '2600 / 0',
+      cat && cat.segments.length === 1 && Math.abs(cat.segments[0].lenCm - 2600) < 0.05 && cat.uncoveredCm < 0.5 && cat.segments[0].product && cat.segments[0].product.id === S.matPaths[0].productId,
+      cat ? `${cat.segments.map(s => s.lenCm).join('+')} / ${cat.uncoveredCm}` : 'ingen');
+    undo();
+    check('Angre: biten borte i ett steg', '0', S.matPaths.length === 0, S.matPaths.length);
+    // Gammelt prosjekt: to matter (S.mats) i samme L-rom — planen rører dem ikke, og en ny plan
+    // legger seg rundt dem (Regel 27 pkt. 2), aldri oppå.
+    const oldA = { id: 701, roomId: roomL.id, productId: prod.id, x_cm: 23, y_cm: 20, width_cm: 50, length_cm: 360, num_runs: 5, last_run_length_cm: null, runLengths: null, runStarts: null, gap_cm: 1, rotation_deg: 0, startCorner: 'bl' };
+    const oldB = { id: 702, roomId: roomL.id, productId: prod.id, x_cm: 278, y_cm: 3, width_cm: 50, length_cm: 192, num_runs: 4, last_run_length_cm: 120, runLengths: null, runStarts: null, gap_cm: 1, rotation_deg: 0, startCorner: 'bl' };
+    S.mats = [oldA, oldB];
+    const snap = JSON.stringify(S.mats);
+    const zpOld = _matPlanZones(roomL, prod);
+    const overlapsOld = zpOld && zpOld.chapters.some(ch => _matOverlapsMats({ _runRects: ch._runRects }, [oldA, oldB], 0));
+    check('Gammelt prosjekt (to matter per sone i S.mats): uendret av planen, og en ny plan legger seg aldri oppå dem', 'uendret / ingen overlapp',
+      JSON.stringify(S.mats) === snap && !overlapsOld, `uendret=${JSON.stringify(S.mats) === snap} / overlapp=${overlapsOld}`);
+    S.mats = [];
+
+    // 5) Rektangulært rom: ingen soneplan (uendret ETT-blokk-vei).
+    const roomR = roomOf(902003, [{ x: 0, y: 0 }, { x: 300, y: 0 }, { x: 300, y: 400 }, { x: 0, y: 400 }]);
+    S.rooms = [roomR]; S.ui.selectedRoomId = roomR.id;
+    const zpR = _matPlanZones(roomR, prod);
+    const dryR = _matFillRoomSmart(prod.id, { dryRun: true });
+    check('Rektangulært rom: _matPlanZones null, dryRun gir single med én S.mats-matte (bit-identisk vei)', 'null / single / 1',
+      zpR === null && dryR && dryR.kind === 'single' && dryR.mats.length === 1 && !dryR.matPaths, `${zpR} / ${dryR && dryR.kind} / ${dryR && dryR.mats.length}`);
+  } finally {
+    renderSidebar = savedRenderSidebar; updateCtxBar = savedUpdateCtxBar; render = savedRender; window._showToast = savedToast;
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.mats = savedMats; S.matPaths = savedMatPaths; S.hindrings = savedHindrings; S.zones = savedZones; S.floors = savedFloors;
+    S.ui.selectedRoomId = savedSelectedRoomId; S.ui.selectedMatPathId = savedSelPath; S.ui.selectedMatId = savedSelMat;
+    S.varmematte = savedVarmematte;
+    if (S.varmefolie) { S.varmefolie.direction = savedDirection; S.varmefolie.startCorner = savedCorner; }
+    S.counters.nextMatId = savedNextMatId; S.counters.nextMatPathId = savedNextPathId;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matChapterRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
   return { ok: allOk, results };
 }
 
@@ -16032,7 +16513,8 @@ function _matFillRoomSmart(productId, opts) {
       if (opts.skipPushUndo) undo();   // rommet ble allerede tømt av kalleren — ingen sone kunne fylles, gi det tilbake
       return;
     }
-    if (opts.dryRun) return { kind: 'zone', zonePlan, mats: zonePlan.zonePlans.flatMap(zp => zp.mats) };
+    // 131: sone-rom gir én bane i biter per rull (zonePlan.pieces, S.matPaths-form) — ingen mat[]-objekter.
+    if (opts.dryRun) return { kind: 'zone', zonePlan, mats: [], matPaths: zonePlan.pieces };
     _showMatZoneProposalPanel(room, prod, zonePlan, opts);
     return;
   }
@@ -16178,51 +16660,70 @@ function _showMatMultiProposalPanel(room, prod, geom, capacityAreaM2, solved, op
 function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
   opts = opts || {};
   const netAreaM2 = (() => { try { return compArea(room.points) / 10000; } catch (e) { return null; } })();
-  const btaWm2 = netAreaM2 ? Math.round(zonePlan.totalWatt / netAreaM2) : null;
   const targetWm2 = prod.watt_per_m2 || 0;
+  const dirName = d => d === 'h' ? 'vannrett' : 'loddrett';
 
-  // DEL A STEG 1: en sone kan nå ha FLERE matter (zp.mats, plan.mode==='multi') — én linje per
-  // matte i sonen, samme «${count} × navn»-gruppering som _showMatMultiProposalPanel bruker for et
-  // helt rektangulært rom.
+  // 131 / Regel 28: én matte, ett kapittel per sone — i rekkefølgen velgeren ga.
   const zoneRows = zonePlan.zonePlans.map((zp, i) => {
-    const byProd = {};
-    for (const m of zp.mats) {
-      const p = HEATING_PRODUCTS.find(x => x.id === m.productId);
-      const key = m.productId;
-      if (!byProd[key]) byProd[key] = { name: p ? p.name : '?', runs: m.num_runs, lenCm: m.length_cm, count: 0 };
-      byProd[key].count++;
-    }
-    const matLines = Object.values(byProd).map(g =>
-      `${g.count > 1 ? g.count + ' × ' : ''}${esc(g.name)} — ${g.runs} bredder à ${Math.round(g.lenCm)}cm`).join('<br>');
-    const uncoveredM2 = Math.max(0, zp.zoneAreaM2 - zp.coveredM2);
-    // 130 / Regel 27: sonen brukte ledig plass i en nabosone — si det, så tallet ikke ser ut som en feil.
     const extNote = zp.extended ? ' · bruker ledig plass i nabosonen (Regel 27)' : '';
+    const jumpNote = i > 0 ? ' · hopp fra forrige kapittel (Regel 28)' : '';
     return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
-      <div style="font-weight:600">Sone ${i + 1} — ${zp.zoneAreaM2.toFixed(1)} m²${zp.mats.length > 1 ? ` · ${zp.mats.length} matter` : ''}</div>
-      <div style="color:var(--dim);font-size:12px">${matLines}</div>
-      <div style="font-size:12px">${zp.coveredM2.toFixed(1)} m² dekket${uncoveredM2 > 0.05 ? ` · ${uncoveredM2.toFixed(1)} m² udekket i sonen` : ''}${extNote} · ${zp.watt} W</div>
+      <div style="font-weight:600">Kapittel ${i + 1} — sone ${zp.zoneAreaM2.toFixed(1)} m²</div>
+      <div style="color:var(--dim);font-size:12px">${zp.runs} bredder à ${Math.round(zp.runLenCm)} cm · ${dirName(zp.dir)}${jumpNote}${extNote}</div>
     </div>`;
   }).join('');
+
+  const nRuns = (zonePlan.path && zonePlan.path.moves || []).length, nChap = zonePlan.chapters.length;
+  const head = `1 matte · ${nRuns} bredder · ${nChap} ${nChap === 1 ? 'kapittel' : 'kapitler'} · Σ ${(zonePlan.totalCm / 100).toFixed(1)} m`;
+
+  // Rullvalg (Regel 11 pkt. 4): «like» er standard, «blandet» et bevisst valg — begge med tall.
+  const rolls = zonePlan.rolls;
+  const optOf = (plan, kind) => plan ? { kind, lens: plan, ...(_matChapterPlanStats(plan, rolls.cands, prod)) } : null;
+  const optEqual = optOf(rolls.equal, 'equal'), optUnequal = optOf(rolls.mixed, 'unequal');
+  const sameLens = (a, b) => a && b && a.lens.length === b.lens.length && a.lens.every((l, i) => Math.abs(l - b.lens[i]) < 0.05);
+  const unequalAddsNothing = sameLens(optEqual, optUnequal);
+  const defaultKind = zonePlan.kind || 'equal';
+  const BREAKER_REF_A = 16, VOLTAGE = 230;
+  const rows = [optEqual, optUnequal].filter(Boolean).map(opt => {
+    const noteExtra = (opt.kind === 'unequal' && unequalAddsNothing) ? ' <span style="color:var(--dim);font-size:11px">(gir ingenting ekstra her)</span>' : '';
+    const sumCm = opt.lens.reduce((s, l) => s + l, 0);
+    const uncoveredM = Math.max(0, zonePlan.totalCm - sumCm) / 100;
+    const amps = Math.round((opt.watt / VOLTAGE) * 10) / 10;
+    const ampNote = amps > BREAKER_REF_A ? ` <span style="color:#f59e0b;font-weight:600">⚠ ${amps} A — over ${BREAKER_REF_A} A (uavklart grense)</span>` : ` · ${amps} A`;
+    return `<label style="display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid var(--brd);border-radius:6px;margin-bottom:6px;cursor:pointer">
+      <input type="radio" name="mat-zone-choice" value="${opt.kind}" ${opt.kind === defaultKind ? 'checked' : ''} style="margin-top:2px">
+      <span style="flex:1">
+        <div style="font-weight:600">${opt.n} ${opt.n === 1 ? 'rull' : (opt.kind === 'equal' ? 'like ruller' : 'blandede ruller')}${noteExtra}</div>
+        <div style="color:var(--dim);font-size:12px">${esc(opt.label)}</div>
+        <div style="font-size:12px">${(sumCm * (prod.mat_width_mm || 500) / 10 / 10000).toFixed(1)} m² dekket${uncoveredM > 0.05 ? ` · ${uncoveredM.toFixed(1)} m udekket (siste bredde kortes, Regel 24)` : ' · eksakt'} · ${opt.watt} W${ampNote}</div>
+      </span>
+    </label>`;
+  }).join('');
+  const shortfallNote = (!optEqual && !optUnequal && rolls.shortfall)
+    ? `<div style="margin-top:8px;padding:8px;background:rgba(245,158,11,0.1);border-radius:6px;font-size:12px;color:var(--warn,#f59e0b)">Ingen ${esc(prod.product_family || prod.name)} er kort nok for banen (${(zonePlan.totalCm / 100).toFixed(1)} m) — minste rull (${((rolls.smallestCm || 0) / 100).toFixed(1)} m) brukes.</div>`
+    : '';
 
   const excludedTotalM2 = zonePlan.excludedZones.reduce((s, e) => s + e.areaM2, 0);
   const excludedNote = zonePlan.excludedZones.length
     ? `<div style="margin-top:8px;padding:8px;background:rgba(245,158,11,0.1);border-radius:6px;font-size:12px;color:var(--warn,#f59e0b)">
-        ${excludedTotalM2.toFixed(1)} m² i ${zonePlan.excludedZones.length} sone(r) utelatt — enten for smalt/kort til én bredde, eller ingen tilgjengelig ${esc(prod.product_family || prod.name)}-størrelse passer sonens kapasitet (STEG 2).
+        ${excludedTotalM2.toFixed(1)} m² i ${zonePlan.excludedZones.length} sone(r) utelatt — for smalt/kort til én bredde i minste brukslengde.
       </div>`
     : '';
-
-  const btaNote = btaWm2 != null
-    ? `<div style="font-size:12px;margin-top:4px">Samlet: ${zonePlan.totalAreaM2.toFixed(1)} m² dekket · ${zonePlan.totalWatt} W · <b>${btaWm2} W/m² BTA</b>${targetWm2 ? ` (mål ${targetWm2} W/m²)` : ''}</div>`
-    : `<div style="font-size:12px;margin-top:4px">Samlet: ${zonePlan.totalAreaM2.toFixed(1)} m² dekket · ${zonePlan.totalWatt} W</div>`;
+  const btaWm2 = netAreaM2 ? Math.round(zonePlan.totalWatt / netAreaM2) : null;
+  const btaNote = `<div style="font-size:12px;margin-top:4px">Samlet: ${zonePlan.totalAreaM2.toFixed(1)} m² dekket · ${zonePlan.totalWatt} W${btaWm2 != null ? ` · <b>${btaWm2} W/m² BTA</b>${targetWm2 ? ` (mål ${targetWm2} W/m²)` : ''}` : ''}</div>`;
 
   const old = document.getElementById('mat-zone-panel');
   if (old) old.remove();
   const div = document.createElement('div');
   div.id = 'mat-zone-panel';
   div.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,0.35);max-width:440px;max-height:80vh;overflow-y:auto;font-size:13px;color:var(--text)';
-  div.innerHTML = `<div style="font-weight:700;font-size:14px;margin-bottom:4px">Rommet deles i ${zonePlan.zonePlans.length} soner</div>
-    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(room.name || 'Rommet')} er ikke rektangulært — hver sone fylles for seg (størst først), ledig plass i nabosonen brukes og breddene ankres inntil nabomatta (Regel 27); slakken ligger mot ytterveggene (Regel 20).</div>
+  div.innerHTML = `<div style="font-weight:700;font-size:14px;margin-bottom:4px">Én matte gjennom ${nChap} soner</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:6px">${esc(room.name || 'Rommet')} er ikke rektangulært — matta legges kapittel for kapittel i rekkefølgen retningsvelgeren gir, med et fritt hopp mellom kapitlene (Regel 28). Ledig plass i nabosonen brukes og breddene ankres inntil hverandre (Regel 27); slakken ligger mot ytterveggene (Regel 20).</div>
+    <div style="font-weight:600;margin-bottom:4px">${head}</div>
     ${zoneRows}
+    <div style="margin-top:10px;margin-bottom:4px;font-weight:600">Ruller (Σ bredder = ${(zonePlan.totalCm / 100).toFixed(1)} m)</div>
+    ${rows}
+    ${shortfallNote}
     ${btaNote}
     ${excludedNote}
     <div style="display:flex;gap:8px;margin-top:10px">
@@ -16231,39 +16732,26 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
     </div>`;
   document.body.appendChild(div);
 
-  // STEG 2 (Kenneth 19.08.2026, «Fyll rom automatisk bruker bare halve motoren»): samme resonnement
-  // som _showMatMultiProposalPanel — opts.skipPushUndo betyr kalleren allerede tømte rommet, «Avbryt»
-  // må da gi det tilbake med undo(), ikke bare fjerne panelet.
+  // opts.skipPushUndo: kalleren tømte rommet alt — «Avbryt» må gi det tilbake (undo), ikke bare lukke.
   document.getElementById('mat-zone-cancel').onclick = () => { div.remove(); if (opts.skipPushUndo) undo(); };
   document.getElementById('mat-zone-apply').onclick = () => {
-    // ÉTT undo-steg for hele batchen (samme prinsipp som snøens forhåndsvisning-før-commit-økt) —
-    // hver sone commiter med opts.exact (SAMME produkt dry-run allerede fant) + skipPushUndo. Hopper
-    // over SIN EGEN pushUndo når kalleren allerede har gjort det (opts.skipPushUndo) — ellers ville
-    // hele operasjonen (tøm rom → sone-forslag → legg ut) blitt TO angre-steg i stedet for ett.
-    if (!opts.skipPushUndo) pushUndo();
-    // DEL A STEG 1: 'single'-soner commiter uendret via autoFillMatSerpentine (samme kall som FØR
-    // denne fiksen). 'multi'-soner regner PÅ NYTT (samme mønster som 'single' allerede gjorde —
-    // ingenting i rommet skal ha endret seg mellom forhåndsvisning og klikk) og commiter via
-    // _matPlaceMultiMats — SAMME funksjon _showMatMultiProposalPanel bruker for et helt rom.
-    let placedMats = 0, placedZones = 0;
-    // 130 / Regel 27: samme nabo-akkumulering som _matPlanZones (forslaget), så utlegget ser de
-    // samme nabomattene som forhåndsvisningen gjorde.
-    let prior = _matPriorMatsFor(room, []);
-    for (const zp of zonePlan.zonePlans) {
-      if (zp.mode === 'multi') {
-        const rePlan = _matZonePlanFor(room, zp.rect, prod, prior);
-        const mats = (rePlan && rePlan.mode === 'multi')
-          ? _matPlaceMultiMats(room, rePlan.prod, rePlan.geom, rePlan.sol, { skipPushUndo: true })
-          : null;
-        if (mats && mats.length) { placedMats += mats.length; placedZones++; prior = prior.concat(mats); }
-      } else {
-        const mat = autoFillMatSerpentine(zp.mats[0].productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true, priorMats: prior });
-        if (mat) { placedMats++; placedZones++; prior = prior.concat([mat]); }
-      }
-    }
+    const chosenKind = div.querySelector('input[name="mat-zone-choice"]:checked')?.value || defaultKind;
+    let plan = chosenKind === 'unequal' ? rolls.mixed : rolls.equal;
+    if (!plan) plan = rolls.mixed || rolls.equal || (rolls.shortfall ? [zonePlan.totalCm] : null);
+    if (!plan) { div.remove(); _showToast('Ingen rull passer banen', 'error'); if (opts.skipPushUndo) undo(); return; }
+    S.varmematte = S.varmematte || {};
+    S.varmematte._multiMatPref = chosenKind;
+    // Ett undo-steg for hele utlegget (med mindre kalleren alt tok det) — vaktene kjøres FØR det tas.
+    const committed = _matChapterCommit(room, prod, zonePlan, plan, { skipPushUndo: opts.skipPushUndo });
     div.remove();
-    if (placedMats) _showToast(`${placedMats} matter lagt ut i ${placedZones} soner (${zonePlan.totalAreaM2.toFixed(1)} m²)`, 'ok');
-    else { _showToast('Ingen matter kunne legges ut — prøv igjen', 'error'); if (opts.skipPushUndo) undo(); }
+    if (committed) {
+      const sumCm = plan.reduce((s, l) => s + l, 0);
+      const m2 = Math.min(sumCm, zonePlan.totalCm) * (prod.mat_width_mm || 500) / 10 / 10000;
+      _showToast(`1 matte (${committed.length} ${committed.length === 1 ? 'rull' : 'ruller'}) lagt ut gjennom ${nChap} soner — ${nRuns} bredder, ${m2.toFixed(1)} m²${rolls.shortfall && !rolls.equal ? ' · rullen er lengre enn banen' : ''}`, rolls.shortfall && !rolls.equal ? 'warn' : 'ok');
+    } else {
+      _showToast('Ingen matte kunne legges ut — prøv igjen', 'error');
+      if (opts.skipPushUndo) undo();
+    }
   };
 }
 
@@ -16334,6 +16822,7 @@ function _matRectInsidePoly(x0, y0, x1, y1, pts) {
 // Per-bredde-rektangler (verden) for en lagt matte — fra _matRunWorldGeom, altså NØYAKTIG der
 // bredden tegnes og treffes (124), ikke en ny utledning. Bredder uten lengde utelates.
 function _matRunWorldRects(mat) {
+  if (mat && mat._runRects) return mat._runRects;   // 131: kapittel/frihånds-stubb med ferdige rektangler (priorMats)
   const out = [];
   const n = (mat && mat.num_runs) || 1;
   for (let r = 0; r < n; r++) {
@@ -16367,6 +16856,12 @@ function _matPriorMatsFor(room, extra) {
   const add = m => { if (!m || m.labelOnly) return; const k = m.id != null ? m.id : m; if (seen.has(k)) return; seen.add(k); out.push(m); };
   for (const m of (extra || [])) add(m);
   for (const m of (S.mats || [])) if (m.roomId === room.id) add(m);
+  // 131: frihånds-/kapittelbaner som alt ligger i rommet er også «andre matter» (Regel 27 pkt. 2).
+  for (const mp of (S.matPaths || [])) {
+    if (mp.roomId !== room.id || !mp.moves || !mp.moves.length) continue;
+    const rects = _matPathLaneRects(mp);
+    if (rects.length) add({ id: 'mp:' + mp.id, _runRects: rects });
+  }
   return out;
 }
 // Er rektangelet [x0,x1]×[y0,y1] ledig gulv? Inne i rommet med Regel 12-margin, unna hindringer
@@ -17236,7 +17731,9 @@ function _matFreeDeriveRuns(mp, opts) {
   for (const m of (mp.moves || [])) {
     let a, b, uturn = null;
     if (m.conn === 'uturn') {
-      const off = NET + gap;
+      // 131: et kapittel der Regel 9 måtte kappe mellomrommet (trang sone) bærer sitt eget mellomrom
+      // på U-svingen (m.gap) — ellers banens felles gap, som før.
+      const off = NET + (m.gap != null ? Math.max(0, m.gap) : gap);
       if (m.axis === 'h') { const y = E.y + m.side * off; a = { x: E.x, y }; b = { x: E.x + m.dir * m.len, y }; uturn = { x: E.x, y0: E.y, y1: y }; }
       else { const x = E.x + m.side * off; a = { x, y: E.y }; b = { x, y: E.y + m.dir * m.len }; uturn = { y: E.y, x0: E.x, x1: x }; }
     } else if (m.conn === 'jump' && m.from) {
@@ -17660,7 +18157,7 @@ function _matFreeCableMarginCm(mp) {
 // funksjonen. Rotårsaken selve DEL A retter: FØR denne fiksen kjente klippingen ALDRI til margin
 // (bare selve romveggen) — arealregningen (_matFreeUsableAreaM2) og tegningen sa 5 cm, klippingen
 // sa 0. Snappet ned til raster.
-function _matFreeClampLen(mp, axis, dir, from, len) {
+function _matFreeClampLen(mp, axis, dir, from, len, noRaster) {
   const room = S.rooms.find(r => r.id === mp.roomId);
   if (!room || !room.points || room.points.length < 3) return len;
   const marginCm = _matFreeCableMarginCm(mp);
@@ -17706,6 +18203,11 @@ function _matFreeClampLen(mp, axis, dir, from, len) {
   if (!seg) return 0;
   const limit = dir > 0 ? seg[1] : seg[0];
   const maxLen = Math.abs(limit - along);
+  // 131: vakten (_matFreeRunsWithinRoom) spør «får bredden plass?», ikke «er den et helt antall
+  // kuttintervaller?» — en siste bredde kortet av rullens slutt (skjøt midt i bredden, Regel 22
+  // pkt. 4 / Regel 24) er sjelden et rastermultiplum, og rasteravrundingen her avviste den som
+  // «utenfor rommet» (målt: 104 cm → 96 → avvist). Tegningen (ghost/kandidat) snapper som før.
+  if (noRaster) return Math.max(0, Math.min(len, maxLen));
   const { RASTER } = _matFreeConsts(_matFreeProdOf(mp));
   return Math.max(0, Math.floor(Math.min(len, maxLen) / RASTER) * RASTER);
 }
@@ -17998,7 +18500,7 @@ function _matFreeRunsWithinRoom(mp) {
   for (const r of _matFreeDeriveRuns(mp)) {
     const len = _matFreeRunLen(r);
     if (len <= 0.5) continue;
-    const maxLen = _matFreeClampLen(mp, r.axis, r.dir, r.a, len);
+    const maxLen = _matFreeClampLen(mp, r.axis, r.dir, r.a, len, true);   // 131: uten rasteravrunding, se der
     // DEL B FEIL 3 (Kenneth 19.08.2026, «frihånd starter utenfor rommet»): skill «selve
     // startpunktet ligger utenfor rommet» (maxLen=0 etter FEIL 2-fiksen i _matFreeClampLen) fra
     // «banen ble bare klippet kortere enn tegnet» — to ulike årsaker, to ulike meldinger. FØR
@@ -18164,6 +18666,7 @@ function _matFreeSliceMoves(mp, fromCm, toCm) {
       const srcMove = mp.moves[i] || { conn: 'first', side: 1 };
       const mv = { axis: r.axis, dir: r.dir, len: hi - lo, conn: srcMove.conn, side: srcMove.side };
       if (srcMove.conn === 'jump' && srcMove.from) mv.from = { ...srcMove.from };   // 129: hoppet følger med (relativt til forrige ende, som står)
+      if (srcMove.gap != null) mv.gap = srcMove.gap;   // 131: kapitlets eget mellomrom følger med
       moves.push(mv);
     }
   }
@@ -19964,17 +20467,48 @@ function _matBenchMatsResult(mats, room, prod, ruleAttribution) {
   const wasteCm = matWidthCm > 0 ? Math.round((usableM2 - coverageM2) * 10000 / matWidthCm) : 0;
   return { mats, coverageM2, usableM2, matCount: mats.length, ccDeviationCm, widthSpreadCm, marginSymmetryCm, wasteCm, illegal, ruleAttribution };
 }
+// 131: sone-rom gir nå ÉN bane (S.matPaths-form, i biter per rull) i stedet for mat[]-objekter —
+// samme måling som vei 4 (frihånd), men på motorens egne biter: dekning fra geometrien, antall =
+// ruller, lovlighet via _matFreeRunsWithinRoom (Regel 1/12/22) og parvis overlapp (Regel 27).
+function _matBenchPathsResult(paths, room, prod, ruleAttribution) {
+  paths = paths || [];
+  const marginCm = _matWallMarginCm(prod);
+  const usableM2 = _matUsableAreaM2(room, marginCm) || 0;
+  const { NET } = _matFreeConsts(prod);
+  const idealCC = (prod.mat_cc_mm || 80) / 10;
+  let coverageM2 = 0, ccSum = 0;
+  const runLens = [], illegal = [], rectSets = [];
+  for (const mp of paths) {
+    const g = _matFreeRunsWithinRoom(mp);
+    if (!g.ok) illegal.push('Regel 1/22: bane ' + (mp.id != null ? mp.id : '?') + ' — ' + g.reason);
+    coverageM2 += _matFreeCoveredAreaM2(mp);
+    ccSum += Math.abs((NET + Math.max(0, mp.gapCm || 0)) - idealCC);
+    for (const r of _matFreeDeriveRuns(mp)) { const l = _matFreeRunLen(r); if (l > 0.5) runLens.push(l); }
+    rectSets.push(_matPathLaneRects(mp));
+  }
+  const TOL = 0.5;
+  for (let i = 0; i < rectSets.length; i++) for (let j = i + 1; j < rectSets.length; j++) {
+    for (const a of rectSets[i]) for (const b of rectSets[j]) {
+      if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > TOL && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > TOL) { illegal.push('Regel 27: bane ' + i + ' overlapper bane ' + j); i = j = rectSets.length; break; }
+    }
+  }
+  const widthSpreadCm = runLens.length ? Math.max(...runLens) - Math.min(...runLens) : 0;
+  const wasteCm = NET > 0 ? Math.round((usableM2 - coverageM2) * 10000 / NET) : 0;
+  return { mats: [], matPaths: paths, coverageM2, usableM2, matCount: paths.length, ccDeviationCm: paths.length ? ccSum / paths.length : 0, widthSpreadCm, marginSymmetryCm: 0, wasteCm, illegal, ruleAttribution };
+}
 function _matBenchRunVei1(room, prod) {
   // UPC «Fyll rom automatisk»: samme _matFillRoomSmart-kall _upcPlaceMat sin auto-gren bruker
   // (etter ruting-fiksen, c4f4429) — pushUndo/_clearRoomProductCollections utelates bevisst her,
   // dryRun har ingenting å tømme eller angre.
   const out = _matFillRoomSmart(prod.id, { dryRun: true }) || { mats: [] };
+  if (out.matPaths) return _matBenchPathsResult(out.matPaths, room, prod, out.kind || 'zone');   // 131: sone-rom → én bane
   return _matBenchMatsResult(out.mats, room, prod, out.kind || 'single');
 }
 function _matBenchRunVei2(room, prod) {
   // «Fyll rom» (legacy-panelet): samme funksjon som vei 1 kaller internt — se _matBench sin egen
   // kommentar om hvorfor vei 1 og vei 2 derfor gir IDENTISKE tall for et rom som 2104 i dag.
   const out = _matFillRoomSmart(prod.id, { dryRun: true }) || { mats: [] };
+  if (out.matPaths) return _matBenchPathsResult(out.matPaths, room, prod, out.kind || 'zone');   // 131
   return _matBenchMatsResult(out.mats, room, prod, out.kind || 'single');
 }
 function _matBenchRunVei3(room, prod) {
@@ -20465,7 +20999,8 @@ function _matPathPanel() {
   }
   const segRows = Object.values(byProd).map(g =>
     row(g.count > 1 ? `${g.count} × ${esc(g.name)}` : esc(g.name), (g.areaM2 * g.count) + ' m² · rull ' + (g.lenCm / 100) + ' m')).join('');
-  const title = c.segments.length > 1 ? `Frihånds-matte — ${c.segments.length} ruller` : `Frihånds-matte — ${esc(c.product?.name || 'Matte')}`;
+  const kindName = mp.auto ? 'Auto-matte (Regel 28)' : 'Frihånds-matte';   // 131: motorens egen bane gjennom sonene
+  const title = c.segments.length > 1 ? `${kindName} — ${c.segments.length} ruller` : `${kindName} — ${esc(c.product?.name || 'Matte')}`;
   // DEL D (spec-matte-utlegg.md, Kenneth 28.08.2026): «panelet skal vise Σ breddelengder» — i
   // Kenneths egen form («4 × 1,8 m + 1 × 0,8 m = 8,0 m av 10,0 m rull»), ikke bare ett tall.
   // «Tegnet lengde» viste totalCm — riktig TALL etter Regel 23-fiksen (ingen U-svinger lenger
@@ -68784,7 +69319,7 @@ function _ctxBarItems() {
         : `${esc(segs[0]?.product?.name || 'Frihånds-matte')} — ${((segs[0]?.lenCm || 0) / 100).toFixed(1)} m · ${segs[0]?.watt || 0} W`;
       const gapCm = Math.round(mp.gapCm || 0);
       const runPanelHtml = (ui.selectedMatRunIdx != null) ? _matRunPanelHtml(_matSelectedRunTarget()) : '';   // 124 / Regel 26
-      return `<span class="ctxbar-lbl">\u{1F7EB} Frihånds-matte</span>
+      return `<span class="ctxbar-lbl">\u{1F7EB} ${mp.auto ? 'Auto-matte' : 'Frihånds-matte'}</span>
         <span style="font-size:12px;color:var(--dim);padding:0 4px">${labelHtml}</span>
         ${runPanelHtml}
         <span class="tc-sep"></span>

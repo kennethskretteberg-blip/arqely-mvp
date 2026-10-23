@@ -45,3 +45,33 @@
    to koordinatkonvensjoner.
 5. **Søyle i nabosonen:** en hindring som bare delvis blokkerer stripa stopper hele utvidelsen. Greit
    inntil videre, eller skal utvidelsen gå rundt den per bredde?
+
+# 131 — spørsmål til Kenneth
+
+1. **«Like» mot «blandet» ruller.** Begge velger først *antall* ruller etter Regel 22 pkt. 3 (K klatrer
+   bare til resten er under korteste rull), så lengder. Det gir færrest ruller (Regel 11 pkt. 1), men
+   kan koste litt dekning: Kenneth L-rom i benken (150T) får 24 m i én rull (1,92 m udekket) der to
+   ruller (22 + 3 m) hadde dekket 25,0 m, og T #20 får «like» 2 × 32 m (32,0 m²) som standard der
+   «blandet» (60 + 9 m) gir 32,5 m². Skal (a) det stå slik — færrest ruller er primært, brukeren ser
+   begge tallene, eller (b) skal «blandet» også prøve K + 1 når det dekker mer, og/eller (c) skal
+   standardvalget være det som dekker mest?
+2. **Siste bredde under ett kuttintervall.** T-rommet (600×200 + stamme 200×300) gir Σ 29,76 m →
+   28 m-rull og en siste bredde på 16 cm (24 cm raster for 100T). Regel 24 sier den da «faller bort»,
+   men frihånd-katalogen leser rullen av banens lengde, så fjernes stubben leses biten som en 26 m-rull.
+   Skal stubben (a) stå (hele rullen tegnet, som nå), (b) fjernes og rullen låses på biten
+   (`productId` må da gå foran `_matFreeCatalog`), eller (c) skal rullvalget unngå planer som ender i
+   en stubb under ett raster (velge nest største rull)?
+3. **Geometri størst først, rekkefølge fra velgeren.** Med velgeren i alkoven la første versjon alkoven
+   først og lot den (Regel 27) ta hele stripa over hoveddelen, som da ble tom. Nå regnes geometrien
+   alltid størst først (som 130) og velgeren bestemmer bare hvor kabelen starter og hoppene. Er det
+   riktig lesning av «retningsvelgeren bestemmer rekkefølgen»?
+4. **Startende i senere kapitler.** Kapittel 2 starter i den ytterste bredden og enden som ligger nærmest
+   der kapittel 1 sluttet (kortest løs kabel). I bilde 2 med 5 bredder i hoveddelen slutter bredde 5
+   øverst, så bredde 6 starter øverst (hopp 51 cm) — i tegningen din (6 bredder) starter bredde 7
+   nederst (hopp 200 cm). Skal senere kapitler heller følge velgeren konsekvent (alltid samme startende
+   som bredde 1)?
+5. **Panelet etter utlegg.** Resultatet er en frihånds-bane og får frihånd-panelet («Auto-matte (Regel 28)»:
+   bredder, dekker, udekket, effekt, areal, mellomrom, sentrer, slett) — ikke auto-panelets «Kaldt
+   felt/side», «Del så matta går opp» og Regel E-notene. Greit, eller skal noe av det løftes til banen?
+6. **Rullvalget i panelet** viser to like rader («1 rull … (gir ingenting ekstra her)») når like og
+   blandet er samme plan. Skal den andre raden skjules da?

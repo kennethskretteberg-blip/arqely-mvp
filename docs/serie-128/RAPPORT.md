@@ -446,3 +446,212 @@ før + overlappsjekk, etter) og differansen regnet på radnivå.
 - `_matPlanZones` — `prior` akkumuleres; `zp.extended`. `_showMatZoneProposalPanel` — tekst + commit-løkke.
 - `_matBenchCheckLegal` (Regel 27), `_matBench` (zoneRect-varsel bare ved lavere), `_matZoneRegressionTest`.
 - Spec `spec-matte-utlegg.md` Regel 27 (Cowork-mappa, utenfor repoet).
+
+---
+
+## 131
+
+**Auto-matte: én matte gjennom sonene (Regel 28)** — kapitlene i rekkefølgen retningsvelgeren gir,
+fritt hopp mellom kapitlene, samlet rullvalg. Committet på `main`, **ikke pushet**.
+
+### STEG 0 — målt før endring (fila fra `321722e`, port 4000)
+
+**0.1 Bilde 2-rommet (300 × 400 + alkove 200 × 200, EcoMat 100T, 1 cm mellomrom, velger nede til
+venstre, loddrett):** to matter, én per sone — rød 18 m (5 × 360, x 23–277, 9,0 m²) + blå 7 m (4 bredder
+192/192/192/120, x 278–481, 3,48 m²) = **12,48 m², 1248 W**. Med auto-retning velger hoveddelen vannrett
+(7 × 264, tegnet forskjøvet, x fra −28 — SPØRSMÅL 128-1). Skjermbilde `131-01`.
+
+**0.2 Hva en matte må kunne beskrive, og valget.** Bildet trenger bredder med ulik tvers-posisjon, ulik
+lengde (384 mot 192), potensielt ulik retning per kapittel (auto velger vannrett i hoveddelen og loddrett
+i alkoven), og en forbindelse uten lengde mellom kapitlene.
+
+| | (a) `S.mats` + `chapters[]` | (b) frihånds-bane (`S.matPaths`) |
+|---|---|---|
+| Beskriver bildet? | Bare med ny akse/anker/rotasjon per kapittel | Ja, alt — `moves[]` med `uturn`/`jump` (129), vilkårlig akse per bane |
+| Lesere som må læres opp | `S.mats`: 237 referanser; 110 direkte lesninger av `runStarts`/`runLengths`/`runAdjust`/`num_runs`/`rotation_deg`; ~80 funksjoner (tegning, kabelplan, treff, gizmo, vakt, målkjede, PDF, lister, benk) antar ÉN akse og ÉN rotasjon (`x + r·(w+gap)`, `_matRunWorldGeom`) | `S.matPaths`: 235 referanser, ~75 funksjoner — alle leser alt banen slik den er: tegning (`_drawMatPathObj`), kabel (`_drawMatPathCable`, hopp fra 129), treff/valg/dra, panel (`_matPathPanel`), 124 (`shiftCm`/`startCm`), 127 (`_matArrBegin` tar matPaths), PDF, romliste, materialliste, undo |
+| Rullvalg over Σ bredder, skjøt der den faller | Må bygges (Regel B/E/H-løkka er per matte) | Finnes: `_matFreeSplitPlan` (Regel 22 pkt. 3) + `_matFreeSliceMoves` (pkt. 4) |
+| Ulempe | Stor, risikabel omskriving av låst geometri | Panelet er frihånd-panelet (ingen «Kaldt felt/side», «Del så matta går opp»-bånd eller Regel E-noter); `_matFreeCatalog` utleder rullen av banens lengde, så hver bit må ha Σ = rullen |
+
+**Valgt: (b).** Motoren planlegger geometrien som i 130 og skriver resultatet som en frihånds-bane —
+ingen ny leser noe sted, `S.mats` urørt (gamle prosjekter og rektangulære rom bit-identiske).
+
+**0.3 Velgeren per sone i dag.** `S.varmefolie.startCorner` leses av motorene ved utlegg og lagres på
+matta (`mat.startCorner`); `_matRunOrder` (124 A) utleder første bredde (venstre/høyre, øverst/nederst)
+og startende av det, `_matCornerFlags` styrer «fra vegg»-ankring. Sonene (130) ble lagt **størst
+først**, retning per sone fra sonens eget rektangel (`_matAreaGeom`) eller brukerens lås; velgeren
+påvirket aldri sonerekkefølgen, bare bredde/ende innenfor hver matte.
+
+### Gjort (alt i `index.html`, ny seksjon «131 · ÉN MATTE GJENNOM SONENE» etter `_matPlanZones`)
+
+1. **`_matZoneOrderFromPicker(room, rects)`** (Regel 28 pkt. 1): startsone = sonen som inneholder
+   velgerens hjørne av romboksen (ligger hjørnet i et innhukk: nærmeste), deretter nærmeste sone
+   (senteravstand) som grenser til den forrige (`_matRectsAdjacent`, ≥ 10 cm felles kant), størst ved
+   likhet; uten nabo til den forrige: nabo til noen lagt sone, ellers nærmeste.
+2. **`_matChapterBlock(room, rect, prod, priorMats)`**: ett kapittel = breddene i én sone, 130-geometrien
+   (`_matZoneUsableRoom` → retning på sonens eget rektangel → `_matZoneFreeRoom` → `_matAreaGeom` →
+   ankring `_matZoneAnchorSide` → Regel 9-mellomrom → `_matClipRunToRoom` per bredde) men **fylt til
+   kapasitet**: N = maxRuns, hver bredde så lang rommet gir (kuttraster). Ingen rull per sone. Breddene
+   regnes i verdenskoordinater (vannrett har ikke 128-1-forskyvningen). Returnerer `runs[]` og
+   `_runRects` (samme form som `_matRunWorldRects`), så kapitlet er «nabomatte» for neste.
+3. **Geometri størst først, rekkefølge fra velgeren.** Målt i første forsøk: med velgeren i alkoven la
+   alkoven seg først og utvidet seg (Regel 27) inn i den ulagte hoveddelen over hele stripa y 3–195 —
+   hoveddelen fikk ikke plass til én eneste bredde og ble utelatt. Geometrien regnes derfor fortsatt
+   størst først (130); velgeren bestemmer hvilken sone kabelen *starter* i og hoppene imellom.
+4. **`_matChaptersToPath`**: kapitlene → én bane. Første kapittel: første bredde og startende fra velgeren
+   (124 A). Senere kapitler (`_matChapterRunOrder`): den ytterste bredden og enden nærmest der forrige
+   kapittel sluttet (kortest løs kabel). Nabobredder i samme kapittel som starter der forrige sluttet og
+   ligger NET + mellomrom unna: `uturn`; alt annet (kapittelskiftet, en annerledes klippet bredde):
+   `jump` med `from` relativt til forrige nominelle ende (129). Et kapittel der Regel 9 måtte kappe
+   mellomrommet (trang sone — bilde 2 med auto-retning: alkoven 200,5 cm bred etter den vannrette
+   hoveddelen, 4 bredder → 0,17 cm) bærer sitt eget mellomrom på U-svingene (`move.gap`, lest av
+   `_matFreeDeriveRuns`, kopiert av `_matFreeSliceMoves`) — ellers ble hver nabobredde der et hopp med
+   stiplet strek.
+5. **Rullvalg `_matChapterRollPlans(Σ, prod)`** (Regel 11): «blandet» = `_matFreeSplitPlan` (Regel 22
+   pkt. 3: K klatrer bare til resten er under korteste rull, så likest); «like» = samme K, alle av én
+   lengde (den største som går opp K ganger). Like er standard (pkt. 4), begge vises med tall. Første
+   versjon lot «like» maksimere dekningen alene — benken ga da 13–29 små identiske ruller (U #22: 29 ×
+   1 m) der blandet klarte seg med 2–3; forkastet. Går ikke minste rull opp i banen: minste brukes og
+   panelet varsler (som `_matCapacityShortfall`).
+6. **`_matChapterPieces`**: banen delt i biter per rull med `_matFreeSliceMoves` (skjøt der den faller,
+   Regel 22 pkt. 4), hver bit med rullens produktrad og `auto: true`. Siste bredde kortes (bilde 2:
+   192 → 104), utelates aldri (Regel 24). **`_matChapterCommit`**: vakt per bit (`_matPathMoveValid`:
+   rom/margin/hindring/forbudt sone/areal/andre baner, pluss `_matOverlapsMats` mot `S.mats` i rommet),
+   så ett undo-steg (hopper over når kalleren tok det — UPC-flyten), id-er, `S.matPaths`, valg + panel.
+7. **`_matPlanZones`** returnerer nå `{ chapter: true, chapters, path, rolls, kind, plan, pieces,
+   totalCm, coverCm, uncoveredCm, zonePlans (én per kapittel, `mats: []`), excludedZones, totalAreaM2,
+   totalWatt }`. `_matFillRoomSmart(dryRun)` gir `{ kind: 'zone', mats: [], matPaths: pieces }`.
+   `_matZonePlanFor`/den gamle per-sone-veien står igjen (bakoverkompatibilitet/lesbarhet), brukes ikke
+   av nytt utlegg.
+8. **Panelet `_showMatZoneProposalPanel`**: «Én matte gjennom N soner», hodelinje «1 matte · 9 bredder ·
+   2 kapitler · Σ 26,9 m», én rad per kapittel (bredder à lengde, retning, «hopp fra forrige kapittel»,
+   Regel 27-noten), rullvalg like/blandet med m², udekket («siste bredde kortes, Regel 24»), W, A og
+   «(gir ingenting ekstra her)» som flermatte-panelet; samlet W/m² BTA; utelatte soner. «Legg ut» →
+   `_matChapterCommit`. Skjermbilde `131-02`, `131-07`.
+9. **Frihånd-vakten (`_matFreeClampLen`, ny parameter `noRaster`)**: vakten `_matFreeRunsWithinRoom`
+   spør nå «får bredden plass?» uten å avrunde lengden til kuttrasteret. Målt: den kortede siste bredden
+   (104 cm) ble avrundet til 96 og avvist som «matta ville ligget utenfor rommet». Samme avvisning
+   rammet fra før 127-flytting (`_matArrEnd` → `_matPathMoveValid`) av en 129-bit med skjøt midt i
+   bredden. Tegning/ghost snapper som før.
+10. **Nabomatter**: `_matRunWorldRects` leser `mat._runRects` når satt (kapittel-/banestubb), og
+    `_matPriorMatsFor` tar nå også frihånds-/auto-baner i rommet som «andre matter» (Regel 27 pkt. 2).
+11. **Panel/ctxbar**: en bit med `auto: true` heter «Auto-matte (Regel 28)» / «Auto-matte» i stedet for
+    «Frihånds-matte». 124-justering per bredde, «Mellomrom i denne matta», Sentrer, Slett, 127 «Flytt
+    alle», PDF, romliste og materialliste virker uendret (det er frihånd-maskineriet).
+12. **Mattebenk**: `_matBenchPathsResult` — sone-rom måles på bitene (dekning fra geometrien, antall =
+    ruller, Regel 1/22 via `_matFreeRunsWithinRoom`, Regel 27 parvis). Regel 27-utelatelsen i
+    `_matChapterBlock` logges som `warn` (ventet utfall, vises i panelet).
+13. **Tester**: `_matZoneRegressionTest` skrevet om til kapittelplanen (11 → **17** sjekker: 1102-analog
+    2 kapitler, 17 × 384 + 5 × 288, 3 × 26 m, 39,0 m² (var 32,0 med 4 matter); bilde 1-geometrien
+    uendret (rød 5 × 384 x 23–277, blå 4 × 192 x0 = 278, slakk mot høyre vegg); bilde 2 start (48, 392),
+    hopp ved bredde 6, 26 m, siste 104; velger i alkoven; bånd-flyten uten priorMats fortsatt 3 bredder).
+    Ny **`_matChapterRegressionTest`** (14 sjekker): rekkefølge fra velgeren på tre soner,
+    `_matRectsAdjacent`, trapperom tre kapitler/to hopp/ingen overlapp/innenfor rommet, Σ = biter +
+    udekket, `from` bare på hopp, rullplaner (50 m: like 2 × 24, blandet 26 + 24; 1,5 m: shortfall),
+    dryRun-form, siste bredde 104 godtatt av vakten, commit/undo, gammelt prosjekt med to `S.mats`
+    uendret og aldri overlagt, rektangel null/single.
+
+### Bilde 2 — før og etter (loddrett låst, 1 cm mellomrom, velger nede til venstre)
+
+| | Før (`321722e`) | Etter 131 |
+|---|---|---|
+| Matter | 2 (18 m + 7 m) | **1** — én 26 m-rull |
+| Bredder | 5 × 360 + 4 (192/192/192/120) | **5 × 384 + 3 × 192 + 1 × 104** (Σ bredder 26,88 m, rull 26,0 m, 0,88 m udekket) |
+| Forbindelse 5 → 6 | to separate matter | **hopp**: stiplet, 51 cm på tvers / 5 cm på langs (bredde 5 slutter øverst, bredde 6 starter øverst) |
+| Dekning / effekt | 12,48 m² / 1248 W | **13,0 m² / 1300 W** |
+| Velger i alkoven (øvre høyre) | samme to matter | kapittel 1 = alkoven (start x 456, y 3, ned), hopp 4 → 5, kapittel 2 = hoveddelen; samme rull og Σ |
+| Skjermbilder | `131-01` | `131-02` (panel), `131-03`, `131-04` (hopp, zoom), `131-05` (valgt bane), `131-06`/`131-06b` (velger i alkoven), `131-10` (PDF) |
+
+### Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | Bilde 2: én matte, 1–5 i hoveddelen, 6–9 i alkoven inntil bredde 5, hopp stiplet, Σ = Σ bredder, rullvalg som for samme lengde i ett rom | Ja (tabellen over). Antall i hoveddelen er 5 (128-marginen: 295 cm tvers / 51). Rull: 26 m = største ≤ 26,88 m, samme som `autoFillMatSerpentine` ville valgt for et rektangel med den kapasiteten. Låst i `_matZoneRegressionTest`. |
+| 2 | Velger i alkoven: kapittel 1 alkoven, kapittel 2 hoveddelen | Ja (`131-06`, låst). |
+| 3 | T-rom med tre soner: tre kapitler, to hopp, ingen overlapp, ingen bredde over en ekte vegg | Trapperom (600×200 + 400×200 + 200×200): 3 kapitler, 2 hopp, 2 × 20 m, alle bredder innenfor rommet, ingen overlapp (`131-08`, låst i `_matChapterRegressionTest`). Merk: et T-rom 600×200 + 200×300 stamme deles i **to** soner av `_decomposeRoomToRects`, ikke tre — det ble to kapitler og ett hopp. |
+| 4 | Rektangulære rom bit-identisk | `_matPlanZones` null → uendret ETT-blokk-vei; benken: alle 106 rektangulære rader identiske (dekning og poeng). `_matRegressionTest` 2/2. |
+| 5 | Gammelt prosjekt med to matter i et L-rom: uendret | `S.mats`-modellen og alle leserne er urørt; låst i `_matChapterRegressionTest` (to matter i bilde 2-rommet: uendret av planen, og en ny plan legger seg aldri oppå dem). |
+| 6 | Mattebenk: ingen rom lavere; antall matter ned i sonerom; testbatterier grønne | Antall ruller ned eller likt i **alle** sonerom (ingen opp). Dekning opp i 16 av 19 endrede rom, **tre rom litt lavere** (se under). `_matRegressionTest` 2/2 · `_matZoneRegressionTest` **17/17** · `_matChapterRegressionTest` **14/14** · `_matFreeRegressionTest` 26/26 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_foilRegressionTest` 9/9 · `_pdfExportSmokeTest` 20/20. Ingen konsollunntak. |
+
+### Mattebenk-differansen (`_matBench(42, 64)`, før = `321722e` (130), etter = 131; vei 1 = vei 2)
+
+| Rom | Dekning før | etter | Ruller før → etter | Poeng før → etter |
+|---|---|---|---|---|
+| 1102 Garderobe | 83,9 % | **90,8 %** | 2 → 2 | −98603 → −33000 |
+| 1108 Garderobe (L) | 54,9 % | **84,1 %** | 2 → 1 | −48038 → −59878 |
+| Kenneth L-rom (500×400, hakk) | 86,4 % | 84,1 % ↓ | 2 → 1 | −34214 → −59878 |
+| L #16 | 73,7 % | **82,2 %** | 2 → 1 | −41313 → −25341 |
+| U #17 | 0,0 % | **79,1 %** | 1 → 1 | −43252 → −13406 |
+| L #18 | 89,0 % | 89,3 % | 2 → 1 | −30694 → −70098 |
+| T #19 | 85,7 % | **92,8 %** | 2 → 2 | −28329 → −129711 |
+| T #20 | 97,4 % | 96,0 % ↓ | 2 → 2 | −91370 → −66655 |
+| T #21 | 91,8 % | 91,8 % | 2 → 1 | −97643 → −60893 |
+| U #22 | 63,4 % | **89,2 %** | 3 → 2 | −71550 → −91913 |
+| L #23 | 68,1 % | 69,0 % | 2 → 1 | −37838 → −88723 |
+| hindring #24 | 69,1 % | **82,6 %** | 2 → 1 | −37252 → −20256 |
+| hindring #25 | 45,1 % | **61,0 %** | 1 → 1 | −32681 → 849 |
+| hindring #26 | 66,0 % | **75,8 %** | 1 → 1 | −6328 → −20902 |
+| hindring #27 | 81,7 % | 79,0 % ↓ | 2 → 1 | −3320 → −37559 |
+| hindring #28 | 66,1 % | **76,0 %** | 2 → 1 | −20882 → −59160 |
+| hindring #29 | 66,9 % | **83,6 %** | 2 → 1 | −29291 → −79497 |
+| hindring #30 | 84,0 % | 84,0 % | 2 → 1 | −10276 → −8930 |
+| hindring #31 | 48,5 % | **78,3 %** | 1 → 1 | −25818 → 293 |
+
+224 rader, 38 endret (19 rom × 2 veier), 29 ulovlige før og etter (alle i vei 4/frihånd, kjent),
+ingen ny ulovlig. Konsollfeil fra benken 47 → **20** (Regel H-løkkene per sone er borte), 2 `warn`
+(Regel 27-utelatelse i hindring #24, der 130 avviste samme 24 cm-sone med Regel D). Poengene faller
+i flere rom selv om dekningen stiger: `_matBenchScore` straffer «breddespredning» (ulik lengde i to
+kapitler, f.eks. 384 mot 192) og måler endevegg-symmetri som 0 for en bane — poengformelen er laget for
+én sentrert blokk per matte og sier lite om en kapittelbane. Ikke rørt.
+
+**De tre rommene med lavere dekning** skyldes rullvalget, ikke geometrien (Σ bredder er ≥ før i alle):
+- *Kenneth L-rom* og *hindring #27* (benkens 150T, auto-retning): Σ 25,92 m → blandet stopper ved
+  K = 1 (24 m, rest 1,92 m < korteste rull 2 m — Regel 22 pkt. 2), 12,0 m² med **én** rull; 130 la to
+  ruller (18 m + 7 m / 18 m + 8 m) = 12,4 m². Regel 11 pkt. 1 (færrest matter) foran pkt. 2 (dekning).
+  Vannrett hoveddel i 130-tallet har dessuten 128-1-forskyvningen i grunnlaget.
+- *T #20*: Σ 65,6 m → «like» (standard) 2 × 32 m = 32,0 m², «blandet» 60 m + 9 m = 32,5 m²; 130 fikk
+  32,48 m² med flermatte-løseren. Brukeren ser begge i panelet.
+
+### Funn utenfor scope (ikke rettet)
+
+- **Siste bredde kan bli kortere enn ett kuttintervall** (T-rom 600×200 + 200×300 stamme: Σ 29,76 m →
+  28 m-rull, siste bredde **16 cm**). Regel 24 sier «først når det gjenstående er under ett kuttintervall
+  faller den bort», men `_matFreeCatalog` utleder rullen av banens lengde (Σ ≥ rullen), så å fjerne
+  stubben ville lest biten som en kortere rull. Den gamle motoren kunne også gi en sub-raster siste
+  bredde (`last_run_length_cm`). Spørsmål 131-2.
+- **«Like» mot «blandet»**: med `_matFreeSplitPlan` sin stopp («rest under korteste rull») kan en annen
+  K-kombinasjon dekke mer (Kenneth L-rom: K = 2 gir 25,0 m mot 24,0). Spørsmål 131-1.
+- **Auto-retning per kapittel** gir vannrett hoveddel + loddrett alkove i bilde 2 (`131-09`, 3 × 9 m
+  med «like», 13,5 m²; blandet 1 × 26 m, 13,0 m²). Virker (kapitlet bærer eget mellomrom), men
+  hoveddelen får 7 × 288 i stedet for 5 × 384 — retningsvalget er fortsatt estimatet fra 128-1.
+- **Panelet etter commit er frihånd-panelet**: «Kaldt felt/side», «Del så matta går opp»-båndet og
+  Regel E-notene (fra `S.mats`-panelet) finnes ikke for en bane. Bredder/Dekker/Udekket/Effekt/areal vises.
+- **`_matZonePlanFor`/`_matMultiSolve` per sone** er nå død for nytt utlegg (står for lesbarhet);
+  benkens «zoneRect-avvik»-blokk finner ingen `mode === 'single'` lenger og er en no-op.
+- **Materiallista i headless-testen** ga tom liste for EcoMat — `_collectMaterialItems` krever trolig
+  prosjekt-/romkontekst harnessen ikke setter; PDF-spesifikasjonen viser «Matte · EcoMat 100T 0,5×26m ·
+  1 stk · 1300 W» (`131-10`), og romstatistikken 13,0 m² / 1300 W.
+
+### Skal IKKE — holdt
+Ingen restfelt på tvers (132). Frihånd-tegningen er ikke endret (kun datamodellen gjenbrukt; `move.gap`
+og `noRaster` er tillegg som ikke endrer tegneflyten). Ikke pushet.
+
+### Verifiseringsmetode
+`new Function` på inline-scriptet; headless Chrome 156 (CDP, port 9333) mot `serve-varmeplan.js` på
+4000 uten innlogging — harness i `/tmp/cdp131/` (`cdp.mjs`, `setup130.js`, `steg0_131.mjs` (i
+`/tmp/cdp130/`), `steg2.mjs`, `measure_zone.mjs`, `lower.mjs`, `t20.mjs`, `tests.mjs`, `bench.mjs`,
+`shots.mjs`, `zoom.mjs`). Utlegg via `_matFillRoomSmart(dryRun)` og ekte klikk på «Legg ut»; vakter,
+overlapp og lengder målt på `S.matPaths` etterpå; PDF fanget via `jsPDF.save`-stubb og rendret med
+`pdftoppm`. Benken kjørt mot 130-kjøringen (`/tmp/cdp130/bench-after2.json`) og differansen regnet på
+radnivå.
+
+### Endringslogg (kode, alt i `index.html`)
+- Nye: `_matPickerCornerPt`, `_matRectEdgeDist`, `_matRectsAdjacent`, `_matZoneOrderFromPicker`,
+  `_matChapterBlock`, `_matChapterRunOrder`, `_matChaptersToPath`, `_matChapterRollCands`,
+  `_matChapterRollPlans`, `_matChapterPlanStats`, `_matChapterPieces`, `_matPathLaneRects`,
+  `_matChapterCommit`, `_matBenchPathsResult`, `_matChapterRegressionTest`.
+- Omskrevet: `_matPlanZones` (kapittelplan), `_showMatZoneProposalPanel`, `_matZoneRegressionTest`.
+- Endret: `_matFillRoomSmart` (dryRun → `matPaths`), `_matRunWorldRects` (`_runRects`),
+  `_matPriorMatsFor` (baner som naboer), `_matFreeDeriveRuns` (`move.gap`), `_matFreeSliceMoves`
+  (kopierer `gap`), `_matFreeClampLen` (`noRaster`) + `_matFreeRunsWithinRoom`, `_matPathPanel` og
+  ctxbar-etiketten (`auto`), `_matBenchRunVei1/2`.
+- Spec `spec-matte-utlegg.md` Regel 28 (Cowork-mappa, utenfor repoet): auto bekreftet og bygget.
