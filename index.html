@@ -14635,12 +14635,15 @@ function _matRunPanelHtml(t) {
   const a = _matRunAdjustOf(t);
   const n = t.kind === 'mat' ? (t.obj.num_runs || 1) : t.obj.moves.length;
   const fmt = v => (Math.round(v * 10) / 10).toString().replace('.', ',');
-  const parts = [`Bredde ${t.r + 1} av ${n}`, `${fmt(a.lenCm)} cm`];
+  const crossMv = t.kind === 'matpath' && t.obj.moves[t.r] && t.obj.moves[t.r].cross;   // 132 / Regel 29: tverrstykke
+  const parts = [`Bredde ${t.r + 1} av ${n}${crossMv ? ' · tverr' : ''}`, `${fmt(a.lenCm)} cm`];
   if (a.acrossCm) parts.push(`forskjøvet ${a.acrossCm > 0 ? '+' : '−'}${fmt(Math.abs(a.acrossCm))} cm`);
   if (a.startCm) parts.push(`start +${fmt(a.startCm)} cm`);
   const hasAdj = !!(a.acrossCm || a.startCm);
   const issue = !hasAdj ? null : (t.kind === 'mat' ? _matRunPlacementIssue(t.obj, t.r) : _matPathRunIssue(t.obj, t.r));
-  const short = t.kind === 'mat' ? _matRunTooShortNote(t.obj, t.r) : (() => {
+  // Regel 29 pkt. 2: et tverrstykke er lovlig fra to kabelstrenger (2 × CC) — minstelengden for en
+  // bredde (mat_min_length_mm) gjelder ikke det.
+  const short = t.kind === 'mat' ? _matRunTooShortNote(t.obj, t.r) : crossMv ? null : (() => {
     const prod = _matFreeProdOf(t.obj); const minLenCm = ((prod && prod.mat_min_length_mm) || 0) / 10;
     return (minLenCm > 0 && a.lenCm > 0 && a.lenCm < minLenCm - 0.05) ? `Bredde ${t.r + 1} er ${Math.round(a.lenCm)} cm — under minste lengde ${Math.round(minLenCm)} cm` : null;
   })();
@@ -15768,7 +15771,27 @@ function _matPlanZones(room, prod) {
   // 131 / Regel 28 pkt. 1: kapitlene i velgerens rekkefølge — startsone der pila står, så nærmeste nabo.
   const order = _matZoneOrderFromPicker(room, chapters.map(ch => ch.rect));
   chapters = order.map(rect => chapters.find(ch => ch.rect === rect));
-  const base = { zonePlans: [], excludedZones, totalAreaM2: 0, totalWatt: 0, chapter: true, chapters, path: null, rolls: null, kind: null, plan: null, pieces: [], totalCm: 0, coverCm: 0, uncoveredCm: 0 };
+  // 132 / Regel 29: restfelt for smale for en bredde i hovedretningen fylles med tverrlagte stykker
+  // — egne kapitler SIST i banen (rullen velges av hele Σ; er den brukt opp, er det stykkene som
+  // blir udekket). Nærmeste felt til forrige kapittel først (kortest løs kabel).
+  const cross = chapters.length ? _matCrossFillChapters(room, prod, prior) : { chapters: [], fields: [] };
+  if (cross.chapters.length) {
+    const center = r => ({ x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2 });
+    const rest = cross.chapters.slice();
+    let last = chapters[chapters.length - 1].rect;
+    while (rest.length) {
+      const lc = center(last);
+      rest.sort((a, b) => Math.hypot(center(a.rect).x - lc.x, center(a.rect).y - lc.y) - Math.hypot(center(b.rect).x - lc.x, center(b.rect).y - lc.y));
+      const next = rest.shift();
+      next.zoneAreaM2 = (next.rect.x1 - next.rect.x0) * (next.rect.y1 - next.rect.y0) / 10000;
+      chapters.push(next); last = next.rect;
+    }
+    // En sone som ble utelatt i 131 men nå har fått tverrstykker, er ikke lenger «utelatt».
+    const hit = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0.5 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0.5;
+    for (let i = excludedZones.length - 1; i >= 0; i--) if (cross.chapters.some(ch => ch._runRects.some(r => hit(r, excludedZones[i].rect)))) excludedZones.splice(i, 1);
+  }
+  const restFields = cross.fields;
+  const base = { zonePlans: [], excludedZones, restFields, totalAreaM2: 0, totalWatt: 0, chapter: true, chapters, path: null, rolls: null, kind: null, plan: null, pieces: [], totalCm: 0, coverCm: 0, uncoveredCm: 0 };
   if (!chapters.length) return base;
   const path = _matChaptersToPath(room, prod, chapters);
   const totalCm = _matFreeTotalCm(path, true);   // Σ breddelengder (Regel 17) — hoppene teller ikke
@@ -15784,7 +15807,7 @@ function _matPlanZones(room, prod) {
   const zonePlans = chapters.map(ch => {
     const nomCm = ch.runs.reduce((s, r) => s + r.len, 0);
     const coveredM2 = nomCm * matWidthCm / 10000;
-    return { rect: ch.rect, mode: 'chapter', mats: [], zoneAreaM2: ch.zoneAreaM2, coveredM2, watt: Math.round(wm2 * coveredM2), extended: ch.extended, runs: ch.runs.length, runLenCm: ch.runs[0].len, dir: ch.dir };
+    return { rect: ch.rect, mode: 'chapter', mats: [], zoneAreaM2: ch.zoneAreaM2, coveredM2, watt: Math.round(wm2 * coveredM2), extended: ch.extended, runs: ch.runs.length, runLenCm: ch.runs[0].len, dir: ch.dir, cross: !!ch.cross, fieldNarrowCm: ch.fieldNarrowCm };
   });
   // «Dekker» følger geometrien (rullene × bredden); effekten er rullenes ratede (som frihånd-katalogen).
   return { ...base, zonePlans, totalAreaM2: coverCm * matWidthCm / 10000, totalWatt: stats.watt, path, rolls, kind, plan, pieces, totalCm, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm) };
@@ -15931,6 +15954,199 @@ function _matChapterBlock(room, rect, prod, priorMats) {
   return { rect, dir, width: matWidthCm, gap, cutCm, runs, _runRects: rects, anchorAcross, anchorAlong, extended };
 }
 
+// ═══ 132 · RESTFELT PÅ TVERS (Regel 29, Kenneth 23.10.2026) ═══════════════════════════════════
+// «Helt til høyre i bildet så ønsker jeg å fylle opp rommet med matter som legges 90 grader rotert i
+// små lengder ved siden av hverandre. Det er slik det i praksis blir gjort.» Etter at 131-kapitlene er
+// lagt (fylt til kapasitet) står det igjen striper som er for smale for én bredde i hovedretningen —
+// slakken på tvers av et kapittel, en sone som ble utelatt, plassen mellom to kapitler. Regel 29:
+//   • et restfelt er kandidat når det er for smalt for en vanlig bredde langs sin lange akse, men
+//     minst 2 × CC + 8 + 5 cm bredt på tvers (150T: 29 cm, 60T/100T: 37 cm) — to kabelstrenger,
+//     Kenneths naboavstand (MAT_CROSS_NEIGHBOUR_CM) og kabelkravet mot vegg (MAT_CABLE_WALL_CM,
+//     128). Under det blir feltet stående udekket, og panelet sier det (ingen tvang);
+//   • feltet fylles med STYKKER à mattebredde lagt side om side langs feltets lange akse, hvert så
+//     langt som feltet gir (kuttraster) minus naboavstand mot nabomatta / Regel 12-margin mot vegg,
+//     minst 2 × CC (ett kuttintervall) — som et nytt KAPITTEL av samme matte (Regel 28-hopp inn,
+//     U-sving mellom stykkene, brukerens mellomrom (Regel 9) mellom dem);
+//   • kapitlene kommer SIST i banen: rullen velges av hele Σ (Regel 11/22), og er rullen brukt opp,
+//     er det stykkene som blir udekket (Regel 22 pkt. 2-mønster) — aldri hovedbreddene;
+//   • aldri tverrstykker der en vanlig bredde får plass (da skulle 131 ha lagt den — vaktes og logges).
+// Datamodellen er 131 sin: et tverrkapittel har samme form som _matChapterBlock gir (runs/_runRects
+// med dir = feltets smale akse), _matChaptersToPath lager U-svinger og hopp som før og merker hvert
+// move `cross: true` (etikett «tverr» i panel, plan og PDF). S.mats og rektangulære rom er urørt.
+const MAT_CROSS_NEIGHBOUR_CM = 8;   // Kenneth 23.10.2026: «8 cm avstand fra nabomatte» (stykkets ende → nabomattas nett)
+// Regel 29 pkt. 3: minste ledige bredde på et restfelt — lest fra produktet og 128-konstanten.
+function _matCrossMinFieldCm(prod) {
+  const cc = ((prod && prod.mat_cc_mm) || 80) / 10;
+  return 2 * cc + MAT_CROSS_NEIGHBOUR_CM + MAT_CABLE_WALL_CM;
+}
+// Regel 29 pkt. 2: minste stykke = to kabelstrenger (150T 16 cm, 60T/100T 24 cm).
+function _matCrossMinPieceCm(prod) { return 2 * (((prod && prod.mat_cc_mm) || 80) / 10); }
+
+// Maksimale ledige akseparallelle rektangler i rommet: gulv inne i polygonet, utenfor hindringer og
+// forbudte soner, utenfor `occupied` (lagte bredder, verdensrektangler). Komprimert rutenett av alle
+// kantkoordinater (rom-/hindrings-/sonehjørner, breddekanter): hver rute er helt ledig eller helt
+// opptatt for ortogonale rom, så søket (radpar × sammenhengende kolonneløp, bare løp som ikke kan
+// vokse opp eller ned) gir nøyaktig de maksimale rektanglene. Skrå vegger: rutesenteret avgjør, og
+// stykkene vaktes etterpå med _matRectBlockedBy. Størst først.
+function _matFreeFieldRects(room, occupied) {
+  const pts = room.points;
+  if (!pts || pts.length < 3) return [];
+  occupied = occupied || [];
+  const hind = (S.hindrings || []).filter(h => h.roomId === room.id && h.points && h.points.length >= 3);
+  const fz = (S.zones || []).filter(z => z.roomId === room.id && z.type === 'forbidden' && z.points && z.points.length >= 3);
+  const xs = new Set(), ys = new Set();
+  const add = (x, y) => { xs.add(Math.round(x * 100) / 100); ys.add(Math.round(y * 100) / 100); };
+  for (const q of pts) add(q.x, q.y);
+  for (const h of hind) for (const q of h.points) add(q.x, q.y);
+  for (const z of fz) for (const q of z.points) add(q.x, q.y);
+  for (const r of occupied) { add(r.x0, r.y0); add(r.x1, r.y1); }
+  const X = [...xs].sort((a, b) => a - b), Y = [...ys].sort((a, b) => a - b);
+  const nx = X.length - 1, ny = Y.length - 1;
+  if (nx < 1 || ny < 1 || nx * ny > 40000) return [];
+  const F = new Uint8Array(nx * ny);
+  for (let j = 0; j < ny; j++) {
+    if (Y[j + 1] - Y[j] < 0.05) continue;
+    const cy = (Y[j] + Y[j + 1]) / 2;
+    for (let i = 0; i < nx; i++) {
+      if (X[i + 1] - X[i] < 0.05) continue;
+      const cx = (X[i] + X[i + 1]) / 2;
+      if (!ptInPoly(cx, cy, pts)) continue;
+      if (hind.some(h => ptInPoly(cx, cy, h.points)) || fz.some(z => ptInPoly(cx, cy, z.points))) continue;
+      if (occupied.some(r => cx > r.x0 && cx < r.x1 && cy > r.y0 && cy < r.y1)) continue;
+      F[j * nx + i] = 1;
+    }
+  }
+  const rowFree = (j, i, i1) => { for (let k = i; k <= i1; k++) if (!F[j * nx + k]) return false; return true; };
+  const out = [];
+  const col = new Uint8Array(nx);
+  for (let j0 = 0; j0 < ny; j0++) {
+    for (let i = 0; i < nx; i++) col[i] = F[j0 * nx + i];
+    for (let j1 = j0; j1 < ny; j1++) {
+      if (j1 > j0) for (let i = 0; i < nx; i++) col[i] = col[i] && F[j1 * nx + i] ? 1 : 0;
+      let i = 0, any = false;
+      while (i < nx) {
+        if (!col[i]) { i++; continue; }
+        let i1 = i; while (i1 + 1 < nx && col[i1 + 1]) i1++;
+        any = true;
+        const up = j0 > 0 && rowFree(j0 - 1, i, i1), dn = j1 + 1 < ny && rowFree(j1 + 1, i, i1);
+        if (!up && !dn) out.push({ x0: X[i], x1: X[i1 + 1], y0: Y[j0], y1: Y[j1 + 1] });
+        i = i1 + 1;
+      }
+      if (!any) break;
+    }
+  }
+  for (const r of out) r.areaCm2 = (r.x1 - r.x0) * (r.y1 - r.y0);
+  return out.sort((a, b) => b.areaCm2 - a.areaCm2);
+}
+// Hva begrenser hver kant av et ledig felt: en lagt bredde (`mat`, og `full` når bredder dekker hele
+// kanten) eller alt annet — vegg, hindring, forbudt sone. Klaringen følger av det: mot en matte
+// naboavstanden (stykkets ende) eller mellomrommet (stykkets side), mot vegg Regel 12-marginen.
+function _matFieldEdgeBounds(field, occupied) {
+  const T = 0.5;
+  const info = side => {
+    const vert = side === 'x0' || side === 'x1';
+    const span = vert ? (field.y1 - field.y0) : (field.x1 - field.x0);
+    let cover = 0;
+    for (const r of (occupied || [])) {
+      const touches = side === 'x0' ? Math.abs(r.x1 - field.x0) <= T : side === 'x1' ? Math.abs(r.x0 - field.x1) <= T
+        : side === 'y0' ? Math.abs(r.y1 - field.y0) <= T : Math.abs(r.y0 - field.y1) <= T;
+      if (!touches) continue;
+      const ov = vert ? Math.min(r.y1, field.y1) - Math.max(r.y0, field.y0) : Math.min(r.x1, field.x1) - Math.max(r.x0, field.x0);
+      if (ov > T) cover += ov;
+    }
+    return { mat: cover > T, full: cover >= span - 1 };
+  };
+  return { x0: info('x0'), x1: info('x1'), y0: info('y0'), y1: info('y1') };
+}
+// ETT tverrkapittel i ett ledig felt — eller hvorfor ikke: { skipped: 'normal' | 'under' | 'short' |
+// 'blocked' }. Stykkene ligger langs feltets SMALE akse (dir 'h' når feltet er smalt i x) og stables
+// langs den lange. Ankring som 131: inntil nabomatta når den siden er en matte (slakken mot veggen,
+// Regel 20 pkt. 4), begge vegger → sentrert, begge matter → lav side.
+function _matCrossFieldChapter(room, prod, field, occupied) {
+  const NET = (prod.mat_width_mm || 500) / 10;
+  const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
+  const marginCm = _matWallMarginCm(prod);        // Regel 12
+  const gapCm = _matResolveGapCm(prod);           // Regel 9
+  const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+  const minField = _matCrossMinFieldCm(prod), minPiece = Math.max(_matCrossMinPieceCm(prod), cutCm > 0 ? cutCm : 0);
+  const w = field.x1 - field.x0, h = field.y1 - field.y0;
+  const narrowX = w <= h;                          // smal i x → stykkene vannrett, stablet i y
+  const dir = narrowX ? 'h' : 'v';
+  const narrow = narrowX ? w : h, long = narrowX ? h : w;
+  const b = _matFieldEdgeBounds(field, occupied);
+  const nLo = narrowX ? b.x0 : b.y0, nHi = narrowX ? b.x1 : b.y1;   // stykkenes ender
+  const sLo = narrowX ? b.y0 : b.x0, sHi = narrowX ? b.y1 : b.x1;   // stablingens ender
+  const endClear = e => e.mat ? MAT_CROSS_NEIGHBOUR_CM : marginCm;
+  const sideClear = e => e.mat ? (e.full ? gapCm : Math.max(gapCm, marginCm)) : marginCm;
+  // «Skal ikke»: får en VANLIG bredde (langs feltets lange akse) plass her, er det ikke et restfelt.
+  if (narrow - sideClear(nLo) - sideClear(nHi) >= NET - 0.01 && long - sideClear(sLo) - sideClear(sHi) >= minLenCm - 0.01) return { skipped: 'normal' };
+  if (narrow < minField - 0.01) return { skipped: 'under' };
+  let pieceLen = narrow - endClear(nLo) - endClear(nHi);
+  pieceLen = cutCm > 0 ? Math.floor(pieceLen / cutCm + 1e-6) * cutCm : pieceLen;
+  if (pieceLen < minPiece - 0.01) return { skipped: 'under' };
+  const stackAvail = long - sideClear(sLo) - sideClear(sHi);
+  const n = Math.floor((stackAvail + gapCm) / (NET + gapCm) + 1e-6);
+  if (n < 1) return { skipped: 'short' };
+  const nMin = narrowX ? field.x0 : field.y0, nMax = narrowX ? field.x1 : field.y1;
+  const anchorN = _matZoneAnchorSide(nLo.mat ? 'mat' : 'wall', nHi.mat ? 'mat' : 'wall');
+  const start = anchorN === 'lo' ? nMin + endClear(nLo) : anchorN === 'hi' ? nMax - endClear(nHi) - pieceLen : (nMin + nMax) / 2 - pieceLen / 2;
+  const totalS = n * NET + (n - 1) * gapCm;
+  const sMin = narrowX ? field.y0 : field.x0, sMax = narrowX ? field.y1 : field.x1;
+  const anchorS = _matZoneAnchorSide(sLo.mat ? 'mat' : 'wall', sHi.mat ? 'mat' : 'wall');
+  const sBase = anchorS === 'lo' ? sMin + sideClear(sLo) : anchorS === 'hi' ? sMax - sideClear(sHi) - totalS : (sMin + sMax) / 2 - totalS / 2;
+  const runs = [], rects = [];
+  for (let r = 0; r < n; r++) {
+    const perp0 = sBase + r * (NET + gapCm);
+    const R = narrowX ? { x0: start, x1: start + pieceLen, y0: perp0, y1: perp0 + NET } : { x0: perp0, x1: perp0 + NET, y0: start, y1: start + pieceLen };
+    // Vakt per stykke: inne i rommet med Regel 12-margin, unna hindring/forbudt sone, unna lagte bredder.
+    if (_matRectBlockedBy(room, R.x0, R.y0, R.x1, R.y1, marginCm, occupied, gapCm)) continue;
+    runs.push({ r: runs.length, perp0, perp1: perp0 + NET, start, len: pieceLen });
+    rects.push(R);
+  }
+  if (!runs.length) return { skipped: 'blocked' };
+  return { chapter: { rect: { x0: field.x0, y0: field.y0, x1: field.x1, y1: field.y1 }, dir, width: NET, gap: gapCm, cutCm, runs, _runRects: rects,
+    anchorAcross: anchorS, anchorAlong: anchorN, extended: false, cross: true, pieceLenCm: pieceLen, fieldNarrowCm: narrow, fieldLongCm: long } };
+}
+// Alle tverrkapitler for et rom etter at 131-kapitlene er lagt: største ledige felt først, legg,
+// søk på nytt (feltene endrer seg) — til ingen felt kan fylles. `prior` = kapitlene (som
+// {_runRects}) pluss det som alt ligger i rommet. Returnerer også restfeltene som ble stående
+// (smal side ≥ 10 cm og lang side ≥ mattebredden — margin-striper er ikke «felt»), med grunn:
+// 'under' (under 29/37-grensen), 'short' (for kort for ett stykke), 'blocked' (vakten), 'normal'
+// (plass til en vanlig bredde — skal ikke skje, logges).
+function _matCrossFillChapters(room, prod, prior) {
+  const NET = (prod.mat_width_mm || 500) / 10;
+  const minField = _matCrossMinFieldCm(prod);
+  let occupied = [];
+  for (const m of (prior || [])) occupied.push(..._matRunWorldRects(m));
+  const chapters = [];
+  const isField = f => Math.min(f.x1 - f.x0, f.y1 - f.y0) >= 10 && Math.max(f.x1 - f.x0, f.y1 - f.y0) >= NET;
+  const describe = (f, extra) => ({ rect: { x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1 }, narrowCm: Math.min(f.x1 - f.x0, f.y1 - f.y0), longCm: Math.max(f.x1 - f.x0, f.y1 - f.y0), areaM2: f.areaCm2 / 10000, minFieldCm: minField, ...extra });
+  const fields = [];
+  for (let guard = 0; guard < 12; guard++) {
+    let placed = false;
+    for (const f of _matFreeFieldRects(room, occupied)) {
+      if (!isField(f)) continue;
+      const res = _matCrossFieldChapter(room, prod, f, occupied);
+      if (!res.chapter) continue;
+      chapters.push(res.chapter);
+      occupied = occupied.concat(res.chapter._runRects);
+      fields.push(describe(f, { filled: true, pieces: res.chapter.runs.length, pieceLenCm: res.chapter.pieceLenCm }));
+      placed = true;
+      break;
+    }
+    if (!placed) break;
+  }
+  // Det som ble stående — målt på sluttbildet.
+  for (const f of _matFreeFieldRects(room, occupied)) {
+    if (!isField(f)) continue;
+    const res = _matCrossFieldChapter(room, prod, f, occupied);
+    if (res.chapter) continue;   // kan ikke skje etter løkka over, men ufarlig
+    if (res.skipped === 'normal') console.warn('_matCrossFillChapters: restfelt med plass til en vanlig bredde — ikke lagt (Regel 29 gjelder bare felt for smale for en bredde)', f);
+    fields.push(describe(f, { filled: false, reason: res.skipped }));
+  }
+  return { chapters, fields };
+}
+
 // Rekkefølgen på breddene i et kapittel og hvilken ende kabelen går inn. Første kapittel: følger
 // velgeren (124 A — 'v': venstre bredde først, start nederst for 'b'; 'h': nederste bredde først
 // for 'b', start til venstre for 'l'). Senere kapitler: den ytterste bredden og enden som ligger
@@ -15982,20 +16198,26 @@ function _matChaptersToPath(room, prod, chapters) {
       if (!moves.length) {
         start = A;
         moves.push({ axis: ch.dir, dir: dirSign, len: ru.len, conn: 'first', side: 1 });
+      } else if (ch.cross && !(i > 0)) {
+        // 132 / Regel 29: inn i et tverrkapittel — alltid et hopp (annen akse enn forrige).
+        moves.push({ axis: ch.dir, dir: dirSign, len: ru.len, conn: 'jump', side: 1, cross: true, from: { dx: Math.round((A.x - E.x) * 100) / 100, dy: Math.round((A.y - E.y) * 100) / 100 } });
       } else {
         const eAlong = horiz ? E.x : E.y, eAcross = horiz ? E.y : E.x;
         const dAcross = c - eAcross;
         if (i > 0 && Math.abs(aAlong - eAlong) < 0.05 && Math.abs(Math.abs(dAcross) - (NET + ch.gap)) < 0.05) {
           const mv = { axis: ch.dir, dir: dirSign, len: ru.len, conn: 'uturn', side: dAcross > 0 ? 1 : -1 };
           if (Math.abs(ch.gap - gap) > 0.01) mv.gap = Math.round(ch.gap * 100) / 100;   // Regel 9 kappet mellomrommet i denne sonen
+          if (ch.cross) mv.cross = true;   // 132: tverrstykke (etikett «tverr»)
           moves.push(mv);
         } else {
-          moves.push({ axis: ch.dir, dir: dirSign, len: ru.len, conn: 'jump', side: 1, from: { dx: Math.round((A.x - E.x) * 100) / 100, dy: Math.round((A.y - E.y) * 100) / 100 } });
+          const mv = { axis: ch.dir, dir: dirSign, len: ru.len, conn: 'jump', side: 1, from: { dx: Math.round((A.x - E.x) * 100) / 100, dy: Math.round((A.y - E.y) * 100) / 100 } };
+          if (ch.cross) mv.cross = true;
+          moves.push(mv);
         }
       }
       E = B; high = !high;
     });
-    chapterIdx.push({ from, to: moves.length - 1, rect: ch.rect, dir: ch.dir, extended: ch.extended });
+    chapterIdx.push({ from, to: moves.length - 1, rect: ch.rect, dir: ch.dir, extended: ch.extended, cross: !!ch.cross });
   }
   return { roomId: room.id, productId: prod.id, start, moves, gapCm: gap, centered: false, offX: 0, offY: 0, chapters: chapterIdx };
 }
@@ -16402,6 +16624,150 @@ function _matChapterRegressionTest() {
   return { ok: allOk, results };
 }
 
+// ─── 132 · REGRESJONSTEST RESTFELT PÅ TVERS (Regel 29) ─────────────────────────────────────────
+// Grensene 29/37 lest fra produktet, minste stykke 2 × CC, udekket under grensen, stykkene som
+// kapittel av samme matte (hopp inn, U-sving mellom), rullvalg over hele Σ, etiketten «tverr»
+// gjennom oppdeling i ruller, commit/undo, tegneren (samme som PDF) uten unntak, og bit-identisk
+// 131-plan i et rom uten restfelt. Tallene er målt 23.10.2026 (docs/serie-128/RAPPORT.md «## 132»).
+function _matCrossFillRegressionTest() {
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const savedRooms = S.rooms, savedMats = S.mats, savedMatPaths = S.matPaths, savedHindrings = S.hindrings, savedZones = S.zones,
+    savedFloors = S.floors, savedSelectedRoomId = S.ui.selectedRoomId, savedSelPath = S.ui.selectedMatPathId, savedSelMat = S.ui.selectedMatId,
+    savedSelRun = S.ui.selectedMatRunIdx, savedVarmematte = S.varmematte ? { ...S.varmematte } : S.varmematte,
+    savedDirection = S.varmefolie && S.varmefolie.direction, savedCorner = S.varmefolie && S.varmefolie.startCorner,
+    savedNextMatId = S.counters.nextMatId, savedNextPathId = S.counters.nextMatPathId, savedZoom = S.view && S.view.zoom;
+  const savedRenderSidebar = renderSidebar, savedUpdateCtxBar = updateCtxBar, savedRender = render, savedToast = window._showToast;
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const roomOf = (id, pts) => ({ id, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) });
+  const near = (a, b, t) => Math.abs(a - b) <= (t == null ? 0.05 : t);
+  const fmtMoves = path => path.moves.map(m => m.conn[0] + '/' + m.axis + (m.dir > 0 ? '+' : '-') + Math.round(m.len) + (m.cross ? 'X' : '')).join(' ');
+  try {
+    renderSidebar = () => {}; updateCtxBar = () => {}; render = () => {}; window._showToast = () => {};
+    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: 1, fromWall: false, fromWallAlong: undefined, _multiMatPref: null });
+    if (S.varmefolie) { S.varmefolie.direction = 'v'; S.varmefolie.startCorner = 'bl'; }
+    HEATING_PRODUCTS.length = 0;
+    // 150T-katalog (CC 80, kutt 160, margin 3) + 100T-katalog (CC 120, kutt 240, margin 2,5) — samme
+    // feltmønster som basen, kun CC/kuttintervall/familie skiller dem (som i _ensureEcoMatProducts).
+    const areas = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const cat150 = _matBenchCatalog(areas, { idBase: 903000, prefix: 'TVERR150', family: 'EcoMat 150T', wm2: 150 });
+    const cat100 = _matBenchCatalog(areas, { idBase: 903100, prefix: 'TVERR100', family: 'EcoMat 100T', wm2: 100 });
+    for (const q of cat100) { q.mat_cc_mm = 120; q.mat_cut_interval_mm = 240; }
+    HEATING_PRODUCTS.push(...cat150, ...cat100);
+    S.hindrings = []; S.zones = []; S.floors = []; S.matPaths = []; S.mats = [];
+    const p100 = cat100.find(q => q.mat_area_m2 === 9), p150 = cat150.find(q => q.mat_area_m2 === 10);
+
+    // 1) Grensene fra produktet (Regel 29 pkt. 2–3): 2 × CC + 8 + 5, minste stykke 2 × CC.
+    check('Grense 100T: 2 × 12 + 8 + 5 = 37 cm, minste stykke 24 cm', '37 / 24', near(_matCrossMinFieldCm(p100), 37) && near(_matCrossMinPieceCm(p100), 24), `${_matCrossMinFieldCm(p100)} / ${_matCrossMinPieceCm(p100)}`);
+    check('Grense 150T: 2 × 8 + 8 + 5 = 29 cm, minste stykke 16 cm', '29 / 16', near(_matCrossMinFieldCm(p150), 29) && near(_matCrossMinPieceCm(p150), 16), `${_matCrossMinFieldCm(p150)} / ${_matCrossMinPieceCm(p150)}`);
+
+    // 2) Fri-rektangel-søket: tomt rom → hele rommet; én bredde midt i → fire maksimale felt rundt.
+    const roomR = roomOf(903001, [{ x: 0, y: 0 }, { x: 300, y: 0 }, { x: 300, y: 400 }, { x: 0, y: 400 }]);
+    S.rooms = [roomR]; S.ui.selectedRoomId = roomR.id;
+    const fr0 = _matFreeFieldRects(roomR, []);
+    check('Fri-rektangel: tomt rom gir ett felt = hele rommet', '1 × 300×400', fr0.length === 1 && near(fr0[0].x1 - fr0[0].x0, 300) && near(fr0[0].y1 - fr0[0].y0, 400), fr0.map(r => `${r.x1 - r.x0}×${r.y1 - r.y0}`).join(', '));
+    const fr1 = _matFreeFieldRects(roomR, [{ x0: 125, x1: 175, y0: 100, y1: 300 }]);
+    const has = (w, h) => fr1.some(r => near(r.x1 - r.x0, w) && near(r.y1 - r.y0, h));
+    check('Fri-rektangel: én bredde midt i rommet gir fire maksimale felt (125×400, 125×400, 300×100, 300×100)', '4 felt', fr1.length === 4 && has(125, 400) && has(300, 100), fr1.map(r => `${r.x1 - r.x0}×${r.y1 - r.y0}`).join(', '));
+    const eb = _matFieldEdgeBounds({ x0: 481, x1: 526, y0: 0, y1: 200 }, [{ x0: 431, x1: 481, y0: 3, y1: 195 }]);
+    check('Feltkant: venstre kant stoppes av en matte (ikke hele kanten), høyre/topp/bunn er vegg', 'mat(!full) / wall', eb.x0.mat && !eb.x0.full && !eb.x1.mat && !eb.y0.mat && !eb.y1.mat, JSON.stringify(eb));
+    // «Skal ikke»: et felt med plass til en vanlig bredde fylles aldri på tvers.
+    const normal = _matCrossFieldChapter(roomR, p100, { x0: 0, x1: 60, y0: 0, y1: 300, areaCm2: 18000 }, []);
+    check('Felt 60 × 300 (plass til en vanlig bredde): ingen tverrstykker (Regel 29 gjelder bare felt for smale for en bredde)', 'skipped normal', !normal.chapter && normal.skipped === 'normal', JSON.stringify(normal));
+
+    // 3) Variant A (300×380 + alkove 226×200): reststripa 44 cm til høyre i alkoven — 100T.
+    const ptsA = [{ x: 0, y: 0 }, { x: 526, y: 0 }, { x: 526, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 380 }, { x: 0, y: 380 }];
+    const roomA = roomOf(903002, ptsA);
+    S.rooms = [roomA]; S.ui.selectedRoomId = roomA.id;
+    const zpA = _matPlanZones(roomA, p100);
+    const crossA = zpA.chapters.filter(ch => ch.cross);
+    check('Variant A 100T: tre kapitler, det siste et tverrkapittel med 3 stykker à 24 cm, vannrett', '3 kap / 1 tverr / 3 × 24 / h',
+      zpA.chapters.length === 3 && crossA.length === 1 && zpA.chapters[2].cross && crossA[0].runs.length === 3 && crossA[0].runs.every(r => near(r.len, 24)) && crossA[0].dir === 'h',
+      `${zpA.chapters.length} kap / ${crossA.length} tverr / ${crossA[0] ? crossA[0].runs.map(r => r.len).join(',') : '-'} / ${crossA[0] && crossA[0].dir}`);
+    const rA = crossA[0] ? crossA[0]._runRects : [];
+    check('Variant A 100T: stykkene starter 8 cm fra nabobredden (x 490,25), slakken mot høyre vegg, sentrert i y (24–176)', 'x 490,25–514,25 · y 24/75/126',
+      rA.length === 3 && near(rA[0].x0, 490.25) && near(rA[0].x1, 514.25) && near(rA[0].y0, 24) && near(rA[1].y0, 75) && near(rA[2].y0, 126) && near(rA[2].y1, 176),
+      rA.map(r => `${r.x0}-${r.x1} y${r.y0}-${r.y1}`).join(' | '));
+    check('Variant A 100T: Σ 26,4 m (25,68 + 3 × 0,24) → 26 m-rull der 131 (Σ 25,68) ga 24 m — dekning 12,0 → 13,0 m²', '2640 / [2600] / 13.0',
+      near(zpA.totalCm, 2640) && zpA.plan && zpA.plan.length === 1 && near(zpA.plan[0], 2600) && near(zpA.totalAreaM2, 13, 0.01) && near(_matChapterRollPlans(2568, p100).equal[0], 2400),
+      `${zpA.totalCm} / ${JSON.stringify(zpA.plan)} / ${zpA.totalAreaM2}`);
+    check('Variant A 100T: banen 9 + 3 bredder, hopp inn i tverrkapitlet, U-sving mellom stykkene, cross-flagg på nøyaktig 3', 'f u u u u j u u u jX uX uX',
+      fmtMoves(zpA.path) === 'f/v-360 u/v+360 u/v-360 u/v+360 u/v-360 j/v+192 u/v-192 u/v+192 u/v-192 j/h+24X u/h-24X u/h+24X', fmtMoves(zpA.path));
+    const allRects = zpA.chapters.flatMap(ch => ch._runRects);
+    let ov = 0; for (let i = 0; i < allRects.length; i++) for (let j = i + 1; j < allRects.length; j++) { const a = allRects[i], b = allRects[j]; if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0.05 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > 0.05) ov++; }
+    check('Variant A 100T: ingen bredde overlapper en annen, hele banen innenfor rommet (vakten)', '0 / ok', ov === 0 && _matFreeRunsWithinRoom(zpA.path).ok, `${ov} / ${JSON.stringify(_matFreeRunsWithinRoom(zpA.path))}`);
+    const fA = (zpA.restFields || []).find(f => f.filled);
+    check('Variant A 100T: restfeltet meldes som fylt (44 cm bredt, 3 stykker), de smale stripene (24/22 cm) som udekket under grensen', 'filled 43.8 / under',
+      fA && near(fA.narrowCm, 43.75, 0.3) && fA.pieces === 3 && (zpA.restFields || []).some(f => !f.filled && f.reason === 'under' && near(f.narrowCm, 24.25, 0.3)),
+      JSON.stringify((zpA.restFields || []).map(f => [Math.round(f.narrowCm * 10) / 10, f.filled, f.reason])));
+    // Oppdeling i ruller tar etiketten med seg (også når en rull begynner i et tverrstykke).
+    const sl1 = _matFreeSliceMoves(zpA.path, 0, 2600), sl2 = _matFreeSliceMoves(zpA.path, 2580, 2640);
+    check('Oppdeling: 26 m-biten ender i tverrstykkene (siste move cross, 8 cm stubb — Regel 24/131-2), en bit som begynner i et tverrstykke har cross på første move', 'X / X',
+      sl1 && sl1.moves[sl1.moves.length - 1].cross && near(sl1.moves[sl1.moves.length - 1].len, 8) && sl2 && sl2.moves[0].cross,
+      `${sl1 && fmtMoves(sl1)} / ${sl2 && fmtMoves(sl2)}`);
+    // dryRun-formen og commit/undo.
+    const dryA = _matFillRoomSmart(p100.id, { dryRun: true });
+    check('dryRun: kind zone, én bit (26 m) med tverrstykker', 'zone / 1 / cross', dryA && dryA.kind === 'zone' && dryA.matPaths && dryA.matPaths.length === 1 && dryA.matPaths[0].moves.some(m => m.cross), `${dryA && dryA.kind} / ${dryA && dryA.matPaths && dryA.matPaths.length}`);
+    const nBefore = S.matPaths.length, undoBefore = _undoStack.length;
+    const committed = _matChapterCommit(roomA, p100, zpA, zpA.plan, {});
+    const mpA = committed && committed[0];
+    check('Commit: én bit i S.matPaths, vakten godtar den (24 cm-stykker, ingen minstelengde-avvisning), Σ = rullen', '1 / ok / 2600',
+      committed && committed.length === 1 && S.matPaths.length === nBefore + 1 && _matPathMoveValid(mpA).ok && near(_matFreeTotalCm(mpA), 2600),
+      `${committed && committed.length} / ${mpA && JSON.stringify(_matPathMoveValid(mpA))} / ${mpA && _matFreeTotalCm(mpA)}`);
+    // Tegneren (plan og PDF bruker samme) kaster ikke på en bane med tverrstykker, og etiketten sier «tverr».
+    let drawErr = null;
+    try { if (S.view) S.view.zoom = 1; _drawMatPathObj(mpA, false); } catch (e) { drawErr = e.message; }
+    const tverrLabel = (() => { const r = _matFreeDeriveRuns(mpA); const i = mpA.moves.findIndex(m => m.cross); return i >= 0 && r[i] && mpA.moves[i].cross; })();
+    check('Tegneren: _drawMatPathObj på banen uten unntak, tverrstykket har cross-flagg for «tverr»-etiketten', 'null / true', drawErr === null && tverrLabel, `${drawErr} / ${tverrLabel}`);
+    S.ui.selectedMatPathId = mpA.id; S.ui.selectedMatRunIdx = 9;
+    const t = _matSelectedRunTarget();
+    const html = t ? _matRunPanelHtml(t) : '';
+    check('Breddepanelet: «Bredde 10 av 11 · tverr · 24 cm», ingen «under minste lengde»-merknad', 'tverr / ingen', /Bredde 10 av 11 · tverr/.test(html) && !/under minste lengde/.test(html), html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120));
+    S.ui.selectedMatRunIdx = null;
+    if (_undoStack.length > undoBefore) undo();
+    check('Angre: banen er borte igjen', String(nBefore), S.matPaths.length === nBefore, String(S.matPaths.length));
+
+    // 4) Variant A med 150T: 29 cm-grensen, stykker 45 − 8 − 3 = 34 → 32 cm (16-raster).
+    S.matPaths = [];
+    const zpA150 = _matPlanZones(roomA, p150);
+    const c150 = zpA150.chapters.find(ch => ch.cross);
+    check('Variant A 150T: 3 tverrstykker à 32 cm (34 → 16-raster), Σ 27,04 m', '3 × 32 / 2704', c150 && c150.runs.length === 3 && c150.runs.every(r => near(r.len, 32)) && near(zpA150.totalCm, 2704), `${c150 && c150.runs.map(r => r.len).join(',')} / ${zpA150.totalCm}`);
+
+    // 5) Reststripe 30 cm (300×400 + alkove 211×200): 100T under 37 → udekket; 150T over 29 → fylt (16 cm).
+    const room30 = roomOf(903003, [{ x: 0, y: 0 }, { x: 511, y: 0 }, { x: 511, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }]);
+    S.rooms = [room30]; S.ui.selectedRoomId = room30.id;
+    const zp30 = _matPlanZones(room30, p100);
+    const f30 = (zp30.restFields || []).find(f => near(f.narrowCm, 30, 0.6));
+    check('Rest 30 cm, 100T: ikke fylt (under 37), feltet meldes udekket, banen er 131 sine 9 bredder', 'ingen tverr / under / 9',
+      !zp30.chapters.some(ch => ch.cross) && f30 && !f30.filled && f30.reason === 'under' && zp30.path.moves.length === 9 && !zp30.path.moves.some(m => m.cross),
+      `${zp30.chapters.filter(ch => ch.cross).length} / ${f30 && f30.reason} / ${zp30.path.moves.length}`);
+    const zp30b = _matPlanZones(room30, p150);
+    const c30 = zp30b.chapters.find(ch => ch.cross);
+    check('Rest 30 cm, 150T: fylt (over 29) med 3 stykker à 16 cm (30 − 8 − 3 = 19 → 16)', '3 × 16', c30 && c30.runs.length === 3 && c30.runs.every(r => near(r.len, 16)), `${c30 && c30.runs.map(r => r.len).join(',')}`);
+
+    // 6) Bilde 2 (300×400 + alkove 200×200): ingen restfelt over grensen → bit-identisk 131-plan.
+    const roomB = roomOf(903004, [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }]);
+    S.rooms = [roomB]; S.ui.selectedRoomId = roomB.id;
+    const zpB = _matPlanZones(roomB, p100);
+    check('Bilde 2 100T: ingen tverrkapittel, 9 bredder, Σ 26,88 m, start (48, 392) — som 131', '0 / 9 / 2688 / 48,392',
+      !zpB.chapters.some(ch => ch.cross) && zpB.path.moves.length === 9 && near(zpB.totalCm, 2688) && near(zpB.path.start.x, 48) && near(zpB.path.start.y, 392) && !zpB.path.moves.some(m => m.cross),
+      `${zpB.chapters.filter(ch => ch.cross).length} / ${zpB.path.moves.length} / ${zpB.totalCm} / ${zpB.path.start.x},${zpB.path.start.y}`);
+    check('Bilde 2 100T: restfeltene (23/23/19 cm) meldes udekket under grensen', '3 × under', (zpB.restFields || []).filter(f => !f.filled && f.reason === 'under').length === 3 && (zpB.restFields || []).every(f => !f.filled), JSON.stringify((zpB.restFields || []).map(f => [Math.round(f.narrowCm), f.reason])));
+  } finally {
+    renderSidebar = savedRenderSidebar; updateCtxBar = savedUpdateCtxBar; render = savedRender; window._showToast = savedToast;
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    S.rooms = savedRooms; S.mats = savedMats; S.matPaths = savedMatPaths; S.hindrings = savedHindrings; S.zones = savedZones; S.floors = savedFloors;
+    S.ui.selectedRoomId = savedSelectedRoomId; S.ui.selectedMatPathId = savedSelPath; S.ui.selectedMatId = savedSelMat; S.ui.selectedMatRunIdx = savedSelRun;
+    S.varmematte = savedVarmematte;
+    if (S.varmefolie) { S.varmefolie.direction = savedDirection; S.varmefolie.startCorner = savedCorner; }
+    S.counters.nextMatId = savedNextMatId; S.counters.nextMatPathId = savedNextPathId;
+    if (S.view && savedZoom != null) S.view.zoom = savedZoom;
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matCrossFillRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+  return { ok: allOk, results };
+}
+
 // ─── «FYLL ROM AUTOMATISK» BRUKER HELE MOTOREN (Kenneth 19.08.2026) ───────
 // STEG 0-revisjon (Varmeplan-prompt-fyll-rom-automatisk-halve-motoren.md), rapportert FØR fiksen
 // under ble skrevet — samme mønster som 786d95a og 05390a0. Kartlegger HVERT inngangspunkt som
@@ -16664,17 +17030,41 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
   const dirName = d => d === 'h' ? 'vannrett' : 'loddrett';
 
   // 131 / Regel 28: én matte, ett kapittel per sone — i rekkefølgen velgeren ga.
+  // 132: hvor i banen hvert kapittel begynner (Σ før det) — et kapittel som ligger helt eller delvis
+  // forbi rullens lengde blir ikke lagt (Regel 22 pkt. 2) og sies rett ut i raden.
+  const pathMoves = (zonePlan.path && zonePlan.path.moves) || [], pathChapters = (zonePlan.path && zonePlan.path.chapters) || [];
+  const chapterSpan = i => { const c = pathChapters[i]; if (!c) return null; let before = 0, len = 0; pathMoves.forEach((m, k) => { if (k < c.from) before += m.len; else if (k <= c.to) len += m.len; }); return { before, len }; };
+  const rollNote = i => {
+    const sp = chapterSpan(i); if (!sp || !(zonePlan.coverCm > 0)) return '';
+    if (sp.before >= zonePlan.coverCm - 0.05) return ' · <span style="color:var(--warn,#f59e0b)">utenfor rullen — legges ikke (Regel 22 pkt. 2)</span>';
+    if (sp.before + sp.len > zonePlan.coverCm + 0.05) return ' · <span style="color:var(--warn,#f59e0b)">delvis utenfor rullen</span>';
+    return '';
+  };
   const zoneRows = zonePlan.zonePlans.map((zp, i) => {
     const extNote = zp.extended ? ' · bruker ledig plass i nabosonen (Regel 27)' : '';
     const jumpNote = i > 0 ? ' · hopp fra forrige kapittel (Regel 28)' : '';
+    // 132 / Regel 29: et tverrkapittel — korte stykker på tvers i et restfelt, fortsettelse av samme matte.
+    if (zp.cross) return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
+      <div style="font-weight:600">Kapittel ${i + 1} — restfelt ${zp.zoneAreaM2.toFixed(1)} m² (${Math.round(zp.fieldNarrowCm)} cm bredt)</div>
+      <div style="color:var(--dim);font-size:12px">${zp.runs} ${zp.runs === 1 ? 'tverrstykke' : 'tverrstykker'} à ${Math.round(zp.runLenCm)} cm · ${dirName(zp.dir)} · på tvers av hovedretningen (Regel 29)${jumpNote}${rollNote(i)}</div>
+    </div>`;
     return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
       <div style="font-weight:600">Kapittel ${i + 1} — sone ${zp.zoneAreaM2.toFixed(1)} m²</div>
-      <div style="color:var(--dim);font-size:12px">${zp.runs} bredder à ${Math.round(zp.runLenCm)} cm · ${dirName(zp.dir)}${jumpNote}${extNote}</div>
+      <div style="color:var(--dim);font-size:12px">${zp.runs} bredder à ${Math.round(zp.runLenCm)} cm · ${dirName(zp.dir)}${jumpNote}${extNote}${rollNote(i)}</div>
     </div>`;
   }).join('');
+  // Σ før første tverrkapittel — ligger rullen under det, er det tverrstykkene som faller utenfor.
+  const firstCrossIdx = pathChapters.findIndex(c => c.cross);
+  const crossStartCm = firstCrossIdx >= 0 ? chapterSpan(firstCrossIdx).before : null;
 
   const nRuns = (zonePlan.path && zonePlan.path.moves || []).length, nChap = zonePlan.chapters.length;
-  const head = `1 matte · ${nRuns} bredder · ${nChap} ${nChap === 1 ? 'kapittel' : 'kapitler'} · Σ ${(zonePlan.totalCm / 100).toFixed(1)} m`;
+  const nCross = (zonePlan.path && zonePlan.path.moves || []).filter(m => m.cross).length;
+  const head = `1 matte · ${nRuns} bredder${nCross ? ` (${nCross} tverr)` : ''} · ${nChap} ${nChap === 1 ? 'kapittel' : 'kapitler'} · Σ ${(zonePlan.totalCm / 100).toFixed(1)} m`;
+  // 132 / Regel 29 pkt. 3: restfelt under grensen blir stående udekket — sagt rett ut, ingen tvang.
+  const restUnder = (zonePlan.restFields || []).filter(f => !f.filled && f.reason === 'under' && f.areaM2 >= 0.1);
+  const restNote = restUnder.length
+    ? `<div style="margin-top:8px;padding:8px;background:var(--surface2);border-radius:6px;font-size:12px;color:var(--dim)">Restfelt under grensen for tverrstykker (${Math.round(restUnder[0].minFieldCm)} cm for ${esc(prod.product_family || prod.name)}, Regel 29) — udekket: ${restUnder.map(f => `${Math.round(f.narrowCm)} × ${Math.round(f.longCm)} cm`).join(', ')} (${restUnder.reduce((s, f) => s + f.areaM2, 0).toFixed(1)} m²).</div>`
+    : '';
 
   // Rullvalg (Regel 11 pkt. 4): «like» er standard, «blandet» et bevisst valg — begge med tall.
   const rolls = zonePlan.rolls;
@@ -16695,7 +17085,7 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
       <span style="flex:1">
         <div style="font-weight:600">${opt.n} ${opt.n === 1 ? 'rull' : (opt.kind === 'equal' ? 'like ruller' : 'blandede ruller')}${noteExtra}</div>
         <div style="color:var(--dim);font-size:12px">${esc(opt.label)}</div>
-        <div style="font-size:12px">${(sumCm * (prod.mat_width_mm || 500) / 10 / 10000).toFixed(1)} m² dekket${uncoveredM > 0.05 ? ` · ${uncoveredM.toFixed(1)} m udekket (siste bredde kortes, Regel 24)` : ' · eksakt'} · ${opt.watt} W${ampNote}</div>
+        <div style="font-size:12px">${(sumCm * (prod.mat_width_mm || 500) / 10 / 10000).toFixed(1)} m² dekket${uncoveredM > 0.05 ? ` · ${uncoveredM.toFixed(1)} m udekket (${crossStartCm != null && sumCm <= crossStartCm + 0.05 ? 'tverrstykkene faller utenfor rullen, Regel 22 pkt. 2' : 'siste bredde kortes, Regel 24'})` : ' · eksakt'} · ${opt.watt} W${ampNote}</div>
       </span>
     </label>`;
   }).join('');
@@ -16726,6 +17116,7 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
     ${shortfallNote}
     ${btaNote}
     ${excludedNote}
+    ${restNote}
     <div style="display:flex;gap:8px;margin-top:10px">
       <button id="mat-zone-cancel" style="flex:1;padding:8px;border-radius:6px;border:1px solid var(--brd);background:var(--surface2);color:var(--text);cursor:pointer">Avbryt</button>
       <button id="mat-zone-apply" style="flex:1;padding:8px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Legg ut</button>
@@ -18660,13 +19051,16 @@ function _matFreeSliceMoves(mp, fromCm, toCm) {
     const pLo = { x: r.a.x + (r.b.x - r.a.x) * tLo, y: r.a.y + (r.b.y - r.a.y) * tLo };
     if (first) {
       start = pLo;
-      moves.push({ axis: r.axis, dir: r.dir, len: hi - lo, conn: 'first', side: 1 });
+      const mv0 = { axis: r.axis, dir: r.dir, len: hi - lo, conn: 'first', side: 1 };
+      if (mp.moves[i] && mp.moves[i].cross) mv0.cross = true;   // 132: en rull som begynner i et tverrstykke
+      moves.push(mv0);
       first = false;
     } else {
       const srcMove = mp.moves[i] || { conn: 'first', side: 1 };
       const mv = { axis: r.axis, dir: r.dir, len: hi - lo, conn: srcMove.conn, side: srcMove.side };
       if (srcMove.conn === 'jump' && srcMove.from) mv.from = { ...srcMove.from };   // 129: hoppet følger med (relativt til forrige ende, som står)
       if (srcMove.gap != null) mv.gap = srcMove.gap;   // 131: kapitlets eget mellomrom følger med
+      if (srcMove.cross) mv.cross = true;   // 132: tverrstykke (Regel 29) — etiketten følger med
       moves.push(mv);
     }
   }
@@ -21006,15 +21400,17 @@ function _matPathPanel() {
   // «Tegnet lengde» viste totalCm — riktig TALL etter Regel 23-fiksen (ingen U-svinger lenger
   // iberegnet), men fortsatt bare ETT tall. Ingen flate i appen viste selve breddene som summeres.
   const _bredderLine = (() => {
-    const lens = _matFreeDeriveRuns(mp).map(r => _matFreeRunLen(r)).filter(l => l > 0.5);
+    const runsAll = _matFreeDeriveRuns(mp);
+    const lens = runsAll.map((r, i) => ({ l: _matFreeRunLen(r), cross: !!(mp.moves[i] && mp.moves[i].cross) })).filter(x => x.l > 0.5);
     if (!lens.length) return '—';
     const groups = [];
-    for (const l of lens) {
+    for (const { l, cross } of lens) {
       const rl = Math.round(l * 10) / 10;
-      const g = groups.find(x => Math.abs(x.len - rl) < 0.05);
-      if (g) g.count++; else groups.push({ len: rl, count: 1 });
+      const g = groups.find(x => Math.abs(x.len - rl) < 0.05 && x.cross === cross);
+      if (g) g.count++; else groups.push({ len: rl, count: 1, cross });
     }
-    const parts = groups.map(g => `${g.count} × ${(g.len / 100).toFixed(1)} m`).join(' + ');
+    // 132 / Regel 29: tverrstykkene vises som egne bredder med «tverr».
+    const parts = groups.map(g => `${g.count} × ${(g.len / 100).toFixed(1)} m${g.cross ? ' tverr' : ''}`).join(' + ');
     return `${parts} = ${((c.laidCm != null ? c.laidCm : c.totalCm) / 100).toFixed(1)} m av ${(c.coverCm / 100).toFixed(1)} m rull`;   // 124: faktisk lagt (kortet bane teller kortere)
   })();
   section.innerHTML = `<div class="rwp-section-label">✏️ ${title}</div>
@@ -21411,10 +21807,12 @@ function _drawMatPathObj(mp, active) {
   // #5: lengde pr bredde (bane) — kappe-klar for elektriker, midt i hver lane (committet).
   if (!active && S.view.zoom > 0.35) {
     ctx.save(); ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    for (const r of runs) {
+    for (let li = 0; li < runs.length; li++) {
+      const r = runs[li];
       const len = _matFreeRunLen(r); if (len < 20) continue;
       const mid = w2s((r.a.x + r.b.x) / 2, (r.a.y + r.b.y) / 2);
-      const lbl = (len / 100).toFixed(1).replace('.', ',') + ' m';
+      // 132 / Regel 29: tverrstykke merkes «tverr» (plan og PDF — samme tegner).
+      const lbl = (len / 100).toFixed(1).replace('.', ',') + ' m' + ((mp.moves && mp.moves[li] && mp.moves[li].cross) ? ' tverr' : '');
       const tw = ctx.measureText(lbl).width;
       ctx.fillStyle = 'rgba(255,255,255,0.82)'; ctx.fillRect(mid.x - tw / 2 - 3, mid.y - 7, tw + 6, 14);
       ctx.fillStyle = '#1c2b33'; ctx.fillText(lbl, mid.x, mid.y);

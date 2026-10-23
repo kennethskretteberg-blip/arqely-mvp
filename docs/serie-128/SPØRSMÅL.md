@@ -75,3 +75,27 @@
    felt/side», «Del så matta går opp» og Regel E-notene. Greit, eller skal noe av det løftes til banen?
 6. **Rullvalget i panelet** viser to like rader («1 rull … (gir ingenting ekstra her)») når like og
    blandet er samme plan. Skal den andre raden skjules da?
+
+# 132 — spørsmål til Kenneth
+
+1. **Hva er «plass til en vanlig bredde»?** I motoren får en 61 cm bred stripe en vanlig loddrett bredde
+   (50 + 1 mellomrom + 2,5 nettmargin = 53,5 cm), så bilde 2-stripa di ville aldri blitt tverrstykker her.
+   Ditt regnestykke bruker 50 + 8 (nabo) + 5 (vegg) = 63 cm. Skal grensen for en vanlig bredde også regnes
+   med 8 + 5 (da blir striper på 54–62 cm tverrlagt), eller står mellomrom + margin?
+2. **Stubb der rullen slutter i et tverrstykke.** Variant A med 100T: 26 m-rullen slutter 8 cm inn i stykke 2
+   — under to kabelstrenger. Samme sak som 131-2 (katalogen leser rullen av banens lengde). Skal (a) stubben
+   stå, (b) rullvalget unngå å ende inne i et tverrstykke med rest under 2 × CC (nest største rull), eller
+   (c) stubben fjernes når 131-2 (b) er avgjort?
+3. **Kuttraster for stykkene.** Stykkene avrundes ned til kuttrasteret (2 × CC: 24/16 cm) som alle andre
+   bredder — 44 cm rest gir 24 cm stykker (100T). «Ca. 55–60 cm» i en 61 cm stripe tyder på at du kutter
+   per kabelstreng (CC). Skal tverrstykker få kutt per CC (24 → 36 cm i samme felt)?
+4. **Rektangulære rom.** Regel 29 virker bare i sonerom (kapittelbanen). Et rektangulært rom med «fra vegg»
+   har 30–41 cm slakk langs én vegg og ville kvalifisert, men det går S.mats-veien. Skal rektangulære rom
+   med et kvalifisert restfelt gå over til kapittelbanen (resultatet blir da en `S.matPaths`-matte med
+   frihånd-panelet), eller er det greit at Regel 29 bare gjelder sonerom?
+5. **Restfelt der en vanlig bredde får plass** (benkrom hindring #30: 319 × 60 cm igjen etter at 131 utelot
+   sonen med Regel 27). 132 lar det stå (logger). Skal 131 prøve den utelatte sonen i den andre retningen,
+   eller skal 132 legge tverrstykker der likevel?
+6. **Rekkefølge og ankring.** Tverrkapitlene kommer sist i banen (nærmest forrige kapittel først), stykkene
+   stables sentrert når begge ender er vegg og inntil nabomatta når én ende er en matte — som 131. Og de
+   legges alltid etter hovedbreddene, så det er stykkene som faller utenfor rullen. Riktig prioritet?

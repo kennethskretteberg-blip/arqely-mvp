@@ -655,3 +655,194 @@ radnivå.
   (kopierer `gap`), `_matFreeClampLen` (`noRaster`) + `_matFreeRunsWithinRoom`, `_matPathPanel` og
   ctxbar-etiketten (`auto`), `_matBenchRunVei1/2`.
 - Spec `spec-matte-utlegg.md` Regel 28 (Cowork-mappa, utenfor repoet): auto bekreftet og bygget.
+
+## 132
+
+**Auto-matte: restfelt som er for smale for en bredde i hovedretningen fylles med korte tverrlagte
+stykker som fortsettelse av samme matte (Regel 29).** Committet på `main`, **ikke pushet**.
+
+### STEG 0 — målt før endring (fila fra `fefc638`, port 4000)
+
+**0.1 Bilde 2-rommet etter 131** (300 × 400 + alkove 200 × 200, 1 cm mellomrom, loddrett låst, velger nede
+til venstre), restfeltene (maksimale ledige rektangler etter at de 9 breddene ligger — målt med et eget
+rutenett-søk i harnessen, samme metode som senere ble `_matFreeFieldRects`):
+
+| Restfelt | Mål | 100T (grense 2 × 12 + 8 + 5 = **37**) | 150T (grense 2 × 8 + 8 + 5 = **29**) |
+|---|---|---|---|
+| Venstre for hoveddelen (x 0–23) | 23 × 400 cm, 0,92 m² | under — udekket | under — udekket |
+| Høyre for hoveddelen under alkoven (x 277–300) | 23 × 205 cm, 0,47 m² | under | under |
+| Høyre for alkoven (x 481–500) | 19 × 200 cm, 0,38 m² | under | under |
+| Endestriper (y 0–8, 392–400, 0–3) | 3–8 cm brede | ikke felt | ikke felt |
+
+**Regel 29 gir ingenting i bilde 2-rommet slik det er modellert.** Hoveddelen (300 cm) tar 5 bredder
+(254 cm) med 23 cm slakk på hver side, og alkoven (200 cm) tar 4 bredder fra x 278 til 481 — 19 cm igjen.
+Kenneths stripe på **61 × 200 cm** finnes ikke i denne geometrien (tegningen hans har 6 + 3 bredder, altså et
+bredere rom). Merk også: i motoren ville en 61 cm bred stripe fått en **vanlig** bredde (50 + 1 mellomrom +
+2,5 margin = 53,5 ≤ 61) — «Skal IKKE legge tverrstykker der det er plass til en vanlig bredde». Kenneths
+eget regnestykke (50 + 8 + 5 = 63 > 61) bruker naboavstand og kabelkrav i stedet for mellomrom og
+nettmargin. Spørsmål 132-1. For testene er det derfor laget en **variant A**: 300 × 380 + alkove 226 × 200
+(44 cm rest til høyre i alkoven), der 100T får 3 stykker à 24 cm og rullen går fra 24 til 26 m.
+
+**0.2 Hvordan motoren finner restfelt i dag: den gjør det ikke.** `_decomposeRoomToRects` rasteriserer
+rommet minus hindringer/forbudte soner i 6–12 cm celler og tar ut største rektangel grådig
+(`_largestRectInGrid`, histogram) — uten matter, og for grovt for grenser på 29/37 cm.
+`_matZoneFreeRoom` (130) skyver en soneboks 1 cm om gangen inn i ledig naboplass (`_matRectBlockedBy`)
+— utvider, søker ikke. Ingen «ledig rektangel»-funksjon på eksakte koordinater fantes. Ny
+`_matFreeFieldRects`: komprimert rutenett av **alle** kantkoordinater (rom-, hindrings-, sonehjørner og
+breddekanter), hver rute helt ledig eller helt opptatt, alle maksimale rektangler (radpar × kolonneløp som
+ikke kan vokse opp/ned). Gjenbruker `ptInPoly`, `_matRectBlockedBy`, `_matZoneAnchorSide`,
+`_matRunWorldRects`, `_matResolveGapCm`, `_matWallMarginCm`.
+
+**0.3 Datamodellen fra 131 beskriver et kapittel med annen rotasjon.** Banen er en frihånds-bane:
+`_matFreeDeriveRuns` leser `axis` per move, så `jump` inn i en vannrett bredde etter loddrette (og
+`uturn` mellom vannrette) virker uendret — ingenting i tegning, kabel, treff, 124-justering, oppdeling i
+ruller, PDF eller lister antar én akse. Det eneste nye i modellen er et flagg `cross: true` per move
+(etikett «tverr»); `_matFreeSliceMoves` tar det med seg.
+
+### Gjort (alt i `index.html`, ny seksjon «132 · RESTFELT PÅ TVERS» etter `_matChapterBlock`)
+
+1. **Grensene fra produktet:** `MAT_CROSS_NEIGHBOUR_CM = 8` (ny konstant, Kenneths tall),
+   `_matCrossMinFieldCm(prod)` = 2 × CC + 8 + `MAT_CABLE_WALL_CM` (150T **29**, 60T/100T **37**),
+   `_matCrossMinPieceCm(prod)` = 2 × CC (16 / 24). Ingen tall hardkodet utover de to konstantene.
+2. **`_matFreeFieldRects(room, occupied)`** (0.2) og **`_matFieldEdgeBounds(field, occupied)`**: hva som
+   begrenser hver kant av et felt — en lagt bredde (`mat`, `full` når bredder dekker hele kanten) eller
+   vegg/hindring/forbudt sone. Klaringen følger av det: stykkets **ende** mot en matte 8 cm, mot vegg
+   Regel 12-margin (2,5/3 cm); stykkets **side** mot en matte brukerens mellomrom (Regel 9), mot vegg
+   margen.
+3. **`_matCrossFieldChapter(room, prod, field, occupied)`**: stykkene langs feltets smale akse (smal i x →
+   vannrette stykker stablet i y), lengde = smal side − klaringer, avrundet **ned til kuttrasteret** (2 × CC),
+   minst 2 × CC; antall = ⌊(lang side − klaringer + mellomrom) / (50 + mellomrom)⌋. Ankring som 131: inntil
+   nabomatta når den enden er en matte (slakken mot veggen, Regel 20 pkt. 4), begge vegger → sentrert.
+   Vakt per stykke (`_matRectBlockedBy`: rom med margin, hindring, forbudt sone, lagte bredder). **Først**
+   sjekkes «Skal IKKE»: får en vanlig bredde plass langs feltets lange akse (50 + klaringer på tvers og
+   minstelengde på langs), returneres `skipped: 'normal'` og feltet rører ikke (logges som `warn`).
+   Så grensen: smal side < 29/37 → `'under'`.
+4. **`_matCrossFillChapters(room, prod, prior)`**: største ledige felt først, legg, søk på nytt (feltene
+   endrer seg) til ingen felt kan fylles (tak 12). Returnerer kapitlene og **restfeltene som ble stående**
+   (smal side ≥ 10 cm og lang side ≥ mattebredden — margin-striper er ikke «felt») med grunn.
+5. **`_matPlanZones`**: etter 131-kapitlene (og velgerens rekkefølge) kalles tverrfyllingen med `prior`
+   (kapitlene som nabomatter + det som alt ligger i rommet). Tverrkapitlene legges **sist i banen**,
+   nærmest forrige kapittel først (kortest løs kabel). En sone 131 utelot, men som nå har fått stykker,
+   fjernes fra «utelatt». Nytt felt `restFields` på planen; `zonePlans[i].cross`/`fieldNarrowCm`.
+6. **`_matChaptersToPath`**: inn i et tverrkapittel alltid `jump` (annen akse), stykkene imellom `uturn`
+   (de har samme start og lengde, ligger NET + mellomrom unna — 131-vilkåret), `cross: true` på hvert
+   move, `chapters[i].cross`. `_matFreeSliceMoves` kopierer flagget (også når en rull begynner i et
+   tverrstykke).
+7. **Rullvalget** er uendret (`_matChapterRollPlans` over hele Σ). Er rullen brukt opp før stykkene,
+   faller de utenfor (`_matChapterPieces` skjærer ved rullens lengde) — Regel 22 pkt. 2-mønsteret.
+8. **Panel `_showMatZoneProposalPanel`**: hodelinje «12 bredder (3 tverr)», rad «Kapittel 3 — restfelt
+   0,9 m² (44 cm bredt) · 3 tverrstykker à 24 cm · vannrett · på tvers av hovedretningen (Regel 29) · hopp
+   fra forrige kapittel»; per kapittel «utenfor rullen — legges ikke (Regel 22 pkt. 2)» / «delvis utenfor
+   rullen» når Σ før kapitlet ligger forbi rullen; udekket-teksten sier «tverrstykkene faller utenfor
+   rullen» når det er dem det gjelder; ny grå note «Restfelt under grensen for tverrstykker (37 cm for
+   EcoMat 100T, Regel 29) — udekket: 23 × 400 cm, … (2,0 m²)» (felt ≥ 0,1 m²). Skjermbilder `132-01`,
+   `132-05`, `132-06`, `132-08`, `132-09`.
+9. **Etiketten «tverr»**: ctxbar-breddepanelet (`_matRunPanelHtml`: «Bredde 10 av 11 · tverr · 24 cm», og
+   «under minste lengde»-merknaden gjelder ikke tverrstykker — Regel 29 pkt. 2 er grensen), bane-panelet
+   (`_matPathPanel`: «5 × 3,6 m + 4 × 1,9 m + 1 × 0,2 m tverr + …»), og lengde-etiketten i planen
+   («0,2 m tverr», `_drawMatPathObj` — samme tegner gir PDF-en). 124-justering (dra sidelengs, S-håndtak,
+   Start +) virker på stykkene som på alle baner (`132-04`).
+10. **Ny `_matCrossFillRegressionTest()`** — 23 sjekker: grensene 37/29 og 24/16 fra produktet;
+    `_matFreeFieldRects` (tomt rom → ett felt; én bredde midt i → fire maksimale felt);
+    `_matFieldEdgeBounds`; «Skal IKKE» (60 × 300-felt → `normal`); variant A 100T (tre kapitler, 3 × 24 cm
+    vannrett, x 490,25–514,25 (8 cm fra nabobredden, slakk mot veggen), y 24/75/126 (sentrert), Σ 26,4 m
+    → 26 m der 131 (Σ 25,68) ga 24 m, 13,0 m², banen `f u u u u j u u u jX uX uX`, ingen overlapp, vakten
+    ok, restfelt meldt fylt/udekket); oppdeling i ruller tar `cross` med (26 m-biten ender i tverrstykkene
+    med en 8 cm stubb); dryRun-form; commit (vakten godtar 24 cm-stykker, Σ = rullen), tegneren uten
+    unntak, breddepanel «Bredde 10 av 11 · tverr», angre; variant A 150T (3 × 32 cm, Σ 27,04 m); rest 30 cm
+    (100T udekket under 37 og 131-banen uendret; 150T 3 × 16 cm); bilde 2 (ingen tverrkapittel, 9 bredder,
+    Σ 26,88 m, start (48, 392), restfeltene 23/23/19 meldt udekket).
+
+### Bilde 2 og variantene — før og etter (loddrett låst, 1 cm mellomrom, velger nede til venstre)
+
+| Rom | Produkt | Restfelt (smal side) | Grense | Tverrstykker | Σ bredder før → etter | Rull før → etter | Dekning før → etter |
+|---|---|---|---|---|---|---|---|
+| Bilde 2 (300×400 + 200×200) | 100T | 23 / 23 / 19 cm | 37 | ingen — udekket | 26,88 m | 26 m | 13,0 m² (81,3 %) — **bit-identisk 131** |
+| Bilde 2 | 150T | 23 / 23 / 19 cm | 29 | ingen — udekket | 26,88 m | 26 m | 13,0 m² — bit-identisk |
+| Variant A (300×380 + 226×200) | 100T | **44 cm** (x 482–526) | 37 | **3 × 24 cm**, vannrett | 25,68 → 26,40 m | 24 → **26 m** | **12,0 → 13,0 m²** (75,4 → 81,7 % av 15,92 m²) |
+| Variant A | 150T | 44 cm | 29 | 3 × 32 cm | 25,68 → 27,04 m | 24 → 26 m | 12,0 → 13,0 m² — stykkene faller utenfor rullen (Σ hovedbredder 26,08 > 26) |
+| Rest 30 (300×400 + 211×200) | 100T | 30 cm | 37 | **ingen** — meldt udekket | 26,88 m | 26 m | 13,0 m² |
+| Rest 30 | 150T | 30 cm | 29 | **3 × 16 cm** | 26,88 → 27,36 m | 26 m | 13,0 m² — stykkene utenfor rullen |
+| Alkove 226 × 200 (bilde 2 med bredere alkove) | 100T | 45 cm | 37 | 3 × 24 cm | 26,88 → 27,60 m | 26 m | 13,0 m² — utenfor rullen |
+| T-rom tre soner | 100T | 24 / 24 / 20 / 20 / 16 cm | 37 | ingen | 29,76 m | 28 m | 14,0 m² — uendret |
+
+Stykkene dekker bare når Σ passerer neste rullengde (variant A 100T: 25,68 → 26,40 ≥ 26,0). Ellers planlegges
+de, vises i panelet som «utenfor rullen — legges ikke», og `_matChapterPieces` skjærer dem bort ved commit
+— dekningen er da uendret, aldri lavere. Variant A 100T etter commit: 26 m-rullen slutter **8 cm inn i
+stykke 2** (`j/h+24 · u/h−8`) — en stubb under 2 × CC (spørsmål 132-2, samme sak som 131-2).
+
+### Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | Bilde 2 med 100T: reststripa fylles, tre stykker, dekning stiger målbart; 150T: 29-grensen | Bilde 2 slik det er modellert har ingen stripe over grensen (STEG 0.1). **Variant A** (44 cm rest): 100T 3 × 24 cm, 12,0 → 13,0 m² (75,4 → 81,7 %); 150T 3 × 32 cm (29-grensen), planlagt, men utenfor 26 m-rullen → 13,0 m² uendret. Låst i `_matCrossFillRegressionTest`. |
+| 2 | Reststripe 30 cm: 100T ikke fylt (udekket vises), 150T fylt | Ja: 100T «Restfelt under grensen … 30 × 200 cm» i panelet, 131-banen uendret (`132-06`); 150T 3 × 16 cm (`132-08`). Låst. |
+| 3 | Rom uten restfelt: bit-identisk med 131 | Bilde 2 100T/150T: samme 9 moves, start (48, 392), Σ 26,88 m, samme biter (låst). Benken: 216 av 224 rader identiske (dekning, ruller, poeng). `_matZoneRegressionTest` 17/17, `_matChapterRegressionTest` 14/14. |
+| 4 | Mattebenk: flere rom høyere, ingen lavere; tid ≤ +20 % | **4 rom høyere** (8 rader, vei 1 = vei 2), **0 lavere**, ingen ny ulovlig (29 før/etter, alle vei 4/frihånd som før). Tid: `_matBench(42, 64)` median av 7 kjøringer **98 → 102 ms** (+4 %, 0,44 → 0,46 ms/rad). |
+| 5 | Batterier, `_matChapterRegressionTest`, `_pdfExportSmokeTest`, ny `_matCrossFillRegressionTest` | `_matRegressionTest` 2/2 · `_matZoneRegressionTest` 17/17 · `_matChapterRegressionTest` 14/14 · **`_matCrossFillRegressionTest` 23/23** · `_matFreeRegressionTest` 26/26 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_foilRegressionTest` 9/9 · `_pdfExportSmokeTest` 20/20. Ingen konsollunntak. PDF av variant A (`132-10`): stykkene tegnet med «tverr»-etikett, spesifikasjon «Matte · EcoMat 100T 0,5×26m · 1 stk · 1300 W», romstatistikk 13,0 m² / 1300 W. |
+
+### Mattebenk-differansen (`_matBench(42, 64)`, før = `fefc638` (131), etter = 132; vei 1 = vei 2)
+
+| Rom (150T, auto-retning) | Restfelt → tverrstykker | Σ hoved → Σ | Rull 131 → 132 | Dekning før → etter | Poeng |
+|---|---|---|---|---|---|
+| L #23 | 41,5 × 260 → 5 × 16 cm | 13,92 → 14,72 m | 12 → **14 m** | 69,0 % → **80,6 %** | −88723 → −91477 |
+| hindring #25 | 40 × 126 → 2 × 16; 43 × 284 → 5 × 32; 40 × 105 → 1 × 16 | 8,16 → 10,24 m | 8 → **10 m** | 61,0 % → **76,3 %** | 849 → −58911 |
+| hindring #26 | 52 × 242 → 4 × 32 cm | 17,28 → 18,56 m | 16 → **18 m** | 75,8 % → **85,3 %** | −20902 → −58881 |
+| hindring #27 | 31 × 69 → 1 × 16; 63 × 77 (for kort for en bredde) → 1 × 48 | 25,92 → 26,56 m | 24 → **26 m** | 79,0 % → **85,6 %** | −37559 → −58651 |
+| hindring #24 | 32,5 × 156 → 2 × 16; 32,5 × 82 → 1 × 16 | 22,72 → 23,20 m | 22 → 22 m | 82,6 % uendret — stykkene utenfor rullen | — |
+| hindring #28 | 38 × 216 → 4 × 16; 38 × 115 → 2 × 16 | 16,96 → 17,92 m | 16 → 16 m | 76,0 % uendret | — |
+| hindring #31 | 43,5 × 219 → 4 × 32 | 16,64 → 17,92 m | 16 → 16 m | 78,3 % uendret | — |
+
+Poengene faller der dekningen stiger: `_matBenchScore` straffer breddespredning (16 cm mot 384 cm) — samme
+formel-svakhet som i 131, ikke rørt. Konsoll fra benken: 2 → 4 `warn` (de to nye er «restfelt med plass til
+en vanlig bredde — ikke lagt», rom hindring #30, se funn), `error` 35 → 35 (alle Regel H-taket i
+`autoFillMatSerpentine`, som før).
+
+### Funn utenfor scope (ikke rettet)
+
+- **Stubb under 2 × CC der rullen slutter i et tverrstykke** (variant A 100T: 24 + 8 cm). Regel 29 pkt. 2
+  sier minst to kabelstrenger; `_matFreeCatalog` leser rullen av banens lengde (Σ ≥ rullen), så å fjerne
+  stubben ville lest biten som en 24 m-rull — nøyaktig 131-2. Spørsmål 132-2.
+- **Restfelt med plass til en vanlig bredde** (benk hindring #30, 378 × 518 med en 49 × 48 cm hindring i
+  hjørnet): etter at hovedkapitlet er lagt står feltet x 59–378 × y 0–60 (319 × 60 cm) igjen — en vannrett
+  bredde på 319 cm får plass (60 − 1 − 3 ≥ 50). 131 utelot sonen med Regel 27 («kapitlet ville overlappet
+  en nabomatte»); 132 legger etter regelen ikke tverrstykker der, logger `warn` og lar det stå. Spørsmål
+  132-5.
+- **Rektangulære rom** går fortsatt S.mats-veien (`_matPlanZones` null) og får ingen Regel 29 — med «fra
+  vegg» ligger 30–41 cm slakk langs én vegg (300 cm bredt rom), som ville kvalifisert. Å ta dem inn
+  betyr at rektangulære rom blir `S.matPaths` (frihånd-panelet, ikke auto-panelet). Spørsmål 132-4.
+- **Kuttrasteret** gjør stykkene korte: 44 − 8 − 2,5 = 33,5 → 24 cm (100T). Kenneths «ca. 55–60 cm» i en
+  61 cm stripe tyder på kutt per kabelstreng (CC), ikke per to. Spørsmål 132-3.
+- **Alkove høyere enn ~228 cm** i bilde 2-formen får `_decomposeRoomToRects` til å bytte største sone
+  (526 × 258 over 300 × 400) — hoveddelen blir et 142 cm høyt kapittel med 5 × 144 cm. Ikke 132-sak,
+  men forklarer hvorfor «alkove 226 × 260» ikke ble et testrom.
+- **Panelet viser to like rull-rader** («1 rull … (gir ingenting ekstra her)») — 131-6, står.
+- **Kabeltegneren viser én streng i et 24 cm-stykke.** `_drawMatPathCable` finner to strengposisjoner
+  (cc/2 og 3cc/2 fra kuttkanten), men flukt-invarianten (`_matCableEntrySide`: inn på siden mot forrige
+  bredde, ut mot neste — delt med auto) kapper antallet til oddetall når inn- og utside er lik; i variant A
+  (inn ovenfra, stubben under) blir 2 → 1 streng (målt: én strek 496,2 / 32,5–65,5 og endemarkøren der).
+  Dekning, effekt og lister er geometriske og uberørt; bare kabelstreken i planen/PDF viser én streng der
+  Regel 29 pkt. 2 sier to. Tegnerens paritetsregel, ikke 132-geometrien — ikke rørt.
+
+### Skal IKKE — holdt
+Ingen tverrstykker der en vanlig bredde får plass (vaktet i `_matCrossFieldChapter`, låst i testen).
+Grensene leses fra produktet (`mat_cc_mm`) og konstantene (`MAT_CROSS_NEIGHBOUR_CM`, `MAT_CABLE_WALL_CM`).
+Ikke pushet.
+
+### Verifiseringsmetode
+Headless Chrome (CDP, port 9333, egen tab per skript) mot `serve-varmeplan.js` på 4000 uten innlogging —
+harness i `/tmp/cdp132/` (`cdp.mjs`, `setup130.js`, `steg0.mjs` (restfelt-måling), `plan.mjs`,
+`variantA.mjs` (plan + ekte «Legg ut»-klikk + panel/ctxbar-tekst + angre), `tests.mjs`, `bench.mjs`,
+`benchdetail.mjs`, `timing.mjs` (7 kjøringer, median), `shots.mjs`, `zoom.mjs`). Benken kjørt på `fefc638`
+før endringen (`bench-before.json`) og etter, differansen regnet på radnivå. PDF fanget via `jsPDF.save`-stubb
+og rendret med `pdftoppm`.
+
+### Endringslogg (kode, alt i `index.html`)
+- Nye: `MAT_CROSS_NEIGHBOUR_CM`, `_matCrossMinFieldCm`, `_matCrossMinPieceCm`, `_matFreeFieldRects`,
+  `_matFieldEdgeBounds`, `_matCrossFieldChapter`, `_matCrossFillChapters`, `_matCrossFillRegressionTest`.
+- Endret: `_matPlanZones` (tverrkapitler sist, `restFields`, utelatt-filter), `_matChaptersToPath`
+  (`cross` på moves/chapters), `_matFreeSliceMoves` (kopierer `cross`), `_showMatZoneProposalPanel`
+  (restfelt-rad, «utenfor rullen», udekket-tekst, grå note), `_matRunPanelHtml` («tverr», ingen
+  minstelengde-merknad), `_matPathPanel` (bredder-linja), `_drawMatPathObj` (lengde-etikett).
+- Spec `spec-matte-utlegg.md` Regel 29 (Cowork-mappa, utenfor repoet): «UTKAST» fjernet, auto bekreftet og
+  bygget i 132. Skjermbilder `docs/serie-128/skjermbilder/132-*`.
