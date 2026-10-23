@@ -2892,6 +2892,10 @@ const _SHORTCUTS = [
   { group: 'Bakgrunn valgt',        keys: ['Piler'],               what: 'Flytt 25 cm · Shift = 5 cm' },                        // :41191-41198
   { group: 'Bakgrunn valgt',        keys: ['Shift', 'roter'],      what: 'Snap til 15° (eneste stedet Shift SLÅR PÅ snap, ikke av)' }, // :39700
   { group: 'Rotere et objekt',      keys: ['Shift', 'roter'],      what: 'Fri vinkel — ellers snapper til 45° (matte/plate/trapp/hindring) eller 0/90/180/270° (labels)' }, // :39700-39939, label-håndtak
+  { group: 'Matte: bredde valgt',   keys: ['klikk'],               what: 'Klikk på en bredde i en valgt matte velger bredden (Esc velger bort)' }, // 124 / Regel 26
+  { group: 'Matte: bredde valgt',   keys: ['dra'],                 what: 'Flytt bredden sidelengs i steg på 5 cm · Shift = glidende' },           // 124
+  { group: 'Matte: bredde valgt',   keys: ['dra S'],               what: 'Forskyv starten langs bredden (bredden blir kortere, slutten står)' },  // 124
+  { group: 'Matte: bredde valgt',   keys: ['Piler'],               what: 'På tvers = sidelengs 5 cm, langs = start 5 cm · Shift = 1 cm' },         // 124
   { group: 'Frihånds-matte',        keys: ['Enter'],               what: 'Avslutt banen' },                                     // :41250
   { group: 'Frihånds-matte',        keys: ['Backspace'],           what: 'Angre siste segment' },                               // :41255
   { group: 'Presentasjonsmodus',    keys: ['dra'],                 what: 'Panorer' },                                           // :38293
@@ -13268,6 +13272,7 @@ function _upcRenderMatResults(container, familyName, categoryId, roomId) {
     const widthCm = Math.round((shown[0].mat_width_mm || 500) / 10);
     html += `<div style="color:var(--dim);margin-bottom:4px;font-size:11px">Bredde: ${widthCm} cm · ${wm2} W/m²</div>`;
   }
+  html += _matGapFieldHtml();   // 124 DEL B: «Mellomrom» FØR utlegg — samme felt/kilde som etter (S.varmematte.gapCm, Regel 9)
   html += _snowMatSummaryHtml(roomId);
   // Preview footer (shown while a packed result is previewed, not yet committed).
   // 010: samme ÉN-knapp-mønster som kabel-footeren, og samme `_realRoomFor`-oppslag — matte-
@@ -13996,7 +14001,7 @@ function _matPathSegColor(mp, segIdx) {
 function _matLaidLengthCm(mat) {
   if (!mat) return 0;
   const n = mat.num_runs || 1;
-  if (mat.runLengths) {
+  if (mat.runLengths || mat.runAdjust) {   // 124: en kortet bredde (runAdjust) teller med sin faktiske lengde
     let sum = 0;
     for (let i = 0; i < n; i++) sum += _matRunLenCm(mat, i);
     return sum;
@@ -14429,11 +14434,255 @@ function _matClippedSegments(roomId, direction, pos_cm, nettoCm, marginCm, cutCm
 // mat.length_cm, evt. kortere siste via last_run_length_cm («eksakt mattelengde»-regelen fra
 // 08.07). ÉN kilde brukt av tegning (skjerm), _matLaidLengthCm og materiallista, så de aldri kan
 // komme til ulikt tall.
-function _matRunLenCm(mat, i) {
+function _matRunLenBaseCm(mat, i) {
   if (mat && mat.runLengths && mat.runLengths[i] != null) return mat.runLengths[i];
   const n = (mat && mat.num_runs) || 1;
   if (mat && i === n - 1 && mat.last_run_length_cm != null) return mat.last_run_length_cm;
   return mat ? mat.length_cm : 0;
+}
+// 124 / Regel 26 (Kenneth 22.10.2026): en forskjøvet start (runAdjust[i].startCm) KORTER bredden
+// i startenden — sluttenden ligger fast. Lengden som tegnes, dekkes og telles er derfor
+// base − startCm; produktet, rullen og W er urørt (Regel 17: ingenting regnes om).
+function _matRunLenCm(mat, i) {
+  const base = _matRunLenBaseCm(mat, i);
+  const adj = _matRunStartAdjCm(mat, i);
+  return adj > 0 ? Math.max(0, base - adj) : base;
+}
+
+// ── 124 / Regel 26: justering av ÉN bredde (auto-matte, S.mats) ─────────────────────────────
+// mat.runAdjust[i] = { acrossCm, startCm } — tomt/udefinert = ingen justering. acrossCm er en
+// sideforskyvning for bredde i ALENE, i mattas lokale tverrakse (samme akse som
+// r × (bredde + gap): +x for en loddrett matte, +y for en vannrett). startCm forskyver starten
+// langs bredden og korter den (se _matRunLenCm). Nullstilles implisitt ved nytt utlegg (motorene
+// lager et nytt mat-objekt uten feltet). Arrayen byttes ALLTID ut (kopi), aldri mutert i plass —
+// pushUndo tar bare en grunn kopi av matta ({...m}), så en delt array ville ødelagt angre.
+function _matRunAdj(mat, i) { const a = mat && mat.runAdjust && mat.runAdjust[i]; return a || null; }
+function _matRunAcrossAdjCm(mat, i) { const a = _matRunAdj(mat, i); return (a && a.acrossCm) ? a.acrossCm : 0; }
+function _matRunStartAdjCm(mat, i) { const a = _matRunAdj(mat, i); return (a && a.startCm > 0) ? a.startCm : 0; }
+function _matHasRunAdjust(mat) { return !!(mat && mat.runAdjust && mat.runAdjust.some(a => a && ((a.acrossCm || 0) !== 0 || (a.startCm || 0) > 0))); }
+function _matSetRunAdj(mat, i, patch) {
+  const n = mat.num_runs || 1;
+  const arr = (mat.runAdjust || []).slice();
+  while (arr.length < n) arr.push(null);
+  const cur = arr[i] || { acrossCm: 0, startCm: 0 };
+  const next = { acrossCm: patch.acrossCm != null ? patch.acrossCm : (cur.acrossCm || 0), startCm: patch.startCm != null ? patch.startCm : (cur.startCm || 0) };
+  next.acrossCm = Math.round(next.acrossCm * 10) / 10;
+  next.startCm = Math.max(0, Math.min(_matRunLenBaseCm(mat, i), Math.round(next.startCm * 10) / 10));
+  arr[i] = (next.acrossCm === 0 && next.startCm === 0) ? null : next;
+  mat.runAdjust = arr.some(a => a) ? arr : null;
+}
+// Tverr-forskyvning (cm, lokal tverrakse) for bredde r regnet fra mattas blokkstart — ÉN formel
+// for tegning (drawMats), treff (hitMat), vakt (_matRunsWithinRoom) og målsetting, så en
+// justert bredde aldri kan tegnes ett sted og treffes et annet.
+function _matRunAcrossOffsetCm(mat, r, gapCm) {
+  if (gapCm == null) gapCm = mat.gap_cm != null ? mat.gap_cm : 0;
+  return r * (mat.width_cm + gapCm) + _matRunAcrossAdjCm(mat, r);
+}
+
+// 124 DEL A: hvilken bredde som er FØRST og i hvilken ende kabelen STARTER følger retningsvelgeren
+// (mat.startCorner, satt av motorene ved utlegg). Uten feltet (eldre prosjekter, manuelt
+// plasserte matter): nøyaktig dagens rekkefølge (r stigende, første bredde starter i «høy»
+// along-ende), så ingenting lagret endrer utseende.
+//   • loddrett (rotation 0):  r=0 er VENSTRE bredde; høy along-ende = NEDERST (høy y).
+//   • vannrett (rotation 90): r=0 er ØVERSTE bredde; høy along-ende (lokal) = VENSTRE (lav x),
+//     fordi 90°-rotasjonen speiler langaksen (målt i STEG 0.1, prompt 124).
+function _matRunOrder(mat) {
+  const sc = mat && mat.startCorner;
+  if (!sc || sc.length < 2) return { reverse: false, firstHigh: true };
+  const left = sc.charAt(1) === 'l', bottom = sc.charAt(0) === 'b';
+  const horiz = (mat.rotation_deg || 0) === 90;
+  return horiz ? { reverse: bottom, firstHigh: left } : { reverse: !left, firstHigh: bottom };
+}
+// Kabelrekkefølgen (indekser r) for en matte — brukt av _matCablePlan og tegningen.
+function _matRunCableOrder(mat) {
+  const n = mat.num_runs || 1, o = _matRunOrder(mat);
+  const idx = []; for (let r = 0; r < n; r++) idx.push(r);
+  return o.reverse ? idx.reverse() : idx;
+}
+// Starter bredde r i høy along-ende? Ren paritet fra rekkefølgen (serpentin: inn i én ende, ut i
+// den andre) — samme standardvalg _matCablePlan bruker før en eventuell flukt-korreksjon.
+function _matRunStartIsHigh(mat, r) {
+  const n = mat.num_runs || 1, o = _matRunOrder(mat);
+  const j = o.reverse ? (n - 1 - r) : r;
+  return o.firstHigh ? (j % 2 === 0) : (j % 2 === 1);
+}
+
+// 124: verdensgeometri for ÉN bredde — samme transform som drawMats (senter + rotasjon), så
+// treff, rødmerking og håndtak alltid ligger nøyaktig der bredden tegnes. Returnerer null for en
+// bredde uten lengde. {quad:[4 pkt], start:{x,y} (startendens midtpunkt), end:{x,y}, lenCm}.
+function _matRunWorldGeom(mat, r) {
+  const len = _matRunLenCm(mat, r);
+  if (!(len > 0)) return null;
+  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+  const gapCm = mat.gap_cm != null ? mat.gap_cm : (prod?.min_gap_mm || 20) / 10;
+  const totalW = _matTotalWidthCm(mat);
+  const cx = mat.x_cm + totalW / 2, cy = mat.y_cm + mat.length_cm / 2;
+  const rad = (mat.rotation_deg || 0) * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
+  const hw = mat.width_cm / 2, hl = mat.length_cm / 2;
+  const alongStart = mat.rotation_deg === 90 ? mat.x_cm : mat.y_cm;
+  const lxC = -totalW / 2 + hw + _matRunAcrossOffsetCm(mat, r, gapCm);
+  const ly0 = (_matRunStartCm(mat, r) - alongStart) - hl, ly1 = ly0 + len;
+  const toW = (lx, ly) => ({ x: cx + lx * c - ly * sn, y: cy + lx * sn + ly * c });
+  const quad = [toW(lxC - hw, ly0), toW(lxC + hw, ly0), toW(lxC + hw, ly1), toW(lxC - hw, ly1)];
+  const high = _matRunStartIsHigh(mat, r);
+  return { quad, start: toW(lxC, high ? ly1 : ly0), end: toW(lxC, high ? ly0 : ly1), lenCm: len, lxC, ly0, ly1, toW };
+}
+// Avstand (cm) fra et punkt til nærmeste kant i et polygon.
+function _ptToPolyEdgeCm(x, y, pts) {
+  let best = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / L2));
+    best = Math.min(best, Math.hypot(x - (a.x + t * dx), y - (a.y + t * dy)));
+  }
+  return best;
+}
+// 124 / Regel 26: ligger bredde r utenfor rommet eller over en hindring? Merkes rødt med tekst,
+// spretter ALDRI tilbake — Kenneth avgjør selv. Returnerer null når alt er i orden.
+function _matRunPlacementIssue(mat, r) {
+  const g = _matRunWorldGeom(mat, r);
+  const room = S.rooms.find(rm => rm.id === mat.roomId);
+  if (!g || !room || !room.points || room.points.length < 3) return null;
+  let outsideCm = 0;
+  for (const q of g.quad) if (!ptInPoly(q.x, q.y, room.points)) outsideCm = Math.max(outsideCm, _ptToPolyEdgeCm(q.x, q.y, room.points));
+  const qx = g.quad.map(q => q.x), qy = g.quad.map(q => q.y);
+  const bx0 = Math.min(...qx), bx1 = Math.max(...qx), by0 = Math.min(...qy), by1 = Math.max(...qy);
+  let overHindring = false;
+  for (const h of S.hindrings) {
+    if (h.roomId !== mat.roomId || !h.points || h.points.length < 3) continue;
+    if (g.quad.some(q => ptInPoly(q.x, q.y, h.points))
+        || h.points.some(hp => hp.x > bx0 + 0.5 && hp.x < bx1 - 0.5 && hp.y > by0 + 0.5 && hp.y < by1 - 0.5)) { overHindring = true; break; }
+  }
+  if (outsideCm < 0.5 && !overHindring) return null;
+  const parts = [];
+  if (outsideCm >= 0.5) parts.push(`ligger ${Math.round(outsideCm)} cm utenfor rommet`);
+  if (overHindring) parts.push('ligger over en hindring');
+  return { outsideCm: Math.round(outsideCm * 10) / 10, overHindring, text: `Bredde ${r + 1} ${parts.join(' og ')}` };
+}
+// Gul merknad: bredden er kortet under produktets minste lengde (blokkerer ikke).
+function _matRunTooShortNote(mat, r) {
+  const prod = HEATING_PRODUCTS.find(p => p.id === mat.productId);
+  const minLenCm = ((prod && prod.mat_min_length_mm) || 0) / 10;
+  const len = _matRunLenCm(mat, r);
+  if (!(minLenCm > 0) || !(len > 0) || len >= minLenCm - 0.05) return null;
+  return `Bredde ${r + 1} er ${Math.round(len)} cm — under minste lengde ${Math.round(minLenCm)} cm`;
+}
+
+// ── 124 / Regel 26: felles inngang for tastatur, panel og regresjonstest ─────────────────────
+// Gjelder den valgte bredden i den valgte auto-matta (S.ui.selectedMatId + selectedMatRunIdx)
+// ELLER den valgte banen i den valgte frihånds-matta (S.ui.selectedMatPathId + selectedMatRunIdx).
+function _matSelectedRunTarget() {
+  const r = S.ui.selectedMatRunIdx;
+  if (r == null) return null;
+  if (S.ui.selectedMatId != null) {
+    const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+    if (mat && r < (mat.num_runs || 1)) return { kind: 'mat', obj: mat, r };
+  }
+  if (S.ui.selectedMatPathId != null) {
+    const mp = (S.matPaths || []).find(m => m.id === S.ui.selectedMatPathId);
+    if (mp && mp.moves && r < mp.moves.length) return { kind: 'matpath', obj: mp, r };
+  }
+  return null;
+}
+function _matRunAdjustOf(t) {
+  if (!t) return { acrossCm: 0, startCm: 0, lenCm: 0, baseLenCm: 0 };
+  if (t.kind === 'mat') return { acrossCm: _matRunAcrossAdjCm(t.obj, t.r), startCm: _matRunStartAdjCm(t.obj, t.r), lenCm: _matRunLenCm(t.obj, t.r), baseLenCm: _matRunLenBaseCm(t.obj, t.r) };
+  const m = t.obj.moves[t.r];
+  return { acrossCm: m.shiftCm || 0, startCm: m.startCm || 0, lenCm: Math.max(0, m.len - (m.startCm || 0)), baseLenCm: m.len };
+}
+function _matRunApplyAdjust(t, patch) {
+  if (t.kind === 'mat') _matSetRunAdj(t.obj, t.r, patch);
+  else _matPathSetRunAdj(t.obj, t.r, { shiftCm: patch.acrossCm, startCm: patch.startCm });
+  if (typeof _invalidateMatCache === 'function') _invalidateMatCache();
+}
+function _matRunAfterChange(t) {
+  if (t.kind === 'matpath' && typeof _matPathPanel === 'function') _matPathPanel();
+  updateCtxBar(); render();
+}
+// Flytt den valgte bredden: dAcross (cm, lokal tverrakse) og/eller dStart (cm, + = kortere).
+function _matRunNudge(dAcross, dStart) {
+  const t = _matSelectedRunTarget(); if (!t) return false;
+  const cur = _matRunAdjustOf(t);
+  pushUndo();
+  _matRunApplyAdjust(t, { acrossCm: cur.acrossCm + (dAcross || 0), startCm: cur.startCm + (dStart || 0) });
+  _matRunAfterChange(t);
+  return true;
+}
+function _matRunSetStart(v) {
+  const t = _matSelectedRunTarget(); if (!t) return;
+  const n = Number.isFinite(+v) ? Math.max(0, +v) : 0;
+  pushUndo();
+  _matRunApplyAdjust(t, { startCm: n });
+  _matRunAfterChange(t);
+}
+function _matRunReset() {
+  const t = _matSelectedRunTarget(); if (!t) return;
+  pushUndo();
+  _matRunApplyAdjust(t, { acrossCm: 0, startCm: 0 });
+  _matRunAfterChange(t);
+}
+function _matRunDeselect() {
+  if (S.ui.selectedMatRunIdx == null) return false;
+  S.ui.selectedMatRunIdx = null;
+  const mp = (S.matPaths || []).find(m => m.id === S.ui.selectedMatPathId);
+  if (mp && typeof _matPathPanel === 'function') _matPathPanel();
+  updateCtxBar(); render();
+  return true;
+}
+// Panel-tekst: «Bredde 2 av 5 · 180 cm · forskjøvet 5 cm · start +50 cm» + merknader.
+function _matRunPanelHtml(t) {
+  if (!t) return '';
+  const a = _matRunAdjustOf(t);
+  const n = t.kind === 'mat' ? (t.obj.num_runs || 1) : t.obj.moves.length;
+  const fmt = v => (Math.round(v * 10) / 10).toString().replace('.', ',');
+  const parts = [`Bredde ${t.r + 1} av ${n}`, `${fmt(a.lenCm)} cm`];
+  if (a.acrossCm) parts.push(`forskjøvet ${a.acrossCm > 0 ? '+' : '−'}${fmt(Math.abs(a.acrossCm))} cm`);
+  if (a.startCm) parts.push(`start +${fmt(a.startCm)} cm`);
+  const hasAdj = !!(a.acrossCm || a.startCm);
+  const issue = !hasAdj ? null : (t.kind === 'mat' ? _matRunPlacementIssue(t.obj, t.r) : _matPathRunIssue(t.obj, t.r));
+  const short = t.kind === 'mat' ? _matRunTooShortNote(t.obj, t.r) : (() => {
+    const prod = _matFreeProdOf(t.obj); const minLenCm = ((prod && prod.mat_min_length_mm) || 0) / 10;
+    return (minLenCm > 0 && a.lenCm > 0 && a.lenCm < minLenCm - 0.05) ? `Bredde ${t.r + 1} er ${Math.round(a.lenCm)} cm — under minste lengde ${Math.round(minLenCm)} cm` : null;
+  })();
+  return `<span class="tc-sep"></span>
+    <span style="font-size:12px;padding:0 4px;color:var(--text)" title="Valgt bredde — dra sidelengs (5 cm, Shift = glidende), dra S-håndtaket for forskjøvet start, piler = 5 cm, Shift + pil = 1 cm, Esc = velg bort">${parts.join(' · ')}</span>
+    <label style="font-size:11px;color:var(--dim);display:inline-flex;align-items:center;gap:3px;padding:0 4px">Start +
+      <input id="mat-run-start-input" type="number" min="0" max="${Math.round(a.baseLenCm)}" step="5" value="${Math.round(a.startCm)}"
+        style="width:54px;padding:2px 4px;border:1px solid var(--brd);border-radius:4px;font-size:11px;background:var(--bg);font-family:var(--font-mono)"
+        onclick="event.stopPropagation()" onkeydown="event.stopPropagation(); if (event.key === 'Enter') this.blur();" onchange="_matRunSetStart(this.value)"> cm</label>
+    <button class="snap-chip" onclick="_matRunReset()" title="Fjern sideforskyvning og forskjøvet start for denne bredden"${hasAdj ? '' : ' disabled'}>Nullstill</button>
+    ${issue ? `<span style="font-size:11px;color:#dc2626;padding:0 4px">⚠ ${esc(issue.text)}</span>` : ''}
+    ${short ? `<span style="font-size:11px;color:#d97706;padding:0 4px">⚠ ${esc(short)}</span>` : ''}`;
+}
+// Drag-geometri: skjerm-delta → (dAcross, dStart) i cm for målobjektet, med 5 cm-snapp (Shift:
+// glidende, 1 mm). Alltid DELTA fra der man grep — aldri «hopp til musa».
+function _matRunDragDelta(t, e) {
+  const sc = S.view.zoom * BASE_SCALE;
+  const dx = (e.clientX - _matDragOrigStart.x) / sc, dy = (e.clientY - _matDragOrigStart.y) / sc;
+  const fine = !!(e.shiftKey || S.shiftHeld);
+  const step = fine ? 0.1 : 5;
+  const snap = v => Math.round(v / step) * step;
+  if (t.kind === 'mat') {
+    const rad = (t.obj.rotation_deg || 0) * Math.PI / 180, c = Math.cos(rad), sn = Math.sin(rad);
+    const dlx = dx * c + dy * sn, dly = -dx * sn + dy * c;   // skjerm → mattas lokale akser
+    const high = _matRunStartIsHigh(t.obj, t.r);
+    return { dAcross: snap(dlx), dStart: snap(high ? -dly : dly) };
+  }
+  const m = t.obj.moves[t.r];
+  return m.axis === 'h' ? { dAcross: snap(dy), dStart: snap(dx * m.dir) } : { dAcross: snap(dx), dStart: snap(dy * m.dir) };
+}
+// Starthåndtaket på en valgt frihåndsbane (skjermavstand).
+function _matPathRunStartWorld(mp, i) {
+  const r = _matFreeDeriveRuns(mp)[i]; if (!r || _matFreeRunLen(r) <= 0.5) return null;
+  return { x: r.a.x, y: r.a.y };
+}
+function hitMatPathRunStartHandle(sx, sy) {
+  if (S.ui.selectedMatPathId == null || S.ui.selectedMatRunIdx == null) return false;
+  const mp = (S.matPaths || []).find(m => m.id === S.ui.selectedMatPathId); if (!mp) return false;
+  const w = _matPathRunStartWorld(mp, S.ui.selectedMatRunIdx); if (!w) return false;
+  const hp = w2s(w.x, w.y);
+  return Math.hypot(sx - hp.x, sy - hp.y) <= 11;
 }
 
 // REGEL A (LÅST, Kenneth 19.08.2026): startpunktet for en streng skal komme fra SAMME kilde som
@@ -14443,7 +14692,7 @@ function _matRunLenCm(mat, i) {
 // som FØR denne regelen fantes: full bredde spenner fra blokkens egen start (mat.y_cm/x_cm), unntatt
 // en kortere SISTE bredde («eksakt mattelengde», 08.07-regelen), som forankres i sømenden etter
 // samme paritet (upR) som drawMats alltid har brukt for den.
-function _matRunStartCm(mat, i) {
+function _matRunStartBaseCm(mat, i) {
   if (mat && mat.runStarts && mat.runStarts[i] != null) return mat.runStarts[i];
   const dir = mat && mat.rotation_deg === 90 ? 'h' : 'v';
   const alongStart = mat ? (dir === 'h' ? mat.x_cm : mat.y_cm) : 0;
@@ -14454,6 +14703,14 @@ function _matRunStartCm(mat, i) {
     return upR ? (alongStart + mat.length_cm - mat.last_run_length_cm) : alongStart;
   }
   return alongStart;
+}
+// 124 / Regel 26: starter bredden i LAV along-ende, flyttes startpunktet innover (base + startCm);
+// starter den i høy ende, ligger startpunktet fast og bare lengden kortes (_matRunLenCm).
+function _matRunStartCm(mat, i) {
+  const base = _matRunStartBaseCm(mat, i);
+  const adj = _matRunStartAdjCm(mat, i);
+  if (adj > 0 && !_matRunStartIsHigh(mat, i)) return base + Math.min(adj, _matRunLenBaseCm(mat, i));
+  return base;
 }
 
 // REGEL I+J (LÅST, Kenneth 19.08.2026): kabelplanen for ÉN matte — ÉN kilde brukt av BÅDE
@@ -14516,7 +14773,15 @@ function _matCablePlan(mat, prod) {
   // k-indeks og verdensposisjon er ekvivalente), men unngår falske flukt-treff når ankrene faktisk
   // er halv-CC fra hverandre.
   let prevEndY = null;
-  for (let r = 0; r < numRuns; r++) {
+  // 124 DEL A: breddene tas i KABELREKKEFØLGE (_matRunCableOrder — r stigende som før, eller
+  // synkende når velgeren setter første bredde i høy tverr-ende). plan.runs er derfor i
+  // kabelrekkefølge, og hvert element bærer sin egen r (run.r) — lesere som trenger «planen for
+  // bredde r» slår opp på run.r (_matRunsWithinRoom), aldri på posisjon i arrayen.
+  const order = _matRunCableOrder(mat);
+  const reverseOrder = order.length > 1 && order[0] > order[1];
+  const firstHigh = _matRunOrder(mat).firstHigh;
+  for (let oi = 0; oi < order.length; oi++) {
+    const r = order[oi];
     const netLen = _matRunLenCm(mat, r);
     if (netLen <= 0) { runs.push(null); prevEndY = null; continue; }   // STEG 2: hoppet over, aldri stopp
     // REGEL 19: forbandt-forskyvningen er en PER-BREDDE offset på rutenettets forankring — kun
@@ -14539,7 +14804,9 @@ function _matCablePlan(mat, prod) {
     // rutenett-posisjon). Fluktkriteriet (Regel J) er UENDRET - fortsatt sammenlignet pa
     // verdensposisjon under, bit-identisk for det uforskjovne, rektangulaere standardtilfellet
     // (samme valg som r%2 alltid ga der, bekreftet ved utledning).
-    let descending = (r % 2 === 0);
+    // 124 DEL A: standardvalget følger plassen i KABELREKKEFØLGEN (oi) og velgerens startende
+    // (firstHigh) — for en matte uten startCorner er dette bit-identisk med den gamle r%2-regelen.
+    let descending = firstHigh ? (oi % 2 === 0) : (oi % 2 === 1);
     if (prevEndY != null) {
       const yIfDesc0 = anchorCm + kHi * ccCm, yIfAsc0 = anchorCm + kLo * ccCm;
       if (Math.abs(yIfDesc0 - prevEndY) < 1e-6) descending = true;
@@ -14561,7 +14828,8 @@ function _matCablePlan(mat, prod) {
     // plan som _matRunsWithinRoom (vakten) leser, sa de to aldri kan divergere. Rapportert i
     // commit-meldingen: ks-lengden brukes IKKE til lengdeberegning noe sted (kun til vakten og
     // selve tegningen, begge steder trygt a trunkere) - _matCablePlan har bare disse to kallerne.
-    const { hi0, Nuse } = _matCableEntrySide(false, true, ks.length);
+    // 124 DEL A: ved omvendt rekkefølge kommer kabelen inn fra HØY tverr-side og går ut mot lav.
+    const { hi0, Nuse } = _matCableEntrySide(reverseOrder, !reverseOrder, ks.length);
     if (Nuse < ks.length) { ks.length = Nuse; yWorld.length = Nuse; }
     runs.push({ r, netStart, netEnd, ks, yWorld, flukt, startHi0: hi0 });
     prevEndY = yWorld.length ? yWorld[yWorld.length - 1] : null;
@@ -14612,7 +14880,7 @@ function _matRunsWithinRoom(mat, room, marginCm, prod) {
     // ikke fanget «riktig lengde, feil posisjon»: den regnet en posisjon som alltid stemte med seg
     // selv, uansett hvor bredden faktisk var forskjøvet i tegningen.
     const start = _matRunStartCm(mat, r);
-    const perpPos = perpBase + r * (mat.width_cm + gapCm);
+    const perpPos = perpBase + _matRunAcrossOffsetCm(mat, r, gapCm);   // 124: inkl. sideforskyvning av én bredde
     const segs = _matClippedSegments(room.id, dir, perpPos, mat.width_cm, marginCm, 0);
     const fits = segs.some(s => s.start_cm <= start + 0.5 && s.start_cm + s.length_cm >= start + len - 0.5);
     if (!fits) return false;
@@ -14620,7 +14888,7 @@ function _matRunsWithinRoom(mat, room, marginCm, prod) {
   if (prod) {
     const plan = _matCablePlan(mat, prod);
     for (let r = 0; r < n; r++) {
-      const run = plan.runs[r];
+      const run = plan.runs.find(x => x && x.r === r) || null;   // 124: plan.runs er i kabelrekkefølge
       if (!run) continue;   // STEG 2: ingen kabel her er gyldig (ikke et brudd) — intet å validere
       const netLen = _matRunLenCm(mat, r);
       const netStart = _matRunStartCm(mat, r);
@@ -15245,6 +15513,7 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
       num_runs: item.runs, last_run_length_cm: null,
       runLengths: runLengthsOut, runStarts: runStartsOut,
       gap_cm: gapCm, rotation_deg: dir === 'h' ? 90 : 0,
+      startCorner: (S.varmefolie && S.varmefolie.startCorner) || 'bl',   // 124 DEL A: som autoFillMatSerpentine
       // DEL B: fra-vegg-aksen har ALDRI slakk på startsiden (all slark havner på motsatt vegg) —
       // rapporter marginCm rent der, ikke den gamle sentrerings-formelen (som IKKE lenger stemmer
       // med hvor matta faktisk starter). Sentrert (fromWallAlong=false, etter eksplisitt «Sentrer»)
@@ -16383,6 +16652,7 @@ function autoFillMatSerpentine(productId, opts) {
     runStarts: runStartsOut,             // REGEL A: startpunkt fra SAMME klipp som lengden (null = alle nominelle)
     gap_cm: effectiveGapCm,
     rotation_deg: dir === 'h' ? 90 : 0,
+    startCorner: (S.varmefolie && S.varmefolie.startCorner) || 'bl',   // 124 DEL A: første bredde + start følger velgeren (se _matRunOrder)
     _coldTotalCm: Math.max(0, acrossSpan + 2 * marginCm - totalW),  // kaldt felt på tvers mot FULL romvegg (inkl. margin) — som mockup-fasiten
     _fromWall: fromWall,                                            // true → alt kaldt felt på én side; false → deles likt
     _capacityCm: Math.round(capacityCm * 10) / 10,                  // STEG 2: rommets sanne kapasitet — vist mot valgt rull-lengde i panelet
@@ -16552,7 +16822,8 @@ function _matFreeProdOf(mp) { return HEATING_PRODUCTS.find(p => p.id === mp.prod
 
 // Relativ moves → absolutte løp (verden cm). Start + off; uturn forskyver NET+gap på
 // musesiden; 90°-hjørne trekker ½NET inn på begge akser så ytterkantene linjerer.
-function _matFreeDeriveRuns(mp) {
+function _matFreeDeriveRuns(mp, opts) {
+  const raw = !!(opts && opts.raw);
   const { NET } = _matFreeConsts(_matFreeProdOf(mp));
   const gap = Math.max(0, mp.gapCm || 0);
   let E = { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }, prev = null;
@@ -16576,9 +16847,58 @@ function _matFreeDeriveRuns(mp) {
       if (m.axis === 'h') { a = { ...E }; b = { x: E.x + m.dir * m.len, y: E.y }; }
       else { a = { ...E }; b = { x: E.x, y: E.y + m.dir * m.len }; }
     }
-    out.push({ a, b, axis: m.axis, dir: m.dir, uturn }); E = { ...b }; prev = out[out.length - 1];
+    // 124 / Regel 26: kjeden (E, prev) går videre fra den NOMINELLE banen, så naboene står
+    // stille når én bane justeres. Bare den utleverte banen får sideforskyvning (shiftCm, på
+    // tverraksen: y for en vannrett bane, x for en loddrett) og forskjøvet start (startCm: a
+    // flyttes mot b, b ligger fast — banen blir kortere). opts.raw = uten justering (brukes av
+    // rullvalget, Regel 17: produktet regnes ikke om).
+    const nominal = { a, b, axis: m.axis, dir: m.dir, uturn };
+    let run = nominal;
+    if (!raw && ((m.shiftCm || 0) !== 0 || (m.startCm || 0) > 0)) {
+      const sh = m.shiftCm || 0, st = Math.max(0, Math.min(m.len, m.startCm || 0));
+      const a2 = { ...a }, b2 = { ...b };
+      if (m.axis === 'h') { a2.y += sh; b2.y += sh; a2.x += m.dir * st; }
+      else { a2.x += sh; b2.x += sh; a2.y += m.dir * st; }
+      run = { a: a2, b: b2, axis: m.axis, dir: m.dir, uturn, adjusted: true };
+    }
+    out.push(run); E = { ...b }; prev = nominal;
   }
   return out;
+}
+// 124 / Regel 26: sett justering på ÉN bane i en frihånds-matte. moves byttes ut (kopi) så
+// pushUndo sitt snapshot (grunne kopier av hvert move) aldri deles med det levende objektet.
+function _matPathSetRunAdj(mp, i, patch) {
+  const moves = (mp.moves || []).map(m => ({ ...m }));
+  const m = moves[i]; if (!m) return;
+  if (patch.shiftCm != null) m.shiftCm = Math.round(patch.shiftCm * 10) / 10;
+  if (patch.startCm != null) m.startCm = Math.max(0, Math.min(m.len, Math.round(patch.startCm * 10) / 10));
+  if (!m.shiftCm) delete m.shiftCm;
+  if (!m.startCm) delete m.startCm;
+  mp.moves = moves;
+}
+function _matPathHasRunAdjust(mp) { return (mp.moves || []).some(m => (m.shiftCm || 0) !== 0 || (m.startCm || 0) > 0); }
+// Rødmerking for én frihåndsbane: utenfor rommet (samme klemming vakten bruker) eller over en
+// hindring. null = i orden.
+function _matPathRunIssue(mp, i) {
+  const runs = _matFreeDeriveRuns(mp); const r = runs[i]; if (!r) return null;
+  const len = _matFreeRunLen(r); if (len <= 0.5) return null;
+  const room = S.rooms.find(rm => rm.id === mp.roomId);
+  if (!room || !room.points || room.points.length < 3) return null;
+  const parts = [];
+  const { NET } = _matFreeConsts(_matFreeProdOf(mp));
+  const R = _matFreeLaneRectWorld(r, NET);
+  const quad = [{ x: R.x0, y: R.y0 }, { x: R.x1, y: R.y0 }, { x: R.x1, y: R.y1 }, { x: R.x0, y: R.y1 }];
+  // Samme sjekk som auto-matta (_matRunPlacementIssue): hjørnene mot rommets polygon. IKKE
+  // _matFreeClampLen — den snapper til kuttrasteret og ville meldt «utenfor» for enhver kortet
+  // bane som ikke går opp i 16 cm, selv midt i rommet.
+  let outsideCm = 0;
+  for (const q of quad) if (!ptInPoly(q.x, q.y, room.points)) outsideCm = Math.max(outsideCm, _ptToPolyEdgeCm(q.x, q.y, room.points));
+  if (outsideCm >= 0.5) parts.push(`ligger ${Math.round(outsideCm)} cm utenfor rommet`);
+  for (const h of S.hindrings) {
+    if (h.roomId !== mp.roomId || !h.points || h.points.length < 3) continue;
+    if (quad.some(q => ptInPoly(q.x, q.y, h.points)) || h.points.some(hp => hp.x > R.x0 + 0.5 && hp.x < R.x1 - 0.5 && hp.y > R.y0 + 0.5 && hp.y < R.y1 - 0.5)) { parts.push('ligger over en hindring'); break; }
+  }
+  return parts.length ? { text: `Bredde ${i + 1} ${parts.join(' og ')}` } : null;
 }
 function _matFreeRunLen(r) { return Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); }
 // Regel 23 (spec-matte-utlegg.md, Kenneth 28.08.2026): vendingen mellom to bredder spiser ikke av
@@ -16588,7 +16908,7 @@ function _matFreeRunLen(r) { return Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); }
 // fila) — motoren belastet rullen for lengde ingenting ble tegnet for. `_matFreeUTurnLen` fantes
 // tidligere her (slettet — .uturn sin koordinat-payload leses ALDRI andre steder i filen, kun
 // sjekket for sannhetsverdi ved denne nå fjernede lengde-akkumuleringen; grep bekreftet FØR sletting).
-function _matFreeTotalCm(mp) { let L = 0; for (const r of _matFreeDeriveRuns(mp)) L += _matFreeRunLen(r); return L; }
+function _matFreeTotalCm(mp, raw) { let L = 0; for (const r of _matFreeDeriveRuns(mp, raw ? { raw: true } : undefined)) L += _matFreeRunLen(r); return L; }
 function _matFreeEnd(mp) { const runs = _matFreeDeriveRuns(mp); return runs.length ? runs[runs.length - 1].b : { x: mp.start.x + (mp.offX || 0), y: mp.start.y + (mp.offY || 0) }; }
 
 // FEIL 2 (Kenneth 19.08.2026, «frihånd kan ikke avsluttes med Enter»): DELT kilde for STOPP-
@@ -16783,7 +17103,10 @@ function _matSplitDiagnose(mp) {
 }
 function _matFreeCatalog(mp) {
   const fam = _matFreeProdOf(mp);
-  const totalCm = _matFreeTotalCm(mp);
+  // 124 / Regel 17+26: rullvalget regnes av den NOMINELLE (tegnede) lengden — en kortet bane
+  // endrer ikke produkt, W eller rull. laidCm (under) er den faktiske geometrien.
+  const totalCm = _matFreeTotalCm(mp, true);
+  const laidCm = _matFreeTotalCm(mp);
   const widthMm = fam?.mat_width_mm || 500, voltage = fam?.voltage || 230;
   const cands = HEATING_PRODUCTS.filter(p => fam && p.product_family === fam.product_family
       && (p.mat_width_mm || 500) === widthMm && (p.voltage || 230) === voltage
@@ -16820,7 +17143,7 @@ function _matFreeCatalog(mp) {
   const totalWatt = segments.reduce((s, seg) => s + seg.watt, 0);
   const first = segments[0];
   return {
-    fam, totalCm, segments, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), totalWatt, tooShort,
+    fam, totalCm, laidCm, segments, coverCm, uncoveredCm: Math.max(0, totalCm - coverCm), totalWatt, tooShort,
     // Bakoverkompatible aliaser til FØRSTE segment — for kallere som bevisst bare trenger
     // hovedproduktet. Tell/summer-flater (materiallister, romstatistikk) MÅ bruke segments[].
     product: first?.product ?? null, chosenA: first?.areaM2 ?? 0, rollCm: first?.lenCm ?? 0,
@@ -17710,6 +18033,240 @@ function _matFreeRegressionTest() {
 // ⚠ Krever et lerret med gyldige mål (klikk-kaskaden regner i skjermkoordinater). Kjøres testen
 // mens lerretet er 0×0 (skjult designer), RAPPORTERES det som «hoppet over» — den består aldri av
 // den grunnen alene.
+// 124 / Regel 26 (Kenneth 22.10.2026): regresjonstest for (A) start og første bredde følger
+// velgeren, (C) justering av ÉN bredde — sidelengs 5 cm (bare den valgte), forskjøvet start
+// (slutten står, bredden kortes, ingenting regnes om), tastatur, Shift, Nullstill, angre,
+// lagring, flytting av hele matta, nytt utlegg nullstiller — for auto-matte OG frihånd.
+// Kjør i konsollen: _matRunAdjustRegressionTest()
+function _matRunAdjustRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  if (!canvas || !canvas.width || !canvas.height || !canvas.getBoundingClientRect().width) {
+    console.error('_matRunAdjustRegressionTest: HOPPET OVER — lerretet er 0×0 (åpne et prosjekt i tegnemodulen først)');
+    return { ok: false, skipped: true, results };
+  }
+  const savedProducts = HEATING_PRODUCTS.slice();
+  const saved = { rooms: S.rooms, mats: S.mats, matPaths: S.matPaths, hindrings: S.hindrings, zones: S.zones, strips: S.strips, cables: S.cables,
+    floors: S.floors, activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId, selectedRoomId: S.ui.selectedRoomId,
+    selectedMatId: S.ui.selectedMatId, selectedMatPathId: S.ui.selectedMatPathId, selectedMatRunIdx: S.ui.selectedMatRunIdx,
+    drawMode: S.ui.drawMode, view: { ...S.view }, varmefolie: { ...S.varmefolie }, varmematte: { ...S.varmematte },
+    nextMatId: S.counters.nextMatId, nextMatPathId: S.counters.nextMatPathId, matFree: _matFree, cycle: S.ui.cycle,
+    autoSave: window._performAutoSave, toast: window._showToast, undoLen: _undoStack.length };
+  window._performAutoSave = () => Promise.resolve();
+  window._showToast = () => {};
+  const cr = () => canvas.getBoundingClientRect();
+  const ev = (type, sx, sy, extra) => canvas.dispatchEvent(new MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, clientX: cr().left + sx, clientY: cr().top + sy, button: 0, buttons: type === 'mouseup' ? 0 : 1 }, extra || {})));
+  const key = (k, extra) => document.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ bubbles: true, cancelable: true, key: k }, extra || {})));
+  const near = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 0.05 : tol);
+  const quadKey = q => q.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('|');
+  try {
+    HEATING_PRODUCTS.length = 0;
+    HEATING_PRODUCTS.push(..._matBenchCatalog([1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20], { idBase: 912400, prefix: 'RUNADJ' }));
+    const RID = 912401;
+    const pts = [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 300 }, { x: 0, y: 300 }];
+    const room = { id: RID, floorId: null, points: pts, walls: [], dims: [], area: Math.abs(compArea(pts)) };
+    room.walls = compWalls(pts);
+    S.rooms = [room]; S.mats = []; S.matPaths = []; S.hindrings = []; S.zones = []; S.strips = []; S.cables = [];
+    S.floors = []; S.ui.activeFloorId = null; S.ui.activePartId = null; _rebuildActiveFloorRoomIds();
+    S.ui.selectedRoomId = RID; S.ui.selectedMatId = null; S.ui.selectedMatPathId = null; S.ui.selectedMatRunIdx = null;
+    S.ui.drawMode = null; S.ui.cycle = null; _matFree = null;
+    S.varmematte = { gapCm: null }; S.varmefolie = Object.assign(S.varmefolie || {}, { direction: 'v', startCorner: 'bl', dirExplicit: true });
+    S.view = { ...S.view, zoom: 1.2, panX: 200, panY: 150 };
+    const prod = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 6);
+
+    // ── A: første bredde og start følger velgeren (alle 4 hjørner × 2 retninger) ──────────
+    const cornerOf = p => (p.y < 150 ? 't' : 'b') + (p.x < 200 ? 'l' : 'r');
+    for (const [corner, dir] of [['bl', 'v'], ['tl', 'v'], ['br', 'v'], ['tr', 'v'], ['bl', 'h'], ['tl', 'h'], ['br', 'h'], ['tr', 'h']]) {
+      S.varmefolie.startCorner = corner; S.varmefolie.direction = dir;
+      const m = autoFillMatSerpentine(prod.id, { dryRun: true });
+      if (!m) { check(`A ${corner}/${dir}: utlegg`, 'matte', false, 'ingen matte'); continue; }
+      const first = _matRunCableOrder(m)[0];
+      const g = _matRunWorldGeom(m, first);
+      const plan = _matCablePlan(m, HEATING_PRODUCTS.find(p => p.id === m.productId));
+      const run0 = plan.runs.find(x => x);
+      const xs = g.quad.map(q => q.x), ys = g.quad.map(q => q.y);
+      const firstSide = dir === 'v' ? ((Math.min(...xs) < 400 - Math.max(...xs)) ? 'l' : 'r') : ((Math.min(...ys) < 300 - Math.max(...ys)) ? 't' : 'b');
+      const expSide = dir === 'v' ? corner.charAt(1) : corner.charAt(0);
+      check(`A ${corner}/${dir}: første bredde ligger i hjørnets side`, expSide, firstSide === expSide && run0 && run0.r === first, { firstSide, first, planFirst: run0 && run0.r });
+      check(`A ${corner}/${dir}: start (grønn) i valgt hjørne`, corner, cornerOf(g.start) === corner, { start: g.start, got: cornerOf(g.start) });
+      check(`A ${corner}/${dir}: startCorner lagret på matta`, corner, m.startCorner === corner, m.startCorner);
+    }
+    // Uten startCorner (eldre prosjekt): dagens rekkefølge
+    S.varmefolie.startCorner = 'bl'; S.varmefolie.direction = 'v';
+    const legacy = autoFillMatSerpentine(prod.id, { dryRun: true }); delete legacy.startCorner;
+    check('A eldre matte uten startCorner: r stigende, start i høy ende', 'reverse=false, firstHigh=true',
+      !_matRunOrder(legacy).reverse && _matRunOrder(legacy).firstHigh && _matRunCableOrder(legacy)[0] === 0, _matRunOrder(legacy));
+
+    // ── C: auto-matte ────────────────────────────────────────────────────────────────────
+    S.mats = []; S.counters.nextMatId = 1;
+    const mat = autoFillMatSerpentine(prod.id);
+    check('C fikstur: auto-matte med ≥4 bredder', '≥4', mat && mat.num_runs >= 4, mat && mat.num_runs);
+    if (!mat) throw new Error('ingen matte');
+    const before = {}; for (let r = 0; r < mat.num_runs; r++) before[r] = quadKey(_matRunWorldGeom(mat, r).quad);
+    const prodId0 = mat.productId, nRuns0 = mat.num_runs, len0 = mat.length_cm, laid0 = _matLaidLengthCm(mat);
+    S.ui.selectedMatId = mat.id; S.ui.selectedMatRunIdx = 2;
+    render(); updateCtxBar();
+    check('C panel viser «Bredde 3 av N»', 'tekst', /Bredde 3 av \d+/.test(document.getElementById('ctxbar')?.textContent || ''), (document.getElementById('ctxbar')?.textContent || '').slice(0, 120));
+    _matRunNudge(-5, 0);
+    check('C sidelengs −5: bredde 3 flyttet 5 cm', 'acrossCm=−5', near(_matRunAcrossAdjCm(mat, 2), -5), _matRunAcrossAdjCm(mat, 2));
+    const g2 = _matRunWorldGeom(mat, 2);
+    check('C sidelengs: geometrien flyttet 5 cm mot venstre', 'x −5', near(g2.quad[0].x, parseFloat(before[2].split('|')[0].split(',')[0]) - 5, 0.11), g2.quad[0].x);
+    check('C sidelengs: naboene står stille', 'uendret', [0, 1, 3].every(r => quadKey(_matRunWorldGeom(mat, r).quad) === before[r]), [0, 1, 3].map(r => quadKey(_matRunWorldGeom(mat, r).quad) === before[r]));
+    // Tastatur: ← = −5, Shift+← = −1 (loddrett matte: piler på tvers = x)
+    key('ArrowLeft');
+    check('C tastatur ←: −5 cm til', 'acrossCm=−10', near(_matRunAcrossAdjCm(mat, 2), -10), _matRunAcrossAdjCm(mat, 2));
+    key('ArrowRight', { shiftKey: true });
+    check('C tastatur Shift+→: +1 cm', 'acrossCm=−9', near(_matRunAcrossAdjCm(mat, 2), -9), _matRunAcrossAdjCm(mat, 2));
+    // Forskjøvet start +50: slutten står, lengden −50, produkt/W/rull uendret
+    const endBefore = _matRunWorldGeom(mat, 2).end, lenBefore = _matRunLenCm(mat, 2);
+    _matRunNudge(0, 50);
+    const gS = _matRunWorldGeom(mat, 2);
+    check('C start +50: bredden 50 cm kortere', `${lenBefore - 50}`, near(_matRunLenCm(mat, 2), lenBefore - 50), _matRunLenCm(mat, 2));
+    check('C start +50: slutten ligger fast', 'samme sluttpunkt', near(gS.end.x, endBefore.x, 0.11) && near(gS.end.y, endBefore.y, 0.11), { before: endBefore, after: gS.end });
+    check('C start +50: startpunktet flyttet 50 cm', '50', near(Math.hypot(gS.start.x - gS.end.x, gS.start.y - gS.end.y), lenBefore - 50, 0.11), Math.hypot(gS.start.x - gS.end.x, gS.start.y - gS.end.y));
+    check('C start +50: produkt, antall bredder og nominell lengde uendret (Regel 17)', 'uendret', mat.productId === prodId0 && mat.num_runs === nRuns0 && mat.length_cm === len0, { productId: mat.productId, num_runs: mat.num_runs, length_cm: mat.length_cm });
+    check('C start +50: «Dekker» (lagt lengde) 50 cm mindre', `${laid0 - 50}`, near(_matLaidLengthCm(mat), laid0 - 50), _matLaidLengthCm(mat));
+    // Tastatur langs bredden: for 'bl'/'v' starter bredde 3 (r=2, j=2) i høy ende → ↑ korter
+    key('ArrowUp');
+    check('C tastatur ↑ (langs): start +5', '55', near(_matRunStartAdjCm(mat, 2), 55), _matRunStartAdjCm(mat, 2));
+    key('ArrowDown', { shiftKey: true });
+    check('C tastatur Shift+↓ (langs): start −1', '54', near(_matRunStartAdjCm(mat, 2), 54), _matRunStartAdjCm(mat, 2));
+    // Gul merknad under minste lengde
+    const minLenCm = (prod.mat_min_length_mm || 1000) / 10;
+    _matRunSetStart(_matRunLenBaseCm(mat, 2) - minLenCm + 10);
+    check('C under minste lengde: gul merknad, ikke blokkert', 'merknad', !!_matRunTooShortNote(mat, 2) && _matRunLenCm(mat, 2) > 0, _matRunTooShortNote(mat, 2));
+    _matRunSetStart(54);
+    // Rød merknad utenfor rommet, uten sprett (bredde 1 ligger inntil venstre vegg)
+    S.ui.selectedMatRunIdx = 0;
+    _matRunNudge(-40, 0);
+    const issue = _matRunPlacementIssue(mat, 0);
+    check('C utenfor rommet: rød merknad', 'Bredde 1 ligger N cm utenfor rommet', !!issue && /utenfor rommet/.test(issue.text), issue && issue.text);
+    check('C utenfor rommet: spretter ikke tilbake', 'acrossCm=−40', near(_matRunAcrossAdjCm(mat, 0), -40), _matRunAcrossAdjCm(mat, 0));
+    _matRunNudge(40, 0);
+    check('C tilbake i rommet: merknaden borte', 'null', !_matRunPlacementIssue(mat, 0), _matRunPlacementIssue(mat, 0));
+    S.ui.selectedMatRunIdx = 2;
+    // Angre / gjør om
+    const adjBeforeUndo = JSON.stringify(mat.runAdjust);
+    _matRunNudge(-5, 0);   // −9 → −14, så angre har noe å angre
+    undo();
+    const matU = S.mats.find(m => m.id === mat.id);
+    check('C angre: siste justering tilbake', '−9', near(_matRunAcrossAdjCm(matU, 2), -9), _matRunAcrossAdjCm(matU, 2));
+    if (typeof redo === 'function') { redo(); check('C gjør om: justeringen tilbake', adjBeforeUndo, JSON.stringify(S.mats.find(m => m.id === mat.id).runAdjust) === adjBeforeUndo, JSON.stringify(S.mats.find(m => m.id === mat.id).runAdjust)); }
+    const matR = S.mats.find(m => m.id === mat.id);
+    S.ui.selectedMatId = matR.id; S.ui.selectedMatRunIdx = 2;
+    // Lagre/åpne (JSON-rundtur) og flytt hele matta
+    const copy = JSON.parse(JSON.stringify(matR));
+    check('C lagring: runAdjust overlever JSON-rundtur', 'lik', JSON.stringify(copy.runAdjust) === JSON.stringify(matR.runAdjust) && copy.startCorner === matR.startCorner, copy.runAdjust);
+    const gBeforeMove = _matRunWorldGeom(matR, 2);
+    matR.x_cm += 10; matR.y_cm += 7;
+    const gAfterMove = _matRunWorldGeom(matR, 2);
+    check('C flytt hele matta: justeringen følger med', 'dx=10, dy=7', near(gAfterMove.start.x - gBeforeMove.start.x, 10) && near(gAfterMove.start.y - gBeforeMove.start.y, 7) && near(_matRunAcrossAdjCm(matR, 2), -9), { dx: gAfterMove.start.x - gBeforeMove.start.x, dy: gAfterMove.start.y - gBeforeMove.start.y });
+    matR.x_cm -= 10; matR.y_cm -= 7;
+    // Mus: grip bredde 2 i høyre kant og dra 2 cm → ingenting hopper; 3 cm → 5 cm; Shift → glidende
+    document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Shift' })); S.shiftHeld = false;   // Shift-pilene over slapp aldri tasten
+    S.ui.selectedMatRunIdx = null; render();
+    const g1 = _matRunWorldGeom(matR, 1);
+    const grabW = { x: g1.quad[1].x - 2, y: (g1.quad[0].y + g1.quad[3].y) / 2 };   // 2 cm inn fra høyre kant
+    const grab = w2s(grabW.x, grabW.y);
+    const sc = S.view.zoom * BASE_SCALE;
+    _resetCycle(); _labelPress = null;
+    ev('mousedown', grab.x, grab.y);
+    check('C klikk på bredde i valgt matte velger bredden', 'selectedMatRunIdx=1, drag matrun', S.ui.selectedMatRunIdx === 1 && _matDragging && _matDragKind === 'matrun', { idx: S.ui.selectedMatRunIdx, _matDragging, _matDragKind });
+    ev('mousemove', grab.x + 2 * sc, grab.y);
+    check('C dra 2 cm: ingenting hopper (snapp 5)', 'acrossCm=0', near(_matRunAcrossAdjCm(matR, 1), 0), _matRunAcrossAdjCm(matR, 1));
+    ev('mousemove', grab.x + 3 * sc, grab.y);
+    check('C dra 3 cm: snapper til 5', 'acrossCm=5', near(_matRunAcrossAdjCm(matR, 1), 5), _matRunAcrossAdjCm(matR, 1));
+    ev('mousemove', grab.x + 3 * sc, grab.y, { shiftKey: true });
+    check('C Shift + dra: glidende (ikke snappet til 5)', '≈3', near(_matRunAcrossAdjCm(matR, 1), 3, 0.5), _matRunAcrossAdjCm(matR, 1));
+    ev('mouseup', grab.x + 3 * sc, grab.y);
+    check('C slipp avslutter draget', 'ingen drag', !_matDragging, { _matDragging, _matDragKind });
+    check('C naboene sto stille under draget', 'uendret', [0, 3].every(r => quadKey(_matRunWorldGeom(matR, r).quad) === before[r]), null);
+    // Starthåndtak: dra langs bredden
+    const gh = _matRunWorldGeom(matR, 1); const hp = w2s(gh.start.x, gh.start.y);
+    const high = _matRunStartIsHigh(matR, 1);
+    ev('mousedown', hp.x, hp.y);
+    check('C mousedown på S-håndtaket starter start-drag', 'matrunstart', _matDragging && _matDragKind === 'matrunstart', _matDragKind);
+    ev('mousemove', hp.x, hp.y + (high ? -20 : 20) * sc);   // 20 cm innover
+    check('C dra håndtaket 20 cm innover: start +20', '20', near(_matRunStartAdjCm(matR, 1), 20), _matRunStartAdjCm(matR, 1));
+    ev('mouseup', hp.x, hp.y + (high ? -20 : 20) * sc);
+    // Nullstill
+    S.ui.selectedMatRunIdx = 1; _matRunReset();
+    check('C Nullstill: bredde 2 uten justering', 'ingen', _matRunAcrossAdjCm(matR, 1) === 0 && _matRunStartAdjCm(matR, 1) === 0, _matRunAdj(matR, 1));
+    // Esc velger bort bredden, ikke matta
+    key('Escape');
+    check('C Esc: bredden velges bort, matta står', 'runIdx=null, matta valgt', S.ui.selectedMatRunIdx == null && S.ui.selectedMatId === matR.id, { runIdx: S.ui.selectedMatRunIdx, matId: S.ui.selectedMatId });
+    // «Fyll rom» på nytt nullstiller
+    S.ui.selectedMatRunIdx = 2; _matRunNudge(-5, 20);
+    S.mats = []; const matNew = autoFillMatSerpentine(prod.id);
+    check('C nytt utlegg nullstiller justeringene', 'ingen runAdjust', matNew && !_matHasRunAdjust(matNew), matNew && matNew.runAdjust);
+
+    // ── C: frihånd ───────────────────────────────────────────────────────────────────────
+    const fam = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 4);
+    S.mats = []; S.ui.selectedMatId = null; S.ui.selectedMatRunIdx = null;   // auto-matta ville ellers ligget under frihåndsbanen og tatt klikket (kaskaden: mat før matpath)
+    const MPID = 912477;
+    S.matPaths = [{ id: MPID, roomId: RID, productId: fam.id, start: { x: 50, y: 50 },
+      moves: [{ axis: 'h', dir: 1, len: 300, conn: 'first', side: 1 }, { axis: 'h', dir: -1, len: 300, conn: 'uturn', side: 1 }, { axis: 'h', dir: 1, len: 300, conn: 'uturn', side: 1 }],
+      gapCm: 0, centered: false, offX: 0, offY: 0 }];
+    const mp = S.matPaths[0];
+    const runs0 = _matFreeDeriveRuns(mp).map(r => ({ a: { ...r.a }, b: { ...r.b } }));
+    const cat0 = _matFreeCatalog(mp);
+    S.ui.selectedMatPathId = MPID; S.ui.selectedMatRunIdx = 1;
+    _matRunNudge(5, 0);
+    let runs1 = _matFreeDeriveRuns(mp);
+    check('F sidelengs +5: bane 2 flyttet 5 cm (y)', '+5', near(runs1[1].a.y, runs0[1].a.y + 5) && near(runs1[1].b.y, runs0[1].b.y + 5), { before: runs0[1].a.y, after: runs1[1].a.y });
+    check('F sidelengs: naboene står stille', 'uendret', near(runs1[0].a.y, runs0[0].a.y) && near(runs1[2].a.y, runs0[2].a.y) && near(runs1[2].a.x, runs0[2].a.x), { r0: runs1[0].a, r2: runs1[2].a });
+    _matRunNudge(0, 50);
+    runs1 = _matFreeDeriveRuns(mp);
+    check('F start +50: banen 50 cm kortere, slutten står', '250, b uendret', near(_matFreeRunLen(runs1[1]), 250) && near(runs1[1].b.x, runs0[1].b.x), { len: _matFreeRunLen(runs1[1]), b: runs1[1].b });
+    const cat1 = _matFreeCatalog(mp);
+    check('F start +50: rull/produkt uendret (Regel 17), lagt lengde 50 cm mindre', 'samme segmenter', JSON.stringify(cat1.segments.map(s => s.lenCm)) === JSON.stringify(cat0.segments.map(s => s.lenCm)) && near(cat1.laidCm, cat0.laidCm - 50), { seg0: cat0.segments.map(s => s.lenCm), seg1: cat1.segments.map(s => s.lenCm), laid: cat1.laidCm });
+    key('ArrowDown');
+    check('F tastatur ↓ på vannrett bane: sidelengs +5', '10', near(mp.moves[1].shiftCm, 10), mp.moves[1].shiftCm);
+    key('ArrowLeft', { shiftKey: true });   // dir −1: ← = +1 innover
+    check('F tastatur Shift+← (dir −1): start +1', '51', near(mp.moves[1].startCm, 51), mp.moves[1].startCm);
+    const copyMp = JSON.parse(JSON.stringify(mp));
+    check('F lagring: shiftCm/startCm overlever JSON-rundtur', 'lik', copyMp.moves[1].shiftCm === mp.moves[1].shiftCm && copyMp.moves[1].startCm === mp.moves[1].startCm, copyMp.moves[1]);
+    undo();
+    check('F angre: start tilbake til 50', '50', near(S.matPaths[0].moves[1].startCm, 50), S.matPaths[0].moves[1].startCm);
+    S.ui.selectedMatPathId = MPID; S.ui.selectedMatRunIdx = 1;
+    _matRunReset();
+    check('F Nullstill: bane 2 uten justering', 'ingen', !S.matPaths[0].moves[1].shiftCm && !S.matPaths[0].moves[1].startCm, S.matPaths[0].moves[1]);
+    // Mus på frihånd: klikk på bane i valgt matte velger banen
+    document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Shift' })); S.shiftHeld = false;
+    render();
+    const rr = _matFreeDeriveRuns(S.matPaths[0])[2]; const { NET } = _matFreeConsts(fam);
+    const R2 = _matFreeLaneRectWorld(rr, NET);
+    let pw = null;   // et punkt på banen som IKKE ligger under labelen (labelen tar klikket først)
+    for (const t of [0.1, 0.2, 0.8, 0.9, 0.35, 0.65]) { const c = w2s(R2.x0 + (R2.x1 - R2.x0) * t, (R2.y0 + R2.y1) / 2); if (hitMatLabel(c.x, c.y) === null) { pw = c; break; } }
+    check('F fikstur: fant et banepunkt utenfor labelen', 'punkt', !!pw, pw);
+    _resetCycle(); _labelPress = null;
+    ev('mousedown', pw.x, pw.y);
+    check('F klikk på bane i valgt frihånds-matte velger banen', 'runIdx=2, drag mprun', S.ui.selectedMatRunIdx === 2 && _matDragging && _matDragKind === 'mprun', { idx: S.ui.selectedMatRunIdx, _matDragKind });
+    ev('mousemove', pw.x, pw.y + 6 * sc);
+    ev('mouseup', pw.x, pw.y + 6 * sc);
+    check('F dra 6 cm → 5 cm (snapp), naboer stille', '5', near(S.matPaths[0].moves[2].shiftCm, 5) && !S.matPaths[0].moves[1].shiftCm, S.matPaths[0].moves.map(m => m.shiftCm || 0));
+    check('F ingen drag henger igjen', 'ingen', !_matDragging, _matDragKind);
+  } catch (e) {
+    check('Uventet feil', 'ingen', false, e.message + ' @ ' + (e.stack || '').split('\n')[1]);
+  } finally {
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...savedProducts);
+    _matDragging = false; _matDragId = -1; _matDragKind = 'mat'; _matDragInvalid = false; _matRunDragOrig = null;
+    S.rooms = saved.rooms; S.mats = saved.mats; S.matPaths = saved.matPaths; S.hindrings = saved.hindrings; S.zones = saved.zones; S.strips = saved.strips; S.cables = saved.cables;
+    S.floors = saved.floors; S.ui.activeFloorId = saved.activeFloorId; S.ui.activePartId = saved.activePartId; _rebuildActiveFloorRoomIds();
+    S.ui.selectedRoomId = saved.selectedRoomId; S.ui.selectedMatId = saved.selectedMatId; S.ui.selectedMatPathId = saved.selectedMatPathId; S.ui.selectedMatRunIdx = saved.selectedMatRunIdx;
+    S.ui.drawMode = saved.drawMode; S.view = saved.view; S.varmefolie = saved.varmefolie; S.varmematte = saved.varmematte;
+    S.counters.nextMatId = saved.nextMatId; S.counters.nextMatPathId = saved.nextMatPathId; _matFree = saved.matFree; S.ui.cycle = saved.cycle;
+    window._performAutoSave = saved.autoSave; window._showToast = saved.toast;
+    _undoStack.length = Math.min(_undoStack.length, saved.undoLen);
+    canvas.style.cursor = 'default';
+    if (typeof _matPathPanel === 'function') _matPathPanel();
+    updateCtxBar(); render();
+  }
+  const allOk = results.every(r => r.ok);
+  console[allOk ? 'log' : 'error'](`_matRunAdjustRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'} (${results.filter(r => r.ok).length}/${results.length})`, results.filter(r => !r.ok));
+  return { ok: allOk, results };
+}
+
 function _matPathClickRegressionTest() {
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
@@ -17740,7 +18297,10 @@ function _matPathClickRegressionTest() {
   // velger objektet UNDER, uten å starte noe drag — riktig oppførsel, men da måler testen noe
   // annet enn den tror. Uten dette «bestod» KRAV 2-4 fordi draget aldri startet.
   const mdownRaw = (sx, sy) => canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cr().left + sx, clientY: cr().top + sy, button: 0, buttons: 1 }));
-  const mdown = (sx, sy) => { _resetCycle(); _labelPress = null; return mdownRaw(sx, sy); };
+  // 124 / Regel 26: et klikk på en ALLEREDE valgt frihånds-matte velger nå en BANE (ikke hele
+  // matta) — denne testen måler flytting av HELE matta, så hvert klikk starter fra uvalgt tilstand,
+  // nøyaktig slik et første klikk i appen gjør. Bane-valget har sin egen test (_matRunAdjustRegressionTest).
+  const mdown = (sx, sy) => { _resetCycle(); _labelPress = null; S.ui.selectedMatPathId = null; S.ui.selectedMatRunIdx = null; return mdownRaw(sx, sy); };
   const mmove = (sx, sy) => canvas.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: cr().left + sx, clientY: cr().top + sy, button: 0, buttons: 1 }));
   const mupCanvas = (sx, sy) => canvas.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cr().left + sx, clientY: cr().top + sy, button: 0, buttons: 0 }));
   // Slipp som IKKE traff lerretet — nøyaktig det Kenneth gjorde: dro matta og slapp over panelet.
@@ -19003,20 +19563,22 @@ function _matPathAtWorld(wp) {
   for (let i = (S.matPaths || []).length - 1; i >= 0; i--) {
     const mp = S.matPaths[i]; if (!_roomIdOnActiveFloor(mp.roomId)) continue;
     const { NET } = _matFreeConsts(_matFreeProdOf(mp));
-    let acc = 0;
+    let acc = 0, runIdxCounter = -1;
     for (const r of _matFreeDeriveRuns(mp)) {
+      runIdxCounter++;
       const rl = _matFreeRunLen(r);
       const runStartAcc = acc;
       acc += rl;
       const R = _matFreeLaneRectWorld(r, NET);
       if (wp.x >= R.x0 - 1 && wp.x <= R.x1 + 1 && wp.y >= R.y0 - 1 && wp.y <= R.y1 + 1) {
         const horiz = r.axis === 'h';
+        const runIdx = runIdxCounter;   // 124: baneindeks (= moves[i])
         const alongInRun = Math.max(0, Math.min(rl, Math.abs((horiz ? wp.x : wp.y) - (horiz ? r.a.x : r.a.y))));
         const cumPos = runStartAcc + alongInRun;
         const segs = _matFreeCatalog(mp).segments;
         let segIdx = segs.findIndex(seg => cumPos < seg.toCm - 0.01);
         if (segIdx < 0) segIdx = Math.max(0, segs.length - 1);
-        return { id: mp.id, segIdx };
+        return { id: mp.id, segIdx, runIdx };
       }
     }
   }
@@ -19095,13 +19657,13 @@ function _matPathPanel() {
       if (g) g.count++; else groups.push({ len: rl, count: 1 });
     }
     const parts = groups.map(g => `${g.count} × ${(g.len / 100).toFixed(1)} m`).join(' + ');
-    return `${parts} = ${(c.totalCm / 100).toFixed(1)} m av ${(c.coverCm / 100).toFixed(1)} m rull`;
+    return `${parts} = ${((c.laidCm != null ? c.laidCm : c.totalCm) / 100).toFixed(1)} m av ${(c.coverCm / 100).toFixed(1)} m rull`;   // 124: faktisk lagt (kortet bane teller kortere)
   })();
   section.innerHTML = `<div class="rwp-section-label">✏️ ${title}</div>
     <div style="border-top:1px solid var(--brd);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:2px">
       ${row('Bredder', _bredderLine)}
       ${segRows}
-      ${row('Dekker', (c.coverCm / 100).toFixed(1) + ' m')}
+      ${row('Dekker', (Math.min(c.coverCm, c.laidCm != null ? c.laidCm : c.coverCm) / 100).toFixed(1) + ' m' + ((c.laidCm != null && c.laidCm < c.coverCm - 0.5) ? ` (rull ${(c.coverCm / 100).toFixed(1)} m)` : ''))}
       ${row('Udekket', c.uncoveredCm > 5 ? (c.uncoveredCm / 100).toFixed(1) + ' m' : '—')}
       ${row('Effekt', c.totalWatt + ' W')}
       ${usableM2 != null ? row('Brukbart areal', usableM2.toFixed(2) + ' m²') : ''}
@@ -19373,11 +19935,13 @@ function _drawMatPathCable(mp, coverCm, opts) {
   ctx.stroke();
   // Kaldskjøt (sort ~8 cm langs første streng) + ende-markør (liten sort sirkel).
   if (opts.lastOnly) { ctx.restore(); return; }   // ghost-kabel: ingen markører
+  // 124 DEL A: grønn start / rød slutt — samme fargespråk som kabel og auto-matte (også i PDF).
   if (gStart && gStartDir) {
-    ctx.save(); ctx.strokeStyle = '#111'; ctx.lineWidth = Math.max(2.2, sc * 0.8); ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(gStart.x, gStart.y); ctx.lineTo(gStart.x + (gStartDir.x || 0) * 8 * sc, gStart.y + (gStartDir.y || 0) * 8 * sc); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.strokeStyle = '#16a34a'; ctx.lineWidth = Math.max(2.4, sc * 0.9); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(gStart.x, gStart.y); ctx.lineTo(gStart.x + (gStartDir.x || 0) * 8 * sc, gStart.y + (gStartDir.y || 0) * 8 * sc); ctx.stroke();
+    ctx.fillStyle = '#16a34a'; ctx.beginPath(); ctx.arc(gStart.x, gStart.y, Math.max(2.2, 2.0 * sc), 0, 2 * Math.PI); ctx.fill(); ctx.restore();
   }
-  if (gEnd) { ctx.save(); ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(gEnd.x, gEnd.y, Math.max(1.4, 1.6 * sc), 0, 2 * Math.PI); ctx.fill(); ctx.restore(); }
+  if (gEnd) { ctx.save(); ctx.fillStyle = '#dc2626'; ctx.beginPath(); ctx.arc(gEnd.x, gEnd.y, Math.max(1.8, 1.8 * sc), 0, 2 * Math.PI); ctx.fill(); ctx.restore(); }
   ctx.restore();
 }
 
@@ -19395,12 +19959,21 @@ function _drawMatPathObj(mp, active) {
   // tegner markørene etter løkka (se under).
   const jointCmSet = (cat && cat.segments.length > 1) ? new Set(cat.segments.slice(0, -1).map(s => s.toCm)) : null;
   const jointPts = [];
+  // 124 / Regel 26: valgt bane (uthevet kant) og rødmerket bane (utenfor rom / over hindring).
+  const isSelPath = !active && S.ui.selectedMatPathId === mp.id && !S.ui?._pdfMode;
+  const selRun = (isSelPath && S.ui.selectedMatRunIdx != null) ? S.ui.selectedMatRunIdx : null;
+  const hasAdj = !active && _matPathHasRunAdjust(mp);
+  let runIdx = -1;
   for (const r of runs) {
+    runIdx++;
     const rl = _matFreeRunLen(r);
     const runStartAcc = acc;
     const covLen = coverCm >= acc + rl ? rl : (coverCm <= acc ? 0 : coverCm - acc);
     acc += rl;
-    if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
+    const mvAdj = mp.moves && mp.moves[runIdx] && ((mp.moves[runIdx].shiftCm || 0) !== 0 || (mp.moves[runIdx].startCm || 0) > 0);
+    const issue = (hasAdj && mvAdj && rl > 0.5) ? _matPathRunIssue(mp, runIdx) : null;   // kun JUSTERTE baner merkes
+    if (issue) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true, true); }
+    else if (coverCm === Infinity) { _drawMatLaneRect(_matFreeLaneRectWorld(r, NET), false, true); }
     // DEL A (Kenneth 21.08.2026, «fargene forsvant da banen ble delt»): FØR var denne grenen betinget
     // på `cat.segments.length > 1` — «har DENNE BANEN flere ruller». Etter e840b73 (Modell A) har
     // hver committet matPath-objekt NØYAKTIG ETT segment (banen ER allerede delt til uavhengige
@@ -19433,6 +20006,20 @@ function _drawMatPathObj(mp, active) {
     }
   }
   if (S.view.zoom > 0.25 && (mp.moves || []).length) _drawMatPathCable(mp, coverCm);
+  // 124 / Regel 26: uthevet kant rundt valgt bane + S-håndtak i startenden (dras langs banen).
+  if (selRun != null && runs[selRun] && _matFreeRunLen(runs[selRun]) > 0.5) {
+    const R = _matFreeLaneRectWorld(runs[selRun], NET);
+    const p0 = w2s(R.x0, R.y0), p1 = w2s(R.x1, R.y1);
+    ctx.save();
+    ctx.strokeStyle = _lc('#1a55cc', '#22d3ee'); ctx.lineWidth = 3;
+    ctx.strokeRect(Math.min(p0.x, p1.x) + 1.5, Math.min(p0.y, p1.y) + 1.5, Math.abs(p1.x - p0.x) - 3, Math.abs(p1.y - p0.y) - 3);
+    const hp = w2s(runs[selRun].a.x, runs[selRun].a.y);
+    ctx.fillStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(hp.x, hp.y, 7, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = _lc('#1a55cc', '#22d3ee'); ctx.font = "bold 9px 'Space Grotesk',sans-serif";
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('S', hp.x, hp.y + 0.5);
+    ctx.restore();
+  }
   // Tegn skjøt-markørene: en tydelig strek på tvers av banen + «Skjøt»-etikett, så montøren ser
   // nøyaktig hvor matte 1 slutter og matte 2 begynner.
   if (jointPts.length && S.view.zoom > 0.15) {
@@ -36532,6 +37119,34 @@ function _matGapPanelProd() {
 // «Avstand mellom matter» (misvisende når det ikke finnes noen andre matter å være «mellom») til
 // «Avstand mellom baner», som er det den faktisk alltid har vist. Hintet under («standard N cm
 // (CC − 2×kant-inntrekk)») er uendret — det beskriver allerede riktig tall.
+// 124 DEL B: ÉN kilde for grensene og visningsverdien til mellomrom-feltet — brukt både av
+// produktpanelet FØR utlegg (_matGapFieldHtml) og chippen/panelet ETTER (openMatGapPanel).
+function _matGapFieldState() {
+  const snow = (typeof _isSnowModule === 'function') && _isSnowModule();
+  const minG = snow ? 5 : 0, maxG = snow ? 20 : MAT_GAP_MAX_CM;
+  const prod = _matGapPanelProd();
+  const cm = snow
+    ? Math.max(minG, Math.min(maxG, Math.round(S.varmematte.gapCm ?? 10)))
+    : Math.round(_matResolveGapCm(prod));
+  const hint = snow ? 'Min 5 cm · standard 10 cm'
+    : (prod && prod.mat_equal_widths
+        ? `Min 0 cm · standard ${_matDefaultGapCm(prod).toFixed(0)} cm (CC − 2×kant-inntrekk)`
+        : 'Min 0 cm · matter inntil hverandre (sentrert)');
+  return { snow, minG, maxG, cm, hint, prod };
+}
+function _matGapFieldHtml() {
+  const st = _matGapFieldState();
+  return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 6px;font-size:11px" title="Avstand mellom breddene ved neste utlegg (Regel 9). ${esc(st.hint)}">
+    <span style="white-space:nowrap">Mellomrom</span>
+    <button class="gap-step-btn" onclick="event.stopPropagation(); stepMatGap(-1)" title="Mindre">▼</button>
+    <input id="mat-gap-cm-input" class="gap-mm-input" type="number" min="${st.minG}" max="${st.maxG}" step="1" value="${st.cm}"
+      style="font-family:var(--font-mono);width:48px;text-align:center;padding:2px 4px"
+      onclick="event.stopPropagation()" onkeydown="event.stopPropagation()"
+      oninput="setMatGap(parseFloat(this.value), true)" />
+    <span style="color:var(--dim)">cm</span>
+    <button class="gap-step-btn" onclick="event.stopPropagation(); stepMatGap(1)" title="Mer">▲</button>
+  </div>`;
+}
 function openMatGapPanel(e) {
   e.stopPropagation();
   // Indoor mats use the foil-like gap model (min 0 cm). Snow (Ute/InSnow) keeps its own
@@ -40294,18 +40909,31 @@ function drawMats() {
     // (_matRunStartCm/_matRunLenCm) — tegningen skal aldri utlede posisjonen selv (det var nettopp
     // det som ga «riktig lengde, feil posisjon» før denne regelen).
     const alongStartCm = mat.rotation_deg === 90 ? mat.x_cm : mat.y_cm;
+    // 124 / Regel 26: valgt bredde (uthevet kant) og rødmerket bredde (utenfor rom / over
+    // hindring) — tverrposisjonen leses fra _matRunAcrossOffsetCm (inkl. sideforskyvning).
+    const selRun = (isSel && !S.ui?._pdfMode && S.ui.selectedMatRunIdx != null) ? S.ui.selectedMatRunIdx : null;
+    const hasAdj = _matHasRunAdjust(mat);
     for (let r = 0; r < numRuns; r++) {
-      const runCenterX = -htw + hw + r * (mat.width_cm + gapCm) * sc;
+      const runCenterX = -htw + hw + _matRunAcrossOffsetCm(mat, r, gapCm) * sc;
       const rLenCm = _matRunLenCm(mat, r);
       if (rLenCm <= 0) continue;   // STEG 2: klippet vekk helt (for kort etter kuttraster-snap)
       const rStartCm = _matRunStartCm(mat, r);
       const ry0 = (rStartCm - alongStartCm) * sc - hl;
       const rh = rLenCm * sc;
-      ctx.fillStyle = fillColor;
+      const issue = (hasAdj && _matRunAdj(mat, r)) ? _matRunPlacementIssue(mat, r) : null;   // kun JUSTERTE bredder merkes
+      ctx.fillStyle = issue ? 'rgba(220,38,38,0.22)' : fillColor;
       ctx.fillRect(runCenterX - hw, ry0, hw * 2, rh);
-      ctx.strokeStyle = strokeColor;
+      ctx.strokeStyle = issue ? 'rgba(220,38,38,0.95)' : strokeColor;
       ctx.lineWidth = isSel ? 2 : 1.5;
+      if (issue) ctx.setLineDash([4, 3]);
       ctx.strokeRect(runCenterX - hw, ry0, hw * 2, rh);
+      ctx.setLineDash([]);
+      if (selRun === r) {
+        ctx.save();
+        ctx.strokeStyle = _lc('#1a55cc', '#22d3ee'); ctx.lineWidth = 3;
+        ctx.strokeRect(runCenterX - hw + 1.5, ry0 + 1.5, hw * 2 - 3, rh - 3);
+        ctx.restore();
+      }
     }
 
     // Serpentine cable pattern inside each run + U-turn arcs between runs.
@@ -40351,7 +40979,7 @@ function drawMats() {
           continue;
         }
         const r = run.r;
-        const cxr = -htw + hw + r * (mat.width_cm + gapCm) * sc;
+        const cxr = -htw + hw + _matRunAcrossOffsetCm(mat, r, gapCm) * sc;   // 124: følger en sideforskjøvet bredde
         const loX = cxr - hw + insetPx, hiX = cxr + hw - insetPx;      // strengens tverr-endepunkter
         for (let jj = 0; jj < run.ks.length; jj++) {
           const y = localY(run.yWorld[jj]);
@@ -40400,19 +41028,23 @@ function drawMats() {
       }
       ctx.stroke();
 
-      // Del 2: kaldskjøt-markør ved kabelstart + sort ende-markør (tegnes OVER kabelen, én per matte-kabel).
+      // Del 2: kaldskjøt-markør ved kabelstart + ende-markør (tegnes OVER kabelen, én per matte-kabel).
+      // 124 DEL A: samme fargespråk som kabel — GRØNN start (der kabelen kommer inn, følger
+      // velgeren) og RØD slutt. Tegnes alltid, også i PDF (drawMats gjenbrukes der).
       if (startPt) {
         ctx.save();
-        ctx.strokeStyle = '#111'; ctx.lineWidth = Math.max(2.2, sc * 0.8); ctx.lineCap = 'round';
+        ctx.strokeStyle = '#16a34a'; ctx.lineWidth = Math.max(2.4, sc * 0.9); ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(startPt.x, startPt.y);
         ctx.lineTo(startPt.x + startDirX * 8 * sc, startPt.y);   // ~8 cm langs første streng
         ctx.stroke();
+        ctx.fillStyle = '#16a34a';
+        ctx.beginPath(); ctx.arc(startPt.x, startPt.y, Math.max(2.2, 2.0 * sc), 0, 2 * Math.PI); ctx.fill();
         ctx.restore();
       }
       if (pen) {
-        ctx.save(); ctx.fillStyle = '#111';
-        ctx.beginPath(); ctx.arc(pen.x, pen.y, Math.max(1.4, 1.6 * sc), 0, 2 * Math.PI); ctx.fill();
+        ctx.save(); ctx.fillStyle = '#dc2626';
+        ctx.beginPath(); ctx.arc(pen.x, pen.y, Math.max(1.8, 1.8 * sc), 0, 2 * Math.PI); ctx.fill();
         ctx.restore();
       }
 
@@ -40423,10 +41055,15 @@ function drawMats() {
         ctx.setLineDash([3, 3]);
         const nCuts = Math.floor(mat.length_cm / cutCm);
         for (let r = 0; r < numRuns; r++) {
-          const runCenterX = -htw + hw + r * (mat.width_cm + gapCm) * sc;
+          const runCenterX = -htw + hw + _matRunAcrossOffsetCm(mat, r, gapCm) * sc;   // 124
+          // 124: kuttlinjer kun innenfor breddens FAKTISKE utstrekning (klippet/kortet bredde).
+          const rLen = _matRunLenCm(mat, r);
+          if (rLen <= 0) continue;
+          const rY0 = (_matRunStartCm(mat, r) - alongStartCm) * sc - hl, rY1 = rY0 + rLen * sc;
           for (let i = 1; i <= nCuts; i++) {
             const yPos = -hl + i * cutCm * sc;
             if (yPos > hl - 1) break;
+            if (yPos < rY0 + 1 || yPos > rY1 - 1) continue;
             ctx.beginPath();
             ctx.moveTo(runCenterX - hw + 1, yPos);
             ctx.lineTo(runCenterX + hw - 1, yPos);
@@ -40438,6 +41075,21 @@ function drawMats() {
     }
 
     ctx.restore();
+
+    // 124 / Regel 26: håndtak i STARTENDEN av den valgte bredden (dras langs bredden → forskjøvet
+    // start). Skjermrom, så det alltid er like stort. Aldri i PDF.
+    if (selRun != null) {
+      const g = _matRunWorldGeom(mat, selRun);
+      if (g) {
+        const hp = w2s(g.start.x, g.start.y);
+        ctx.save();
+        ctx.fillStyle = '#fff'; ctx.strokeStyle = _lc('#1a55cc', '#22d3ee'); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(hp.x, hp.y, 7, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = _lc('#1a55cc', '#22d3ee'); ctx.font = "bold 9px 'Space Grotesk',sans-serif";
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('S', hp.x, hp.y + 0.5);
+        ctx.restore();
+      }
+    }
 
     // Label \u2014 delt renderer med folie/kabel (_drawStripLabel): verdensbasert skalering (skalerer
     // med zoom, riktig i PDF), klamping innenfor rommet, one-line/callout-fallback p\u00e5 smale matter.
@@ -51054,7 +51706,7 @@ function _drawMatDimChainForRoom(room) {
     const cx = mat.x_cm + totalW / 2;
     const cy = mat.y_cm + mat.length_cm / 2;
     for (let r = 0; r < n; r++) {
-      const localCx = -totalW/2 + mat.width_cm/2 + r * (mat.width_cm + gap);
+      const localCx = -totalW/2 + mat.width_cm/2 + _matRunAcrossOffsetCm(mat, r, gap);   // 124: inkl. sideforskyvning
       if (dir === 'v') {
         const perp_min = cx + localCx - mat.width_cm/2;
         const perp_max = cx + localCx + mat.width_cm/2;
@@ -61353,30 +62005,35 @@ function hitHindringRotHandle(sx,sy) {
 }
 
 // ── Mat hit detection ──
-function hitMat(wx, wy) {
+// 124: treff per BREDDE — samme geometri som tegningen (_matRunWorldGeom: faktisk gap_cm,
+// klippet lengde/start og sideforskyvning). Før leste treffet produktets min_gap_mm i stedet for
+// mattas gap_cm og hele nominelle lengden, så en klippet eller forskjøvet bredde kunne treffes
+// der den ikke var tegnet. Returnerer { id, r } eller null.
+function hitMatRun(wx, wy) {
   for (let i = S.mats.length - 1; i >= 0; i--) {
     const m = S.mats[i];
-    if (!_roomIdOnActiveFloor(m.roomId)) continue;
+    if (m.labelOnly || !_roomIdOnActiveFloor(m.roomId)) continue;
     const numRuns = m.num_runs || 1;
-    const totalW = _matTotalWidthCm(m);
-    const prod = HEATING_PRODUCTS.find(p => p.id === m.productId);
-    const gapCm = (prod?.min_gap_mm || 20) / 10;
-    // Transform world point into mat-local coords (inverse rotation around center of multi-run group)
-    const cx = m.x_cm + totalW / 2;
-    const cy = m.y_cm + m.length_cm / 2;
-    const rad = -(m.rotation_deg || 0) * Math.PI / 180;
-    const cos = Math.cos(rad), sin = Math.sin(rad);
-    const dx = wx - cx, dy = wy - cy;
-    const lx = dx * cos - dy * sin + totalW / 2;
-    const ly = dx * sin + dy * cos + m.length_cm / 2;
-    if (ly < 0 || ly > m.length_cm) continue;
-    // Check if lx falls within any of the runs
     for (let r = 0; r < numRuns; r++) {
-      const runStart = r * (m.width_cm + gapCm);
-      if (lx >= runStart && lx <= runStart + m.width_cm) return m.id;
+      const g = _matRunWorldGeom(m, r);
+      if (g && ptInPoly(wx, wy, g.quad)) return { id: m.id, r };
     }
   }
   return null;
+}
+function hitMat(wx, wy) {
+  const h = hitMatRun(wx, wy);
+  return h ? h.id : null;
+}
+// 124: starthåndtaket (S-sirkelen) på den valgte bredden — skjermavstand, som kabelens gizmoer.
+function hitMatRunStartHandle(sx, sy) {
+  if (!S.ui.selectedMatId || S.ui.selectedMatRunIdx == null) return false;
+  const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+  if (!mat) return false;
+  const g = _matRunWorldGeom(mat, S.ui.selectedMatRunIdx);
+  if (!g) return false;
+  const hp = w2s(g.start.x, g.start.y);
+  return Math.hypot(sx - hp.x, sy - hp.y) <= 11;
 }
 
 function _getMatGizmoPos(mat) {
@@ -61684,6 +62341,7 @@ let _dhDragging=false, _dhId=-1, _dhOrigStart={x:0,y:0}, _dhOrigPts=null, _dhLas
 let _dhRotating=false, _dhRotStart=0, _dhRotOrigPts=null, _dhRotCenter={x:0,y:0};
 // Mat drag/rotate
 let _matDragging=false, _matDragId=-1, _matDragAxis='free';
+let _matRunDragOrig = null;   // 124: { r, acrossCm, startCm } ved start av en bredde-flytting ('matrun' / 'matrunstart')
 // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): _matDragging/_matDragId GJENBRUKT for frihånds-matte
 // (matPath), ikke en ny, parallell drag-mekanikk — kun _matDragKind skiller hvilken samling/felt som
 // oppdateres. _matDragInvalid/_matDragOrigCentered er matpath-spesifikke (S.mats-grenen bruker dem
@@ -62025,7 +62683,7 @@ function _buildCycleCandidates(wx, wy) {
   const hc = hitCable(wx, wy);            if (hc)            list.push({type:'cable',    id:hc.id});
   const hz = hitZone(wx, wy);             if (hz)            list.push({type:'zone',     id:hz.id});
   const hm = hitMat(wx, wy);              if (hm !== null)   list.push({type:'mat',      id:hm});
-  const hmp = _matPathAtWorld({x:wx, y:wy}); if (hmp !== null) list.push({type:'matpath', id:hmp.id, segIdx:hmp.segIdx});
+  const hmp = _matPathAtWorld({x:wx, y:wy}); if (hmp !== null) list.push({type:'matpath', id:hmp.id, segIdx:hmp.segIdx, runIdx:hmp.runIdx});
   const hp = hitPlate(wx, wy);            if (hp !== null)   list.push({type:'plate',    id:hp});
   const hal = hitAluboard(wx, wy);        if (hal !== null)  list.push({type:'aluboard', id:hal});
   const hst = hitStair(wx, wy);           if (hst)           list.push({type:'stair',    id:hst.id});
@@ -63313,11 +63971,30 @@ canvas.addEventListener('mousedown', e=>{
         // løses her, uansett idx — samme unntak bg alene hadde før, nå én regel
         // (CYCLE_INLINE_TYPES) i stedet for ett hardkodet spesialtilfelle per type.
         if (!CYCLE_INLINE_TYPES.has(_chosen.type)) {
+          const _mpWasSelected = S.ui.selectedMatPathId;   // 124: FØR _applyCycleSelection velger den
           _applyCycleSelection(_chosen);
           // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): en frihånds-matte får nå samme «velg + start
           // flytting umiddelbart»-mønster som S.mats sin egen «── Mat body click ──» under — men kun
           // ved et FRISKT klikk (idx===0, samme regel resten av nedfallet allerede følger for om et
           // klikk skal starte en drag eller bare velge en gravd-fram nabo).
+          // 124 / Regel 26: klikk på en bane i en ALLEREDE valgt frihånds-matte velger BANEN og
+          // starter en sidelengs flytting av bare den (naboene står stille).
+          if (_chosen.type === 'matpath' && _idx === 0 && !_noDrag && _mpWasSelected === _chosen.id && _chosen.runIdx != null) {
+            const mpRun = (S.matPaths || []).find(m => m.id === _chosen.id);
+            if (mpRun) {
+              S.ui.selectedMatRunIdx = _chosen.runIdx;
+              pushUndo();
+              _matDragging = true; _matDragKind = 'mprun'; _matDragId = mpRun.id; _matDragAxis = 'free'; _matDragInvalid = false;
+              _matDragOrigStart = { x: e.clientX, y: e.clientY };
+              const mv = mpRun.moves[_chosen.runIdx];
+              _matRunDragOrig = { r: _chosen.runIdx, acrossCm: mv.shiftCm || 0, startCm: mv.startCm || 0 };
+              canvas.style.cursor = 'move';
+              if (typeof _matPathPanel === 'function') _matPathPanel();
+              updateCtxBar(); render();
+              return;
+            }
+          }
+          if (_chosen.type === 'matpath') S.ui.selectedMatRunIdx = null;
           if (_chosen.type === 'matpath' && _idx === 0 && !_noDrag) {
             const mpDrag = (S.matPaths || []).find(m => m.id === _chosen.id);
             if (mpDrag) {
@@ -63569,6 +64246,35 @@ canvas.addEventListener('mousedown', e=>{
       }
     }
 
+    // ── 124 / Regel 26: starthåndtak på valgt frihåndsbane ──
+    if (S.ui.selectedMatPathId != null && S.ui.selectedMatRunIdx != null && hitMatPathRunStartHandle(sx0, sy0)) {
+      const mpH = (S.matPaths || []).find(m => m.id === S.ui.selectedMatPathId);
+      if (mpH) {
+        pushUndo();
+        _matDragging = true; _matDragKind = 'mprunstart'; _matDragId = mpH.id; _matDragAxis = 'free'; _matDragInvalid = false;
+        _matDragOrigStart = { x: e.clientX, y: e.clientY };
+        const mv = mpH.moves[S.ui.selectedMatRunIdx];
+        _matRunDragOrig = { r: S.ui.selectedMatRunIdx, acrossCm: mv.shiftCm || 0, startCm: mv.startCm || 0 };
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
+    }
+    // ── 124 / Regel 26: starthåndtak på valgt bredde — dra langs bredden = forskjøvet start ──
+    if (S.ui.selectedMatId && S.ui.selectedMatRunIdx != null && hitMatRunStartHandle(sx0, sy0)) {
+      const mat = S.mats.find(m => m.id === S.ui.selectedMatId);
+      if (mat) {
+        pushUndo();
+        _matDragging = true;
+        _matDragKind = 'matrunstart';
+        _matDragId = mat.id;
+        _matDragAxis = 'free';
+        _matDragOrigStart = { x: e.clientX, y: e.clientY };
+        _matRunDragOrig = { r: S.ui.selectedMatRunIdx, acrossCm: _matRunAcrossAdjCm(mat, S.ui.selectedMatRunIdx), startCm: _matRunStartAdjCm(mat, S.ui.selectedMatRunIdx) };
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
+    }
+
     // ── Mat gizmo (rotation + move) ──
     if (S.ui.selectedMatId) {
       if (hitMatRotHandle(sx0, sy0)) {
@@ -63657,9 +64363,29 @@ canvas.addEventListener('mousedown', e=>{
     }
 
     // ── Mat body click — select + start drag immediately ──
-    const hmid = hitMat(rawWp0.x, rawWp0.y);
+    const hmRun = hitMatRun(rawWp0.x, rawWp0.y);
+    const hmid = hmRun ? hmRun.id : null;
+    // 124 / Regel 26: klikk på en bredde i en ALLEREDE valgt matte velger BREDDEN (og starter en
+    // sidelengs flytting av bare den). Klikk på en uvalgt matte velger matta som før.
+    if (hmid !== null && hmid === S.ui.selectedMatId) {
+      const mat = S.mats.find(m => m.id === hmid);
+      if (mat) {
+        S.ui.selectedMatRunIdx = hmRun.r;
+        pushUndo();
+        _matDragging = true;
+        _matDragKind = 'matrun';
+        _matDragId = hmid;
+        _matDragAxis = 'free';
+        _matDragOrigStart = { x: e.clientX, y: e.clientY };
+        _matRunDragOrig = { r: hmRun.r, acrossCm: _matRunAcrossAdjCm(mat, hmRun.r), startCm: _matRunStartAdjCm(mat, hmRun.r) };
+        canvas.style.cursor = 'ew-resize';
+        updateCtxBar(); render();
+        return;
+      }
+    }
     if (hmid !== null) {
       const mat = S.mats.find(m => m.id === hmid);
+      S.ui.selectedMatRunIdx = null;
       S.ui.selectedMatId = hmid;
       S.ui.selectedStripId = null;
       S.ui.selectedStripIds = new Set();
@@ -64290,6 +65016,20 @@ canvas.addEventListener('mousemove', e=>{
   }
   // ── Mat dragging ──
   if (_matDragging) {
+    // 124 / Regel 26: flytting av ÉN bredde/bane (sidelengs) eller dens start — delta fra der man
+    // grep, snappet 5 cm (Shift glidende). Ingen klamping, ingen sprett: rødmerking er svaret.
+    if (_matDragKind === 'matrun' || _matDragKind === 'matrunstart' || _matDragKind === 'mprun' || _matDragKind === 'mprunstart') {
+      const isPath = _matDragKind.startsWith('mp');
+      const obj = isPath ? (S.matPaths || []).find(m => m.id === _matDragId) : S.mats.find(m => m.id === _matDragId);
+      if (obj && _matRunDragOrig) {
+        const t = { kind: isPath ? 'matpath' : 'mat', obj, r: _matRunDragOrig.r };
+        const d = _matRunDragDelta(t, e);
+        if (_matDragKind.endsWith('start')) _matRunApplyAdjust(t, { startCm: _matRunDragOrig.startCm + d.dStart });
+        else _matRunApplyAdjust(t, { acrossCm: _matRunDragOrig.acrossCm + d.dAcross });
+        updateCtxBar();
+      }
+      render(); return;
+    }
     // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): matpath-grenen følger musa FRITT (ingen live-
     // klamping som S.mats/_clampMatToRoom har) — _matPathMoveValid kjøres hver frame og styrer kun
     // om _drawMatPathObj tegner mattа rød/ugyldig; selve avvisningen (tilbakestilling + toast) skjer
@@ -65156,6 +65896,13 @@ function _canvasMouseUp(e){
   if (_foilFreeMoving) { _foilFreeMoving=false; _foilFreeMoveId=null; _foilFreeMoveConstraint='free'; canvas.style.cursor='default'; render(); return; }
   if (_foilFreeLenDragging) { _foilFreeLenDragging=false; _foilFreeLenId=null; canvas.style.cursor='default'; render(); return; }
   if (_matDragging) {
+    // 124 / Regel 26: bredde-/bane-drag avsluttes uten avvisning (Kenneth avgjør selv).
+    if (_matDragKind === 'matrun' || _matDragKind === 'matrunstart' || _matDragKind === 'mprun' || _matDragKind === 'mprunstart') {
+      const isPath = _matDragKind.startsWith('mp');
+      if (isPath && typeof _matPathPanel === 'function') _matPathPanel();
+      _matDragging = false; _matDragId = -1; _matDragAxis = 'free'; _matDragKind = 'mat'; _matDragInvalid = false; _matRunDragOrig = null;
+      canvas.style.cursor = 'default'; updateCtxBar(); render(); return;
+    }
     // DEL B STEG 2 (Kenneth 19.08.2026, Modell A): avvisning ved slipp, ikke stille under draget —
     // samme prinsipp som _matFreeExit sin egen FEIL 4-fiks. Posisjon OG «Sentrer»-flagg tilbakestilt
     // sammen (dradd = ikke lenger sentrert, men en AVVIST drag skal ikke etterlate den slått av).
@@ -65639,6 +66386,7 @@ document.addEventListener('keydown', e=>{
     // _manualPlaceSession (under), ville Escape drept artikkellista i stedet for måleverktøyet.
     // Høyreklikk gjorde alltid det riktige her; Escape gjorde ikke.
     if (S.ui.drawMode === 'dim') { cancelDrawing(); return; }
+    if (_matRunDeselect()) return;   // 124 / Regel 26: første Esc velger bort bredden, ikke matta
     if (S.ui.selectedLabelStripId != null || S.ui.selectedLabelCableId != null || S.ui.selectedLabelMatId != null || S.ui.selectedLabelMatRectId != null) { S.ui.selectedLabelStripId = null; S.ui.selectedLabelCableId = null; S.ui.selectedLabelMatId = null; S.ui.selectedLabelMatRectId = null; render(); return; }
     if (S.ui.selectedBg) { deselectBg(); return; }
     if (S.ui.matPlaceMode) { S.ui.matPlaceMode=false; S.ui.matPlaceProductId=null; canvas.style.cursor='default'; return; }
@@ -65793,6 +66541,31 @@ document.addEventListener('keydown', e=>{
   // STEG 2b (Kenneth 25.08.2026, «finere steg ved Shift»): pilene fantes allerede, men Shift ga et
   // STØRRE steg — motsatt av det som ble bedt om. Byttet hvilken av de to eksisterende
   // stegstørrelsene (5/25 cm) hver tast-tilstand bruker, ikke selve tallene.
+  // 124 / Regel 26: piler flytter den VALGTE bredden/banen — på tvers av leggeretningen =
+  // sidelengs (5 cm, Shift = 1 cm), langs leggeretningen = forskjøvet start (+ = kortere).
+  if (S.ui.selectedMatRunIdx != null && !S.ui.drawMode && !e.ctrlKey && !e.metaKey && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+    const t = _matSelectedRunTarget();
+    if (t) {
+      e.preventDefault();
+      const step = e.shiftKey ? 1 : 5;
+      // Leggeretning: auto-matte 0° = loddrett (bredden går langs y), 90° = vannrett; frihånd: move.axis.
+      const alongY = t.kind === 'mat' ? (t.obj.rotation_deg || 0) !== 90 : t.obj.moves[t.r].axis === 'v';
+      const dxk = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+      const dyk = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
+      let dAcross = 0, dStart = 0;
+      if (t.kind === 'mat') {
+        const high = _matRunStartIsHigh(t.obj, t.r);   // startenden ligger i høy along-ende?
+        if (alongY) { dAcross = dxk; dStart = high ? -dyk : dyk; }
+        else { dAcross = dyk; dStart = high ? dxk : -dxk; }   // 90°: lokal along er speilet x (høy = venstre)
+      } else {
+        const m = t.obj.moves[t.r];
+        if (alongY) { dAcross = dxk; dStart = dyk * m.dir; }
+        else { dAcross = dyk; dStart = dxk * m.dir; }
+      }
+      _matRunNudge(dAcross, dStart);
+      return;
+    }
+  }
   if (S.ui.selectedBg && !S.ui.drawMode && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
     e.preventDefault(); pushUndo();
     const bg = S.ui.selectedBg, step = e.shiftKey ? 5 : 25;
@@ -66747,6 +67520,8 @@ function _ctxBarItems() {
   }
 
   // Mat selected
+  // 124 / Regel 26: en valgt bredde finnes bare så lenge en matte/frihånds-matte er valgt.
+  if (ui.selectedMatRunIdx != null && ui.selectedMatId == null && ui.selectedMatPathId == null) ui.selectedMatRunIdx = null;
   if (ui.selectedMatId) {
     const mat = S.mats.find(m => m.id === ui.selectedMatId);
     if (!mat) { ui.selectedMatId = null; return ''; }   // stale id (mat removed elsewhere) — self-heal instead of crashing
@@ -66835,8 +67610,10 @@ function _ctxBarItems() {
       const uncoveredCm = Math.max(0, roomWidthCm - (x1 - x0));
       uncoveredHtml = `<span style="font-size:11px;color:var(--dim);padding:0 4px" title="Rommets bredde minus mattenes samlede bredde+mellomrom">${uncoveredCm.toFixed(0)} cm udekket mot langveggene</span>`;
     }
+    const runPanelHtml = (ui.selectedMatRunIdx != null) ? _matRunPanelHtml(_matSelectedRunTarget()) : '';   // 124 / Regel 26
     return `<span class="ctxbar-lbl">\u{1F7EB} Matte</span>
       <span style="font-size:12px;color:var(--dim);padding:0 4px">${prod ? esc(prod.name) : 'Matte'} \u2014 ${lenInfo} \u00b7 ${watt} W</span>
+      ${runPanelHtml}
       ${excessHtml}${runsHtml}
       <button class="snap-chip" onclick="_matRotate90()" title="Roter 90\u00b0">\u21bb 90\u00b0</button>
       <span style="font-size:11px;padding:0 2px;color:var(--dim)">${rotDeg}\u00b0</span>
@@ -66869,8 +67646,10 @@ function _ctxBarItems() {
         ? `${segs.length} ruller — ${(cat.coverCm / 100).toFixed(1)} m · ${cat.totalWatt} W`
         : `${esc(segs[0]?.product?.name || 'Frihånds-matte')} — ${((segs[0]?.lenCm || 0) / 100).toFixed(1)} m · ${segs[0]?.watt || 0} W`;
       const gapCm = Math.round(mp.gapCm || 0);
+      const runPanelHtml = (ui.selectedMatRunIdx != null) ? _matRunPanelHtml(_matSelectedRunTarget()) : '';   // 124 / Regel 26
       return `<span class="ctxbar-lbl">\u{1F7EB} Frihånds-matte</span>
         <span style="font-size:12px;color:var(--dim);padding:0 4px">${labelHtml}</span>
+        ${runPanelHtml}
         <span class="tc-sep"></span>
         <button class="snap-chip" onclick="openMatPathGapPanel(event,${mp.id})" title="Avstand mellom matter">↔ <span style="font-family:var(--font-mono)">${gapCm}</span> cm</button>
         <span class="tc-sep"></span>

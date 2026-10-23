@@ -4,6 +4,32 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 124 — Matte: start og første bredde følger velgeren, mellomrom før utlegg, én bredde kan justeres (23.10.2026, `main`, ikke pushet)
+
+Regel 26 i `spec-matte-utlegg.md`. Rapport og skjermbilder i `docs/serie-124/`.
+
+- **A.** `mat.startCorner` lagres ved utlegg (auto og flermatte); `_matCablePlan` tar breddene i
+  kabelrekkefølge fra velgeren (`_matRunOrder`/`_matRunCableOrder`), inn-/utside speiles. Matte
+  uten feltet tegnes som før. Grønn start / rød slutt på matte og frihånd, også i PDF. Målt: alle
+  8 velgerstillinger stemmer (før: 2 av 8).
+- **B.** «Mellomrom»-felt i matte-produktpanelet før utlegg — samme `setMatGap`/`mat-gap-cm-input`
+  som chippen etter utlegg (`_matGapFieldState` er én kilde).
+- **C.** `mat.runAdjust[i] = { acrossCm, startCm }` / `moves[i].shiftCm, startCm`. Klikk på bredde i
+  valgt matte velger den; dra sidelengs 5 cm (Shift glidende, delta fra grepspunktet), S-håndtak
+  for forskjøvet start (slutt fast, bredden kortes), piler 5 cm / Shift 1 cm, «Start +cm»,
+  «Nullstill», Esc. Ingenting regnes om (Regel 17); «Dekker» følger geometrien. Gul merknad under
+  minste lengde, rød kant uten sprett utenfor rom / over hindring. Angre, lagring, flytting av hele
+  matta og nytt utlegg (nullstiller) dekket.
+- `hitMat` leser nå mattas `gap_cm` og klippet lengde (før: produktets `min_gap_mm` og nominell
+  lengde). Kuttlinjer tegnes bare innenfor breddens faktiske utstrekning.
+- Ny `_matRunAdjustRegressionTest()` (70 sjekker). `_matPathClickRegressionTest` starter hvert klikk
+  fra uvalgt matte (andre klikk velger nå en bane). Alle matte-batterier, PDF-røyktest og
+  mattebenken (224 rader, ingen endring) grønne.
+- Funn utenfor scope: vannrett matte (rotation 90) har to koordinatkonvensjoner mellom utlegg og
+  tegning (2 av 5 bredder klippet til 0 i 900 × 300 «h»). Se rapporten.
+
+---
+
 ## 123 — Navnebytte del 2: `arqely_usage` og IndexedDB-databasene flyttet til `varmeplan_*` (22.10.2026, `main`, `06d784b`, pushet)
 
 - `arqely_usage` → `varmeplan_usage`, med samme kopiering ved oppstart som prefs.
