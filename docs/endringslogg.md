@@ -4,6 +4,29 @@ Kronologisk logg over arbeid i `romtegner.html`. Nyeste øverst.
 
 ---
 
+## 125 — Materialliste: foliemengde (m per produkt) i tilbehørsdialogen, justerbar og lagret (23.10.2026, `main`, ikke pushet)
+
+Kenneth: «beregnet mengde kommer opp i samme listen, slik at bruker kan justere mengde opp eller ned
+selv … kanskje gå opp litt siden det kan være snaut». Rapport og skjermbilder i `docs/serie-125/`.
+
+- Ny seksjon **«Varmefolie (meter)»** øverst i tilbehørsdialogen: én rad per folieprodukt med «tegnet
+  47,3 m i 2 rom», «forslag: 48 m», tallfelt i hele meter og knappene **+1 m** / **+5 m**.
+- Lagres i `S.project.accessories.items` som `{ type: 'foilProduct', productId, qty, autoQty }` — følger
+  prosjektet og foreslås igjen. Lagret ≥ forslag → lagret. Lagret < forslag → forslaget med gul merknad
+  «Tegnet mengde har økt siden sist (var N m)». 0 m lagres (bevisst valg) og gir ingen linje.
+- **Én kilde:** `_foilOrderQtyM` for PDF-materialliste, XLSX «Bestilling», Kopier til Visma og GBAO10.
+  Før regnet de fire hver for seg og ulikt (PDF/XLSX «47.3 m», Visma/GBAO10 48). Nå hele meter overalt.
+  Uten dialog (Visma/GBAO10 gjenbruker lagret valg) vinner forslaget hvis tegningen har økt siden tallet
+  ble bekreftet; ellers står brukerens tall, også 0.
+- Tilbehør som regnes av folien (tape, plater, klemmer, RKK) leser fortsatt tegnet mengde, ikke det
+  justerte tallet.
+- Ny `_accessoryFoilQtyRegressionTest()` (38 sjekker, inkl. én kilde i alle fire eksporter + vaksine).
+  `_pdfExportSmokeTest` grønn.
+- Funn utenfor scope: `_assertProductSurfacesCoverAllCollections` er rød for XLSX også uten 125
+  (sjekken kjenner ikke `_collectMaterialItems`). Se rapporten.
+
+---
+
 ## 124 — Matte: start og første bredde følger velgeren, mellomrom før utlegg, én bredde kan justeres (23.10.2026, `main`, `e3b5904`, pushet)
 
 Regel 26 i `spec-matte-utlegg.md`. Rapport og skjermbilder i `docs/serie-124/`.

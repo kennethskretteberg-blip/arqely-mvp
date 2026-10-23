@@ -75352,12 +75352,19 @@ async function exportPDF(opts) {
   // spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026): leser nå den kanoniske MATERIAL_GROUPS
   // (delt med XLSX/Visma-pasten) i stedet for sin egen kopi — PDF-en er FASITEN for rekkefølgen,
   // så resten av logikken her (inkl. _matRest-fallback rett under) er BEVISST urørt.
-  const _matEntries = Object.entries(matList).map(([pid, info]) => ({ info, prod: HEATING_PRODUCTS.find(p => p.id === +pid) }));
+  // 125: foliemengden (hele meter) kommer fra ÉN kilde, _foilOrderQtyM — brukerens justerte tall
+  // fra tilbehørsdialogen om det finnes, ellers tegnet lengde rundet opp (før: totalLen/100 med én
+  // desimal her, og et annet tall i Visma). 0 m → ingen linje, som for tilbehør.
+  const _foilDrawn = _foilDrawnByProduct();
+  const _matEntries = Object.entries(matList)
+    .map(([pid, info]) => ({ pid: +pid, info, prod: HEATING_PRODUCTS.find(p => p.id === +pid),
+      foilM: info.type === 'Folie' ? _foilOrderQtyM(+pid, accessoryItems, _foilDrawn) : null }))
+    .filter(e => !(e.info.type === 'Folie' && e.foilM <= 0));
   const _matGroups = MATERIAL_GROUPS;
   const _matRenderEntry = (e) => {
     const isFoil = e.info.type === 'Folie';
     _matRow(e.prod ? e.prod.name : 'Ukjent',
-            isFoil ? (e.info.totalLen / 100).toFixed(1) : String(e.info.count),
+            isFoil ? String(e.foilM) : String(e.info.count),
             isFoil ? 'm' : 'stk',
             e.prod?.el_no, e.prod?.article_no);
   };
@@ -75374,7 +75381,8 @@ async function exportPDF(opts) {
   if (_matRest.length) { _matHeadRow('Andre produkter'); for (const e of _matRest) _matRenderEntry(e); y += 4; }
 
   // ── Tilbehør — samme 5-kolonne-mal, egen «Tilbehør <type>»-overskrift pr gruppe ──
-  if (accessoryItems.length > 0) {
+  const _accOnly = _accessoryOnly(accessoryItems);   // 125: folieradene er produktlinjer, ikke tilbehør
+  if (_accOnly.length > 0) {
     const _accRenderGroup = (title, list) => {
       if (!list.length) return;
       _matHeadRow(title);
@@ -75396,8 +75404,8 @@ async function exportPDF(opts) {
       y += 4;
     };
     const _accGroups = [{ key: 'foil', label: 'Tilbehør varmefolie' }, { key: 'cable', label: 'Tilbehør varmekabel' }];
-    for (const g of _accGroups) _accRenderGroup(g.label, accessoryItems.filter(it => (it.type || 'foil') === g.key));
-    const _accRest = accessoryItems.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil')));
+    for (const g of _accGroups) _accRenderGroup(g.label, _accOnly.filter(it => (it.type || 'foil') === g.key));
+    const _accRest = _accOnly.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil')));
     _accRenderGroup('Tilbehør — annet', _accRest);
     y += 1;
   }
@@ -77120,6 +77128,9 @@ function showAccessoriesModal() {
     const savedAcc = (S.project && S.project.accessories && S.project.accessories.items) || null;
     const savedById = new Map((savedAcc || []).map(it => [it.id, it]));
     const hasSaved = !!savedAcc;
+    // 125: tegnet foliemengde per produkt (samme kilde som materiallista) — grunnlaget for
+    // seksjonen «Varmefolie (meter)» øverst og for folieradene som lagres i items.
+    const foilDrawn = foilUsed ? _foilDrawnByProduct() : new Map();
 
     // STEG 1 (LÅST REGEL): følerrør telles per oppvarmet rom uansett varmetype — delt tall satt
     // på BEGGE kontekstene. Kabel-seksjonen (når den finnes) viser hele totalen; matte-seksjonens
@@ -77181,6 +77192,48 @@ function showAccessoriesModal() {
 
     const sectionHdr = (t) => `<div style="font-size:13px;font-weight:800;color:var(--text,#111);letter-spacing:.4px;text-transform:uppercase;margin-top:18px;margin-bottom:6px;border-bottom:2px solid var(--accent,#1a6fcc);padding-bottom:3px">${t}</div>`;
     const subHdr = (t) => `<div style="font-size:11px;font-weight:700;color:var(--accent,#1a6fcc);letter-spacing:.5px;text-transform:uppercase;margin-top:12px;margin-bottom:4px">${t}</div>`;
+
+    // ── 125: VARMEFOLIE (METER) — selve folien, justerbar før lista lages ──
+    // Kenneth 23.10.2026: «beregnet mengde kommer opp i samme listen, slik at bruker kan justere
+    // mengde opp eller ned selv … kanskje gå opp litt siden det kan være snaut med avrundet tall».
+    // Én rad per folieprodukt (per product.id, som materiallista). Forhåndsutfylling (STEG 0.3):
+    // lagret ≥ forslag → lagret; lagret < forslag → FORSLAGET med gul merknad — for selve folien
+    // får et gammelt tall aldri stå under beregnet mengde uten at brukeren ser det (tilbehøret
+    // beholder «lagret vinner alltid», se renderRow).
+    const foilProducts = [...foilDrawn.values()].sort((a, b) => a.product.id - b.product.id);
+    const fmtM = (m) => m.toFixed(1).replace('.', ',');
+    let foilQtyHtml = '';
+    if (foilProducts.length) {
+      const rows = foilProducts.map(e => {
+        const pid = e.product.id;
+        const forslag = _foilSuggestQtyM(e.lenM);
+        const savedRow = hasSaved ? savedById.get(_foilAccId(pid)) : null;
+        const savedQty = savedRow ? Math.max(0, Math.round(Number(savedRow.qty) || 0)) : null;
+        const under = savedQty != null && savedQty < forslag;
+        const startVal = under || savedQty == null ? forslag : savedQty;
+        const grown = under && (savedRow.autoQty == null || forslag > Math.round(Number(savedRow.autoQty)));
+        const note = !under ? '' : (grown
+          ? `Tegnet mengde har økt siden sist (var ${savedQty} m)`
+          : `Lagret ${savedQty} m er under beregnet mengde`);
+        const plusBtn = (n) => `<button type="button" data-foil-plus="${n}" data-foil-pid="${pid}" tabindex="-1" title="Legg til ${n} m"
+                 style="padding:3px 7px;border:1px solid var(--border,#ccc);border-radius:4px;background:var(--surface2,#f4f6fa);color:var(--text,#111);font-size:11px;cursor:pointer;white-space:nowrap">+${n} m</button>`;
+        return `
+        <div class="acc-row" data-foil-row="${pid}" style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border,#eee)">
+          <span style="flex:1;font-size:13px">${esc(e.product.name || ('Produkt #' + pid))}<br><span style="font-size:10px;color:var(--dim)">tegnet ${fmtM(e.lenM)} m i ${e.roomCount} rom</span>${note ? `<br><span style="font-size:10px;color:#b8860b">⚠ ${esc(note)}</span>` : ''}</span>
+          <span style="font-size:11px;color:var(--dim);min-width:72px;text-align:right" title="Tegnet lengde rundet opp til hele meter">forslag: ${forslag} m</span>
+          <input type="number" min="0" step="1"
+                 data-foil-pid="${pid}" data-role="foil-qty"
+                 data-auto-qty="${forslag}"
+                 value="${startVal}"
+                 style="width:70px;padding:4px 6px;border:1px solid var(--border,#ccc);border-radius:4px;text-align:right;font-size:13px">
+          ${plusBtn(1)}${plusBtn(5)}
+          <span style="font-size:12px;color:var(--dim);min-width:14px">m</span>
+        </div>`;
+      });
+      foilQtyHtml = sectionHdr('Varmefolie (meter)')
+        + `<div style="font-size:11px;color:var(--dim);margin-bottom:4px">Bestilt mengde per produkt. Forslaget er tegnet lengde rundet opp til hele meter — gå gjerne litt opp. 0 m gir ingen linje.</div>`
+        + `<div>${rows.join('')}</div>`;
+    }
 
     // ── FOIL ──
     const foilAuto   = FOIL_ACCESSORIES.filter(a => a.group === 'auto');
@@ -77309,6 +77362,7 @@ function showAccessoriesModal() {
           <h3 style="font-size:18px;font-weight:700;margin:0">Tilbehør</h3>
           <button id="acc-close" style="background:none;border:none;color:var(--muted,#666);font-size:20px;cursor:pointer">&times;</button>
         </div>
+        ${foilQtyHtml}
         ${foilHtml}
         ${cableHtml}
         ${matHtml}
@@ -77336,6 +77390,12 @@ function showAccessoriesModal() {
     };
     overlay.querySelectorAll('input[data-stalnett-room]').forEach(cb => cb.addEventListener('change', _updateStalnettTotal));
     _updateStalnettTotal();
+    // 125: «+1 m» / «+5 m» — legger til på feltets nåværende verdi (tomt felt regnes som 0).
+    overlay.querySelectorAll('button[data-foil-plus]').forEach(b => b.addEventListener('click', () => {
+      const qi = overlay.querySelector(`input[data-foil-pid="${b.getAttribute('data-foil-pid')}"][data-role="foil-qty"]`);
+      if (!qi) return;
+      qi.value = Math.max(0, Math.round(Number(qi.value) || 0)) + (Number(b.getAttribute('data-foil-plus')) || 0);
+    }));
 
     const done = (val) => { overlay.style.display = 'none'; resolve(val); };
 
@@ -77366,6 +77426,24 @@ function showAccessoriesModal() {
           items.push(it);
         }
       };
+
+      // 125: FOLIEMENGDE (meter per produkt). Lagres i samme items-liste som tilbehøret, som
+      // { type: 'foilProduct', productId, qty, autoQty } — autoQty er forslaget raden ble bekreftet
+      // mot, som _foilOrderQtyM bruker til å se om tegnet mengde har økt siden (STEG 0.3). Raden
+      // lagres OGSÅ ved 0 (til forskjell fra tilbehør): 0 er et bevisst valg («kunden har folie»)
+      // som skal huskes, og som eksportene skal respektere (ingen linje) så lenge tegningen ikke
+      // har vokst. Tilbehør som regnes av folien (tape, RKK m.m.) leser foilCtx — altså TEGNET
+      // mengde, ikke dette tallet. Rekkefølgen i items er uviktig: alle lesere filtrerer på type.
+      for (const e of foilProducts) {
+        const pid = e.product.id;
+        const forslag = _foilSuggestQtyM(e.lenM);
+        const qi = overlay.querySelector(`input[data-foil-pid="${pid}"][data-role="foil-qty"]`);
+        const raw = qi?.value?.trim();
+        const qty = raw !== '' && raw != null ? Math.max(0, Math.round(Number(raw))) : forslag;
+        items.push({ id: _foilAccId(pid), type: 'foilProduct', productId: pid, name: e.product.name || '',
+          art_no: e.product.article_no || '', el_no: e.product.el_no || '', unit: 'm', qty,
+          autoQty: forslag, drawnM: Math.round(e.lenM * 100) / 100, source: 'foilProduct' });
+      }
 
       // FOIL
       let rkkDim = prefs.rkkDim || '1.5';
@@ -82770,7 +82848,7 @@ function _collectMaterialItems() {
       const ncMm = p.netto_width_mm || p.width_mm || 500;
       const areaM2 = (s.length_cm * (ncMm/10)) / 10000;
       const watt = (p.watt_per_m2||0) * areaM2;
-      items.push({ product: p, kind: 'Folie', roomName, floorName, qtyStr: '1 stk', count: 1, areaM2, lenM: s.length_cm/100, watt });
+      items.push({ product: p, kind: 'Folie', roomName, floorName, roomId: room.id, qtyStr: '1 stk', count: 1, areaM2, lenM: s.length_cm/100, watt });
     });
     (S.cables||[]).filter(c => c.roomId === room.id).forEach(c => {
       const p = HEATING_PRODUCTS.find(pr => pr.id === c.productId);
@@ -82853,12 +82931,264 @@ function _aggregateMaterialItems(items) {
 // (showAccessoriesModal sitt resultat, evt. forhåndsfiltrert på type) til én rad per id.
 function _aggregateAccessoryItems(list) {
   const agg = new Map();
-  for (const it of list) {
+  for (const it of _accessoryOnly(list)) {   // 125: folieradene (type 'foilProduct') er ikke tilbehør
     const e = agg.get(it.id) || { name: it.name, art_no: it.art_no || '', unit: it.unit || '', qty: 0 };
     e.qty += it.qty;
     agg.set(it.id, e);
   }
   return [...agg.values()];
+}
+
+// ═══ 125 (Kenneth 23.10.2026): foliemengde i meter per produkt — ÉN kilde ═══════════════════════
+// «Det er ønskelig å kanskje gå opp litt siden det kan være snaut med avrundet tall som appen
+// foreslår.» Før 125 regnet FIRE steder foliemengden hver for seg, og ikke likt: Visma-pasten og
+// GBAO10 Math.ceil(totalLen) (hele meter), PDF-materiallista (totalLen/100).toFixed(1) og
+// Bestilling-arket totalLen.toFixed(1) (desimal). Nå leser alle fire _foilOrderQtyM, og brukeren
+// kan justere tallet i tilbehørsdialogen (showAccessoriesModal, seksjonen «Varmefolie (meter)»).
+//
+// Tegnet lengde per folieprodukt, fra samme _collectMaterialItems som eksportene (utkast-rom
+// ekskludert, fri folie inkludert). roomCount = antall rom produktet er tegnet i.
+function _foilDrawnByProduct() {
+  const m = new Map();
+  for (const it of _collectMaterialItems()) {
+    if (it.kind !== 'Folie') continue;
+    const e = m.get(it.product.id) || { product: it.product, lenM: 0, rooms: new Set(), roomCount: 0 };
+    e.lenM += it.lenM || 0;
+    e.rooms.add(it.roomId != null ? it.roomId : (it.floorName + '|' + it.roomName));
+    e.roomCount = e.rooms.size;
+    m.set(it.product.id, e);
+  }
+  return m;
+}
+// Forslaget: tegnet lengde rundet opp til hele meter — samme Math.ceil som Visma/GBAO10 brukte før
+// 125, men avrundet til mm først, så 48,000000001 (flyttallsstøy fra cm/100-summer) ikke blir 49.
+function _foilSuggestQtyM(lenM) { return Math.max(0, Math.ceil(Math.round((lenM || 0) * 1000) / 1000)); }
+// Nøkkelen folieraden lagres under i S.project.accessories.items — samme liste som tilbehøret
+// (så den følger prosjektet og foreslås igjen neste gang), skilt på type: 'foilProduct'.
+function _foilAccId(productId) { return 'foil_product_' + productId; }
+// Bestilt mengde i hele meter for ett folieprodukt. accItems = tilbehørslista (modalens resultat
+// eller S.project.accessories.items); drawn = valgfritt ferdig _foilDrawnByProduct().
+// Regel (STEG 0.3 i 125): brukerens lagrede tall gjelder — men ALDRI lavere enn nytt forslag uten
+// at brukeren har sett det. Raden husker forslaget den ble bekreftet mot (autoQty). Har tegnet
+// mengde ØKT siden da (forslag > autoQty), vinner forslaget: Visma-pasten og GBAO10 gjenbruker
+// lagret valg UTEN å åpne modalen, og ville ellers bestilt for lite i stillhet. Er forslaget uendret
+// eller lavere, står brukerens tall — også 0 («kunden har folie på lager» → ingen linje).
+function _foilOrderQtyM(productId, accItems, drawn) {
+  const e = (drawn || _foilDrawnByProduct()).get(productId);
+  const forslag = _foilSuggestQtyM(e ? e.lenM : 0);
+  const saved = (accItems || []).find(it => it && it.type === 'foilProduct' && it.productId === productId);
+  if (!saved) return forslag;
+  const q = Math.max(0, Math.round(Number(saved.qty) || 0));
+  if (q >= forslag) return q;
+  const seen = saved.autoQty != null ? Math.round(Number(saved.autoQty)) : null;
+  return (seen != null && forslag <= seen) ? q : forslag;
+}
+// Tilbehøret UTEN folieradene. PDF/XLSX grupperer tilbehøret på it.type ('foil'/'cable'/annet) og
+// ville ellers listet folien som «Tilbehør — annet» i tillegg til produktlinja.
+function _accessoryOnly(items) { return (items || []).filter(it => it && it.type !== 'foilProduct'); }
+
+// 125 — regresjonstest for foliemengden. Kjør i konsollen: await _accessoryFoilQtyRegressionTest()
+// Dekker: forslag (tegnet → hele meter), lagret ≥ forslag, lagret < forslag (økt tegning vs.
+// bevisst lavere), 0 m (ingen linje), folieradene er ikke tilbehør, og ÉN kilde i alle fire
+// eksportene (Visma-paste, GBAO10, XLSX-Bestilling, PDF-materialliste) — pluss en vaksine.
+function _accessoryFoilQtyRegressionTest() {
+  const results = [];
+  const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
+  const saved = {
+    rooms: S.rooms, strips: S.strips, foilFree: S.foilFree, cables: S.cables, mats: S.mats,
+    matPaths: S.matPaths, plates: S.plates, aluboard: S.aluboard, zones: S.zones, hindrings: S.hindrings,
+    stairs: S.stairs, floors: S.floors, project: S.project, counters: { ...S.counters },
+    activeFloorId: S.ui.activeFloorId, activePartId: S.ui.activePartId,
+    prods: HEATING_PRODUCTS.slice(), cats: PRODUCT_CATEGORIES.slice(),
+    autoSave: window._performAutoSave, toast: window._showToast, modal: window.showAccessoriesModal,
+    branding: window._pdfBranding, jsPDF: window.jspdf && window.jspdf.jsPDF, XLSX: window.XLSX,
+    vismaAcc: _vismaPasteAccessoryItems, gbaoAcc: _gbao10AccessoryItems,
+    undoLen: (typeof _undoStack !== 'undefined' && _undoStack) ? _undoStack.length : null,
+  };
+  const gjenopprett = () => {
+    Object.assign(S, { rooms: saved.rooms, strips: saved.strips, foilFree: saved.foilFree,
+      cables: saved.cables, mats: saved.mats, matPaths: saved.matPaths, plates: saved.plates,
+      aluboard: saved.aluboard, zones: saved.zones, hindrings: saved.hindrings, stairs: saved.stairs,
+      floors: saved.floors, project: saved.project });
+    Object.assign(S.counters, saved.counters);
+    S.ui.activeFloorId = saved.activeFloorId; S.ui.activePartId = saved.activePartId;
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(...saved.prods);
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(...saved.cats);
+    window._performAutoSave = saved.autoSave; window._showToast = saved.toast;
+    window.showAccessoriesModal = saved.modal; window._pdfBranding = saved.branding;
+    if (window.jspdf) window.jspdf.jsPDF = saved.jsPDF;
+    window.XLSX = saved.XLSX;
+    _vismaPasteAccessoryItems = saved.vismaAcc; _gbao10AccessoryItems = saved.gbaoAcc;
+    if (saved.undoLen != null) _undoStack.length = saved.undoLen;
+    _invalidateStripCache();
+    if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+    _invalidateCableCache && _invalidateCableCache();
+    _invalidateMatCache && _invalidateMatCache();
+    _invalidateStairCache && _invalidateStairCache();
+    try { renderSidebar(); updateCtxBar(); render(); } catch (e) {}
+  };
+  try {
+    window._performAutoSave = () => Promise.resolve();
+    window._showToast = () => {};
+    window._pdfBranding = () => Promise.resolve(null);
+
+    // ── Fikstur: to folieprodukter (ulik bredde) i tre rom ─────────────────────────────────
+    const CAT_FOIL = { id: 9900, module_type: 'foil', name: 'TESTFOLIE' };
+    const F50 = { id: 997001, category_id: 9900, active: true, name: 'TESTFOLIE 50', width_mm: 500,
+      netto_width_mm: 500, watt_per_m2: 60, article_no: 'TF50', el_no: '1000050' };
+    const F30 = { id: 997002, category_id: 9900, active: true, name: 'TESTFOLIE 30', width_mm: 300,
+      netto_width_mm: 300, watt_per_m2: 60, article_no: 'TF30', el_no: '1000030' };
+    PRODUCT_CATEGORIES.length = 0; PRODUCT_CATEGORIES.push(CAT_FOIL);
+    HEATING_PRODUCTS.length = 0; HEATING_PRODUCTS.push(F50, F30);
+    const rect = (x, y, w, h) => [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }];
+    const mkRoom = (id, navn, pts) => ({ id, floorId: null, partId: null, name: navn,
+      points: pts.map(p => ({ ...p })), walls: compWalls(pts), area: Math.abs(compArea(pts)), dims: [] });
+    const A = 992301, B = 992302, C = 992303;
+    S.rooms = [mkRoom(A, 'Stue', rect(0, 0, 500, 400)), mkRoom(B, 'Kjøkken', rect(600, 0, 400, 300)),
+      mkRoom(C, 'Gang', rect(0, 500, 300, 200))];
+    S.cables = []; S.mats = []; S.matPaths = []; S.plates = []; S.aluboard = []; S.foilFree = [];
+    S.zones = []; S.hindrings = []; S.stairs = []; S.floors = [];
+    S.ui.activeFloorId = null; S.ui.activePartId = null;
+    S.project = { name: 'FOLIEMENGDE-TEST', parts: [], revision: 0, createdAt: Date.now() };
+    const strip = (id, roomId, productId, length_cm, pos_cm) => ({ id, roomId, productId, direction: 'v', pos_cm, start_cm: 0, length_cm });
+    // F50: 12,34 + 20,00 (Stue) + 15,00 (Kjøkken) = 47,34 m i 2 rom → 48. F30: 8,00 (Kjøkken) + 10,30 (Gang) = 18,30 m i 2 rom → 19.
+    S.strips = [strip(1, A, F50.id, 1234, 25), strip(2, A, F50.id, 2000, 85), strip(3, B, F50.id, 1500, 25),
+      strip(4, B, F30.id, 800, 85), strip(5, C, F30.id, 1030, 15)];
+    _invalidateStripCache();
+    if (typeof _rebuildActiveFloorRoomIds === 'function') _rebuildActiveFloorRoomIds();
+
+    // ── Avrunding ───────────────────────────────────────────────────────────────────────────
+    check('forslag: 47,3 m → 48', 48, _foilSuggestQtyM(47.3) === 48, _foilSuggestQtyM(47.3));
+    check('forslag: flyttallsstøy 48,0000000001 → 48 (ikke 49)', 48, _foilSuggestQtyM(48.0000000001) === 48, _foilSuggestQtyM(48.0000000001));
+    check('forslag: 0 → 0', 0, _foilSuggestQtyM(0) === 0, _foilSuggestQtyM(0));
+
+    // ── Tegnet mengde per produkt ───────────────────────────────────────────────────────────
+    const drawn = _foilDrawnByProduct();
+    const d50 = drawn.get(F50.id), d30 = drawn.get(F30.id);
+    check('tegnet F50: 47,34 m i 2 rom (to striper i Stue teller som ett rom)', '47.34/2', d50 && Math.abs(d50.lenM - 47.34) < 1e-9 && d50.roomCount === 2, d50 && (d50.lenM + '/' + d50.roomCount));
+    check('tegnet F30: 18,30 m i 2 rom', '18.3/2', d30 && Math.abs(d30.lenM - 18.3) < 1e-9 && d30.roomCount === 2, d30 && (d30.lenM + '/' + d30.roomCount));
+
+    // ── Regelen i _foilOrderQtyM ────────────────────────────────────────────────────────────
+    const row = (pid, qty, autoQty) => ({ id: _foilAccId(pid), type: 'foilProduct', productId: pid, qty, autoQty, unit: 'm' });
+    check('uten lagret: forslag 48', 48, _foilOrderQtyM(F50.id, []) === 48, _foilOrderQtyM(F50.id, []));
+    check('uten lagret (F30): forslag 19', 19, _foilOrderQtyM(F30.id, null) === 19, _foilOrderQtyM(F30.id, null));
+    check('lagret 55 ≥ forslag 48 → 55', 55, _foilOrderQtyM(F50.id, [row(F50.id, 55, 48)]) === 55, _foilOrderQtyM(F50.id, [row(F50.id, 55, 48)]));
+    check('lagret 48 = forslag 48 → 48', 48, _foilOrderQtyM(F50.id, [row(F50.id, 48, 48)]) === 48, _foilOrderQtyM(F50.id, [row(F50.id, 48, 48)]));
+    check('lagret 40 < forslag 48, bevisst (autoQty 48) → 40', 40, _foilOrderQtyM(F50.id, [row(F50.id, 40, 48)]) === 40, _foilOrderQtyM(F50.id, [row(F50.id, 40, 48)]));
+    check('lagret 0, bevisst (autoQty 48) → 0 (ingen linje)', 0, _foilOrderQtyM(F50.id, [row(F50.id, 0, 48)]) === 0, _foilOrderQtyM(F50.id, [row(F50.id, 0, 48)]));
+    check('lagret 40 < forslag uten autoQty (ukjent historikk) → forslag 48', 48, _foilOrderQtyM(F50.id, [row(F50.id, 40, undefined)]) === 48, _foilOrderQtyM(F50.id, [row(F50.id, 40, undefined)]));
+    // Tegningen vokser: +12 m F50 → 59,34 → 60.
+    S.strips.push(strip(6, C, F50.id, 1200, 75)); _invalidateStripCache();
+    check('tegnet mer: forslag 60', 60, _foilOrderQtyM(F50.id, []) === 60, _foilOrderQtyM(F50.id, []));
+    check('lagret 55 (bekreftet mot 48) < nytt forslag 60 → 60, ikke 55', 60, _foilOrderQtyM(F50.id, [row(F50.id, 55, 48)]) === 60, _foilOrderQtyM(F50.id, [row(F50.id, 55, 48)]));
+    check('lagret 0 (bekreftet mot 48), tegningen vokst → 60, ikke 0', 60, _foilOrderQtyM(F50.id, [row(F50.id, 0, 48)]) === 60, _foilOrderQtyM(F50.id, [row(F50.id, 0, 48)]));
+    check('lagret 70 ≥ 60 → 70', 70, _foilOrderQtyM(F50.id, [row(F50.id, 70, 48)]) === 70, _foilOrderQtyM(F50.id, [row(F50.id, 70, 48)]));
+    S.strips.pop(); _invalidateStripCache();
+    check('tegningen tilbake: forslag 48 igjen', 48, _foilOrderQtyM(F50.id, []) === 48, _foilOrderQtyM(F50.id, []));
+
+    // ── Folieradene er ikke tilbehør ────────────────────────────────────────────────────────
+    const tape = { id: 'tape_test', name: 'Tape', art_no: 'T1', unit: 'rull', qty: 2, type: 'foil', source: 'auto' };
+    const blandet = [row(F50.id, 55, 48), tape, row(F30.id, 19, 19)];
+    check('_accessoryOnly fjerner folieradene', 1, _accessoryOnly(blandet).length === 1 && _accessoryOnly(blandet)[0].id === 'tape_test', _accessoryOnly(blandet).map(i => i.id));
+    check('_aggregateAccessoryItems hopper over folieradene', 1, _aggregateAccessoryItems(blandet).length === 1, _aggregateAccessoryItems(blandet).map(i => i.name));
+
+    // ── Én kilde i eksportene ───────────────────────────────────────────────────────────────
+    const vismaLinje = (items, art) => {
+      _vismaPasteAccessoryItems = items;
+      const b = _vismaPasteBuild();
+      const l = b.sections.flatMap(s => s.lines).find(l => l.artikkelnr === art);
+      return l ? l.antall : null;
+    };
+    check('Visma: uten lagret → 48', 48, vismaLinje([], 'TF50') === 48, vismaLinje([], 'TF50'));
+    check('Visma: lagret 55 → 55', 55, vismaLinje([row(F50.id, 55, 48)], 'TF50') === 55, vismaLinje([row(F50.id, 55, 48)], 'TF50'));
+    check('Visma: F30 urørt → 19', 19, vismaLinje([row(F50.id, 55, 48)], 'TF30') === 19, vismaLinje([row(F50.id, 55, 48)], 'TF30'));
+    check('Visma: lagret 0 → ingen linje', null, vismaLinje([row(F50.id, 0, 48)], 'TF50') === null, vismaLinje([row(F50.id, 0, 48)], 'TF50'));
+    check('Visma: folieraden lekker ikke inn som tilbehørslinje', 0, _vismaPasteBuild().accLines.length === 0, _vismaPasteBuild().accLines.length);
+    _vismaPasteAccessoryItems = [];
+
+    const gbaoLinje = (items, art) => {
+      _gbao10AccessoryItems = items;
+      const l = _gbao10Build().lines.find(l => l.artikkelnr === art);
+      return l ? l.antall : null;
+    };
+    check('GBAO10: uten lagret → 48', 48, gbaoLinje([], 'TF50') === 48, gbaoLinje([], 'TF50'));
+    check('GBAO10: lagret 55 → 55', 55, gbaoLinje([row(F50.id, 55, 48)], 'TF50') === 55, gbaoLinje([row(F50.id, 55, 48)], 'TF50'));
+    check('GBAO10: lagret 0 → ingen linje', null, gbaoLinje([row(F50.id, 0, 48)], 'TF50') === null, gbaoLinje([row(F50.id, 0, 48)], 'TF50'));
+    _gbao10AccessoryItems = [];
+
+    // XLSX og PDF er async (modal + fil) — modalen stubbes til å svare med de lagrede radene,
+    // filskriving og jsPDF.save stubbes. Samme mønster som _pdfExportSmokeTest.
+    return (async () => {
+      const xlsxBestilling = async (items) => {
+        let fanget = null;
+        window.showAccessoriesModal = () => Promise.resolve({ items });
+        window.XLSX = { utils: { aoa_to_sheet: rows => ({ rows }), book_new: () => ({ sheets: [] }),
+          book_append_sheet: (wb, ws, name) => wb.sheets.push({ name, ws }) },
+          writeFile: (wb) => { fanget = wb; } };
+        await _exportMaterialListXLSX();
+        const ark = fanget && fanget.sheets.find(s => s.name === 'Bestilling');
+        return ark ? ark.ws.rows : null;
+      };
+      let rows = await xlsxBestilling([row(F50.id, 55, 48)]);
+      const r50 = rows && rows.find(r => r[0] === 'TF50'), r30 = rows && rows.find(r => r[0] === 'TF30');
+      check('XLSX Bestilling: lagret 55 → «55 m»', '55 m', r50 && r50[1] === '55 m', r50 && r50[1]);
+      check('XLSX Bestilling: F30 → «19 m»', '19 m', r30 && r30[1] === '19 m', r30 && r30[1]);
+      check('XLSX Bestilling: folieraden ikke som tilbehør', false, !rows.some(r => String(r[2] || '').startsWith('— Tilbehør')), rows.filter(r => String(r[2] || '').startsWith('— Tilbehør')).map(r => r[2]));
+      rows = await xlsxBestilling([row(F50.id, 0, 48)]);
+      check('XLSX Bestilling: lagret 0 → ingen TF50-linje', false, !rows.some(r => r[0] === 'TF50'), rows.filter(r => r[0] === 'TF50'));
+      rows = await xlsxBestilling([]);
+      check('XLSX Bestilling: uten lagret → «48 m»', '48 m', (rows.find(r => r[0] === 'TF50') || [])[1] === '48 m', (rows.find(r => r[0] === 'TF50') || [])[1]);
+
+      const pdfTekster = async (items) => {
+        const tekster = [];
+        window.showAccessoriesModal = () => Promise.resolve({ items });
+        const Ekte = saved.jsPDF;
+        window.jspdf.jsPDF = function (...a) {
+          const d = new Ekte(...a);
+          const ekte = d.text.bind(d);
+          d.text = function (t, ...rest) { if (typeof t === 'string') tekster.push(t); return ekte(t, ...rest); };
+          d.save = function () { return d; };
+          return d;
+        };
+        await exportPDF({ cover: false, summary: false, rooms: [], stairs: [], roomTable: false,
+          stairTable: false, materialList: true, pricing: false, discount: 0, showDGDB: false,
+          docs: false, signature: false, freeText: '' });
+        return tekster;
+      };
+      const etter = (tekster, navn) => { const i = tekster.indexOf(navn); return i < 0 ? null : tekster.slice(i + 1, i + 3).join(' '); };
+      if (window.jspdf && saved.jsPDF) {
+        let t = await pdfTekster([row(F50.id, 55, 48)]);
+        check('PDF materialliste: lagret 55 → «55 m»', '55 m', etter(t, 'TESTFOLIE 50') === '55 m', etter(t, 'TESTFOLIE 50'));
+        check('PDF materialliste: F30 → «19 m»', '19 m', etter(t, 'TESTFOLIE 30') === '19 m', etter(t, 'TESTFOLIE 30'));
+        check('PDF: folieraden ikke som «Tilbehør — annet»', false, !t.includes('Tilbehør — annet'), t.filter(x => x.startsWith('Tilbehør')));
+        t = await pdfTekster([row(F50.id, 0, 48)]);
+        check('PDF materialliste: lagret 0 → ingen TESTFOLIE 50-linje', false, !t.includes('TESTFOLIE 50'), t.includes('TESTFOLIE 50'));
+        t = await pdfTekster([]);
+        check('PDF materialliste: uten lagret → «48 m» (før 125: «47.3 m»)', '48 m', etter(t, 'TESTFOLIE 50') === '48 m', etter(t, 'TESTFOLIE 50'));
+      } else {
+        check('PDF: jsPDF lastet', true, false, 'jsPDF mangler — PDF-delen ikke kjørt');
+      }
+
+      // ── VAKSINE: en innført feil i kilden MÅ gjøre testen rød ────────────────────────────
+      const ekteOrder = window._foilOrderQtyM;
+      let syk = null;
+      try {
+        window._foilOrderQtyM = () => 1;   // hvis eksportene IKKE leser kilden, merkes det ikke
+        _vismaPasteAccessoryItems = [row(F50.id, 55, 48)];
+        syk = _vismaPasteBuild().sections.flatMap(s => s.lines).find(l => l.artikkelnr === 'TF50');
+      } finally { window._foilOrderQtyM = ekteOrder; _vismaPasteAccessoryItems = []; }
+      check('VAKSINE: Visma leser faktisk _foilOrderQtyM (innført feil synlig)', 1, syk && syk.antall === 1, syk && syk.antall);
+
+      const allOk = results.every(r => r.ok);
+      console[allOk ? 'log' : 'error'](`_accessoryFoilQtyRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
+      return { ok: allOk, results };
+    })().finally(gjenopprett);
+  } catch (e) {
+    results.push({ name: 'UNNTAK (oppsett)', ok: false, expected: '-', got: String(e && e.stack || e) });
+    gjenopprett();
+    console.error('_accessoryFoilQtyRegressionTest: FEILET', results);
+    return Promise.resolve({ ok: false, results });
+  }
 }
 
 // spec-visma-paste-rekkefolge.md (Kenneth 28.08.2026): kanonisk gruppeliste — fantes tidligere i
@@ -82940,9 +83270,10 @@ function _vismaPasteBuild() {
   // antall<=0-filtreringen — «grupper uten linjer gir ingen tom rad» (spec) betyr filtrert etter
   // dette steget, ikke bare før (en gruppe kan bli tom nettopp fordi alt i den hadde antall 0).
   const sections = [];
+  const _foilDrawn = _foilDrawnByProduct();
   for (const g of groups) {
     const lines = [];
-    for (const { product, count, totalLen, kind } of g.rows) {
+    for (const { product, count, kind } of g.rows) {
       // Kun folie selges løpende (kappet fra rull, bestilt i meter — count er antall TEGNEDE
       // striper, en irrelevant størrelse for bestilling). Kabel/matte/plate er FASTE lengde-SKUer
       // (hver rullstørrelse er sin egen article_no) — count ER antall ruller/stk å bestille.
@@ -82950,8 +83281,9 @@ function _vismaPasteBuild() {
       // matter feil (mangler cable_length_m akkurat som folie) — Visma sitt Antall-felt tolererer
       // ingen slik unøyaktighet, derfor kind (satt av _collectMaterialItems, ett sted, alltid
       // riktig) i stedet for et nytt feltbasert gjettemønster.
-      const byLength = kind === 'Folie' && totalLen > 0;
-      const antall = Math.ceil(byLength ? totalLen : count);
+      // 125: foliemeterne fra ÉN kilde (_foilOrderQtyM — brukerens justerte tall i
+      // _vismaPasteAccessoryItems, ellers tegnet lengde rundet opp, som Math.ceil(totalLen) før).
+      const antall = kind === 'Folie' ? _foilOrderQtyM(product.id, _vismaPasteAccessoryItems, _foilDrawn) : Math.ceil(count);
       if (antall <= 0) continue;
       if (!product.article_no) { missing.push(product.name || ('Produkt #' + product.id)); continue; }
       lines.push({
@@ -83281,11 +83613,12 @@ function _gbao10Build() {
   const groups = _groupByMaterialGroups(_aggregateMaterialItems(items), e => e.kind, e => e.product.id);
   const missing = [];   // {key, name, el_no}
   const lines = [];
+  const _foilDrawn = _foilDrawnByProduct();
   for (const g of groups) {
-    for (const { product, count, totalLen, kind } of g.rows) {
+    for (const { product, count, kind } of g.rows) {
       // Samme regel som _vismaPasteBuild: kun folie selges løpende (meter), resten er stk.
-      const byLength = kind === 'Folie' && totalLen > 0;
-      const antall = Math.ceil(byLength ? totalLen : count);
+      // 125: foliemeterne fra ÉN kilde (_foilOrderQtyM, med _gbao10AccessoryItems som lagret valg).
+      const antall = kind === 'Folie' ? _foilOrderQtyM(product.id, _gbao10AccessoryItems, _foilDrawn) : Math.ceil(count);
       if (antall <= 0) continue;
       if (product.article_no) { lines.push({ artikkelnr: product.article_no, antall }); continue; }
       const key = 'prod:' + product.id;
@@ -83559,20 +83892,29 @@ async function _exportMaterialListXLSX() {
   const accessoryResult = await showAccessoriesModal();
   if (!accessoryResult) return;
   const accessoryItems = accessoryResult.items || [];
+  const _accOnly = _accessoryOnly(accessoryItems);   // 125: folieradene er produktlinjer, ikke tilbehør
+  const _foilDrawn = _foilDrawnByProduct();
   const items = _collectMaterialItems();
   const rooms = (S.rooms || []).filter(r => !r.listDraft);   // utkast-rom (Hurtig prosj.) ekskluderes — Sheet 3 (Per rom) bruker denne selv
 
   // ── Sheet 1: Bestilling — 3 cols, aggregated by product ──
   // What case-workers paste into ordering tools.
   const orderRows = [['Art.nr', 'Antall', 'Produkt']];
-  for (const { product, count, totalLen } of _aggregateMaterialItems(items)) {
+  for (const { product, count, totalLen, kind } of _aggregateMaterialItems(items)) {
+    // 125: folie bestilles i hele meter fra ÉN kilde (_foilOrderQtyM: brukerens justerte tall
+    // eller forslaget) — samme tall som PDF-materiallista og Visma. 0 m → ingen linje.
+    if (kind === 'Folie') {
+      const m = _foilOrderQtyM(product.id, accessoryItems, _foilDrawn);
+      if (m > 0) orderRows.push([product.article_no || '', `${m} m`, product.name || '']);
+      continue;
+    }
     const qty = totalLen > 0 && (product.cable_length_m ? false : true)
       ? `${count} stk · ${totalLen.toFixed(1)} m`
       : `${count}`;
     orderRows.push([product.article_no || '', qty, product.name || '']);
   }
   // Accessories on Bestilling — gruppert per type (folie/kabel), aggregert qty + unit.
-  if (accessoryItems.length > 0) {
+  if (_accOnly.length > 0) {
     const _accGroups = [{ key: 'foil', label: 'Tilbehør — Varmefolie' }, { key: 'cable', label: 'Tilbehør — Varmekabel' }];
     const _emit = (label, list) => {
       if (!list.length) return;
@@ -83581,8 +83923,8 @@ async function _exportMaterialListXLSX() {
         orderRows.push([art_no, `${qty} ${unit || ''}`.trim(), name]);
       }
     };
-    for (const g of _accGroups) _emit(g.label, accessoryItems.filter(it => (it.type || 'foil') === g.key));
-    _emit('Tilbehør — Annet', accessoryItems.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil'))));
+    for (const g of _accGroups) _emit(g.label, _accOnly.filter(it => (it.type || 'foil') === g.key));
+    _emit('Tilbehør — Annet', _accOnly.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil'))));
   }
   const wsOrder = XLSX.utils.aoa_to_sheet(orderRows);
   wsOrder['!cols'] = [{wch:18},{wch:18},{wch:40}];
@@ -83626,7 +83968,7 @@ async function _exportMaterialListXLSX() {
   }
   matRows.push(['', '', '', '', '', 'TOTAL', '', +grandA.toFixed(2), Math.round(grandW), '', '', '']);
   // Tilbehør block on Materialliste — appended after the heating groups.
-  if (accessoryItems.length > 0) {
+  if (_accOnly.length > 0) {
     const _accGroups = [{ key: 'foil', label: 'Varmefolie' }, { key: 'cable', label: 'Varmekabel' }];
     const _emitMat = (label, list) => {
       if (!list.length) return;
@@ -83645,8 +83987,8 @@ async function _exportMaterialListXLSX() {
         ]);
       }
     };
-    for (const g of _accGroups) _emitMat(g.label, accessoryItems.filter(it => (it.type || 'foil') === g.key));
-    _emitMat('Annet', accessoryItems.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil'))));
+    for (const g of _accGroups) _emitMat(g.label, _accOnly.filter(it => (it.type || 'foil') === g.key));
+    _emitMat('Annet', _accOnly.filter(it => !_accGroups.some(g => g.key === (it.type || 'foil'))));
   }
   const wsMat = XLSX.utils.aoa_to_sheet(matRows);
   wsMat['!cols'] = [{wch:14},{wch:16},{wch:30},{wch:18},{wch:14},{wch:18},{wch:16},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12}];
