@@ -27,3 +27,21 @@
    fra fri ende (der ingen U-sving/90° gir mening) skal tolkes som hopp automatisk? Jeg lot det være,
    fordi et slikt klikk i dag avslutter banen («tilgivende avslutning»), og jeg ville ikke endre den
    uten å spørre.
+
+# 130 — spørsmål til Kenneth
+
+1. **Langsaksen også?** Regel 27 pkt. 1 sier sonen aldri bestemmer hvor en bredde må stoppe, så jeg
+   utvidet både på tvers (bilde 1) og på langs (alkove under hoveddelen: blå går opp til 1 cm under røds
+   bredder). Er det riktig, eller skulle bare tvers-aksen få bruke nabosonen? Gevinsten på langs
+   kommer bare når kuttrasteret og katalogen gir en lengre rull.
+2. **Matter som alt ligger i rommet** regnes nå som naboer (Regel 27 pkt. 2: «andre matter»). «Fyll
+   rom»-knappen i det gamle produktpanelet tømmer ikke rommet først — den legger nå rundt det som
+   ligger der i stedet for oppå. Er det ønsket, eller skal «Fyll rom» alltid tømme først?
+3. **Begge sider stoppet av en matte** (en sone klemt mellom to naboer): blokka ankres til den lave
+   siden. Skal den heller sentreres mellom dem?
+4. **Vannrett retning (128-1) før 131?** Auto-retning velger vannrett for hoveddelen i bilde 1 og for
+   T-stammen, og den veien tegner matta forskjøvet. 130 unngår naboen der den *tegnes*, så det ser
+   riktig ut, men stammen får 0 cm lagt. Anbefaler å rette 128-1 (a) før 131, så 131 ikke bygges oppå
+   to koordinatkonvensjoner.
+5. **Søyle i nabosonen:** en hindring som bare delvis blokkerer stripa stopper hele utvidelsen. Greit
+   inntil videre, eller skal utvidelsen gå rundt den per bredde?

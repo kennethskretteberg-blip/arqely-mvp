@@ -15455,7 +15455,7 @@ function _matMultiSolve(candidates, alongSpanCm, maxRuns, targetAreaM2, cutCm, m
 function _matPlaceMultiMats(room, prod, geom, solution, opts) {
   opts = opts || {};
   const { dir, acrossMin, acrossMax, alongMin, alongMax, alongSpan, matWidthCm, gapCm, cutCm, marginCm, minLenCm,
-    zoneAlongMin, zoneAlongMax } = geom;
+    zoneAlongMin, zoneAlongMax, anchorAcross, anchorAlong, priorMats } = geom;   // 130: anchor*/priorMats kun fra _matZonePlanFor
   const L = solution.L;
   const items = solution.mats.slice().sort((a, b) => b.runs - a.runs || b.areaM2 - a.areaM2);
   const totalWidths = items.reduce((s, d) => s + d.runs, 0);
@@ -15467,9 +15467,12 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
   // dette false, altså BIT-FOR-BIT uendret for det vanligste tilfellet.
   const { left: _mcLeft, bottom: _mcBottom } = _matCornerFlags();
   const acrossFromHigh = dir === 'v' ? !_mcLeft : _mcBottom;
-  const acrossCenter = fromWall
-    ? (acrossFromHigh ? (acrossMax - totalW / 2) : (acrossMin + totalW / 2))
-    : (acrossMin + acrossMax) / 2;
+  // 130 / Regel 27 pkt. 3: inntil nabomatta når tverr-kanten ble stoppet av en (geom.anchorAcross).
+  const acrossCenter = anchorAcross === 'lo' ? (acrossMin + totalW / 2)
+    : anchorAcross === 'hi' ? (acrossMax - totalW / 2)
+    : fromWall
+      ? (acrossFromHigh ? (acrossMax - totalW / 2) : (acrossMin + totalW / 2))
+      : (acrossMin + acrossMax) / 2;
   // DEL B: langaksens EGET «fra vegg»-standardvalg (default true — se _matAlongFromWallDefault),
   // uavhengig av tvers-aksens `fromWall`. alongFromHigh speiler acrossFromHigh med byttet retning
   // (langaksen for 'v' er Y — samme test som tvers-aksen ville brukt for 'h', og omvendt).
@@ -15486,9 +15489,11 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
   // grense-uenigheten er rettet som egen sak.
   const fromWallAlong = _matAlongFromWallDefault() && zoneAlongMin == null;
   const alongFromHigh = dir === 'v' ? _mcBottom : !_mcLeft;
-  const alongCenter = fromWallAlong
-    ? (alongFromHigh ? (alongMax - L / 2) : (alongMin + L / 2))
-    : (alongMin + alongMax) / 2;
+  const alongCenter = anchorAlong === 'lo' ? (alongMin + L / 2)   // 130 / Regel 27 pkt. 3
+    : anchorAlong === 'hi' ? (alongMax - L / 2)
+    : fromWallAlong
+      ? (alongFromHigh ? (alongMax - L / 2) : (alongMin + L / 2))
+      : (alongMin + alongMax) / 2;
   const blockAcrossStart = acrossCenter - totalW / 2;
 
   const built = [];
@@ -15550,6 +15555,12 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
       if (!opts.dryRun) _showToast('Flermatte-utlegg avbrutt: ' + ruleCheck.reason, 'error');
       return opts.dryRun ? null : false;
     }
+    // 130 / Regel 27 pkt. 2: aldri oppå en nabomatte fra en tidligere sone (vakt, se autoFillMatSerpentine).
+    if (priorMats && _matOverlapsMats(mat, priorMats, gapCm)) {
+      console.error('_matPlaceMultiMats: Regel 27 — matte ville overlappet en nabomatte — avbrutt', mat);
+      if (!opts.dryRun) _showToast('Flermatte-utlegg avbrutt: ville overlappet en annen matte', 'error');
+      return opts.dryRun ? null : false;
+    }
     built.push(mat);
     widthsUsed += item.runs;
   }
@@ -15589,7 +15600,7 @@ function _matPlaceMultiMats(room, prod, geom, solution, opts) {
 // _matRoomCapacityCm → MAX_MATS-formel → _matMultiSolve) — bare med geometrien begrenset til
 // sonens eget rektangel (_matZoneUsableRoom, samme sone-bevisste margin autoFillMatSerpentine sin
 // zoneRect-gren allerede bruker) i stedet for rommets omsluttende boks. Ingen ny motor.
-function _matZonePlanFor(room, rect, prod) {
+function _matZonePlanFor(room, rect, prod, priorMats) {
   const matWidthCm = (prod.mat_width_mm || 500) / 10;
   const cutCm = (prod.mat_cut_interval_mm || 160) / 10;
   const marginCm = _matWallMarginCm(prod);   // 128 / Regel 12
@@ -15602,10 +15613,22 @@ function _matZonePlanFor(room, rect, prod) {
   // innsatt med sone-bevisst margin (ingen margin mot en nabosone), marginCm=0 inn i _matAreaGeom
   // siden geomRoom allerede ER innsatt. zoneAlongMin/Max = sonens EGNE along-grenser, brukt av
   // _matRoomCapacityCm/_matPlaceMultiMats til å klemme segmenter (aldri lekke inn i nabosonen).
-  const geomRoom = _matZoneUsableRoom(room, rect, marginCm);
-  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir, minMandatoryGapCm });
+  let geomRoom = _matZoneUsableRoom(room, rect, marginCm);
+  // 130 / Regel 27: samme utvidelse som autoFillMatSerpentine sin zoneRect-gren — retning fra
+  // sonens eget rektangel, boksen utvidet inn i ledig naboplass, ankring inntil nabomatta.
+  let zoneFree = null, zoneDir = userDir;
+  const prior = priorMats ? _matPriorMatsFor(room, priorMats) : null;
+  if (prior) {
+    zoneDir = userDir || _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir, minMandatoryGapCm }).dir;
+    zoneFree = _matZoneFreeRoom(room, rect, marginCm, zoneDir, prior, gapCm);
+    geomRoom = zoneFree;
+  }
+  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir: zoneDir, minMandatoryGapCm });
   if (geom0.maxRuns <= 0 || geom0.alongSpan < minLenCm) return null;   // for liten — samme grense autoFillMatSerpentine selv bruker
-  const geom = { ...geom0, marginCm, zoneAlongMin: geom0.alongMin, zoneAlongMax: geom0.alongMax };
+  const geom = { ...geom0, marginCm, zoneAlongMin: geom0.alongMin, zoneAlongMax: geom0.alongMax,
+    anchorAcross: zoneFree ? _matZoneAnchorSide(zoneFree.acrossLoBy, zoneFree.acrossHiBy) : null,   // 130 / Regel 27 pkt. 3
+    anchorAlong: zoneFree ? _matZoneAnchorSide(zoneFree.alongLoBy, zoneFree.alongHiBy) : null,
+    priorMats: prior };
 
   const sizeSuffixRe = /\s*\d+(\.\d+)?\s*[×x]\s*\d+(\.\d+)?\s*m\s*$/i;
   const familyKey = (prod.product_family || prod.name || '').replace(sizeSuffixRe, '').trim();
@@ -15706,6 +15729,12 @@ function _matZonePlanFor(room, rect, prod) {
 // gjenstår er FEIL 3 (sonekant kutter en bredde som kunne fortsatt inn i nabosonen) — et SMALERE,
 // mer avgrenset problem enn en full serpentin-omskriving, og ikke adressert her (utenfor STEG 1-3
 // sitt eksplisitte omfang i denne prompten).
+//
+// 130 / REGEL 27 (Kenneth 23.10.2026): FEIL 3 over er nå adressert for TVERR- og LANGS-aksen av
+// hver sone — sonegrensen er ikke lenger en vegg (se _matZoneFreeRoom): en sone får bruke ledig
+// plass i nabosonen, stoppet av vegg/hindring/forbudt sone/nabomatte, og ankres inntil nabomatta.
+// Sonedelingen (_decomposeRoomToRects) og rekkefølgen (størst først) er uendret; én matte som
+// FORTSETTER fra én sone til neste (Regel 28) er fortsatt ikke bygget (131).
 function _matPlanZones(room, prod) {
   const rects = _decomposeRoomToRects(room);
   if (!rects || rects.length <= 1) return null;
@@ -15714,23 +15743,31 @@ function _matPlanZones(room, prod) {
   const wm2 = prod.watt_per_m2 || 0;
   const zonePlans = [], excludedZones = [];
   let totalAreaM2 = 0, totalWatt = 0;
+  // 130 / REGEL 27: sonene planlegges som dryRun, så mattene fra tidligere soner ligger IKKE i
+  // S.mats — de akkumuleres her og sendes inn som priorMats (pluss det som alt ligger i rommet).
+  // Commit-løkka (_showMatZoneProposalPanel) gjør det samme med de committede mattene, så forslag
+  // og utlegg ser nøyaktig samme naboer.
+  let prior = _matPriorMatsFor(room, []);
   for (const rect of rects) {
     const zoneAreaM2 = (rect.x1 - rect.x0) * (rect.y1 - rect.y0) / 10000;
-    const plan = _matZonePlanFor(room, rect, prod);
+    const plan = _matZonePlanFor(room, rect, prod, prior);
     if (!plan) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
     let mats;
     if (plan.mode === 'multi') {
       mats = _matPlaceMultiMats(room, plan.prod, plan.geom, plan.sol, { dryRun: true });
     } else {
-      const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect });
+      const mat = autoFillMatSerpentine(prod.id, { dryRun: true, zoneRect: rect, priorMats: prior });
       mats = mat ? [mat] : null;
     }
     if (!mats || !mats.length) { excludedZones.push({ rect, areaM2: zoneAreaM2 }); continue; }
     let coveredM2 = 0;
     for (const m of mats) coveredM2 += m.width_cm * _matLaidLengthCm(m) / 10000;
     const watt = Math.round(wm2 * coveredM2);
-    zonePlans.push({ rect, mats, mode: plan.mode, zoneAreaM2, coveredM2, watt });
+    // 130: ligger noen bredde utenfor sonerektangelet, brukte sonen ledig plass i en nabosone (panelet sier det).
+    const extended = mats.some(m => _matRunWorldRects(m).some(r => r.x0 < rect.x0 - 0.5 || r.x1 > rect.x1 + 0.5 || r.y0 < rect.y0 - 0.5 || r.y1 > rect.y1 + 0.5));
+    zonePlans.push({ rect, mats, mode: plan.mode, zoneAreaM2, coveredM2, watt, extended });
     totalAreaM2 += coveredM2; totalWatt += watt;
+    prior = prior.concat(mats);
   }
   return { zonePlans, excludedZones, totalAreaM2, totalWatt };
 }
@@ -15790,10 +15827,15 @@ function _matBenchCatalog(areas, opts) {
 function _matZoneRegressionTest() {
   const savedProducts = HEATING_PRODUCTS.slice();
   const savedRooms = S.rooms, savedMats = S.mats, savedHindrings = S.hindrings, savedZones = S.zones,
-    savedSelectedRoomId = S.ui.selectedRoomId;
+    savedSelectedRoomId = S.ui.selectedRoomId, savedVarmematte = S.varmematte ? { ...S.varmematte } : S.varmematte,
+    savedDirection = S.varmefolie && S.varmefolie.direction, savedNextMatId = S.counters.nextMatId;
   const results = [];
   const check = (name, expected, cond, got) => results.push({ name, ok: !!cond, expected, got });
   try {
+    // 130: fasiten under er målt med produktets standard-mellomrom (gapCm null) og auto-retning —
+    // lås det eksplisitt så en annen økts innstillinger ikke flytter tallene.
+    S.varmematte = Object.assign({}, S.varmematte || {}, { gapCm: null, fromWall: false, fromWallAlong: undefined });
+    if (S.varmefolie) S.varmefolie.direction = null;
     HEATING_PRODUCTS.length = 0;
     const areas = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     HEATING_PRODUCTS.push(..._matBenchCatalog(areas, { idBase: 901000, prefix: 'ZONETEST' }));
@@ -15815,16 +15857,64 @@ function _matZoneRegressionTest() {
     check('Stor sone (35,84 m²): flermatte, 3 matter, 24,0 m²', 'multi, 3 matter, 24,0 m²',
       big && big.mode === 'multi' && big.mats.length === 3 && Math.abs(big.coveredM2 - 24) < 0.05,
       big ? `${big.mode}, ${big.mats.length} matter, ${big.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
-    check('Liten sone (8,76 m²): enkelt-matte, 1 matte, 6,96 m²', 'single, 1 matte, 6,96 m²',
-      small && small.mode === 'single' && small.mats.length === 1 && Math.abs(small.coveredM2 - 6.96) < 0.05,
+    // 130 / Regel 27: den lille sonen (x 0–300, y 400–700) grenser til den store langs y = 400.
+    // Den store sonens matter slutter ved y ≈ 381, så den lille får bruke stripa 400 → ~384 (ledig
+    // plass i nabosonen, ankret inntil nabomatta med mellomrommet): 5 bredder à 320 cm i stedet
+    // for 288 → 8,00 m² (var 6,96 m² da sonegrensen var en vegg), samlet 32,00 (var 30,96).
+    check('Liten sone (8,76 m²): enkelt-matte, 1 matte, 8,00 m² (130: bruker ledig plass i nabosonen; var 6,96)', 'single, 1 matte, 8,00 m²',
+      small && small.mode === 'single' && small.mats.length === 1 && Math.abs(small.coveredM2 - 8.0) < 0.05,
       small ? `${small.mode}, ${small.mats.length} matte(r), ${small.coveredM2.toFixed(2)} m²` : 'sone ikke funnet');
-    check('Samlet dekning ~31,0 m² av 45,0 m² (var ~15-20 m² FØR STEG 1)', '~30,96 m²',
-      Math.abs(zonePlan.totalAreaM2 - 30.96) < 0.1, zonePlan.totalAreaM2.toFixed(2));
+    check('Liten sone: breddene går inn i nabosonen (y < 400) uten å overlappe den store sonens matter', 'extended, ingen overlapp',
+      small && small.extended === true && small.mats.every(m => !_matOverlapsMats(m, big ? big.mats : [], 0)),
+      small ? `extended=${small.extended}, overlapp=${small.mats.some(m => _matOverlapsMats(m, big ? big.mats : [], 0))}` : 'sone ikke funnet');
+    check('Samlet dekning 32,0 m² av 45,0 m² (130; var 30,96 med sonegrensen som vegg, ~15-20 FØR STEG 1)', '~32,00 m²',
+      Math.abs(zonePlan.totalAreaM2 - 32.0) < 0.1, zonePlan.totalAreaM2.toFixed(2));
+
+    // ── 130 / REGEL 27 — Kenneths bilde 1 (23.10.2026): L-rom 300×400 + alkove 200×200 ─────────
+    // Rød (hoveddel): 5 bredder sentrert (x 23–277, 1 cm mellomrom). Blå (alkove, x 300–500) fikk
+    // FØR 3 bredder sentrert i sonen (x 322–474) med 45 cm ledig mot rød — sonegrensen x = 300 var
+    // en vegg. Nå: 4 bredder inntil rød (x 278–481, 1 cm mellomrom), slakk mot høyre yttervegg.
+    // Loddrett retning låses (auto-retning velger 'h' for hoveddelen, og den vannrette veien har
+    // sin egen åpne koordinatsak — SPØRSMÅL 128-1), mellomrom 1 cm som i bildet.
+    S.varmematte.gapCm = 1;
+    if (S.varmefolie) S.varmefolie.direction = 'v';
+    const RID2 = 901130;
+    const pts2 = [{ x: 0, y: 0 }, { x: 500, y: 0 }, { x: 500, y: 200 }, { x: 300, y: 200 }, { x: 300, y: 400 }, { x: 0, y: 400 }];
+    const room2 = { id: RID2, floorId: null, points: pts2, walls: [], dims: [], area: Math.abs(compArea(pts2)) };
+    S.rooms = [room2]; S.mats = []; S.ui.selectedRoomId = RID2;
+    const prod2 = HEATING_PRODUCTS.find(p => p.mat_area_m2 === 9);
+    const zp2 = _matPlanZones(room2, prod2);
+    const red = zp2 && zp2.zonePlans.find(z => z.rect.x1 <= 300 + 1 && z.rect.y1 > 300);
+    const blue = zp2 && zp2.zonePlans.find(z => z.rect.x0 >= 300 - 1);
+    const redMat = red && red.mats[0], blueMat = blue && blue.mats[0];
+    const redRects = redMat ? _matRunWorldRects(redMat) : [], blueRects = blueMat ? _matRunWorldRects(blueMat) : [];
+    const redX1 = redRects.length ? Math.max(...redRects.map(r => r.x1)) : null;
+    const blueX0 = blueRects.length ? Math.min(...blueRects.map(r => r.x0)) : null;
+    const blueX1 = blueRects.length ? Math.max(...blueRects.map(r => r.x1)) : null;
+    check('Bilde 1: rød (hoveddel) uendret — 5 bredder, x 23–277', '5 bredder, 23–277',
+      redMat && redMat.num_runs === 5 && Math.abs(Math.min(...redRects.map(r => r.x0)) - 23) < 0.6 && Math.abs(redX1 - 277) < 0.6,
+      redMat ? `${redMat.num_runs} bredder, ${Math.min(...redRects.map(r => r.x0)).toFixed(1)}–${redX1.toFixed(1)}` : 'ingen rød');
+    check('Bilde 1: blå (alkove) får 4 bredder (var 3)', '4', blueMat && blueMat.num_runs === 4, blueMat ? blueMat.num_runs : 'ingen blå');
+    check('Bilde 1: blå ankres inntil rød med 1 cm mellomrom (x0 = 278)', '278',
+      blueX0 != null && redX1 != null && Math.abs(blueX0 - (redX1 + 1)) < 0.1, blueX0 != null ? blueX0.toFixed(1) : 'ingen blå');
+    check('Bilde 1: slakken ligger mot høyre yttervegg (blå x1 < 497,5 − 10)', '< 487,5',
+      blueX1 != null && blueX1 < 487.5 && blueX1 > 470, blueX1 != null ? blueX1.toFixed(1) : 'ingen blå');
+    check('Bilde 1: ingen overlapp rød/blå, begge innenfor rommet', 'true',
+      redMat && blueMat && !_matOverlapsMats(blueMat, [redMat], 1) && _matRunsWithinRoom(blueMat, room2, _matWallMarginCm(prod2), prod2) && _matRunsWithinRoom(redMat, room2, _matWallMarginCm(prod2), prod2),
+      redMat && blueMat ? `overlapp=${_matOverlapsMats(blueMat, [redMat], 1)}` : 'mangler matte');
+    // Uten priorMats (båndene fra «Del så matta går opp», _matRelayWithGap) er sonegrensen fortsatt
+    // grensen — bit-for-bit som før 130: 3 bredder sentrert i alkoven.
+    const legacy = autoFillMatSerpentine(prod2.id, { dryRun: true, zoneRect: blue ? blue.rect : { x0: 300, y0: 0, x1: 498, y1: 198 } });
+    check('Uten priorMats (bånd-flyten): alkoven gir fortsatt 3 bredder innenfor sonen (uendret vei)', '3, x0 ≥ 300',
+      legacy && legacy.num_runs === 3 && Math.min(..._matRunWorldRects(legacy).map(r => r.x0)) >= 300,
+      legacy ? `${legacy.num_runs}, x0=${Math.min(..._matRunWorldRects(legacy).map(r => r.x0)).toFixed(1)}` : 'ingen matte');
   } finally {
     HEATING_PRODUCTS.length = 0;
     HEATING_PRODUCTS.push(...savedProducts);
     S.rooms = savedRooms; S.mats = savedMats; S.hindrings = savedHindrings; S.zones = savedZones;
-    S.ui.selectedRoomId = savedSelectedRoomId;
+    S.ui.selectedRoomId = savedSelectedRoomId; S.varmematte = savedVarmematte;
+    if (S.varmefolie) S.varmefolie.direction = savedDirection;
+    S.counters.nextMatId = savedNextMatId;
   }
   const allOk = results.every(r => r.ok);
   console[allOk ? 'log' : 'error'](`_matZoneRegressionTest: ${allOk ? 'BESTÅTT' : 'FEILET'}`, results);
@@ -16105,10 +16195,12 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
     const matLines = Object.values(byProd).map(g =>
       `${g.count > 1 ? g.count + ' × ' : ''}${esc(g.name)} — ${g.runs} bredder à ${Math.round(g.lenCm)}cm`).join('<br>');
     const uncoveredM2 = Math.max(0, zp.zoneAreaM2 - zp.coveredM2);
+    // 130 / Regel 27: sonen brukte ledig plass i en nabosone — si det, så tallet ikke ser ut som en feil.
+    const extNote = zp.extended ? ' · bruker ledig plass i nabosonen (Regel 27)' : '';
     return `<div style="padding:6px 0;border-bottom:1px solid var(--brd)">
       <div style="font-weight:600">Sone ${i + 1} — ${zp.zoneAreaM2.toFixed(1)} m²${zp.mats.length > 1 ? ` · ${zp.mats.length} matter` : ''}</div>
       <div style="color:var(--dim);font-size:12px">${matLines}</div>
-      <div style="font-size:12px">${zp.coveredM2.toFixed(1)} m² dekket${uncoveredM2 > 0.05 ? ` · ${uncoveredM2.toFixed(1)} m² udekket i sonen` : ''} · ${zp.watt} W</div>
+      <div style="font-size:12px">${zp.coveredM2.toFixed(1)} m² dekket${uncoveredM2 > 0.05 ? ` · ${uncoveredM2.toFixed(1)} m² udekket i sonen` : ''}${extNote} · ${zp.watt} W</div>
     </div>`;
   }).join('');
 
@@ -16129,7 +16221,7 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
   div.id = 'mat-zone-panel';
   div.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--brd);border-radius:10px;padding:16px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,0.35);max-width:440px;max-height:80vh;overflow-y:auto;font-size:13px;color:var(--text)';
   div.innerHTML = `<div style="font-weight:700;font-size:14px;margin-bottom:4px">Rommet deles i ${zonePlan.zonePlans.length} soner</div>
-    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(room.name || 'Rommet')} er ikke rektangulært — hver sone fylles for seg, breddene ligger tett i sonen og slakken ligger mot ytterveggene (Regel 20).</div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:10px">${esc(room.name || 'Rommet')} er ikke rektangulært — hver sone fylles for seg (størst først), ledig plass i nabosonen brukes og breddene ankres inntil nabomatta (Regel 27); slakken ligger mot ytterveggene (Regel 20).</div>
     ${zoneRows}
     ${btaNote}
     ${excludedNote}
@@ -16154,16 +16246,19 @@ function _showMatZoneProposalPanel(room, prod, zonePlan, opts) {
     // ingenting i rommet skal ha endret seg mellom forhåndsvisning og klikk) og commiter via
     // _matPlaceMultiMats — SAMME funksjon _showMatMultiProposalPanel bruker for et helt rom.
     let placedMats = 0, placedZones = 0;
+    // 130 / Regel 27: samme nabo-akkumulering som _matPlanZones (forslaget), så utlegget ser de
+    // samme nabomattene som forhåndsvisningen gjorde.
+    let prior = _matPriorMatsFor(room, []);
     for (const zp of zonePlan.zonePlans) {
       if (zp.mode === 'multi') {
-        const rePlan = _matZonePlanFor(room, zp.rect, prod);
+        const rePlan = _matZonePlanFor(room, zp.rect, prod, prior);
         const mats = (rePlan && rePlan.mode === 'multi')
           ? _matPlaceMultiMats(room, rePlan.prod, rePlan.geom, rePlan.sol, { skipPushUndo: true })
           : null;
-        if (mats && mats.length) { placedMats += mats.length; placedZones++; }
+        if (mats && mats.length) { placedMats += mats.length; placedZones++; prior = prior.concat(mats); }
       } else {
-        const mat = autoFillMatSerpentine(zp.mats[0].productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true });
-        if (mat) { placedMats++; placedZones++; }
+        const mat = autoFillMatSerpentine(zp.mats[0].productId, { exact: true, zoneRect: zp.rect, skipPushUndo: true, keepPanel: true, priorMats: prior });
+        if (mat) { placedMats++; placedZones++; prior = prior.concat([mat]); }
       }
     }
     div.remove();
@@ -16199,6 +16294,179 @@ function _matZoneUsableRoom(room, rect, marginCm) {
   const ix0 = rect.x0 + (loSoneX ? 0 : marginCm), ix1 = rect.x1 - (hiSoneX ? 0 : marginCm);
   const iy0 = rect.y0 + (loSoneY ? 0 : marginCm), iy1 = rect.y1 - (hiSoneY ? 0 : marginCm);
   return { points: [{ x: ix0, y: iy0 }, { x: ix1, y: iy0 }, { x: ix1, y: iy1 }, { x: ix0, y: iy1 }] };
+}
+
+// ── 130 / REGEL 27 (Kenneth 23.10.2026, «sonesnittet er ikke en vegg») ───────────────────────
+// Bilde 1: L-rom 300×400 + alkove 200×200, EcoMat 100T, 1 cm mellomrom. Rød (hoveddel, sone 1):
+// 5 bredder sentrert (x 23–277). Blå (alkove, sone 2) fikk 3 bredder sentrert i sonen (x 322–474)
+// — 44,8 cm ledig mot rød og 23,7 cm mot høyre vegg, til sammen plass til én bredde til. Årsak:
+// _matZoneUsableRoom gjorde sonerektangelet til et eget lite rom; sonegrensen x = 300 ble en vegg
+// for maxRuns, klipping og sentrering. Regel 27: sonen bestemmer REKKEFØLGE (størst først, som
+// før), RETNING (valgt på sonens eget rektangel, som før) og ANKERHJØRNE — aldri hvor en bredde må
+// stoppe. Det eneste som stopper en bredde er ekte vegger (Regel 12-margin), hindringer, forbudte
+// soner og ANDRE MATTER (brukerens mellomrom, Regel 9). _matZoneFreeRoom under utvider derfor
+// sonens brukbare boks utover HVER sonegrense-kant (_rectEdgeIsSoneBoundary) så langt det faktisk
+// er ledig — først på tvers (det er der hele bredder vinnes), så på langs med den utvidede
+// tverrbredden. Stoppes kanten av en nabomatte, ankres blokka inntil den (anchor 'lo'/'hi'), og
+// slakken havner mot ytterveggen på motsatt side (Regel 20 pkt. 4). Stoppes den av en vegg, er
+// alt som før (sentrert / «fra vegg»). Nabomattene er mattene fra TIDLIGERE soner i samme
+// planlegging (opts.priorMats — _matPlanZones planlegger alle soner som dryRun, så de ligger ikke i
+// S.mats ennå) PLUSS det som alt ligger i rommet (_matPriorMatsFor slår dem sammen, Regel 27 pkt. 2).
+// Uten opts.priorMats (båndene fra «Del så matta går opp», _matRelayWithGap) er alt bit-for-bit
+// som før — sonerektangelet forblir grensen der.
+//
+// Rektangelet (verdens-cm, akseparallelt) ligger HELT inne i polygonet: alle hjørner inne, ingen
+// polygonkant krysser rektangelet, ingen polygonhjørne inne i det. Et hårstrå (0,05 cm) trekkes inn
+// så et rektangel som ligger nøyaktig på en vegg (0 margin) ikke faller på ptInPoly sin kant-kvirk.
+function _matRectInsidePoly(x0, y0, x1, y1, pts) {
+  const e = 0.05;
+  const ax = x0 + e, ay = y0 + e, bx = x1 - e, by = y1 - e;
+  if (bx <= ax || by <= ay) return false;
+  if (!ptInPoly(ax, ay, pts) || !ptInPoly(bx, ay, pts) || !ptInPoly(bx, by, pts) || !ptInPoly(ax, by, pts)) return false;
+  const edges = [[ax, ay, bx, ay], [bx, ay, bx, by], [bx, by, ax, by], [ax, by, ax, ay]];
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    if (p.x > ax && p.x < bx && p.y > ay && p.y < by) return false;
+    for (const [ex0, ey0, ex1, ey1] of edges) if (_segSegHit(p.x, p.y, q.x, q.y, ex0, ey0, ex1, ey1)) return false;
+  }
+  return true;
+}
+// Per-bredde-rektangler (verden) for en lagt matte — fra _matRunWorldGeom, altså NØYAKTIG der
+// bredden tegnes og treffes (124), ikke en ny utledning. Bredder uten lengde utelates.
+function _matRunWorldRects(mat) {
+  const out = [];
+  const n = (mat && mat.num_runs) || 1;
+  for (let r = 0; r < n; r++) {
+    const g = _matRunWorldGeom(mat, r);
+    if (!g) continue;
+    const xs = g.quad.map(q => q.x), ys = g.quad.map(q => q.y);
+    out.push({ x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys), matId: mat.id });
+  }
+  return out;
+}
+// Felles «opptatt»-test for matter: overlapper noen bredde i `mat` noen bredde i `others` (med
+// `gapCm` klaring)? Brukes av vakten i sone-flyten (Regel 27 pkt. 2) og mattebenken (Regel 27-
+// lovlighet). To bredder som ligger nøyaktig gapCm fra hverandre overlapper IKKE (toleranse 0,05).
+function _matOverlapsMats(mat, others, gapCm) {
+  if (!mat || !others || !others.length) return false;
+  const g = Math.max(0, gapCm || 0) - 0.05;
+  const mine = _matRunWorldRects(mat);
+  for (const o of others) {
+    if (!o || o === mat || (o.id != null && o.id === mat.id) || o.labelOnly) continue;
+    for (const a of mine) for (const b of _matRunWorldRects(o)) {
+      if (a.x0 < b.x1 + g && a.x1 > b.x0 - g && a.y0 < b.y1 + g && a.y1 > b.y0 - g) return true;
+    }
+  }
+  return false;
+}
+// Nabomattene for sone-planlegging: det som alt ligger i rommet (S.mats, ikke «kun label») PLUSS
+// de mattene kalleren alt har planlagt/committet i samme omgang (`extra`, kan være dryRun-objekter
+// som ikke finnes i S.mats). Dedupliseres på id — ved commit ligger «extra» også i S.mats.
+function _matPriorMatsFor(room, extra) {
+  const out = [], seen = new Set();
+  const add = m => { if (!m || m.labelOnly) return; const k = m.id != null ? m.id : m; if (seen.has(k)) return; seen.add(k); out.push(m); };
+  for (const m of (extra || [])) add(m);
+  for (const m of (S.mats || [])) if (m.roomId === room.id) add(m);
+  return out;
+}
+// Er rektangelet [x0,x1]×[y0,y1] ledig gulv? Inne i rommet med Regel 12-margin, unna hindringer
+// (per-hindring-klaring, som _matClippedSegments: 'wall' = marginCm, 'none' = 0), unna forbudte
+// soner (marginCm) og unna nabomattene (gapCm). Returnerer null (ledig) eller hva som stoppet:
+// 'wall' (rom/hindring/forbudt sone) eller 'mat'. `pad` = {x0,y0,x1,y1}: andel (0–1) av marginen
+// som legges på HVER side — stripa som prøves i _matZoneFreeRoom får margin bare UTOVER (bort fra
+// sonen) og på langs; siden som vender inn mot sonen er alt ledig (sonen selv). Uten den
+// forskjellen ble stripa rett over et innvendig hjørne (T-stamme → topp) feilaktig blokkert: det
+// innover-vendte margin-tillegget stakk tilbake inn i stammen, forbi stammens egen sidevegg.
+function _matRectBlockedBy(room, x0, y0, x1, y1, marginCm, priorRects, gapCm, pad) {
+  const m = Math.max(0, marginCm || 0);
+  const px0 = pad ? m * pad.x0 : m, py0 = pad ? m * pad.y0 : m, px1 = pad ? m * pad.x1 : m, py1 = pad ? m * pad.y1 : m;
+  if (!_matRectInsidePoly(x0 - px0, y0 - py0, x1 + px1, y1 + py1, room.points)) return 'wall';
+  for (const h of (S.hindrings || [])) {
+    if (h.roomId !== room.id || !h.points || h.points.length < 3) continue;
+    const c = (h.clearance || 'wall') === 'none' ? 0 : 1;
+    if (_rectIntersectsPoly(x0 - c * px0, y0 - c * py0, x1 + c * px1, y1 + c * py1, h.points)) return 'wall';
+  }
+  for (const z of (S.zones || [])) {
+    if (z.roomId !== room.id || z.type !== 'forbidden' || !z.points || z.points.length < 3) continue;
+    if (_rectIntersectsPoly(x0 - px0, y0 - py0, x1 + px1, y1 + py1, z.points)) return 'wall';
+  }
+  const g = Math.max(0, gapCm || 0) - 0.05;
+  for (const b of (priorRects || [])) {
+    if (x0 < b.x1 + g && x1 > b.x0 - g && y0 < b.y1 + g && y1 > b.y0 - g) return 'mat';
+  }
+  return null;
+}
+// Hvilken side blokka ankres til på én akse: inntil nabomatta når EN side stoppes av en matte;
+// begge → lav side (deterministisk); ingen → null (sentrert / «fra vegg» som før).
+function _matZoneAnchorSide(loBy, hiBy) {
+  if (loBy === 'mat' && hiBy !== 'mat') return 'lo';
+  if (hiBy === 'mat' && loBy !== 'mat') return 'hi';
+  if (loBy === 'mat' && hiBy === 'mat') return 'lo';
+  return null;
+}
+// Sonens brukbare boks UTVIDET inn i ledig naboplass (Regel 27). Utgangspunkt: dagens
+// _matZoneUsableRoom-boks (margin mot vegg-kanter, 0 mot sonegrense-kanter). Hver sonegrense-kant
+// skyves utover 1 cm om gangen så lenge den nye stripa (over hele den andre aksens utstrekning) er
+// ledig (_matRectBlockedBy). Stoppes kanten av en nabomatte, snappes den EKSAKT til mattekanten +
+// mellomrom. Først tverr-aksen (dir: 'v' → x, 'h' → y), så langsaksen med den utvidede tverr-
+// bredden. Returnerer et rom-likt objekt {points} som _matAreaGeom kan lese, pluss hva hver kant
+// ble stoppet av (acrossLoBy/HiBy, alongLoBy/HiBy: 'wall' | 'mat') og om noe faktisk ble utvidet.
+function _matZoneFreeRoom(room, rect, marginCm, dir, priorMats, gapCm) {
+  const base = _matZoneUsableRoom(room, rect, marginCm).points;
+  const box = { x0: base[0].x, x1: base[2].x, y0: base[0].y, y1: base[2].y };
+  const sone = { x0: _rectEdgeIsSoneBoundary(room, rect, 'x0'), x1: _rectEdgeIsSoneBoundary(room, rect, 'x1'),
+                 y0: _rectEdgeIsSoneBoundary(room, rect, 'y0'), y1: _rectEdgeIsSoneBoundary(room, rect, 'y1') };
+  const priorRects = [];
+  for (const m of (priorMats || [])) priorRects.push(..._matRunWorldRects(m));
+  const rxs = room.points.map(p => p.x), rys = room.points.map(p => p.y);
+  const lim = { x0: Math.min(...rxs), x1: Math.max(...rxs), y0: Math.min(...rys), y1: Math.max(...rys) };
+  const STEP = 1;
+  let extended = false;
+  // side: 'x0' | 'x1' | 'y0' | 'y1'. Skyver box[side] utover; returnerer hva som stoppet.
+  const extend = side => {
+    if (!sone[side]) return 'wall';
+    const axis = side.charAt(0), lo = side.charAt(1) === '0';
+    const sign = lo ? -1 : 1;
+    let by = null, guard = 0;
+    for (;;) {
+      if (guard++ > 5000) { by = 'wall'; break; }
+      const cur = box[side], next = cur + sign * STEP;
+      if (lo ? next < lim[axis + '0'] - 0.01 : next > lim[axis + '1'] + 0.01) { by = 'wall'; break; }
+      const a = Math.min(cur, next), b = Math.max(cur, next);
+      // Margin bare utover (siden som vender bort fra sonen) og på langs — se _matRectBlockedBy.
+      const pad = { x0: 1, y0: 1, x1: 1, y1: 1 };
+      pad[axis + (lo ? '1' : '0')] = 0;
+      const blocked = axis === 'x'
+        ? _matRectBlockedBy(room, a, box.y0, b, box.y1, marginCm, priorRects, gapCm, pad)
+        : _matRectBlockedBy(room, box.x0, a, box.x1, b, marginCm, priorRects, gapCm, pad);
+      if (blocked) { by = blocked; break; }
+      box[side] = next; extended = true;
+    }
+    if (by === 'mat') {
+      // Snapp eksakt til nærmeste mattekant + mellomrom innenfor den blokkerte stripa.
+      const g = Math.max(0, gapCm || 0);
+      const cur = box[side];
+      let best = null;
+      for (const r of priorRects) {
+        const overl = axis === 'x' ? (r.y0 < box.y1 && r.y1 > box.y0) : (r.x0 < box.x1 && r.x1 > box.x0);
+        if (!overl) continue;
+        const edge = axis === 'x' ? (lo ? r.x1 + g : r.x0 - g) : (lo ? r.y1 + g : r.y0 - g);
+        const inside = lo ? (edge <= cur + 0.01 && edge >= cur - STEP - 0.01) : (edge >= cur - 0.01 && edge <= cur + STEP + 0.01);
+        if (!inside) continue;
+        if (best == null || (lo ? edge > best : edge < best)) best = edge;
+      }
+      if (best != null && (lo ? best < box[side] : best > box[side])) { box[side] = best; extended = true; }
+    }
+    return by;
+  };
+  const acrossSides = dir === 'h' ? ['y0', 'y1'] : ['x0', 'x1'];
+  const alongSides = dir === 'h' ? ['x0', 'x1'] : ['y0', 'y1'];
+  const acrossLoBy = extend(acrossSides[0]), acrossHiBy = extend(acrossSides[1]);
+  const alongLoBy = extend(alongSides[0]), alongHiBy = extend(alongSides[1]);
+  return {
+    points: [{ x: box.x0, y: box.y0 }, { x: box.x1, y: box.y0 }, { x: box.x1, y: box.y1 }, { x: box.x0, y: box.y1 }],
+    acrossLoBy, acrossHiBy, alongLoBy, alongHiBy, extended,
+  };
 }
 
 // 127: klipp ÉN matte-bredde mot rommet (polygon + hindringer + forbudte soner, evt. sonens egne
@@ -16370,14 +16638,27 @@ function autoFillMatSerpentine(productId, opts) {
   // geometrien til ÉN sone-rektangel i stedet for rommets omsluttende boks. Se
   // _matZoneUsableRoom for hva sone-bevisst margin betyr.
   let geomRoom = room, geomMarginCm = marginCm, zoneAlongMin = null, zoneAlongMax = null;
+  // 130 / REGEL 27 (se _matZoneFreeRoom): med opts.priorMats (sone-orkestreringen) er sonegrensen
+  // ikke lenger en vegg — retningen velges på sonens EGET rektangel (som før, Regel 27 pkt. 1), men
+  // den brukbare boksen utvides inn i ledig naboplass, stoppet av vegg/hindring/forbudt sone/
+  // nabomatte. zoneFree.*By sier hva som stoppet hver kant → ankring inntil nabomatta (pkt. 3).
+  const priorMats = opts.priorMats ? _matPriorMatsFor(room, opts.priorMats) : null;
+  let zoneFree = null, zoneDir = null;
   if (opts.zoneRect) {
     geomRoom = _matZoneUsableRoom(room, opts.zoneRect, marginCm);
     geomMarginCm = 0;
+    if (priorMats) {
+      zoneDir = userDir || _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: 0, gapCm, userDir, minMandatoryGapCm }).dir;
+      zoneFree = _matZoneFreeRoom(room, opts.zoneRect, marginCm, zoneDir, priorMats, gapCm);
+      geomRoom = zoneFree;
+    }
   }
   // STEG 1 («Én mattemotor for alle», Kenneth 19.08.2026): bbox+margin+hindring-unngåelse+
   // retningsvalg+maxRuns er nå ÉN delt kjerne (_matAreaGeom) — samme kall som flermatte-søket
   // (_matRoomGeomForFill) og snø-auto (STEG 2) bruker. Ingen formel endret her, kun flyttet dit.
-  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: geomMarginCm, gapCm, userDir, minMandatoryGapCm });
+  const geom0 = _matAreaGeom(geomRoom, { matWidthCm, cutCm, minLenCm, marginCm: geomMarginCm, gapCm, userDir: zoneDir || userDir, minMandatoryGapCm });
+  const anchorAcross = zoneFree ? _matZoneAnchorSide(zoneFree.acrossLoBy, zoneFree.acrossHiBy) : null;   // 130 / Regel 27 pkt. 3
+  const anchorAlong = zoneFree ? _matZoneAnchorSide(zoneFree.alongLoBy, zoneFree.alongHiBy) : null;
   const dir = geom0.dir;
   let acrossMin = geom0.acrossMin, acrossMax = geom0.acrossMax, acrossSpan = geom0.acrossSpan;
   if (acrossSpan < matWidthCm) return;
@@ -16620,14 +16901,21 @@ function autoFillMatSerpentine(productId, opts) {
     // «Sentrer» (standard): kaldt felt deles likt på begge vegger. «Fra vegg»: blokka legges inntil
     // margen på start-siden, alt kaldt felt havner på motsatt vegg.
     fromWall = !!(S.varmematte && S.varmematte.fromWall);
-    acrossCenter = fromWall
-      ? (acrossFromHigh ? (acrossMax - totalW / 2) : (acrossMin + totalW / 2))
-      : (acrossMin + acrossMax) / 2;
+    // 130 / Regel 27 pkt. 3: stoppet tverr-kanten av en nabomatte, ankres blokka inntil den (med
+    // mellomrommet, alt innbakt i acrossMin/Max) — slakken havner mot ytterveggen på motsatt side.
+    acrossCenter = anchorAcross === 'lo' ? (acrossMin + totalW / 2)
+      : anchorAcross === 'hi' ? (acrossMax - totalW / 2)
+      : fromWall
+        ? (acrossFromHigh ? (acrossMax - totalW / 2) : (acrossMin + totalW / 2))
+        : (acrossMin + acrossMax) / 2;
     // DEL B: samme «fra vegg»-standard som _matPlaceMultiMats — startsiden avgjøres av
     // innsettingshjørnet (alongFromHigh over), ikke lenger ubetinget senter.
-    alongCenter = fromWallAlong
-      ? (alongFromHigh ? (alongMax - runLengthCm / 2) : (alongMin + runLengthCm / 2))
-      : (alongMin + alongMax) / 2;
+    // 130: samme ankring på langs når langs-kanten ble stoppet av en nabomatte.
+    alongCenter = anchorAlong === 'lo' ? (alongMin + runLengthCm / 2)
+      : anchorAlong === 'hi' ? (alongMax - runLengthCm / 2)
+      : fromWallAlong
+        ? (alongFromHigh ? (alongMax - runLengthCm / 2) : (alongMin + runLengthCm / 2))
+        : (alongMin + alongMax) / 2;
 
     // Mat geometry: width_cm is the cross-axis dimension, length_cm is the
     // along-axis dimension before rotation. rotation_deg=90 swaps them in world.
@@ -16796,6 +17084,13 @@ function autoFillMatSerpentine(productId, opts) {
   if (!_ruleCheck.ok) {
     console.error('autoFillMatSerpentine: Regel ' + _ruleCheck.rule + ' brutt — avbrutt: ' + _ruleCheck.reason, mat);
     if (!opts.dryRun) _showToast('Auto-utlegg avbrutt: ' + _ruleCheck.reason, 'error');
+    return null;
+  }
+  // 130 / Regel 27 pkt. 2: aldri oppå (eller nærmere enn mellomrommet til) en nabomatte. Den
+  // utvidede boksen (_matZoneFreeRoom) skal alt garantere dette — vakt mot fremtidig regresjon.
+  if (priorMats && _matOverlapsMats(mat, priorMats, gapCm)) {
+    console.error('autoFillMatSerpentine: Regel 27 — utlegget ville overlappet en nabomatte — avbrutt', mat);
+    if (!opts.dryRun) _showToast('Auto-utlegg avbrutt: ville overlappet en annen matte', 'error');
     return null;
   }
 
@@ -19626,6 +19921,11 @@ function _matBenchCheckLegal(mats, room, marginCm) {
     const minGapCm = _matProductMinGapCm(p);
     if ((mat.gap_cm || 0) < minGapCm - 0.05) reasons.push('Regel 18: matte ' + mat.id + ' gap under påkrevd minsteavstand');
   }
+  // 130 / Regel 27 pkt. 2: andre matter stopper en bredde — to matter i samme utlegg skal aldri
+  // overlappe (0 klaring her; mellomrommet er et ønske, overlapp er et brudd).
+  for (let i = 0; i < mats.length; i++) for (let j = i + 1; j < mats.length; j++) {
+    if (_matOverlapsMats(mats[i], [mats[j]], 0)) reasons.push('Regel 27: matte ' + mats[i].id + ' overlapper matte ' + mats[j].id);
+  }
   return reasons;
 }
 // Delt av vei 1-3 (alle returnerer mat[]-objekter fra samme motor).
@@ -19918,7 +20218,9 @@ function _matBench(seed, n, opts) {
           const standaloneMat = autoFillMatSerpentine(indoorProd.id, { dryRun: true });
           S.rooms = savedR2; S.ui.selectedRoomId = savedSel2;
           const standaloneCoverM2 = standaloneMat ? standaloneMat.width_cm * _matLaidLengthCm(standaloneMat) / 10000 : 0;
-          if (Math.abs(singleZone.coveredM2 - standaloneCoverM2) > 0.05) {
+          // 130 / Regel 27: en sone kan nå dekke MER enn sitt eget rektangel (ledig naboplass) —
+          // det er ønsket, ikke et avvik. Varsle kun når sone-konteksten gir MINDRE.
+          if (singleZone.coveredM2 < standaloneCoverM2 - 0.05) {
             console.warn(`_matBench: zoneRect-avviket (kjent, urettet — se _matZoneRegressionTest) for ${room.name}: ${singleZone.coveredM2.toFixed(2)} m² i sone-kontekst mot ${standaloneCoverM2.toFixed(2)} m² frittstående (samme produkt, samme geometri)`);
           }
         }

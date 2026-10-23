@@ -287,3 +287,162 @@ mot lerretet (ikke direkte funksjonskall) — unntatt 124-justeringen, som ble k
 - mousedown/mousemove (lerret), keydown (H, Esc), `updateCtxBar` (Hopp-knapp + status), `updMode`
   (hint), `_SHORTCUTS` (2 rader), `_matFreeRegressionTest` (ny seksjon).
 - Spec `spec-matte-utlegg.md` Regel 28 (Cowork-mappa, utenfor repoet).
+
+## 130
+
+Kjørt 23.10.2026 på `main` fra `7035376` (129 committet, ikke pushet). **Ikke pushet.** Spec: Regel 20,
+**Regel 27** (`spec-matte-utlegg.md`, Cowork-mappa — nå merket «BEKREFTET og bygget i 130» med en kort
+implementasjonsnote), Regel 9, Regel 12. Skjermbilder i `skjermbilder/130-*.png` (headless Chrome).
+
+Kenneth (23.10.2026, bilde 1): «Jeg måler mer enn 60 cm ledig felt fra matten og inn til vegg. Her vil man
+da fått plass til en bredde til. […] Det kan virke som appen avgrenser delen av rommet med blå matte som
+et eget rom med en usynlig vegg?»
+
+**Resultat i én setning:** sonegrensen er ikke lenger en vegg — når en sone fylles, får den bruke ledig
+gulv inn i nabosonen (stoppet bare av ekte vegg, hindring, forbudt sone eller en nabomatte), og blokka
+ankres inntil nabomatta med brukerens mellomrom; i bilde 1 får blå **4 bredder** inntil rød (1 cm), med
+slakken mot høyre yttervegg, og rød er uendret.
+
+### STEG 0 — målt før endring (fila fra `7035376`, port 4000)
+
+Rom: L-rom **300 × 400 + alkove 200 × 200** (x 0–300 / y 0–400 pluss x 300–500 / y 0–200), EcoMat 100T
+(cc 12 cm, kuttraster 24 cm, nettmargin 2,5 cm etter 128), mellomrom 1 cm, hjørne nede-venstre.
+Retningen er **låst loddrett** i alle målingene under (se «Funn» om auto-retning).
+
+**1. Reproduksjon av bilde 1.**
+
+| Hva | Målt |
+|---|---|
+| `_decomposeRoomToRects` | `[0,0 – 300,400]` (12,0 m²) og `[300,0 – 498,198]` (3,92 m²). Alkovens rektangel slutter 2 cm før veggen (rutenettet på 6 cm klamper siste celle); marginen legges oppå → boksen går til 495,5. |
+| Rekkefølge | Størst først: hoveddelen, så alkoven. Begge `single`. |
+| Rød (hoveddel) | 18 m-rull, 5 bredder × 360 cm, x 23–277. **Sentrert**: 23 cm slakk mot hver langvegg. |
+| Blå (alkove) | 5 m-rull, 3 bredder (168, 168, 144), x 321,8–473,8. **Sentrert i sonens boks (300–495,5)**: 21,8 cm mot sonesnittet, 21,7 cm mot høyre vegg. |
+| Ledig mellom rød og blå | 321,8 − 277 = **44,8 cm**. Ledig på blå sin side totalt: 44,8 + 21,7 = **66,5 cm** → én bredde til (50 + 1). |
+| Dekning | 9,0 + 2,4 = 11,4 m². |
+
+**2. Hvor sonegrensen ble en vegg** — fire steder, alle i sone-veien:
+`_matZoneUsableRoom` bygger sonens boks (0 margin mot en sonegrense-kant, men boksen *slutter* der) →
+`_matAreaGeom` regner `acrossMin/Max`, `alongMin/Max` og `maxRuns` av den boksen →
+`zoneAlongMin/Max` klemmer de klippede segmentene i `_matClipRunToRoom` / `_matRoomCapacityCm` /
+`_matPlaceMultiMats` (en bredde får aldri lekke forbi snittet) → `acrossCenter` sentrerer blokka midt i
+boksen (slakken deles mellom sonesnittet og ytterveggen, mot Regel 20 pkt. 4).
+
+**3. Nabomatter.** Motoren visste *ingenting* om andre matter: `_matClippedSegments` klipper mot polygon,
+hindringer og forbudte soner — aldri mot `S.mats`. Det fantes ingen felles opptatt-test for matter (frihånd
+har sin egen «overlaps» i ghosten). Og `_matPlanZones` planlegger alle soner som `dryRun`, så mattene fra
+tidligere soner ligger ikke i `S.mats` når neste sone regnes — de måtte sendes inn eksplisitt.
+
+### Gjort
+
+1. **`_matZoneFreeRoom(room, rect, marginCm, dir, priorMats, gapCm)`** (ny, ved `_matZoneUsableRoom`):
+   starter med dagens boks og skyver hver *sonegrense*-kant (`_rectEdgeIsSoneBoundary`, uendret) utover
+   1 cm om gangen så lenge stripa over hele den andre aksen er ledig (`_matRectBlockedBy`: inne i rommet
+   med Regel 12-margin, unna hindringer med per-hindring-klaring, unna forbudte soner, unna nabomattenes
+   bredder + mellomrom). Først tvers-aksen (der hele bredder vinnes), så langsaksen med den utvidede
+   tverrbredden. Stoppes kanten av en matte, snappes den eksakt til mattekanten + mellomrom. Returnerer
+   boksen som `{points}` (samme form `_matAreaGeom` alt leser) pluss hva som stoppet hver kant.
+   Marginen legges bare *utover* (bort fra sonen) og på langs — med margin på alle fire sider ble stripa
+   rett over et innvendig hjørne (T-stamme → topp) feilaktig blokkert; funnet og rettet under test.
+2. **Retning og ankerhjørne fra sonen (Regel 27 pkt. 1):** retningen velges som før på sonens *eget*
+   rektangel (`_matAreaGeom` på dagens boks) og låses inn (`userDir`) før den utvidede boksen regnes.
+3. **Ankring inntil nabomatta (pkt. 3):** `_matZoneAnchorSide` → `anchorAcross`/`anchorAlong`
+   (`'lo'`/`'hi'`/null). I `autoFillMatSerpentine` og `_matPlaceMultiMats` går ankeret foran
+   «Sentrer»/«Fra vegg» på den aksen; de andre aksene er som før. Begge sider matte → lav side.
+4. **`priorMats` gjennom hele flyten:** `_matPlanZones` akkumulerer dryRun-mattene sone for sone (pluss det
+   som alt ligger i rommet, `_matPriorMatsFor`) og sender dem til `_matZonePlanFor` /
+   `autoFillMatSerpentine({ zoneRect, priorMats })`; commit-løkka i `_showMatZoneProposalPanel` gjør det
+   samme med de committede mattene, så forslag og utlegg ser nøyaktig samme naboer.
+   **Uten `priorMats` er alt som før** — båndene fra «Del så matta går opp» og «Mellomrom i denne matta»
+   bruker fortsatt sonerektangelet som grense (låst i regresjonstesten).
+5. **Felles opptatt-test for matter:** `_matRunWorldRects` (per-bredde-rektangler fra `_matRunWorldGeom`,
+   altså der bredden *tegnes*) og `_matOverlapsMats(mat, others, gapCm)`. Brukes som ny vakt i begge
+   motorene (Regel 27 pkt. 2, `console.error` + avbrutt, som de andre vaktene) og i mattebenken.
+6. **Panelet:** ny intro-tekst, og «· bruker ledig plass i nabosonen (Regel 27)» på sonen det gjelder
+   (`zp.extended`), så 3,5 m² dekket i en 3,9 m²-sone ikke ser ut som en feil (`130-03`).
+7. **Mattebenk:** «Regel 27: matte overlapper matte» er ny lovlighetsregel i `_matBenchCheckLegal`
+   (kjørt *før* 130: ingen rad hadde overlapp, benken bit-identisk). zoneRect-avviket varsler nå bare når
+   sone-konteksten dekker *mindre* enn frittstående — mer er ønsket nå.
+8. **`_matZoneRegressionTest`:** 1102-analogen oppdatert (liten sone 6,96 → **8,00 m²**, samlet 30,96 →
+   **32,00**, med kommentar: den lille sonen bruker stripa y 400 → ~384 opp til den store sonens matter);
+   nye sjekker: `extended` uten overlapp, bilde 1 (rød uendret 5 bredder x 23–277; blå 4 bredder; x0 = rød
+   + 1 cm = 278; slakk mot høyre vegg; ingen overlapp, begge innenfor rommet) og bånd-flyten uten
+   `priorMats` (fortsatt 3 bredder innenfor sonen). 4 → **11 sjekker**.
+
+### Bilde 1 — før og etter (loddrett låst, 1 cm mellomrom)
+
+| | Før (`7035376`) | Etter 130 |
+|---|---|---|
+| Rød (hoveddel) | 18 m, 5 × 360, x 23–277 | **uendret** (sonens x1-kant er ikke en sonegrense: 2 av 5 prøvepunkter ligger i alkoven, < 50 %) |
+| Blå: bredder | 3 (168, 168, 144), 5 m-rull | **4** (192, 192, 192, 120), 7 m-rull |
+| Blå: plassering | x 321,8–473,8, sentrert i sonen | x **278–481**: 1 cm inntil rød (277 + 1) |
+| Ledig mot rød / mot høyre vegg | 44,8 / 21,7 cm | **0 (mellomrom 1 cm) / 14,5 cm** — slakken mot ytterveggen |
+| Blå: dekning | 2,40 m² | **3,48 m²** |
+| Samlet | 11,4 m² | **12,5 m²** |
+| Skjermbilde | `130-01` | `130-02`, panel `130-03` |
+
+### Test (prompten)
+
+| # | Krav | Resultat |
+|---|---|---|
+| 1 | Bilde 1: blå 4 bredder inntil rød (1 cm), slakk mot høyre yttervegg, rød uendret | Målt, se tabellen over. Låst i `_matZoneRegressionTest`. |
+| 2 | Alkove **under** hoveddelen og T-rom: ingen bredde over en ekte vegg, ingen overlapp | L (300×400 + 200×200 under): blå ankres rett under rød (start y 383,3 = rød slutt 382,3 + 1), `_matRunsWithinRoom` sann for begge, ingen overlapp (`130-05`). T (600×200 + 200×300 stamme): stammen går 14 cm opp i toppbeltet til rett under toppmattas bredder (y 184), 8 m-rull 3 × 288 → 3,96 m², totalt 13,0 m² (`130-04`). `_matRunPlacementIssue`: ingen. Begge med loddrett retning — se «Funn» om auto. |
+| 3 | Rektangulære rom bit-identisk | Mattebenk: **ingen** rad for rektangulære rom uten soner endret (vei 1–4, 224 rader). `_matRegressionTest` 2/2. Den ene «rect»-raden som endret seg (hindring #27) har en hindring som deler rommet i soner — det *er* et sonerom. |
+| 4 | Mattebenk: rom som endret dekning | Se tabellen under: 7 rom (14 rader), alle høyere eller lik, **ingen lavere**, ingen ny ulovlig rad (29 ulovlige før og etter — alle i vei 4/frihånd, kjent). |
+| 5 | Testbatterier | `_matZoneRegressionTest` **11/11** · `_matRegressionTest` 2/2 · `_matFreeRegressionTest` 26/26 · `_matPathClickRegressionTest` 28/28 · `_matRunAdjustRegressionTest` 70/70 · `_matArrangementRegressionTest` 55/55 · `_foilRegressionTest` 9/9 · `_pdfExportSmokeTest` 20/20. Ingen konsollunntak. |
+
+### Mattebenk-differansen (`_matBench(42, 64)`, før = 7035376 + overlappsjekken, etter = 130)
+
+| Rom | Vei | Dekning før | Dekning etter | Matter | Poeng før → etter |
+|---|---|---|---|---|---|
+| L #16 | 1 og 2 | 69,7 % | **73,7 %** | 2 → 2 | −56003 → −41313 |
+| T #20 | 1 og 2 | 97,4 % | 97,4 % | 2 → 2 | −91703 → −91370 (bedre marginsymmetri) |
+| T #21 | 1 og 2 | 88,6 % | **91,8 %** | 2 → 2 | −119735 → −97643 |
+| 1102 Garderobe | 1 og 2 | 83,9 % | 83,9 % | 2 → 2 | −99899 → −98603 (matta flyttet inntil naboen, samme rull) |
+| 1108 Garderobe | 1 og 2 | 41,9 % | **54,9 %** | 2 → 2 | −49228 → −48038 |
+| Kenneth L-rom (500×400, hakk) | 1 og 2 | 80,2 % | **86,4 %** | 2 → 2 | −42447 → −34214 |
+| hindring #27 (480×… med søyle) | 1 og 2 | 61,6 % | **81,7 %** | 2 → 2 | −26197 → −3320 |
+
+11 sonerom i benken; 4 av dem (L #18, L #23, T #19, U #17, U #22) uendret — der stoppes utvidelsen av
+vegg eller av naboens matte som alt ligger inntil snittet. Konsollfeil fra benken: 45 → 47; de to nye er
+Regel D-avvisninger (vakt, ikke unntak) i hindring #24 for en 24 cm smal restsone som er utelatt både
+før og etter (før avviste Regel H samme sone).
+
+### Funn utenfor scope (ikke rettet)
+
+- **Auto-retning velger vannrett for hoveddelen i bilde 1** (7 bredder × 264 gir høyere estimat enn
+  5 × 360), og for T-stammen. Den vannrette veien har koordinatsaken fra SPØRSMÅL 128-1: matta
+  *tegnes* 30 cm forskjøvet (x fra −12,5, «Bredde 1 ligger 13 cm utenfor rommet»), og T-stammen ender
+  med 2 m-rull og 0 cm lagt — **identisk før og etter 130** (målt direkte: `oldMat`/`newMat` like).
+  130 avgrenser nabomatta der den *tegnes* (`_matRunWorldGeom`, samme kilde som treff og rødmerking),
+  så en vannrett nabo unngås visuelt riktig; rettes 128-1 slik at tegning = motor, følger 130 med.
+- **`extended`-flagget** leser også tegnet posisjon: en vannrett matte som tegnes utenfor sitt
+  rektangel (128-1) får «bruker ledig plass i nabosonen» i panelet uten at det stemmer (hindring #24).
+- **Sonerektangelet slutter 2 cm før veggen** (rutenettets klamping), og Regel 12-marginen legges oppå
+  → 4,5 cm fra vegg i stedet for 2,5 på sonens veggkanter. Fantes før 130; 130 utvider bare
+  sonegrense-kanter, ikke veggkanter.
+- **Alkove under hoveddelen (loddrett):** langsaksen utvides 19 cm opp til rød, men kuttrasteret (24)
+  og katalogen (5 m vs. 6 m) gir samme rull — gevinsten er null der, 0,6 m² med auto-retning.
+- **Kort siste bredde** (144/120) i blå er Regel E-fallbacken (rullen går ikke opp i like bredder),
+  uendret oppførsel.
+- **Hindring som bare delvis blokkerer utvidelsen** (f.eks. en søyle i nabosonen midt i stripa) stopper
+  hele stripa — modellen er et rektangel. Per-bredde-klippingen kunne gått rundt den.
+
+### Skal IKKE — holdt
+`_decomposeRoomToRects` og størst-først urørt. Ingen matte over to soner (131). Ikke pushet.
+
+### Verifiseringsmetode
+`new Function` på inline-scriptet; headless Chrome 156 (CDP, port 9333) mot `serve-varmeplan.js` på
+4000, uten innlogging (`#app` vist, skylagring stubbet) — harness i `/tmp/cdp130/` (`cdp.mjs`,
+`setup130.js`, `steg0/steg2/bench/tests.mjs`). Utlegg via `_matFillRoomSmart(dryRun)` og ekte klikk på
+«Legg ut» i sonepanelet; vakter og overlapp målt på `S.mats` etterpå. Benken kjørt tre ganger (før,
+før + overlappsjekk, etter) og differansen regnet på radnivå.
+
+### Endringslogg (kode, alt i `index.html`)
+- Nye: `_matRectInsidePoly`, `_matRunWorldRects`, `_matOverlapsMats`, `_matPriorMatsFor`,
+  `_matRectBlockedBy`, `_matZoneAnchorSide`, `_matZoneFreeRoom` (etter `_matZoneUsableRoom`).
+- `autoFillMatSerpentine` — `opts.priorMats`: utvidet boks, låst retning, `anchorAcross/Along`, vakt.
+- `_matZonePlanFor(room, rect, prod, priorMats)` — samme; `geom.anchorAcross/anchorAlong/priorMats`.
+- `_matPlaceMultiMats` — ankring fra `geom`, vakt mot `geom.priorMats`.
+- `_matPlanZones` — `prior` akkumuleres; `zp.extended`. `_showMatZoneProposalPanel` — tekst + commit-løkke.
+- `_matBenchCheckLegal` (Regel 27), `_matBench` (zoneRect-varsel bare ved lavere), `_matZoneRegressionTest`.
+- Spec `spec-matte-utlegg.md` Regel 27 (Cowork-mappa, utenfor repoet).
