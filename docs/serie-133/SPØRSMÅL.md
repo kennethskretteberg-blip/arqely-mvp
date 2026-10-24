@@ -8,6 +8,11 @@
 2. **Mattebenkens syntetiske frihånd (vei 4) i 'h'** er ulovlig i 29 rom før og etter, fordi benkens
    egen bane legger 'h'-breddene nedover fra nedre hjørne (`side: 1`), ikke på grunn av mattene. Skal
    benk-banen rettes (speile `side` for 'h' slik 'v' fikk `dir0 = −1`), slik at vei 4 måler noe for 'h'?
+
+   **Svar (Kenneth 24.10):** Ja, rett benk-banen (speil `side` for 'h' slik 'v' fikk `dir0 = −1`). *Bygget i
+   137 / A: `_matBenchRunVei4` leser hjørnet (`_matCornerFlags`) og speiler både `dir0` og `side0`, så 'h'-
+   breddene legges oppover (inn i rommet) fra bunnveggen. Vei 4 ulovlige 30 → 15 ('h' 16 → 1); 'v' 14 uendret
+   (annen årsak, se 137-rapporten). Vei 1–3 uendret. Rapport `docs/serie-136/RAPPORT.md` («## 137»).*
 3. **↻ 90° på en klippet matte.** Knappen holder nå senteret og tar bredde-mønsteret med relativt
    (bredde 0 forblir «første», klippede ender beholder sin side langs blokka). Før roterte bildet
    bokstavelig (og tegnet da feil). Er «snu på stedet, samme mønster» riktig, eller skal en 90°-dreining
@@ -17,7 +22,16 @@
    pikselidentisk). Godt nok, eller skal migreringen bære med et speilflagg for kabelplanen?
 5. **Enkelt-matte-drag flytter ikke `runStarts`** (fantes før 133, gjelder 'v' òg). Skal mousemove
    bruke samme `_ROOM_TRANSLATE_SPEC`-vei som 108/127, så vakten og 127 ser matta der den tegnes?
+
+   **Svar (Kenneth 24.10):** Ja, bruk 108-veien (`_ROOM_TRANSLATE_SPEC`) i mousemove. *Bygget i 137 / B:
+   mousedown tar et startbilde av matta (`_matDragOrigMat`), og mousemove skriver alle feltene i
+   `_ROOM_TRANSLATE_SPEC.mats` (x_cm/y_cm, runStarts, labelPos) som «original + delta» via
+   `_translatedFieldsFor` (`_matDragApplySingle`) — delta regnes fra der matta faktisk endte etter klamp og
+   magnet. Låst i `_matArrangementRegressionTest` (55 → 65).*
 6. **`_renderRoomToImageOffscreen`** er død kode med den gamle tegneformelen. Slette?
+
+   **Svar (Kenneth 24.10):** Slett. *Gjort i 137 / C: funksjonen (164 linjer) er borte; ingen kallere, ingen
+   hjelpere som bare den brukte. PDF (`_pdfExportSmokeTest` 20/20) og presentasjon virker uten.*
 
    **Svar (Kenneth 24.10):** Godt nok. Ingen endring.
 
@@ -73,6 +87,11 @@
    *gjennom bredde 6* til startpunktet nederst i alkoven. Skal stykke 2 heller legges langs kanten av
    den nye bredden (x = 278 − mellomrom, utenfor nettet), eller er «gjennom nettet» greit siden den
    bare er orientering?
+
+   **Svar (Kenneth 24.10):** Langs kanten av den nye bredden (utenfor nettet, mellomrommets avstand). *Bygget
+   i 137 / D: `_matJumpLinkRoute` legger stykke 2 ved kant − mellomrom på A-siden av den nye bredden, fram til
+   startpunktets langs-koordinat, så et kort stykke inn til B. Bilde 2: (252, 8) → (277, 8) → (277, 196) →
+   (303, 196). Hopp midt i rommet: rett strek som før. Rundt et hjørne: som i 135. Plan og PDF, samme tegner.*
 2. **Grid-dekomponeringen** ble rettet for kanter som stakk *utenfor* veggen (halvcentimeter-vegger),
    fordi A ellers hadde avvist auto-utlegg i T-19/T-20/U-22. Kanter som ligger *inne* i rommet (134-4,
    1–4 cm tapt) står fortsatt. Skal 134-4 tas nå, med samme `snapToWalls`-mekanisme (snapp også
@@ -80,8 +99,17 @@
 3. **Rødmerking av alle bredder** (ikke bare justerte) viser også lagrede baner som ble lovlige under
    den gamle 1 cm-toleransen og baner der en hindring er lagt til etterpå. Riktig at de står røde til
    brukeren flytter dem, eller skal baner lagret før 135 få en engangsmigrering (klem inn ≤ 1 cm)?
+
+   **Svar (Kenneth 24.10):** Engangsmigrering: klem inn ≤ 1 cm ved innlasting, ikke røde. *Bygget i 137 / E:
+   `_restoreProject` kjører `_matPathsMigrateMarginV2` én gang per prosjekt (`project.matPathMarginV < 2`,
+   stemples ved lagring). På tvers flyttes hele banen bort fra veggen, langs kortes startenden via `startCm` og
+   sluttenden via `len` (kaskaden følger kjeden). Mer enn 1 cm feil, hindring, utenfor rommet eller for nær på
+   begge sider: urørt og rød som i 135. Konsollen logger antallet, toast «N matte-baner ble justert ≤ 1 cm til
+   dagens veggmargin», ingen autolagring før brukeren gjør en endring.*
 4. **«Tøm og fyll» tømmer bare matter** (`mats` + `matPaths`); folie/kabel/plater i rommet står. UPC-auto
    tømmer alt. Skal valget tømme alle produkter i rommet som UPC, eller bare matter som nå?
+
+   **Svar (Kenneth 24.10):** OK som nå (bare matter). Ingen endring.
 
 
    **Svar (Kenneth 24.10):** Ja, ta 134-4 nå med samme mekanisme. *Bygget i 136 / E, se 134-4.*

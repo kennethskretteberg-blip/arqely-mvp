@@ -19084,46 +19084,125 @@ function _matPathSetRunAdj(mp, i, patch) {
   mp.moves = moves;
 }
 function _matPathHasRunAdjust(mp) { return (mp.moves || []).some(m => (m.shiftCm || 0) !== 0 || (m.startCm || 0) > 0); }
-// Rødmerking for én frihåndsbane: utenfor rommet (samme klemming vakten bruker) eller over en
-// hindring. null = i orden.
-function _matPathRunIssue(mp, i) {
-  const runs = _matFreeDeriveRuns(mp); const r = runs[i]; if (!r) return null;
+// 137 / E: tallene bak rødmerkingen for ÉN bredde — utenfor rommet (cm), inne i veggmarginen i
+// startenden (aShort) og sluttenden (bShort) langs banen, på tvers (crossShort + side) og hindring.
+// ÉN måler for rødmerkingen (_matPathRunIssue) OG engangsmigreringen (_matPathMigrateMarginV2),
+// så «klemt inn» betyr nøyaktig «ikke lenger rød». `runs` kan gis for å slippe å avlede på nytt.
+// Samme sjekk som auto-matta (_matRunPlacementIssue): hjørnene mot rommets polygon. IKKE
+// _matFreeClampLen — den snapper til kuttrasteret og ville meldt «utenfor» for enhver kortet
+// bane som ikke går opp i 16 cm, selv midt i rommet. null = bredde uten lengde / rom mangler.
+function _matPathRunMarginShort(mp, i, runs) {
+  runs = runs || _matFreeDeriveRuns(mp); const r = runs[i]; if (!r) return null;
   const len = _matFreeRunLen(r); if (len <= 0.5) return null;
   const room = S.rooms.find(rm => rm.id === mp.roomId);
   if (!room || !room.points || room.points.length < 3) return null;
-  const parts = [];
   const { NET } = _matFreeConsts(_matFreeProdOf(mp));
   const R = _matFreeLaneRectWorld(r, NET);
   const quad = [{ x: R.x0, y: R.y0 }, { x: R.x1, y: R.y0 }, { x: R.x1, y: R.y1 }, { x: R.x0, y: R.y1 }];
-  // Samme sjekk som auto-matta (_matRunPlacementIssue): hjørnene mot rommets polygon. IKKE
-  // _matFreeClampLen — den snapper til kuttrasteret og ville meldt «utenfor» for enhver kortet
-  // bane som ikke går opp i 16 cm, selv midt i rommet.
-  let outsideCm = 0;
-  for (const q of quad) if (!ptInPoly(q.x, q.y, room.points)) outsideCm = Math.max(outsideCm, _ptToPolyEdgeCm(q.x, q.y, room.points));
-  if (outsideCm >= 0.5) parts.push(`ligger ${Math.round(outsideCm)} cm utenfor rommet`);
-  else {
+  const out = { outsideCm: 0, aShort: 0, bShort: 0, crossShort: 0, crossSide: null, hindring: false, marginCm: _matFreeCableMarginCm(mp) };
+  for (const q of quad) if (!ptInPoly(q.x, q.y, room.points)) out.outsideCm = Math.max(out.outsideCm, _ptToPolyEdgeCm(q.x, q.y, room.points));
+  if (out.outsideCm < 0.5) {
     // 135 / A: inne i rommet, men inne i veggmarginen — langs (intervallet rundt banens midtpunkt,
-    // samme klipp som vakten) eller på tvers (_matFreeRunCrossShortCm). Rødmerkes, spretter ikke
+    // samme klipp som vakten) eller på tvers (_matFreeRunCrossShort). Rødmerkes, spretter ikke
     // (124-prinsippet): baner lagret med den gamle 1 cm-toleransen får stå, men vises.
-    const marginCm = _matFreeCableMarginCm(mp);
     const cross = r.axis === 'h' ? r.a.y : r.a.x;
     const a0 = r.axis === 'h' ? r.a.x : r.a.y, a1 = r.axis === 'h' ? r.b.x : r.b.y;
     const alo = Math.min(a0, a1), ahi = Math.max(a0, a1), mid = (alo + ahi) / 2;
-    let alongShort = 0;
     try {
-      const iv = (clipStripToRoom(cross - NET / 2, NET, r.axis, room.points, marginCm) || []).find(([lo, hi]) => mid >= lo && mid <= hi);
-      if (iv) alongShort = Math.max(0, iv[0] - alo, ahi - iv[1]);
-    } catch (e) { alongShort = 0; }
-    const crossShort = _matFreeRunCrossShortCm(mp, r, room);
-    const fmt = v => (Math.round(v * 10) / 10).toString().replace('.', ',');
-    if (alongShort > MAT_FREE_TOL_CM) parts.push(`ligger ${fmt(alongShort)} cm inne i veggmarginen (${fmt(marginCm)} cm) i enden`);
-    if (crossShort > 0) parts.push(`ligger ${fmt(crossShort)} cm inne i veggmarginen (${fmt(marginCm)} cm) på tvers`);
+      const iv = (clipStripToRoom(cross - NET / 2, NET, r.axis, room.points, out.marginCm) || []).find(([lo, hi]) => mid >= lo && mid <= hi);
+      if (iv) {
+        const loShort = Math.max(0, iv[0] - alo), hiShort = Math.max(0, ahi - iv[1]);
+        out.aShort = a0 <= a1 ? loShort : hiShort;   // a = startenden (der dir peker fra)
+        out.bShort = a0 <= a1 ? hiShort : loShort;
+      }
+    } catch (e) { /* ingen langs-måling */ }
+    const cs = _matFreeRunCrossShort(mp, r, room);
+    out.crossShort = cs.cm; out.crossSide = cs.side;
   }
   for (const h of S.hindrings) {
     if (h.roomId !== mp.roomId || !h.points || h.points.length < 3) continue;
-    if (quad.some(q => ptInPoly(q.x, q.y, h.points)) || h.points.some(hp => hp.x > R.x0 + 0.5 && hp.x < R.x1 - 0.5 && hp.y > R.y0 + 0.5 && hp.y < R.y1 - 0.5)) { parts.push('ligger over en hindring'); break; }
+    if (quad.some(q => ptInPoly(q.x, q.y, h.points)) || h.points.some(hp => hp.x > R.x0 + 0.5 && hp.x < R.x1 - 0.5 && hp.y > R.y0 + 0.5 && hp.y < R.y1 - 0.5)) { out.hindring = true; break; }
   }
+  return out;
+}
+// Rødmerking for én frihåndsbane: utenfor rommet (samme klemming vakten bruker), inne i
+// veggmarginen (135 / A) eller over en hindring. null = i orden. Teksten bygges av tallene over.
+function _matPathRunIssue(mp, i) {
+  const m = _matPathRunMarginShort(mp, i);
+  if (!m) return null;
+  const parts = [];
+  const fmt = v => (Math.round(v * 10) / 10).toString().replace('.', ',');
+  if (m.outsideCm >= 0.5) parts.push(`ligger ${Math.round(m.outsideCm)} cm utenfor rommet`);
+  else {
+    const alongShort = Math.max(m.aShort, m.bShort);
+    if (alongShort > MAT_FREE_TOL_CM) parts.push(`ligger ${fmt(alongShort)} cm inne i veggmarginen (${fmt(m.marginCm)} cm) i enden`);
+    if (m.crossShort > 0) parts.push(`ligger ${fmt(m.crossShort)} cm inne i veggmarginen (${fmt(m.marginCm)} cm) på tvers`);
+  }
+  if (m.hindring) parts.push('ligger over en hindring');
   return parts.length ? { text: `Bredde ${i + 1} ${parts.join(' og ')}` } : null;
+}
+// 137 / E (Kenneth 24.10.2026, svar på 135-3): ENGANGSMIGRERING av frihånds-baner lagret før 135.
+// Den gamle vakten godtok et startpunkt inntil 1 cm inne i veggmarginen (og en ende 0,5 cm) og
+// hadde ingen tverr-sjekk — slike baner ble røde under 135-vakten uten at brukeren hadde gjort
+// noe. Ligger alt som er feil innenfor MAT_PATH_MIGRATE_MAX_CM, klemmes banen inn til marginen:
+//   • på tvers flyttes HELE banen bort fra veggen (mp.start; mellomrommene bevares),
+//   • langs kortes startenden via m.startCm (naboene står stille, 124 / Regel 26) og sluttenden
+//     via m.len — neste bredde følger kjeden, så kaskaden måles på nytt til alt er rent.
+// Mer enn 1 cm feil, utenfor rommet, over en hindring, for nær på BEGGE sider, eller en kaskade
+// som ikke konvergerer: banen rørt ikke og rødmerkes som i 135. Måler med _matPathRunMarginShort,
+// samme tall som rødmerkingen. Kalles fra _restoreProject én gang per prosjekt
+// (project.matPathMarginV < 2). Returnerer { changed, red, maxCm }.
+const MAT_PATH_MIGRATE_MAX_CM = 1;
+function _matPathMigrateMarginV2(mp) {
+  const none = { changed: false, red: false, maxCm: 0 };
+  const room = S.rooms.find(rm => rm.id === mp.roomId);
+  if (!room || !room.points || room.points.length < 3 || !_matFreeProdOf(mp) || !Array.isArray(mp.moves) || !mp.start) return none;
+  const measure = () => { const runs = _matFreeDeriveRuns(mp); return { runs, ms: runs.map((r, i) => _matPathRunMarginShort(mp, i, runs)) }; };
+  const bad = m => !m ? 0 : Math.max(m.outsideCm >= 0.5 ? m.outsideCm : 0, m.aShort > MAT_FREE_TOL_CM ? m.aShort : 0, m.bShort > MAT_FREE_TOL_CM ? m.bShort : 0, m.crossShort);
+  const clean = ms => ms.every(m => !m || (!m.hindring && bad(m) <= 0));
+  let { runs, ms } = measure();
+  if (clean(ms)) return none;
+  const worst = Math.max(...ms.map(bad));
+  if (ms.some(m => m && (m.hindring || m.outsideCm >= 0.5)) || worst > MAT_PATH_MIGRATE_MAX_CM + 1e-6) return { changed: false, red: true, maxCm: worst };
+  const orig = JSON.parse(JSON.stringify({ start: mp.start, moves: mp.moves }));
+  const revert = () => { mp.start = orig.start; mp.moves = orig.moves; return { changed: false, red: true, maxCm: worst }; };
+  // 1) På tvers: per akse — bare én side kan være for nær, ellers er rommet for trangt (rød).
+  let dx = 0, dy = 0;
+  for (const axis of ['v', 'h']) {
+    let lo = 0, hi = 0;
+    ms.forEach((m, i) => { if (m && runs[i].axis === axis && m.crossShort > 0) { if (m.crossSide === 'hi') hi = Math.max(hi, m.crossShort); else lo = Math.max(lo, m.crossShort); } });
+    if (lo > 0 && hi > 0) return { changed: false, red: true, maxCm: worst };
+    if (axis === 'v') dx = lo > 0 ? lo : -hi; else dy = lo > 0 ? lo : -hi;
+  }
+  if (dx || dy) mp.start = { x: mp.start.x + dx, y: mp.start.y + dy };
+  // 2) Langs: startende → startCm, sluttende → len; mål på nytt til rent (kaskade: neste bredde flytter med).
+  for (let pass = 0; pass < mp.moves.length + 3; pass++) {
+    ({ runs, ms } = measure());
+    if (clean(ms)) break;
+    let touched = false;
+    ms.forEach((m, i) => {
+      const mv = mp.moves[i]; if (!m || !mv) return;
+      if (m.aShort > MAT_FREE_TOL_CM) { mv.startCm = (mv.startCm || 0) + m.aShort; touched = true; }
+      if (m.bShort > MAT_FREE_TOL_CM) { mv.len = Math.max(0, mv.len - m.bShort); touched = true; }
+    });
+    if (!touched) break;
+  }
+  ({ runs, ms } = measure());
+  if (!clean(ms)) return revert();
+  let maxCm = Math.hypot(dx, dy);
+  mp.moves.forEach((mv, i) => { const o = orig.moves[i]; maxCm = Math.max(maxCm, Math.abs((mv.startCm || 0) - (o.startCm || 0)), Math.abs(mv.len - o.len)); });
+  if (maxCm > MAT_PATH_MIGRATE_MAX_CM + 0.05) return revert();   // kaskaden tok mer enn 1 cm av én bredde
+  return { changed: true, red: false, maxCm: Math.round(maxCm * 10) / 10 };
+}
+// Hele lista (S.matPaths ved innlasting). Returnerer { clamped, red, maxCm, ids }.
+function _matPathsMigrateMarginV2(list) {
+  const out = { clamped: 0, red: 0, maxCm: 0, ids: [] };
+  for (const mp of (list || [])) {
+    const r = _matPathMigrateMarginV2(mp);
+    if (r.changed) { out.clamped++; out.ids.push(mp.id); out.maxCm = Math.max(out.maxCm, r.maxCm); }
+    else if (r.red) out.red++;
+  }
+  return out;
 }
 function _matFreeRunLen(r) { return Math.hypot(r.b.x - r.a.x, r.b.y - r.a.y); }
 // Regel 23 (spec-matte-utlegg.md, Kenneth 28.08.2026): vendingen mellom to bredder spiser ikke av
@@ -19468,8 +19547,13 @@ const MAT_FREE_TOL_CM = 0.1;
 // fanges av skannelinjene, ytterveggene av boksen). Returnerer hvor mange cm som mangler
 // (0 = i orden) — brukes av vakten (avvis) og rødmerkingen (_matPathRunIssue, 124-prinsippet).
 // Kun rommets vegger: hindringer og forbudte soner har sine egne klaringer i _matFreeClampLen.
-function _matFreeRunCrossShortCm(mp, r, room) {
-  if (!room || !room.points || room.points.length < 3) return 0;
+// 137 / E: `_matFreeRunCrossShort` gir også HVILKEN side som er for nær ('lo' = lav tverr-koordinat,
+// 'hi' = høy) — migreringen trenger retningen å flytte banen i. `_matFreeRunCrossShortCm` er det
+// gamle tallsvaret, uendret for vakten.
+function _matFreeRunCrossShortCm(mp, r, room) { return _matFreeRunCrossShort(mp, r, room).cm; }
+function _matFreeRunCrossShort(mp, r, room) {
+  const none = { cm: 0, side: null };
+  if (!room || !room.points || room.points.length < 3) return none;
   const { NET } = _matFreeConsts(_matFreeProdOf(mp));
   const marginCm = _matFreeCableMarginCm(mp);
   const cross = r.axis === 'h' ? r.a.y : r.a.x;
@@ -19485,7 +19569,7 @@ function _matFreeRunCrossShortCm(mp, r, room) {
     try { segs = clipStripToRoom(lo, hi - lo, r.axis, room.points, 0); } catch (e) { return false; }
     return (segs || []).some(([s0, s1]) => alo >= s0 - MAT_FREE_TOL_CM && ahi <= s1 + MAT_FREE_TOL_CM);
   };
-  if (fits(bLo, bHi, MAT_FREE_TOL_CM)) return 0;
+  if (fits(bLo, bHi, MAT_FREE_TOL_CM)) return none;
   // Hvor mye mangler? Trim båndet fra ÉN side om gangen (binærsøk, 0,1 cm oppløsning) — den siden
   // som trenger minst trimming er den som ligger for nær veggen. Kjøres bare når båndet feiler.
   const W = bHi - bLo;
@@ -19496,8 +19580,9 @@ function _matFreeRunCrossShortCm(mp, r, room) {
     for (let i = 0; i < 12; i++) { const mid = (lo + hi) / 2; if (at(mid)) hi = mid; else lo = mid; }
     return hi;
   };
-  const d = Math.min(trimFrom('lo'), trimFrom('hi'));
-  return Math.round((isFinite(d) ? d : marginCm + NET / 2) * 10) / 10;
+  const dLo = trimFrom('lo'), dHi = trimFrom('hi');
+  const d = Math.min(dLo, dHi);
+  return { cm: Math.round((isFinite(d) ? d : marginCm + NET / 2) * 10) / 10, side: isFinite(d) ? (dLo <= dHi ? 'lo' : 'hi') : null };
 }
 
 // DEL A (spec-frihand-matte-veggmargin-romform-hindring-forbudte-soner.md, Kenneth 12.09.2026):
@@ -20244,12 +20329,17 @@ function _matFreeJumpSet(wp) {
 // til B. Finnes ingen rimelig vegg — A ligger ikke inntil en vegg (bredden stoppet av rullen eller
 // en nabomatte), eller stykket langs veggen ville forlatt den — tegnes streken rett som før.
 // Fortsatt stiplet, fortsatt uten lengde (Regel 17/28). Returnerer punktlista (verden cm).
-function _matJumpLinkRoute(mp, prevRun, A, B) {
+// 137 / D (Kenneth 24.10.2026, svar på 135-1): stykke 2 går ikke lenger rett inn mot B GJENNOM den
+// nye bredden (bilde 2: fra (303, 8) ned x = 303 gjennom bredde 6), men langs KANTEN av den — på
+// utsiden av nettet, mellomrommets avstand fra det, på siden som vender mot A — fram til B sin
+// langs-koordinat, og så et kort stykke inn til startpunktet. `nextRun` (valgfri) er den nye
+// bredden; uten den (ghost under tegning, eldre kall) antas samme akse som forrige.
+function _matJumpLinkRoute(mp, prevRun, A, B, nextRun) {
   const straight = [A, B];
   const room = S.rooms.find(r => r.id === mp.roomId);
   if (!room || !room.points || room.points.length < 3 || !prevRun) return straight;
   const prod = _matFreeProdOf(mp);
-  const { cc } = _matFreeConsts(prod);
+  const { NET, cc } = _matFreeConsts(prod);
   const near = Math.max(12, _matWallMarginCm(prod) + cc + 2);   // «inntil veggen»: margin + første streng + slingring
   const pts = room.points;
   const dWall = q => _ptToPolyEdgeCm(q.x, q.y, pts);
@@ -20272,7 +20362,22 @@ function _matJumpLinkRoute(mp, prevRun, A, B) {
     return true;
   };
   if (!segInside(A, P, true)) return straight;   // stykket langs veggen skal følge den hele veien
-  if (pulled === 0) return segInside(P, B, false) ? [A, P, B] : straight;
+  if (pulled === 0) {
+    // 137 / D: kanten av den nye bredden (tverr-koordinat), på A-siden, mellomrommet utenfor nettet.
+    // Krever samme akse (ellers er «kanten» noe annet), at kanten ligger mellom A og B, og at
+    // begge stykkene ligger inne i rommet — ellers som før (langs veggen helt til B sin tverr).
+    if (!nextRun || nextRun.axis === prevRun.axis) {
+      const edge = B[crossKey] - sgn * (NET / 2 + Math.max(0, mp.gapCm || 0));
+      if ((edge - A[crossKey]) * sgn > 0.5) {
+        const P1 = { x: A.x, y: A.y }; P1[crossKey] = edge;
+        const Q = { x: P1.x, y: P1.y }; Q[alongKey] = B[alongKey];
+        if (segInside(A, P1, true) && segInside(P1, Q, false) && segInside(Q, B, false)) {
+          return Math.abs(Q[alongKey] - P1[alongKey]) < 0.5 ? [A, P1, B] : [A, P1, Q, B];
+        }
+      }
+    }
+    return segInside(P, B, false) ? [A, P, B] : straight;
+  }
   // Rundt et hjørne: videre langs neste vegg (samme tverr-koordinat som P) til B sin langs-koordinat.
   const P2 = { x: P.x, y: P.y }; P2[alongKey] = B[alongKey];
   return (segInside(P, P2, true) && segInside(P2, B, false)) ? [A, P, P2, B] : straight;
@@ -20484,10 +20589,17 @@ function _matFreeRegressionTest() {
       jpFree.ok && Math.abs(jpFree.x - 200) < 0.01 && Math.abs(jpFree.y - 301.5) < 0.01, JSON.stringify(jpFree));
     // 135 / C: forbindelsesstreken rutes langs veggen bredde 2 slutter mot (bunnveggen), så inn til
     // startpunktet: (77,5, 397,5) → (127,5, 397,5) → (127,5, 190). Hopp midt i rommet: rett strek.
-    const routeJ = _matJumpLinkRoute(mpJ, runsJ[1], runsJ[1].b, runsJ[2].a);
-    check('135 / C: hopp fra bunnveggen rutes langs veggen og inn (3 punkter)', '[77.5,397.5]→[127.5,397.5]→[127.5,190]',
-      routeJ.length === 3 && Math.abs(routeJ[1].x - 127.5) < 0.01 && Math.abs(routeJ[1].y - 397.5) < 0.01 && Math.abs(routeJ[2].y - 190) < 0.01,
+    // 137 / D: stykke 2 går langs KANTEN av den nye bredden (x 102,5 = 127,5 − NET/2, mellomrom 0),
+    // ikke gjennom den (var (127,5, 397,5) → (127,5, 190) rett opp midt i bredde 3), så inn til B.
+    const routeJ = _matJumpLinkRoute(mpJ, runsJ[1], runsJ[1].b, runsJ[2].a, runsJ[2]);
+    check('137 / D: hopp fra bunnveggen: langs veggen til kanten av bredde 3, langs kanten til startpunktets y, så inn (4 punkter)', '[77.5,397.5]→[102.5,397.5]→[102.5,190]→[127.5,190]',
+      routeJ.length === 4 && Math.abs(routeJ[1].x - 102.5) < 0.01 && Math.abs(routeJ[1].y - 397.5) < 0.01 && Math.abs(routeJ[2].x - 102.5) < 0.01 && Math.abs(routeJ[2].y - 190) < 0.01 && Math.abs(routeJ[3].x - 127.5) < 0.01 && Math.abs(routeJ[3].y - 190) < 0.01,
       JSON.stringify(routeJ.map(q => [q.x, q.y])));
+    const mpJg = { ...mpJ, gapCm: 1 }, runsJg = _matFreeDeriveRuns(mpJg);
+    const routeJg = _matJumpLinkRoute(mpJg, runsJg[1], runsJg[1].b, runsJg[2].a, runsJg[2]);
+    check('137 / D: med mellomrom 1 cm ligger stykke 2 ved kant − 1 (B.x − 26)', 'x = B.x − 26', routeJg.length === 4 && Math.abs(routeJg[1].x - (runsJg[2].a.x - 26)) < 0.01 && Math.abs(routeJg[2].x - (runsJg[2].a.x - 26)) < 0.01, JSON.stringify(routeJg.map(q => [q.x, q.y])));
+    const routeJold = _matJumpLinkRoute(mpJ, runsJ[1], runsJ[1].b, runsJ[2].a, { ...runsJ[2], axis: 'h' });
+    check('137 / D: ny bredde langs ANNEN akse → som før (langs veggen til B sin x, 3 punkter)', '3 punkter, x 127.5', routeJold.length === 3 && Math.abs(routeJold[1].x - 127.5) < 0.01, JSON.stringify(routeJold.map(q => [q.x, q.y])));
     const mpMid = { ...mpJ, moves: [{ axis: 'v', dir: -1, len: 240, conn: 'first', side: 1 }, { axis: 'v', dir: -1, len: 120, conn: 'jump', side: 1, from: { dx: 100, dy: 40 } }] };
     const runsMid = _matFreeDeriveRuns(mpMid);
     const routeMid = _matJumpLinkRoute(mpMid, runsMid[0], runsMid[0].b, runsMid[1].a);
@@ -20514,6 +20626,24 @@ function _matFreeRegressionTest() {
     const issueCross = _matPathRunIssue(mkJ(25 + mJ - 1, 400 - mJ), 0), issueOk = _matPathRunIssue(mkJ(25 + mJ, 400 - mJ), 0);
     check('135 / A: lagret bane 1 cm inne i marginen på tvers rødmerkes med tekst; lovlig bane ikke', 'tekst «1 cm inne i veggmarginen … på tvers» / null',
       issueCross && /1 cm inne i veggmarginen .* på tvers/.test(issueCross.text) && issueOk === null, JSON.stringify([issueCross, issueOk]));
+    // 137 / E: engangsmigrering — ≤ 1 cm klemmes inn til marginen (ikke lenger rød), > 1 cm står rød.
+    const nearE = (a, b) => Math.abs(a - b) < 0.01;
+    const migA = mkJ(25 + mJ, 400 - mJ + 0.5);   // startenden 0,5 cm inne i marginen (gammel 1 cm-toleranse)
+    const rA = _matPathMigrateMarginV2(migA);
+    check('137 / E: startende 0,5 cm inne i marginen → startCm 0,5, banen ikke lenger rød', 'changed, startCm 0.5, issue null', rA.changed && nearE(migA.moves[0].startCm, 0.5) && _matPathRunIssue(migA, 0) === null && nearE(migA.start.y, 400 - mJ + 0.5), JSON.stringify([rA, migA.moves[0], _matPathRunIssue(migA, 0)]));
+    const migX = mkJ(25 + mJ - 0.7, 400 - mJ);   // 0,7 cm for nær veggen på tvers
+    const rX = _matPathMigrateMarginV2(migX);
+    check('137 / E: 0,7 cm for nær veggen på tvers → hele banen flyttet 0,7 cm bort fra veggen', 'start.x = 25 + margin, issue null', rX.changed && nearE(migX.start.x, 25 + mJ) && _matPathRunIssue(migX, 0) === null, JSON.stringify([rX, migX.start]));
+    const migB = { ...mkJ(25 + mJ, 400 - mJ), moves: [{ axis: 'v', dir: -1, len: 395.5, conn: 'first', side: 1 }, { axis: 'v', dir: 1, len: 395.5, conn: 'uturn', side: 1 }] };
+    const rB = _matPathMigrateMarginV2(migB);
+    check('137 / E: sluttenden 0,5 cm over (395,5 der 395 får plass) → begge bredder 395 (kaskaden følger kjeden)', 'len 395/395, ingen rød', rB.changed && nearE(migB.moves[0].len, 395) && nearE(migB.moves[1].len, 395) && [0, 1].every(i => _matPathRunIssue(migB, i) === null), JSON.stringify([rB, migB.moves.map(m => m.len), _matPathRunIssue(migB, 0), _matPathRunIssue(migB, 1)]));
+    const migRed = mkJ(25 + mJ - 2, 400 - mJ);
+    const rR = _matPathMigrateMarginV2(migRed);
+    check('137 / E: 2 cm for nær på tvers → urørt og rød («2 cm … på tvers»)', 'red, start uendret', !rR.changed && rR.red && nearE(migRed.start.x, 25 + mJ - 2) && /2 cm inne i veggmarginen .* på tvers/.test((_matPathRunIssue(migRed, 0) || {}).text || ''), JSON.stringify([rR, _matPathRunIssue(migRed, 0)]));
+    const migOk = mkJ(25 + mJ, 400 - mJ), rOk = _matPathMigrateMarginV2(migOk);
+    check('137 / E: lovlig bane rørt ikke', 'changed false, red false', !rOk.changed && !rOk.red && nearE(migOk.start.x, 25 + mJ), JSON.stringify(rOk));
+    const lst = _matPathsMigrateMarginV2([mkJ(25 + mJ, 400 - mJ + 0.5), mkJ(25 + mJ - 2, 400 - mJ), mkJ(25 + mJ, 400 - mJ)]);
+    check('137 / E: lista: 1 klemt, 1 rød, 1 urørt', 'clamped 1, red 1', lst.clamped === 1 && lst.red === 1 && nearE(lst.maxCm, 0.5), JSON.stringify(lst));
     // Avvisning: utenfor rommet (det manglende hjørnet) og på en hindring.
     const jpOut = _matFreeJumpPoint(mpJ, { x: 450, y: 300 }), jpHind = _matFreeJumpPoint(mpJ, { x: 420, y: 70 });
     check('Hopp-punkt utenfor rommet avvises', 'ok:false utenfor rommet', !jpOut.ok && /utenfor/.test(jpOut.reason), JSON.stringify(jpOut));
@@ -20923,6 +21053,37 @@ function _matArrangementRegressionTest() {
     check('B Alt + dra utenfor matte = panorering som før', 'pan', _panning === true && !_matDragging, { _panning, _matDragging });
     ev('mouseup', 2, 2, { altKey: true });
     _panning = false;
+
+    // ── 137 / B: ENKELT-matte-drag (uten modus, uten Alt) flytter runStarts og labelPos med ──
+    // Matte 2 er romform-klippet (runStarts [30]) og har egen labelPos. Før fulgte bare x_cm/y_cm.
+    S.ui.selectedMatId = null; S.ui.selectedMatRunIdx = null; updateCtxBar(); render();
+    const g20 = _matRunWorldGeom(matById(M2), 0);
+    // Grep-punkt: første punkt langs bredde 0 som treffer matta og IKKE en label (matte-rektangel-
+    // labelen ligger over matta og svelger trykket som en label-flytting — samme søk som i D under).
+    let pw2 = null;
+    for (const t of [0.1, 0.9, 0.2, 0.8, 0.3, 0.7, 0.5]) {
+      const wq = { x: (g20.quad[0].x + g20.quad[2].x) / 2, y: g20.quad[0].y + (g20.quad[2].y - g20.quad[0].y) * t };
+      const c = w2s(wq.x, wq.y);
+      if (hitMatRectLabel(c.x, c.y) === null && hitMatLabel(c.x, c.y) === null && (hitMatRun(wq.x, wq.y) || {}).id === M2) { pw2 = c; break; }
+    }
+    check('137 / B: fant et grep-punkt på matte 2 utenfor labelen', 'punkt', !!pw2, pw2);
+    _resetCycle(); _labelPress = null;
+    ev('mousedown', pw2.x, pw2.y);
+    check('137 / B: mousedown på uvalgt matte 2 starter enkelt-drag (kind mat)', 'mat', _matDragging && _matDragKind === 'mat' && _matDragId === M2, { _matDragging, _matDragKind, _matDragId });
+    ev('mousemove', pw2.x, pw2.y + 40 * sc);
+    const mid2 = { y: matById(M2).y_cm, rs: matById(M2).runStarts[0], lp: matById(M2).labelPos.y };
+    ev('mouseup', pw2.x, pw2.y + 40 * sc);
+    const m2a = matById(M2), dyA = m2a.y_cm - P0.m2.y, dxA = m2a.x_cm - P0.m2.x;
+    check('137 / B: matte 2 flyttet i y (klamp/magnet kan justere tallet, men ≠ 0)', 'dy ≠ 0', Math.abs(dyA) > 1, dyA);
+    check('137 / B: runStarts fulgte y_cm med samme delta — alt UNDER draget, ikke bare ved slipp', 'rs = 30 + dy', near(mid2.rs - 30, mid2.y - P0.m2.y) && near(m2a.runStarts[0] - 30, dyA), { mid2, rs: m2a.runStarts, dy: dyA });
+    check('137 / B: labelPos fulgte med samme delta (x og y)', 'lp = (355 + dx, 120 + dy)', near(m2a.labelPos.x - 355, dxA) && near(m2a.labelPos.y - 120, dyA), { lp: m2a.labelPos, dxA, dyA });
+    check('137 / B: bredde 0 tegnes der matta er (geometrien følger y_cm)', 'quad.y flyttet dy', near(_matRunWorldGeom(m2a, 0).quad[0].y - g20.quad[0].y, dyA), _matRunWorldGeom(m2a, 0).quad[0].y - g20.quad[0].y);
+    check('137 / B: ingen rødmerking av den klippede bredden etter flyttingen', 'null', _matRunPlacementIssue(m2a, 0) === null, _matRunPlacementIssue(m2a, 0));
+    check('137 / B: matte 1 og frihånds-matte urørt', 'som før', near(matById(M1).x_cm, P0.m1.x) && near(matById(M1).y_cm, P0.m1.y) && near(mpById(MP).start.y, P0.mp.y), null);
+    check('137 / B: ingen drag henger igjen', 'ingen', !_matDragging && _matDragOrigMat == null, { _matDragging, _matDragOrigMat });
+    undo();
+    check('137 / B: angre setter matte 2 tilbake (x/y, runStarts og labelPos)', 'som før', JSON.stringify(snapPos()) === JSON.stringify(P0), snapPos());
+    S.ui.selectedMatId = M1; updateCtxBar(); render();
 
     // ── C: «Mellomrom i denne matta» — bare den valgte matta legges om, anker fast ────────
     toasts.length = 0;
@@ -21984,13 +22145,21 @@ function _matBenchRunVei4(room, prod) {
   // holde seg inne i rommet; for 'h' ligger startpunktet til VENSTRE, så første bevegelse går til
   // høyre (dir:1) som normalt. Uten dette fortegnsskillet går hver 'v'-bane rett ut gjennom
   // bunnveggen (funnet under testing — «banen starter utenfor rommet» for ALLE fasit-rom).
-  const dir0 = geom.dir === 'v' ? -1 : 1;
+  // 137 / A (Kenneth 24.10.2026, svar på 133-2): også SIDEN speiles etter hjørnet. `side` er
+  // retningen hver ny bredde legges i PÅ TVERS (U-svingen: tverr += side × (NET + gap)). Med
+  // side: 1 ubetinget la 'h'-banen breddene NEDOVER (y øker) fra startpunktet ved bunnveggen —
+  // rett ut gjennom gulvveggen — og vei 4 var ulovlig i 16 av 19 'h'-rom («50,0 cm for nær
+  // veggen på tvers») uansett hva mattene gjorde. Hjørnet leses fra samme velger som
+  // _matFreeStartFor (_matCornerFlags), og både langs (dir0) og tvers (side0) peker INN i rommet.
+  const { left: cLeft, bottom: cBottom } = _matCornerFlags();
+  const dir0 = geom.dir === 'v' ? (cBottom ? -1 : 1) : (cLeft ? 1 : -1);
+  const side0 = geom.dir === 'v' ? (cLeft ? 1 : -1) : (cBottom ? -1 : 1);
   const runs = Math.max(1, Math.min(geom.maxRuns, 6));
   const moves = [];
   for (let i = 0; i < runs; i++) {
     moves.push(i === 0
-      ? { axis: geom.dir, dir: dir0, len: lenRaster, conn: 'first', side: 1 }
-      : { axis: geom.dir, dir: (i % 2 === 0 ? dir0 : -dir0), len: lenRaster, conn: 'uturn', side: 1 });
+      ? { axis: geom.dir, dir: dir0, len: lenRaster, conn: 'first', side: side0 }
+      : { axis: geom.dir, dir: (i % 2 === 0 ? dir0 : -dir0), len: lenRaster, conn: 'uturn', side: side0 });
   }
   const mp = { roomId: room.id, productId: prod.id, start, moves, gapCm: 0, offX: 0, offY: 0 };
   const legal = _matFreeRunsWithinRoom(mp);
@@ -22781,7 +22950,7 @@ function _drawMatPathObj(mp, active) {
     // 129 / Regel 28: hopp — tynn stiplet forbindelse fra forrige ende til denne banens start, plan
     // og PDF (samme tegner). Kun orientering: ingen lengde i katalog, lister eller «Dekker».
     // 135 / C: rutes langs nærmeste vegg (to–tre rette stykker, _matJumpLinkRoute), ellers rett.
-    if (runIdx > 0 && mp.moves && mp.moves[runIdx] && mp.moves[runIdx].conn === 'jump' && rl > 0.5) _drawMatJumpLink(runs[runIdx - 1].b, r.a, false, _matJumpLinkRoute(mp, runs[runIdx - 1], runs[runIdx - 1].b, r.a));
+    if (runIdx > 0 && mp.moves && mp.moves[runIdx] && mp.moves[runIdx].conn === 'jump' && rl > 0.5) _drawMatJumpLink(runs[runIdx - 1].b, r.a, false, _matJumpLinkRoute(mp, runs[runIdx - 1], runs[runIdx - 1].b, r.a, r));   // 137 / D: r = den nye bredden
     // 135 / A: ALLE bredder i en lagret bane merkes (var kun justerte) — en bane lagret med den gamle
     // 1 cm-toleransen kan nå ligge inne i veggmarginen; den rødmerkes, spretter ikke (124-prinsippet).
     const issue = (!active && rl > 0.5) ? _matPathRunIssue(mp, runIdx) : null;
@@ -65345,6 +65514,20 @@ let _matRunDragOrig = null;   // 124: { r, acrossCm, startCm } ved start av en b
 // tilbake»-prinsipp som _matFreeExit sin egen FEIL 4-fiks.
 let _matDragKind='mat', _matDragInvalid=false, _matDragOrigCentered=false;
 let _matDragOrigStart={x:0,y:0}, _matDragOrigPos={x:0,y:0};
+// 137 / B (Kenneth 24.10.2026, svar på 133-5): startbildet av DEN ENE matta som dras (kind 'mat').
+// Flyttingen skrives som «original + delta» for ALLE feltene i _ROOM_TRANSLATE_SPEC.mats (x_cm/y_cm,
+// runStarts, labelPos) via samme oversetter som 108/127 (_translatedFieldsFor) — ingen egen løkke.
+// Før flyttet mousemove bare x_cm/y_cm: en romform-klippet matte (runStarts er ABSOLUTTE langs-
+// koordinater) ble tegnet med breddene liggende igjen der de var, mens gizmoen/bboxen flyttet seg,
+// så vakten (_matRunPlacementIssue) og 127 så matta et annet sted enn brukeren. Delta regnes fra
+// der matta FAKTISK endte (etter _clampMatToRoom og magneten), så alle felt følger samme vektor.
+// Nye felt (ERSTATTES, muteres ikke): angre-snapshotet ({...m}) deler ellers runStarts/labelPos.
+let _matDragOrigMat = null;
+function _matDragApplySingle(mat) {
+  if (!mat || !_matDragOrigMat || _matDragOrigMat.id !== mat.id) return;
+  const spec = _ROOM_TRANSLATE_SPEC.find(sp => sp.key === 'mats');
+  Object.assign(mat, _translatedFieldsFor(_matDragOrigMat, spec, mat.x_cm - _matDragOrigMat.x_cm, mat.y_cm - _matDragOrigMat.y_cm));
+}
 // 127 (Kenneth 23.10.2026, «markere en matte og flytte hele arrangementet»): _matDragKind 'matarr'
 // = flytt ALLE matter og frihånds-matter i rommet med samme delta. Startbildet tas med 108 sin
 // _snapshotRoomForMove (filtrert på mats/matPaths), og hvert musesteg skriver «original + delta»
@@ -67412,6 +67595,7 @@ canvas.addEventListener('mousedown', e=>{
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         const mat = S.mats.find(m => m.id === _matDragId);
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        _matDragOrigMat = JSON.parse(JSON.stringify(mat));   // 137 / B: startbildet for alle felt
         if (mat) _saveMarginSnapshot(mat, 'mat');   // DEL B3: samme varsel-mekanisme som folie ved flytting
         canvas.style.cursor = 'crosshair';
         return;
@@ -67527,6 +67711,7 @@ canvas.addEventListener('mousedown', e=>{
         _matDragAxis = 'free';
         _matDragOrigStart = { x: e.clientX, y: e.clientY };
         _matDragOrigPos = { x: mat.x_cm, y: mat.y_cm };
+        _matDragOrigMat = JSON.parse(JSON.stringify(mat));   // 137 / B: startbildet for alle felt
         _saveMarginSnapshot(mat, 'mat');   // DEL B3: samme varsel-mekanisme som folie ved flytting
         canvas.style.cursor = 'crosshair';
       }
@@ -68214,6 +68399,9 @@ canvas.addEventListener('mousemove', e=>{
         const cand = _matPlaceCandidate(centerWp, mat.productId, mat.id);
         if (cand.valid) { mat.x_cm = cand.x; mat.y_cm = cand.y; }
       }
+      // 137 / B: runStarts og labelPos følger med samme delta som x_cm/y_cm (108-veien).
+      _matDragApplySingle(mat);
+      _invalidateMatCache();
     }
     render(); return;
   }
@@ -69050,7 +69238,7 @@ function _canvasMouseUp(e){
     }
     // DEL B3 (Kenneth 28.08.2026): samme varsel som folie ved flytting — se _checkMarginAfterDrag.
     _checkMarginAfterDrag(S.mats.find(m => m.id === _matDragId), 'mat');
-    _matDragging=false; _matDragId=-1; _matDragAxis='free'; canvas.style.cursor='default'; render(); return;
+    _matDragging=false; _matDragId=-1; _matDragAxis='free'; _matDragOrigMat = null; canvas.style.cursor='default'; render(); return;
   }
   if (_plateDragging) { _plateDragging=false; _plateDragId=-1; _plateDragAxis='free'; canvas.style.cursor='default'; render(); return; }
   if (_stairDragging) { _stairDragging=false; _stairDragAxis='free'; canvas.style.cursor='default'; render(); return; }
@@ -75382,7 +75570,9 @@ function _buildSaveData() {
   for (const st of (S.stairs || [])) _stairPruneZoneSettings(st);
   return {
     _version : 2,
-    project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now(), _prog},
+    // 137 / E: matPathMarginV 2 = frihånds-banene er vurdert mot 135-vakten (migrert eller nye) —
+    // _restoreProject kjører engangsmigreringen bare når stempelet mangler.
+    project  : {...S.project, parts: S.project.parts.map(p=>({...p})), savedAt: Date.now(), _prog, matPathMarginV: S.project.matPathMarginV || 2},
     floors   : S.floors.map(f=>({...f})),
     // 036: `computed` stemples ferskt ved HVER lagring (feltappen leser det). Et gammelt stempel
     // fra innlastingen (ligger i r etter _restoreProject) kastes først, så det aldri overlever
@@ -75749,6 +75939,18 @@ function _restoreProject(data) {
       console.warn(`_restoreProject: ${nOrphans} foreldreløs(e) oppføring(er) fjernet (${orphanMatPaths.length} matPaths, ${orphanAluboard.length} aluboard, ${orphanFoilFree.length} foilFree) — roomId fra et tidligere slettet rom`);
       if (nOrphans >= 3 && typeof _showToast === 'function') _showToast(`Ryddet ${nOrphans} foreldreløse produkt(er) fra slettede rom`, 'warn');
     }
+  }
+  // 137 / E: engangsmigrering av frihånds-baner lagret før 135-vakten — baner inntil 1 cm inne i
+  // veggmarginen klemmes inn til marginen (se _matPathMigrateMarginV2), én gang per prosjekt
+  // (project.matPathMarginV < 2; nye prosjekter stemples i _buildSaveData). Kjøres etter at rom,
+  // hindringer og soner er normalisert. Endrer bare S i minnet: ingenting her kaller
+  // _scheduleAutoSave, og _projectDirty settes false lenger ned — skyen skrives først når brukeren
+  // selv gjør en endring. Baner mer enn 1 cm feil står og rødmerkes som i 135.
+  if ((S.project.matPathMarginV || 0) < 2) {
+    const mig = _matPathsMigrateMarginV2(S.matPaths);
+    S.project.matPathMarginV = 2;
+    if (mig.clamped > 0 || mig.red > 0) console.log(`_restoreProject (137): ${mig.clamped} matte-bane(r) klemt ≤ 1 cm inn til veggmarginen (største ${mig.maxCm.toFixed(1).replace('.', ',')} cm, id ${mig.ids.join(', ') || '–'}), ${mig.red} står rød(e) (> 1 cm, hindring eller utenfor rommet)`);
+    if (mig.clamped > 0 && typeof _showToast === 'function') _showToast(`${mig.clamped} matte-bane${mig.clamped === 1 ? '' : 'r'} ble justert ≤ 1 cm til dagens veggmargin`, 'info');
   }
   S.stairs    = data.stairs    || [];
   // Migrate legacy flat-field stairs to segment-based model
@@ -79001,170 +79203,6 @@ function _renderRoomToImage(room, opts) {
   if (typeof markDirty === 'function') markDirty();
   if (typeof render === 'function') render();
   return { url: dataURL, w: outW, h: outH, aspect };
-}
-
-// Legacy offscreen renderer — kept for reference / fallback. Not called.
-function _renderRoomToImageOffscreen(room) {
-  const offW = 800, offH = 440;
-  const offCanvas = document.createElement('canvas');
-  offCanvas.width = offW; offCanvas.height = offH;
-  const offCtx = offCanvas.getContext('2d');
-
-  // White background
-  offCtx.fillStyle = '#ffffff';
-  offCtx.fillRect(0, 0, offW, offH);
-
-  // Calculate room bounds and scale
-  const xs = room.points.map(p => p.x), ys = room.points.map(p => p.y);
-  const rMinX = Math.min(...xs), rMaxX = Math.max(...xs);
-  const rMinY = Math.min(...ys), rMaxY = Math.max(...ys);
-  const rW = rMaxX - rMinX, rH = rMaxY - rMinY;
-  const pad = 30;
-  const scale = Math.min((offW - 2 * pad) / rW, (offH - 2 * pad) / rH);
-  const ox = pad + ((offW - 2 * pad) - rW * scale) / 2;
-  const oy = pad + ((offH - 2 * pad) - rH * scale) / 2;
-  const tx = (wx) => ox + (wx - rMinX) * scale;
-  const ty = (wy) => oy + (wy - rMinY) * scale;
-
-  // Draw room polygon
-  offCtx.beginPath();
-  offCtx.moveTo(tx(room.points[0].x), ty(room.points[0].y));
-  for (let i = 1; i < room.points.length; i++) {
-    offCtx.lineTo(tx(room.points[i].x), ty(room.points[i].y));
-  }
-  offCtx.closePath();
-  offCtx.fillStyle = 'rgba(220, 235, 250, 0.5)';
-  offCtx.fill();
-  offCtx.strokeStyle = '#3366aa';
-  offCtx.lineWidth = 2;
-  offCtx.stroke();
-
-  // Draw hindrings in room
-  for (const h of S.hindrings.filter(hi => hi.roomId === room.id)) {
-    if (!h.points || h.points.length < 3) continue;
-    offCtx.beginPath();
-    offCtx.moveTo(tx(h.points[0].x), ty(h.points[0].y));
-    for (let i = 1; i < h.points.length; i++) offCtx.lineTo(tx(h.points[i].x), ty(h.points[i].y));
-    offCtx.closePath();
-    offCtx.fillStyle = 'rgba(200, 100, 80, 0.2)';
-    offCtx.fill();
-    offCtx.strokeStyle = 'rgba(200, 100, 80, 0.6)';
-    offCtx.lineWidth = 1;
-    offCtx.stroke();
-  }
-
-  // Draw strips
-  for (const s of _stripsForRoom(room.id)) {
-    const nc = _stripNettoCm(s);
-    if (s.direction === 'v') {
-      const sx = tx(s.pos_cm), sy = ty(s.start_cm);
-      const sw = nc * scale, sh = s.length_cm * scale;
-      offCtx.fillStyle = 'rgba(34, 211, 238, 0.25)';
-      offCtx.fillRect(sx, sy, sw, sh);
-      offCtx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
-      offCtx.lineWidth = 1;
-      offCtx.strokeRect(sx, sy, sw, sh);
-    } else {
-      const sx = tx(s.start_cm), sy = ty(s.pos_cm);
-      const sw = s.length_cm * scale, sh = nc * scale;
-      offCtx.fillStyle = 'rgba(34, 211, 238, 0.25)';
-      offCtx.fillRect(sx, sy, sw, sh);
-      offCtx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
-      offCtx.lineWidth = 1;
-      offCtx.strokeRect(sx, sy, sw, sh);
-    }
-  }
-
-  // Draw cables (simplified — just the runs)
-  for (const cab of _cablesForRoom(room.id)) {
-    if (!cab.runs) continue;
-    offCtx.strokeStyle = 'rgba(220, 50, 30, 0.5)';
-    offCtx.lineWidth = 1;
-    for (const run of cab.runs) {
-      if (!run.segments) continue;
-      for (const seg of run.segments) {
-        offCtx.beginPath();
-        offCtx.moveTo(tx(seg.x1), ty(seg.y1));
-        offCtx.lineTo(tx(seg.x2), ty(seg.y2));
-        offCtx.stroke();
-      }
-    }
-  }
-
-  // Draw mats (with serpentine cable pattern)
-  for (const mat of _matsForRoom(room.id)) {
-    const cx = mat.x_cm + mat.width_cm / 2;
-    const cy = mat.y_cm + mat.length_cm / 2;
-    offCtx.save();
-    offCtx.translate(tx(cx), ty(cy));
-    offCtx.rotate((mat.rotation_deg || 0) * Math.PI / 180);
-    const mw = mat.width_cm * scale / 2, mh = mat.length_cm * scale / 2;
-    offCtx.fillStyle = 'rgba(60, 130, 200, 0.2)';
-    offCtx.fillRect(-mw, -mh, mw * 2, mh * 2);
-    offCtx.strokeStyle = 'rgba(60, 130, 200, 0.6)';
-    offCtx.lineWidth = 1;
-    offCtx.strokeRect(-mw, -mh, mw * 2, mh * 2);
-    // Serpentine cable — tight elliptical arcs matching technical drawing
-    const mp = HEATING_PRODUCTS.find(pr => pr.id === mat.productId);
-    const mCC = (mp?.mat_cc_mm || 80) / 10;
-    const mUL = mat.length_cm - 4;
-    const mNR = Math.max(2, Math.floor(mUL / mCC) + 1);
-    const mTS = (mNR - 1) * mCC;
-    const mEM = (mat.length_cm - mTS) / 2;
-    const mCcPx = mCC * scale;
-    const mStep = (mCcPx < 2) ? Math.ceil(2 / mCcPx) : 1;
-    const mYR = mCcPx / 2;
-    const mXR = Math.min(mYR, 2.5 * scale);
-    const mEdge = Math.max(1, 0.5 * scale);
-    const pL = -mw + mXR + mEdge, pR = mw - mXR - mEdge;
-    offCtx.strokeStyle = 'rgba(200, 60, 30, 0.35)';
-    offCtx.lineWidth = 0.8;
-    offCtx.beginPath();
-    let pRight = true;
-    for (let i = 0; i < mNR; i += mStep) {
-      const yP = -mh + (mEM + i * mCC) * scale;
-      if (i === 0) offCtx.moveTo(pRight ? pL : pR, yP);
-      offCtx.lineTo(pRight ? pR : pL, yP);
-      const ni = i + mStep;
-      if (ni < mNR) {
-        const nY = -mh + (mEM + ni * mCC) * scale;
-        const rY = (nY - yP) / 2;
-        if (pRight) offCtx.ellipse(pR, yP + rY, mXR, rY, 0, -Math.PI / 2, Math.PI / 2);
-        else offCtx.ellipse(pL, yP + rY, mXR, rY, 0, -Math.PI / 2, Math.PI / 2, true);
-      }
-      pRight = !pRight;
-    }
-    offCtx.stroke();
-    offCtx.restore();
-  }
-
-  // Draw plates
-  for (const plate of _platesForRoom(room.id)) {
-    const px = tx(plate.x_cm), py = ty(plate.y_cm);
-    const pw = plate.width_cm * scale, ph = plate.length_cm * scale;
-    offCtx.fillStyle = 'rgba(160, 140, 100, 0.2)';
-    offCtx.fillRect(px, py, pw, ph);
-    offCtx.strokeStyle = 'rgba(160, 140, 100, 0.6)';
-    offCtx.lineWidth = 1;
-    offCtx.strokeRect(px, py, pw, ph);
-  }
-
-  // Room name + dims
-  offCtx.fillStyle = '#1a2a50';
-  offCtx.font = 'bold 14px sans-serif';
-  offCtx.textAlign = 'center';
-  offCtx.fillText(room.name || 'Rom', offW / 2, offH - 12);
-  // Wall dimensions
-  offCtx.font = '10px sans-serif';
-  offCtx.fillStyle = '#4466aa';
-  for (let i = 0; i < room.points.length; i++) {
-    const p1 = room.points[i], p2 = room.points[(i + 1) % room.points.length];
-    const mx = (tx(p1.x) + tx(p2.x)) / 2, my = (ty(p1.y) + ty(p2.y)) / 2;
-    const len = Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
-    offCtx.fillText(len + ' cm', mx, my - 5);
-  }
-
-  return offCanvas.toDataURL('image/png');
 }
 
 // STEG 6 (Kenneth 19.08.2026, oppløsning på lange trapper): kjernen som faktisk tegner en trapp
