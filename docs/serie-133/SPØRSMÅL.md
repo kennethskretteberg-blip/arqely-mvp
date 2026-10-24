@@ -19,6 +19,15 @@
    bruke samme `_ROOM_TRANSLATE_SPEC`-vei som 108/127, så vakten og 127 ser matta der den tegnes?
 6. **`_renderRoomToImageOffscreen`** er død kode med den gamle tegneformelen. Slette?
 
+   **Svar (Kenneth 24.10):** Godt nok. Ingen endring.
+
+   **Svar (Kenneth 24.10):** OK — «snu på stedet, samme mønster» er riktig. Ingen endring.
+
+   **Svar (Kenneth 24.10):** (c) — estimer med Regel E: N × L må gå opp i en rull. *Bygget i 136 / A:
+   `_matDirCoverEstimateCm` regner Regel B/E/24/H tørt på boksen per retning (`ctx.rollLensCm` fra
+   `autoFillMatSerpentine` og `_matRoomGeomForFill`); 900 × 300 → 'h' 15,0 m², 300 × 900 → 'v' 15,0, rect #10 → 'h'
+   10,0. Regel 8-tallet er tie-break, så rom der begge leverer likt beholder retningen. Rapport `docs/serie-136/RAPPORT.md`.*
+
 # 134 — spørsmål til Kenneth
 
 1. **Stubbvalget koster dekning i benken.** Fem rom faller 6,5–11,5 % (26 → 24 m, 14 → 12 m, 18 → 16 m)
@@ -37,6 +46,26 @@
    168 cm bredder der 192 får plass). Skal `_decomposeRoomToRects` snappes til polygonets kantkoordinater
    for ortogonale rom (samme kompresjon som `_matFreeFieldRects`), eller er tapet akseptabelt?
 
+   **Svar (Kenneth 24.10):** Snapp til veggen også for kanter inne i rommet, samme `snapToWalls`-mekanisme.
+   *Bygget i 136 / E: en kant inne i rommet innenfor én celle fra en ortogonal vegg som dekker hele kanten (rommet
+   fortsetter helt til veggen, prøvepunkt) snappes ut; sonegrenser (delvis vegg) røres ikke. H-broa 300–500 →
+   bredder 192 (var 168 / 176). Folie 9/9 uendret.*
+
+   **Svar (Kenneth 24.10):** Låsen vinner, sonen utelates. *Bygget i 136 / D: `_matPlanZones` prøver ikke den andre
+   retningen når `S.varmefolie.direction` er satt; sonen får `reason: 'dirLocked'` og panelet sier «utelatt:
+   retning låst». Auto-retning som i 134.*
+
+   **Svar (Kenneth 24.10):** Bare når stykkene faktisk havner i valgt rull, ellers `S.mats` bit-identisk. *Bygget i
+   136 / C: `_matPlanZones` returnerer null for et rektangel når Σ hovedbredder + første stykke > valgt rull. Benk:
+   rect #9 og smal #38 (bare «fra vegg»-variantene) går tilbake til S.mats-veien; hovedradene uendret.*
+
+   **Svar (Kenneth 24.10):** Begrens til ett trinn: velg nest største rull bare når tapet er under én rullengde
+   (neste rull ned). Ellers behold største rull og vis stubben gult. *Bygget i 136 / B: `_matChapterRollPlans`
+   godtar den stubbfrie bare når Σ største − Σ stubbfri < katalogavstanden fra største rull til neste rull ned;
+   ellers `equalStub`/`mixedStub` på den største og den stubbfrie som `equalLess`/`mixedLess` (panelrad «nest
+   største, unngår stubben»). De fem benkrommene taper nøyaktig ett trinn (2 m) → tilbake på største rull:
+   77,6 → 84,1 %, 69,0 → 80,5, 75,8 → 85,3, 79,0 → 85,6.*
+
 # 135 — spørsmål til Kenneth
 
 1. **Stykke 2 av hopp-streken.** Regelen «først langs veggen bredden slutter mot, så inn til
@@ -53,3 +82,6 @@
    brukeren flytter dem, eller skal baner lagret før 135 få en engangsmigrering (klem inn ≤ 1 cm)?
 4. **«Tøm og fyll» tømmer bare matter** (`mats` + `matPaths`); folie/kabel/plater i rommet står. UPC-auto
    tømmer alt. Skal valget tømme alle produkter i rommet som UPC, eller bare matter som nå?
+
+
+   **Svar (Kenneth 24.10):** Ja, ta 134-4 nå med samme mekanisme. *Bygget i 136 / E, se 134-4.*
